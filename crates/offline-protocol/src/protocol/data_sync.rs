@@ -108,6 +108,14 @@ pub(crate) const MAX_SYNC_BLOB_BYTES: usize = 32 * 1024;
 /// having to measure it. A space with more documents than this sends
 /// several frames, which converges identically: the exchange is per
 /// document, not per frame.
+///
+/// The declared interest rides every frame and is not weighed here, because
+/// it is bounded where it is set: [`MAX_INTEREST_PATTERNS`] names of at most
+/// [`MAX_NAME_LEN`] bytes is about 4 KiB, which this budget leaves free. A
+/// wider bound on either would have to be weighed rather than assumed.
+///
+/// [`MAX_INTEREST_PATTERNS`]: super::data::MAX_INTEREST_PATTERNS
+/// [`MAX_NAME_LEN`]: offline_protocol_data::MAX_NAME_LEN
 const MAX_DOCS_PER_VERSION_FRAME: usize = 128;
 
 /// How long an offer to one peer suppresses the next one.
@@ -243,6 +251,22 @@ enum SyncBody {
         /// exactly the content the floor names.
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         gone: BTreeMap<String, String>,
+        /// Which documents the sender wants back, as names or `name*`
+        /// prefixes.
+        ///
+        /// `Option` rather than a plain list because absent and empty mean
+        /// opposite things. Absent is "everything", which is what a sender
+        /// that has never narrowed says and what every build that predates
+        /// the field says; empty is "nothing", which an application can ask
+        /// for and must be able to express. Collapsing the two would make
+        /// the narrowest possible request read as the widest.
+        ///
+        /// It scopes what the *receiver* sends back, and nothing else. It is
+        /// a request, not a permission: the sender refuses what it does not
+        /// want on arrival regardless, which is what makes it safe toward a
+        /// peer that ignores the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        want: Option<Vec<String>>,
     },
     /// A run of changes, base64.
     #[serde(rename = "delta")]
@@ -313,6 +337,42 @@ fn offer_batches(entries: &[OfferEntry]) -> Vec<&[OfferEntry]> {
     batches.push(&entries[start..]);
     batches
 }
+
+/// What one version offer says.
+///
+/// The three fields travel together in both directions and mean the same
+/// thing in both: what the sender holds, what it removed, and what it wants
+/// back. Grouping them is not tidiness: passed separately they are three
+/// arguments a caller can transpose, and two of them have the same type.
+#[derive(Debug, Default)]
+struct OfferContents {
+    /// Document name to base64 of the version held.
+    docs: BTreeMap<String, String>,
+    /// Document name to base64 of the version it was removed at.
+    gone: BTreeMap<String, String>,
+    /// Names and `name*` prefixes the sender wants back, or `None` for
+    /// everything.
+    want: Option<Vec<String>>,
+}
+
+/// How many interest patterns one frame is read from.
+///
+/// A peer chooses these, and every one of them is walked per document when
+/// the answer is built, so the bound is the receiver's rather than the
+/// sender's: a sender's own list is bounded where it is set.
+const MAX_INTEREST_PATTERNS_PER_FRAME: usize = 32;
+
+/// The two bounds are the same number for a reason, and the reason is not
+/// coincidence: a pattern an application is allowed to declare has to be one
+/// a conforming peer actually reads. Raised past this on the sending side
+/// alone, the tail of every declared list would be dropped by every peer
+/// with no symptom on either device, and the frame-budget note on
+/// [`MAX_DOCS_PER_VERSION_FRAME`] would be reasoning about a list longer than
+/// it weighs.
+const _: () = assert!(
+    super::data::MAX_INTEREST_PATTERNS <= MAX_INTEREST_PATTERNS_PER_FRAME,
+    "a pattern an application may declare must be one every peer reads"
+);
 
 /// Where a sync frame goes and what it is sealed under.
 ///
@@ -679,8 +739,15 @@ impl OfflineProtocol {
             }
         };
         let gone = self.tombstones_for(peer, channel);
+        let want = self.interest_for(peer, channel);
         debug!(space = %peer, cause, docs = docs.len(), gone = gone.len(), "Offering document versions");
-        self.send_version_frames(peer, channel, docs, gone, false, false);
+        self.send_version_frames(
+            peer,
+            channel,
+            OfferContents { docs, gone, want },
+            false,
+            false,
+        );
     }
 
     /// The removals to carry toward one channel.
@@ -710,6 +777,20 @@ impl OfflineProtocol {
         }
     }
 
+    /// The interest to declare toward one channel.
+    ///
+    /// `None` means everything and is what an unnarrowed space sends, so a
+    /// space nobody has scoped produces the frame it always did. Gated on
+    /// the peer's entry 5 for the same reason removals are gated on entry
+    /// 4: a peer that cannot read it would be sent a field it drops, and
+    /// this device refuses what it does not want on arrival either way.
+    fn interest_for(&mut self, space: &str, channel: &SyncChannel) -> Option<Vec<String>> {
+        if matches!(channel, SyncChannel::Peer) && !self.data_interest_active(space) {
+            return None;
+        }
+        self.data_interest(space).cloned()
+    }
+
     /// Send one version frame per batch of documents.
     ///
     /// `force_partial` marks the frames as carrying less than everything we
@@ -721,11 +802,11 @@ impl OfflineProtocol {
         &mut self,
         space: &str,
         channel: &SyncChannel,
-        docs: BTreeMap<String, String>,
-        gone: BTreeMap<String, String>,
+        offer: OfferContents,
         reply: bool,
         force_partial: bool,
     ) {
+        let OfferContents { docs, gone, want } = offer;
         // A space with no documents still says so on the offering leg: that
         // is what tells a peer holding documents to send them to a replica
         // that has never seen any.
@@ -773,6 +854,7 @@ impl OfflineProtocol {
                     partial,
                     docs: batch_docs,
                     gone: batch_gone,
+                    want: want.clone(),
                 }
             })
             .collect();
@@ -796,11 +878,16 @@ impl OfflineProtocol {
                 return;
             }
         };
+        // No interest declared on a question about one document: the peer
+        // answers with that document and draws no inference from the rest of
+        // a list this frame does not carry.
         self.send_version_frames(
             space,
             channel,
-            BTreeMap::from([(doc.to_string(), version)]),
-            BTreeMap::new(),
+            OfferContents {
+                docs: BTreeMap::from([(doc.to_string(), version)]),
+                ..OfferContents::default()
+            },
             true,
             true,
         );
@@ -1050,7 +1137,14 @@ impl OfflineProtocol {
                 partial,
                 docs,
                 gone,
-            } => self.answer_version_offer(&space, channel, reply, partial, docs, gone),
+                want,
+            } => self.answer_version_offer(
+                &space,
+                channel,
+                reply,
+                partial,
+                OfferContents { docs, gone, want },
+            ),
             SyncBody::Delta { doc, blob } => {
                 self.accept_remote_blob(&space, channel, &doc, &blob, BlobKind::Delta)
             }
@@ -1073,9 +1167,35 @@ impl OfflineProtocol {
         channel: &SyncChannel,
         reply: bool,
         partial: bool,
-        theirs: BTreeMap<String, String>,
-        gone: BTreeMap<String, String>,
+        offer: OfferContents,
     ) -> Result<()> {
+        let OfferContents {
+            docs: theirs,
+            gone,
+            want,
+        } = offer;
+        // What the asker wants back. Over-long lists are truncated rather
+        // than refused: the patterns are a request, and answering the first
+        // few is closer to what was asked for than answering none. The bound
+        // is what stops a peer making every document in the space cost a
+        // walk of a list it chose the length of.
+        let wanted = want.map(|mut patterns| {
+            if patterns.len() > MAX_INTEREST_PATTERNS_PER_FRAME {
+                warn!(
+                    space,
+                    patterns = patterns.len(),
+                    "A version offer declares more interest patterns than are read"
+                );
+                patterns.truncate(MAX_INTEREST_PATTERNS_PER_FRAME);
+            }
+            patterns
+        });
+        let asked_for = |doc: &str| match &wanted {
+            None => true,
+            Some(patterns) => patterns
+                .iter()
+                .any(|pattern| super::data::interest_matches(pattern, doc)),
+        };
         // Removals first, before anything is created or asked for. A name
         // the peer has removed must not be created from this same frame and
         // then deleted again, and a version below a floor must not be
@@ -1151,6 +1271,16 @@ impl OfflineProtocol {
                 debug!(space, doc, "Ignoring an offer of content a removal covers");
                 continue;
             }
+            // Our own interest, not theirs: what they hold is their
+            // business, and what this device stores is ours. This is the
+            // half that holds against a peer which never reads the field.
+            if !self.data_wants(space, doc) {
+                debug!(
+                    space,
+                    doc, "Not creating a document outside this space's interest"
+                );
+                continue;
+            }
             // The same door a blob for an unknown document goes through,
             // and the same ceiling. Counting the versions read above
             // instead would undercount by every document whose version
@@ -1181,6 +1311,14 @@ impl OfflineProtocol {
         }
 
         for (doc, ours_encoded) in &ours {
+            // Their interest, not ours: this loop decides what to *send*.
+            // Scoping by what they asked for is safe where scoping by the
+            // names this frame happened to carry is not, because a document
+            // they want and have never named is still in our list and still
+            // matches, so the absence inference below still reaches it.
+            if !asked_for(doc) {
+                continue;
+            }
             let Some(theirs_encoded) = theirs.get(doc) else {
                 // They did not name this document. On a complete offer that
                 // means they have never seen it and the whole document is
@@ -1217,9 +1355,42 @@ impl OfflineProtocol {
         // ever asks.
         if !reply {
             let our_gone = self.tombstones_for(space, channel);
-            self.send_version_frames(space, channel, ours, our_gone, true, false);
+            let our_want = self.interest_for(space, channel);
+            // The counter-offer carries the complete list, interest or no
+            // interest. Scoping it would save a name per unwanted document
+            // and buy a familiar hazard: a reply sweep narrowed on the
+            // answering side is how a document the peer has never seen gets
+            // dropped with no symptom, and the fact that this particular
+            // narrowing is provably safe is not worth a rule the next reader
+            // has to re-derive. What the interest saves is the *document*,
+            // which the catch-up loop above already declined to send.
+            //
+            // Removals are not scoped either, for a reason that is not about
+            // caution: a peer that narrowed its interest keeps what it
+            // already held, so a removal for a document it no longer wants
+            // is exactly the one it still needs.
+            self.send_version_frames(
+                space,
+                channel,
+                OfferContents {
+                    docs: ours,
+                    gone: our_gone,
+                    want: our_want,
+                },
+                true,
+                false,
+            );
         } else {
-            self.send_version_frames(space, channel, created, BTreeMap::new(), true, true);
+            self.send_version_frames(
+                space,
+                channel,
+                OfferContents {
+                    docs: created,
+                    ..OfferContents::default()
+                },
+                true,
+                true,
+            );
         }
         Ok(())
     }
@@ -1488,6 +1659,13 @@ impl OfflineProtocol {
     ) -> Result<()> {
         if offline_protocol_data::validate_name(doc).is_err() {
             warn!(space, doc, "A remote blob names an invalid document");
+            return Ok(());
+        }
+        if !self.data_wants(space, doc) {
+            debug!(
+                space,
+                doc, "Refusing a blob for a document outside this space's interest"
+            );
             return Ok(());
         }
         if !self.data_space_admits_doc(space, doc, MAX_DOCS_PER_SPACE) {
@@ -2518,6 +2696,7 @@ mod tests {
             partial: true,
             docs: BTreeMap::from([("notes".to_string(), "dgA=".to_string())]),
             gone: BTreeMap::from([("old".to_string(), "ZwA=".to_string())]),
+            want: Some(vec!["notes".to_string(), "draft*".to_string()]),
         };
         let json = serde_json::to_string(&body).unwrap();
         let parsed: SyncBody = serde_json::from_str(&json).unwrap();
@@ -2527,11 +2706,16 @@ mod tests {
                 partial,
                 docs,
                 gone,
+                want,
             } => {
                 assert!(reply);
                 assert!(partial);
                 assert_eq!(docs.get("notes").map(String::as_str), Some("dgA="));
                 assert_eq!(gone.get("old").map(String::as_str), Some("ZwA="));
+                assert_eq!(
+                    want.as_deref(),
+                    Some(["notes".to_string(), "draft*".to_string()].as_slice())
+                );
             }
             other => panic!("expected a version frame, got {other:?}"),
         }
@@ -2547,6 +2731,7 @@ mod tests {
             partial: false,
             docs: BTreeMap::new(),
             gone: BTreeMap::new(),
+            want: None,
         })
         .unwrap();
         assert_eq!(
@@ -2568,10 +2753,15 @@ mod tests {
                 partial,
                 docs,
                 gone,
+                want,
             } => {
                 assert!(!reply);
                 assert!(!partial);
                 assert!(docs.is_empty());
+                assert!(
+                    want.is_none(),
+                    "an offer from a build that predates interest read as asking for a subset"
+                );
                 assert!(
                     gone.is_empty(),
                     "an offer from a build that predates removals read as removing something"
@@ -2668,8 +2858,8 @@ mod golden_vectors {
                 .unwrap_or_else(|| panic!("{name} must be an array"))
                 .len()
         };
-        assert_eq!(len("frames"), 9);
-        assert_eq!(len("parse_defaults"), 2);
+        assert_eq!(len("frames"), 10);
+        assert_eq!(len("parse_defaults"), 3);
         assert_eq!(len("attachment_hashes"), 3);
         assert_eq!(len("attachment_references"), 2);
         assert_eq!(len("data_purposes"), 2);
@@ -2690,6 +2880,7 @@ mod golden_vectors {
                 partial: false,
                 docs,
                 gone: BTreeMap::new(),
+                want: None,
             }),
             wire(&vectors, "version offer, complete, asking")
         );
@@ -2705,6 +2896,7 @@ mod golden_vectors {
                 partial: true,
                 docs,
                 gone: BTreeMap::new(),
+                want: None,
             }),
             wire(&vectors, "version offer, answering leg")
         );
@@ -2715,6 +2907,7 @@ mod golden_vectors {
                 partial: false,
                 docs: BTreeMap::new(),
                 gone: BTreeMap::new(),
+                want: None,
             }),
             wire(&vectors, "version offer with no documents")
         );
@@ -2729,8 +2922,22 @@ mod golden_vectors {
                 partial: false,
                 docs,
                 gone,
+                want: None,
             }),
             wire(&vectors, "version offer carrying a removal")
+        );
+
+        let mut docs = BTreeMap::new();
+        docs.insert("notes".to_string(), "AQID".to_string());
+        assert_eq!(
+            framed(&SyncBody::Versions {
+                reply: false,
+                partial: false,
+                docs,
+                gone: BTreeMap::new(),
+                want: Some(vec!["notes".to_string(), "draft*".to_string()]),
+            }),
+            wire(&vectors, "version offer declaring an interest")
         );
 
         let blob = BASE64.encode([0u8, 1, 2, 3, 4, 5, 6, 7]);
@@ -2831,6 +3038,51 @@ mod golden_vectors {
                 case["expect"]["partial"].as_bool().expect("partial")
             );
         }
+    }
+
+    #[test]
+    fn an_absent_interest_parses_as_asking_for_everything() {
+        // Absent and empty are opposite answers, and the frozen cases pin
+        // the one a build that predates the field sends.
+        let vectors = vectors();
+        for case in vectors["parse_defaults"]
+            .as_array()
+            .expect("parse_defaults")
+        {
+            let value: serde_json::Value =
+                serde_json::from_str(case["body"].as_str().expect("body")).expect("JSON");
+            let SyncBody::Versions { want, .. } = serde_json::from_value(value).expect("parses")
+            else {
+                panic!("{}: expected a version offer", case["name"]);
+            };
+            assert!(
+                case["expect"]["want"].is_null(),
+                "{}: this case is about an absent interest",
+                case["name"]
+            );
+            assert!(want.is_none(), "{}", case["name"]);
+        }
+    }
+
+    #[test]
+    fn an_empty_interest_is_not_an_absent_one() {
+        // The distinction the `Option` exists for: collapsing them would
+        // make "send me nothing" read as "send me everything".
+        let asks_for_nothing = serde_json::to_string(&SyncBody::Versions {
+            reply: false,
+            partial: false,
+            docs: BTreeMap::new(),
+            gone: BTreeMap::new(),
+            want: Some(Vec::new()),
+        })
+        .unwrap();
+        assert!(asks_for_nothing.contains(r#""want":[]"#));
+
+        let parsed: SyncBody = serde_json::from_str(&asks_for_nothing).unwrap();
+        let SyncBody::Versions { want, .. } = parsed else {
+            panic!("expected a version offer");
+        };
+        assert_eq!(want, Some(Vec::new()));
     }
 
     #[test]

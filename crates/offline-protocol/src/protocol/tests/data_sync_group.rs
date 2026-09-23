@@ -18,7 +18,9 @@ use crate::group_mesh::{RosterRatchetGap, MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS
 use crate::mls::InMemoryStorage;
 use crate::protocol::prefixes::internal_prefixes;
 use crate::protocol::tests::{create_test_config_for_user, id};
-use crate::protocol::types::{DATA_GROUP_V1, DATA_MEDIA_V1, DATA_SYNC_V1, DATA_TOMBSTONE_V1};
+use crate::protocol::types::{
+    DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1, DATA_SYNC_V1, DATA_TOMBSTONE_V1,
+};
 use crate::protocol::{OfflineProtocol, TestProtocolStateStorage};
 
 /// One member of the group, with the transport its frames go through.
@@ -737,7 +739,8 @@ fn the_group_capability_is_advertised_and_recorded() {
             DATA_SYNC_V1,
             DATA_GROUP_V1,
             DATA_MEDIA_V1,
-            DATA_TOMBSTONE_V1
+            DATA_TOMBSTONE_V1,
+            DATA_INTEREST_V1
         ],
         "a build that intercepts group frames has to say so, or no peer \
          will ever send it one. The media entry rides the same list and is \
@@ -1158,6 +1161,48 @@ fn forgetting_a_peer_drops_its_group_offer_windows_too() {
             .any(|k| k.starts_with(bob.address.as_str())),
         "every window belonging to the forgotten peer has to go, the group \
          ones included"
+    );
+}
+
+#[test]
+fn a_member_that_narrows_its_interest_refuses_what_the_group_broadcasts() {
+    // A group declares its interest unconditionally: one ciphertext reaches
+    // the whole roster, so there is no per-member choice to make and no
+    // member's capability to gate on. What carries the narrowing here is the
+    // other half, the local refusal, and this is the channel that proves it
+    // runs on a blob nobody addressed to this device in particular.
+    let (mut alice, mut bob, mut carol, group) = trio();
+
+    carol
+        .protocol
+        .data_set_interest(&group, vec!["wanted*".to_string()])
+        .expect("interest");
+
+    write(&mut alice, &group, "wanted.notes", "k", "yes");
+    write(&mut alice, &group, "other.notes", "k", "no");
+    let rounds = settle(&mut alice, &mut bob, &mut carol);
+
+    let carol_docs = carol.protocol.data_list_docs(&group).expect("list");
+    assert!(
+        carol_docs.iter().any(|doc| doc == "wanted.notes"),
+        "the document the narrowing asked for never arrived: {carol_docs:?}"
+    );
+    assert!(
+        !carol_docs.iter().any(|doc| doc == "other.notes"),
+        "a document outside the declared interest was stored from a group broadcast: \
+         {carol_docs:?}"
+    );
+    // Bob narrowed nothing and the same ciphertext reached him, so he holds
+    // both. Interest is this device's policy, never the space's.
+    assert_eq!(
+        read(&mut bob, &group, "other.notes", "k"),
+        Some(DataValue::text("no")),
+        "one member's interest narrowed what another member stores"
+    );
+    assert_eq!(
+        rounds.last(),
+        Some(&0),
+        "the group exchange did not terminate: {rounds:?}"
     );
 }
 

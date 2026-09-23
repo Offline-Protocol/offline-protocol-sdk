@@ -543,6 +543,14 @@ documents in one space and nothing else, and the remedy is the one the layer
 already has for state an accepted member left behind, which is to wipe this
 device's documents.
 
+**Narrowing a space does not reduce that cost.** A device that declared an
+interest still records a floor for a removed name it neither holds nor wants,
+because a floor refused on interest is one a later widening has to re-acquire,
+and until the next offer carries it again a third replica offering the removed
+content would have it created here. So the budget above is spent the same way
+whether or not the space is narrowed. What interest reduces is the documents,
+not the floors.
+
 **The judgement of a blob against a removal floor is an engine decode**, and
 it runs inside the same on-disk in-flight marker an import does. A crafted
 blob that ends the process there leaves its digest behind and is refused

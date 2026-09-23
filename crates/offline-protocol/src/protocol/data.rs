@@ -51,6 +51,50 @@ use crate::protocol::types::{storage_keys, MAX_PROTOCOL_STATE_RECORD_BYTES};
 use crate::protocol::OfflineProtocol;
 use crate::protocol_state_storage::ProtocolStateStorage;
 
+/// How many interest patterns one space accepts.
+///
+/// A bound rather than a policy: the list is walked once per document per
+/// offer, so an unbounded one would let an application make its own peers
+/// expensive to answer.
+pub(crate) const MAX_INTEREST_PATTERNS: usize = 32;
+
+/// Whether one interest pattern matches a document name.
+///
+/// `*` alone is everything; a trailing `*` is a prefix; anything else is an
+/// exact name. The document charset (`A-Z a-z 0-9 . _ -`) has no `*` in it,
+/// so a wildcard is never ambiguous with a name that contains one.
+pub(crate) fn interest_matches(pattern: &str, doc: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => doc.starts_with(prefix),
+        None => pattern == doc,
+    }
+}
+
+/// Reject a pattern that could never match, or that names something the
+/// document charset cannot express.
+///
+/// Checked where it is written rather than where it is used, so an
+/// application hears about a typo at the call that made it instead of
+/// silently receiving nothing.
+fn validate_interest_pattern(pattern: &str) -> Result<()> {
+    // `*` alone is the default expressed explicitly, and it is the one
+    // pattern whose body is empty.
+    if pattern == "*" {
+        return Ok(());
+    }
+    // Everything else is a document name with an optional trailing `*`, so
+    // the document validator judges it rather than a second copy of the
+    // charset. A copy would drift the day `validate_name` widens, and the
+    // symptom would be a pattern that cannot match a name the store accepts.
+    let body = pattern.strip_suffix('*').unwrap_or(pattern);
+    offline_protocol_data::validate_name(body).map_err(|err| {
+        Error::InvalidArgument(format!(
+            "an interest pattern is a document name with an optional \
+             trailing `*`: {pattern:?} {err}"
+        ))
+    })
+}
+
 /// The document index for one space.
 ///
 /// Deliberately thin. Sizes and sequence numbers are derived from the
@@ -143,6 +187,14 @@ pub(crate) struct DataLayer {
     spaces: BTreeMap<String, SpaceRecord>,
     /// Removal state per document, loaded with the space that holds it.
     meta: BTreeMap<(String, String), DocMeta>,
+    /// What this device wants from its peers, per space.
+    ///
+    /// Absent means everything, which is what a space nobody has narrowed
+    /// says and what every release before interest existed said. Deliberately
+    /// not persisted: it is application policy about this launch, not a fact
+    /// about the store, and a durable copy would be a second thing to
+    /// reconcile against an application that has changed its mind.
+    interest: BTreeMap<String, Vec<String>>,
 }
 
 impl std::fmt::Debug for DataLayer {
@@ -151,6 +203,7 @@ impl std::fmt::Debug for DataLayer {
             .field("open_docs", &self.docs.len())
             .field("loaded_spaces", &self.spaces.len())
             .field("removed_docs", &self.meta.len())
+            .field("narrowed_spaces", &self.interest.len())
             .finish()
     }
 }
@@ -1093,6 +1146,90 @@ impl OfflineProtocol {
             by: DocRemovedBy::Peer,
         });
         Ok(TombstoneOutcome::Deleted)
+    }
+
+    /// The documents this device wants from its peers in one space.
+    ///
+    /// `patterns` is a list of document names, each of which MAY end in `*`
+    /// to match a prefix. `["*"]` is everything and is the default; `[]` is
+    /// nothing. The document charset excludes `*`, so the wildcard can never
+    /// be part of a name it is matching.
+    ///
+    /// Two halves, and only one of them is a request. Toward a peer this is
+    /// carried in every version offer, so the peer sends nothing else: that
+    /// is the traffic saving, and it depends on the peer reading the field.
+    /// Locally it is a refusal, so a document outside it is never created
+    /// from an offer and never imported however it arrives. The refusal is
+    /// what makes this safe against a peer that ignores the request, which
+    /// includes every peer on a build that predates it.
+    ///
+    /// Narrowing does not delete what is already held. A document that falls
+    /// outside the new patterns stops being updated and stays where it is,
+    /// because deleting on a policy change would make a narrowing lose data
+    /// no caller asked to lose. `data_delete_doc` is how it leaves.
+    ///
+    /// Widening asks: the newly wanted documents are absent from this
+    /// device's next offer and inside its declared want, so the peer answers
+    /// with them.
+    ///
+    /// The question that asks is skipped in the two cases where it would
+    /// cost something and buy nothing, because both are the ordinary way an
+    /// application calls this. Declaring the same patterns again asks for
+    /// nothing new: the offer would carry exactly what the last one did.
+    /// And declaring anything at all before `start()`, which is the
+    /// documented order, cannot reach a peer: the transports are not up, so
+    /// the frame is dropped for want of a session, and the offer path has
+    /// already stamped the window that suppresses the next sweep. That stamp
+    /// would then suppress the start-up sweep and the first rediscovery,
+    /// delaying the exchange this call exists to bring forward by the length
+    /// of the window. Both paths already carry the new interest: the sweep
+    /// in `start` and every rediscovery build their offer from it.
+    pub fn data_set_interest(&mut self, space: &str, patterns: Vec<String>) -> Result<()> {
+        offline_protocol_data::validate_space_name(space).map_err(map_data_error)?;
+        // The same door every other `DataStore` method goes through. Without
+        // it this is the one call that reports success with the layer off,
+        // and an application would read that as a narrowing it never got.
+        self.require_data_storage()?;
+        if patterns.len() > MAX_INTEREST_PATTERNS {
+            return Err(Error::InvalidArgument(format!(
+                "at most {MAX_INTEREST_PATTERNS} interest patterns per space, got {}",
+                patterns.len()
+            )));
+        }
+        for pattern in &patterns {
+            validate_interest_pattern(pattern)?;
+        }
+        let previous = self.data.interest.get(space).cloned();
+        let everything = patterns.len() == 1 && patterns[0] == "*";
+        if everything {
+            // The default, expressed explicitly. Held as absence so the wire
+            // and every read below take the cheap path.
+            self.data.interest.remove(space);
+        } else {
+            self.data.interest.insert(space.to_string(), patterns);
+        }
+        // Both guards are about the same thing: an offer that would carry
+        // nothing new, or could not be carried at all, must not spend the
+        // window that suppresses the offer which can. See the note above.
+        if previous.as_ref() != self.data.interest.get(space) && self.protocol_is_running() {
+            self.nudge_data_sync(space, None, "interest_changed");
+        }
+        Ok(())
+    }
+
+    /// The patterns declared for a space, or `None` for the default.
+    pub(crate) fn data_interest(&self, space: &str) -> Option<&Vec<String>> {
+        self.data.interest.get(space)
+    }
+
+    /// Whether this device wants `doc` in `space`.
+    pub(crate) fn data_wants(&self, space: &str, doc: &str) -> bool {
+        match self.data.interest.get(space) {
+            None => true,
+            Some(patterns) => patterns
+                .iter()
+                .any(|pattern| interest_matches(pattern, doc)),
+        }
     }
 
     /// Let a removed name hold a document again, because something beyond
@@ -2086,6 +2223,13 @@ impl OfflineProtocol {
         self.data.docs.clear();
         self.data.spaces.clear();
         self.data.meta.clear();
+        // Interest goes with the content it was scoping, for the reason
+        // stated above: nothing may distinguish a space this device wiped
+        // from one it has never seen, and a surviving narrowing is exactly
+        // such a distinction. It is also the logout path, so a narrowing
+        // left behind would be one account's policy silently applied to the
+        // next account that happens to replicate with the same peer.
+        self.data.interest.clear();
         // Every window and every outstanding question goes with the content
         // they were about. Left behind, a window suppresses the first offer
         // or the first blob request made after the wipe, which is the same

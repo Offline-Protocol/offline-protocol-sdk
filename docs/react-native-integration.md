@@ -583,6 +583,7 @@ await store.flush('space-1', 'profile');
 | **deleteDoc** | `deleteDoc(spaceId, docId): Promise<void>` | Drops this device's copy. Records nothing about the name, so a replica that still holds the document refills it. |
 | **removeDoc** | `removeDoc(spaceId, docId): Promise<void>` | Removes the document from every replica of the space. An edit made concurrently with the removal wins and brings the document back whole. |
 | **removeSpace** | `removeSpace(spaceId): Promise<void>` | Removes every document the space holds, from every replica. |
+| **setInterest** | `setInterest(spaceId, patterns): Promise<void>` | The documents this device wants from its peers: names or `name*` prefixes, at most 32. Not persisted, so set it before `start()`. |
 | **listDocs** | `listDocs(spaceId): Promise<string[]>` | Documents in a space. |
 | **listSpaces** | `listSpaces(): Promise<string[]>` | Spaces this device holds documents or removal records for. |
 | **mapSet** | `mapSet(spaceId, docId, collection, key, value: DataValue): Promise<void>` | Sets a key in a map collection. |

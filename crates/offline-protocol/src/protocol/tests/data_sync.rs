@@ -116,6 +116,7 @@ impl Node {
         protocol.peer_data_sync.insert(peer.to_string());
         protocol.peer_data_media.insert(peer.to_string());
         protocol.peer_data_tombstones.insert(peer.to_string());
+        protocol.peer_data_interest.insert(peer.to_string());
 
         let mock = MockTransport::new(TransportType::BLE);
         mock.start().expect("transport start");
@@ -197,6 +198,13 @@ fn pair_of(mut alice: Node, mut bob: Node) -> (Node, Node) {
         .insert(bob.address.clone());
     bob.protocol
         .peer_data_tombstones
+        .insert(alice.address.clone());
+    alice
+        .protocol
+        .peer_data_interest
+        .insert(bob.address.clone());
+    bob.protocol
+        .peer_data_interest
         .insert(alice.address.clone());
 
     (alice, bob)
@@ -4621,4 +4629,505 @@ fn recording_protocol(label: &str) -> (OfflineProtocol, Arc<Mutex<Vec<String>>>)
 /// An address that is not this node's, for a space name.
 fn bob_address() -> String {
     id("bob")
+}
+
+// ---- interest -----------------------------------------------------------
+//
+// A space replicates whole unless somebody narrows it. Two halves, and they
+// fail differently: the declared `want` is a request that saves the radio and
+// depends on the peer reading it, while the local refusal is what makes a
+// narrowing mean anything at all against a peer that does not.
+
+#[test]
+fn a_document_outside_this_devices_interest_is_never_created() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    bob.protocol
+        .data_set_interest(&bob_space, vec!["wanted*".to_string()])
+        .expect("interest");
+
+    write(&mut alice, &alice_space, "wanted.notes", "k", "yes");
+    write(&mut alice, &alice_space, "other.notes", "k", "no");
+    let rounds = settle(&mut alice, &mut bob);
+
+    assert!(holds(&mut bob, &bob_space, "wanted.notes"));
+    assert!(
+        !holds(&mut bob, &bob_space, "other.notes"),
+        "a document outside the declared interest was stored anyway"
+    );
+    assert_eq!(
+        rounds.last(),
+        Some(&0),
+        "the exchange did not terminate: {rounds:?}"
+    );
+}
+
+#[test]
+fn a_document_the_asker_never_named_but_wants_is_still_sent() {
+    // The trap this repository has already paid for once: scoping an answer
+    // to the names the inbound frame carried silently drops a document the
+    // answering side holds and the asker has never seen. Scoping to the
+    // asker's *declared interest* is a different thing and must not have
+    // that effect, because the absence inference runs over our own list.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    bob.protocol
+        .data_set_interest(&bob_space, vec!["wanted*".to_string()])
+        .expect("interest");
+    // Bob has never heard of this document, so his offer cannot name it.
+    write(&mut alice, &alice_space, "wanted.secret", "k", "v");
+    alice.transport.clear_sent_messages();
+    bob.transport.clear_sent_messages();
+
+    bob.protocol.nudge_data_sync(&bob_space, None, "test");
+    settle(&mut alice, &mut bob);
+
+    assert_eq!(
+        read(&mut bob, &bob_space, "wanted.secret", "k"),
+        Some(DataValue::text("v")),
+        "a document the asker wanted but had never named was never announced"
+    );
+}
+
+#[test]
+fn an_unwanted_document_is_refused_even_from_a_peer_that_sends_it_anyway() {
+    // The half that does not depend on the peer. Alice never learns Bob's
+    // interest, so she answers with everything she holds; Bob still stores
+    // only what he asked for. This is what makes the feature safe to ship
+    // before any peer speaks it.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    write(&mut alice, &alice_space, "other.notes", "k", "no");
+    write(&mut alice, &alice_space, "wanted.notes", "k", "yes");
+    settle(&mut alice, &mut bob);
+    bob.protocol
+        .data_delete_doc(&bob_space, "wanted.notes")
+        .expect("evict");
+    bob.protocol
+        .data_delete_doc(&bob_space, "other.notes")
+        .expect("evict");
+    // Alice is on a build that never advertised entry 5, so Bob's offer must
+    // leave the field out however narrow his interest is.
+    bob.protocol.peer_data_interest.remove(&alice.address);
+    bob.protocol
+        .data_set_interest(&bob_space, vec!["wanted*".to_string()])
+        .expect("interest");
+    alice.transport.clear_sent_messages();
+    bob.transport.clear_sent_messages();
+
+    bob.protocol.nudge_data_sync(&bob_space, None, "test");
+    pump(&mut bob, &mut alice);
+    // Counted, not just inspected. The end state is the same whether or not
+    // the request was gated, because the refusal below drops the unwanted
+    // document either way, so what the frames say is the only thing that
+    // shows the gate is there at all.
+    let answers = alice
+        .transport
+        .sent_messages()
+        .iter()
+        .filter(|message| !message.metadata.contains_key(ACK_FOR_KEY))
+        .count();
+    let rounds = settle(&mut alice, &mut bob);
+
+    assert_eq!(
+        answers, 3,
+        "the answering side sent {answers} frames where three were asked for: a catch-up for \
+         each of the two documents and one counter-offer. Two is the request going out to a \
+         peer that never advertised entry 5, which is the gate this test exists for"
+    );
+    assert!(holds(&mut bob, &bob_space, "wanted.notes"));
+    assert!(
+        !holds(&mut bob, &bob_space, "other.notes"),
+        "a peer that ignores the request talked this device into storing a document it refused"
+    );
+    assert_eq!(
+        rounds.last(),
+        Some(&0),
+        "the exchange with an old peer did not terminate: {rounds:?}"
+    );
+}
+
+#[test]
+fn a_declared_interest_stops_the_bytes_leaving_the_peer() {
+    // The traffic half, measured where it happens: with the interest
+    // declared, the answering side never sends the document at all, rather
+    // than sending it to be dropped.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    write(&mut alice, &alice_space, "other.notes", "k", "no");
+    write(&mut alice, &alice_space, "wanted.notes", "k", "yes");
+    settle(&mut alice, &mut bob);
+    bob.protocol
+        .data_delete_doc(&bob_space, "wanted.notes")
+        .expect("evict");
+    bob.protocol
+        .data_delete_doc(&bob_space, "other.notes")
+        .expect("evict");
+    bob.protocol
+        .data_set_interest(&bob_space, vec!["wanted*".to_string()])
+        .expect("interest");
+    alice.transport.clear_sent_messages();
+    bob.transport.clear_sent_messages();
+
+    bob.protocol.nudge_data_sync(&bob_space, None, "test");
+    pump(&mut bob, &mut alice);
+    // Counted rather than inspected, because the end state is identical
+    // either way: the local refusal would drop the unwanted document even if
+    // it were sent, so the only thing that shows whether the interest was
+    // honoured is what left the answering side. One catch-up for the wanted
+    // document, and one counter-offer.
+    let answers = alice
+        .transport
+        .sent_messages()
+        .iter()
+        .filter(|message| !message.metadata.contains_key(ACK_FOR_KEY))
+        .count();
+    settle(&mut alice, &mut bob);
+
+    assert!(
+        holds(&mut bob, &bob_space, "wanted.notes"),
+        "precondition: the wanted document has to arrive"
+    );
+    assert_eq!(
+        answers, 2,
+        "the answering side sent {answers} frames where two were asked for: a catch-up for \
+         the wanted document and its counter-offer. A third is the unwanted document going \
+         out to be dropped on arrival"
+    );
+    assert!(
+        !holds(&mut bob, &bob_space, "other.notes"),
+        "the unwanted document was stored"
+    );
+}
+
+#[test]
+fn widening_an_interest_pulls_the_documents_it_adds() {
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    bob.protocol
+        .data_set_interest(&bob_space, vec!["wanted*".to_string()])
+        .expect("interest");
+    write(&mut alice, &alice_space, "wanted.notes", "k", "yes");
+    write(&mut alice, &alice_space, "later.notes", "k", "also");
+    settle(&mut alice, &mut bob);
+    assert!(!holds(&mut bob, &bob_space, "later.notes"), "precondition");
+
+    // Widening is a question, not just a policy change: the newly wanted
+    // document is absent from this device's next offer and inside the
+    // declared want, so the peer answers with it.
+    bob.protocol
+        .data_set_interest(&bob_space, vec!["*".to_string()])
+        .expect("widen");
+    settle(&mut alice, &mut bob);
+
+    assert_eq!(
+        read(&mut bob, &bob_space, "later.notes", "k"),
+        Some(DataValue::text("also")),
+        "widening the interest did not pull the document it added"
+    );
+}
+
+#[test]
+fn narrowing_an_interest_keeps_what_is_already_held() {
+    // A policy change must not lose data nobody asked to lose. The document
+    // stops being updated and stays where it is; `deleteDoc` is how it goes.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    write(&mut alice, &alice_space, "other.notes", "k", "first");
+    settle(&mut alice, &mut bob);
+    assert!(holds(&mut bob, &bob_space, "other.notes"), "precondition");
+
+    bob.protocol
+        .data_set_interest(&bob_space, vec!["wanted*".to_string()])
+        .expect("narrow");
+    write(&mut alice, &alice_space, "other.notes", "k", "second");
+    settle(&mut alice, &mut bob);
+
+    assert_eq!(
+        read(&mut bob, &bob_space, "other.notes", "k"),
+        Some(DataValue::text("first")),
+        "narrowing threw away a document that was already held, or kept updating it"
+    );
+}
+
+#[test]
+fn a_removal_reaches_a_peer_that_no_longer_wants_the_document() {
+    // Removals are deliberately not scoped by interest. A peer that narrowed
+    // still holds what it held before, so a removal for a document it no
+    // longer wants is exactly the one it still needs to hear about.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    write(&mut alice, &alice_space, "other.notes", "k", "v");
+    settle(&mut alice, &mut bob);
+    bob.protocol
+        .data_set_interest(&bob_space, vec!["wanted*".to_string()])
+        .expect("narrow");
+    settle(&mut alice, &mut bob);
+    assert!(holds(&mut bob, &bob_space, "other.notes"), "precondition");
+
+    alice
+        .protocol
+        .data_remove_doc(&alice_space, "other.notes")
+        .expect("remove");
+    settle(&mut alice, &mut bob);
+
+    assert!(
+        !holds(&mut bob, &bob_space, "other.notes"),
+        "a removal was filtered out by an interest the removed document no longer matched"
+    );
+}
+
+#[test]
+fn an_interest_pattern_that_could_never_match_is_refused_where_it_is_written() {
+    let mut alice = Node::new("alice");
+    let space = id("bob");
+
+    for bad in ["", "has space", "notes/sub", "a*b", "*notes"] {
+        assert!(
+            alice
+                .protocol
+                .data_set_interest(&space, vec![bad.to_string()])
+                .is_err(),
+            "{bad:?} was accepted as an interest pattern"
+        );
+    }
+    for good in ["*", "notes", "draft*", "a.b_c-d"] {
+        alice
+            .protocol
+            .data_set_interest(&space, vec![good.to_string()])
+            .unwrap_or_else(|err| panic!("{good:?} was refused: {err}"));
+    }
+    assert!(
+        alice
+            .protocol
+            .data_set_interest(&space, (0..33).map(|n| format!("d{n}*")).collect())
+            .is_err(),
+        "an unbounded pattern list was accepted"
+    );
+}
+
+/// Answer one hand-built offer and report the frames it drew, ACKs aside.
+fn answer_frames(node: &mut Node, sender: &str, body: &str) -> usize {
+    node.transport.clear_sent_messages();
+    node.protocol.handle_data_sync_frame(sender, body);
+    node.transport
+        .sent_messages()
+        .iter()
+        .filter(|message| !message.metadata.contains_key(ACK_FOR_KEY))
+        .count()
+}
+
+/// A complete offer naming no documents and declaring `patterns`.
+fn offer_wanting(patterns: &[String]) -> String {
+    format!(
+        "{{\"v\":1,\"k\":\"vv\",\"reply\":false,\"partial\":false,\"docs\":{{}},\"want\":{}}}",
+        serde_json::to_string(patterns).expect("encode"),
+    )
+}
+
+#[test]
+fn an_offer_declaring_more_patterns_than_are_read_is_answered_not_refused() {
+    // A peer chooses this list and every pattern is walked per document, so
+    // the bound is the receiver's. Two things have to be true past it, and
+    // only one of them is obvious: the frame is still answered, and the
+    // patterns beyond the bound are not honoured. A test that asserts only
+    // the first passes whether or not the bound exists at all.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    write(&mut alice, &alice_space, "notes", "k", "v");
+
+    // Inside the bound: the document is asked for, so a catch-up goes out
+    // alongside the counter-offer.
+    let mut inside: Vec<String> = (0..8).map(|n| format!("filler{n}")).collect();
+    inside[7] = "notes".to_string();
+    assert_eq!(
+        answer_frames(&mut alice, &bob.address, &offer_wanting(&inside)),
+        2,
+        "a pattern inside the bound did not draw the document"
+    );
+
+    // Past it: the same pattern, at an index the receiver never reads. The
+    // offer is still answered, with the counter-offer alone.
+    let mut beyond: Vec<String> = (0..64).map(|n| format!("filler{n}")).collect();
+    beyond[40] = "notes".to_string();
+    assert_eq!(
+        answer_frames(&mut alice, &bob.address, &offer_wanting(&beyond)),
+        1,
+        "a peer set its own cost by declaring more interest patterns than the bound reads"
+    );
+}
+
+#[test]
+fn wiping_the_store_clears_the_interest_it_scoped() {
+    // The wipe promises that nothing distinguishes a space it cleared from
+    // one this device has never seen, and a narrowing that outlived it is
+    // exactly such a distinction. It is also the logout path, so a surviving
+    // narrowing would be one account's policy silently applied to the next
+    // account that replicates with the same peer.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    bob.protocol
+        .data_set_interest(&bob_space, vec!["wanted*".to_string()])
+        .expect("interest");
+    write(&mut alice, &alice_space, "other.notes", "k", "v");
+    settle(&mut alice, &mut bob);
+    assert!(
+        !holds(&mut bob, &bob_space, "other.notes"),
+        "precondition: the narrowing has to be refusing the document"
+    );
+
+    bob.protocol.data_wipe_all().expect("wipe");
+    bob.protocol.nudge_data_sync(&bob_space, None, "test");
+    settle(&mut alice, &mut bob);
+
+    assert_eq!(
+        read(&mut bob, &bob_space, "other.notes", "k"),
+        Some(DataValue::text("v")),
+        "a narrowing outlived the wipe that cleared the documents it scoped"
+    );
+}
+
+#[test]
+fn declaring_interest_before_start_does_not_spend_the_offer_window() {
+    // The documented order is `setInterest` and then `start()`. Before the
+    // transports are up the offer cannot leave the device, but the offer
+    // path stamps its rate-limit window before it finds that out, and the
+    // stamp would go on to suppress the sweep in `start` and the first
+    // rediscovery after it. Both of those already build their offer from
+    // the new interest, so nothing is lost by not asking twice.
+    let mut config = create_test_config_for_user("alice");
+    config.encryption.enabled = true;
+    config.data.enabled = true;
+    let mut protocol = OfflineProtocol::new(config).expect("protocol");
+    let state = Arc::new(InMemoryStorage::new());
+    protocol
+        .initialize_mls(
+            crate::test_identity::seeded_storage("alice"),
+            Arc::new(TestProtocolStateStorage {
+                storage: state.clone(),
+            }),
+        )
+        .expect("initialize_mls");
+    // Without these the nudge stops at the channel lookup and this test
+    // would pass for a protocol that never reached the offer path at all.
+    let peer = bob_address();
+    protocol.peer_data_sync.insert(peer.clone());
+    protocol.peer_data_interest.insert(peer.clone());
+
+    protocol
+        .data_set_interest(&peer, vec!["wanted*".to_string()])
+        .expect("interest");
+
+    assert!(
+        !protocol.last_data_sync_offer.contains_key(&peer),
+        "an interest declared before start() spent the window that suppresses \
+         the sweep start() makes"
+    );
+
+    // The other half: once the engine is running, a change still asks.
+    // Without this the assertion above passes for a guard that never lets
+    // anything through.
+    protocol.start().expect("start");
+    protocol
+        .data_set_interest(&peer, vec!["wanted*".to_string(), "later*".to_string()])
+        .expect("widen");
+    assert!(
+        protocol.last_data_sync_offer.contains_key(&peer),
+        "widening the interest of a running engine did not ask the peer for what it added"
+    );
+
+    // And the same patterns again carry nothing new, so they ask nothing.
+    // An application that declares its interest at every launch would
+    // otherwise spend a window on a frame identical to the last one.
+    protocol.last_data_sync_offer.clear();
+    protocol
+        .data_set_interest(&peer, vec!["wanted*".to_string(), "later*".to_string()])
+        .expect("same patterns again");
+    assert!(
+        protocol.last_data_sync_offer.is_empty(),
+        "re-declaring the same interest spent a window on an offer that would have \
+         carried exactly what the last one did"
+    );
+}
+
+#[test]
+fn a_carried_snapshot_outside_the_interest_is_refused_before_it_is_reassembled() {
+    // The refusal the import path makes, made at the descriptor instead.
+    // Only a peer without entry 5 sends one of these, so nothing here is a
+    // regression; what it saves is a whole transfer, up to the record
+    // ceiling, spent reaching a decision the narrowing already made.
+    let (mut alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    bob.protocol
+        .data_set_interest(&bob_space, vec!["wanted*".to_string()])
+        .expect("interest");
+
+    // Large enough that one window cannot finish it, so the assembly is
+    // observably open at the point the gate either refused it or did not.
+    let payload = vec![7u8; 2 * 1024 * 1024];
+    alice
+        .protocol
+        .send_media_inner(
+            bob.address.clone(),
+            payload,
+            "other.notes".to_string(),
+            offline_protocol_core::ContentType::File,
+            crate::protocol::types::MediaSendOptions::default(),
+            Some(crate::media_envelope::DataPurpose::Snapshot {
+                doc: "other.notes".to_string(),
+            }),
+        )
+        .expect("a peer that advertised carriage accepts the send");
+    pump(&mut alice, &mut bob);
+
+    assert_eq!(
+        bob.protocol.file_transfer_manager.active_transfer_count(),
+        0,
+        "a narrowed device buffered a snapshot for a document it had already refused"
+    );
+
+    // The control, over the same send and the same chunk count: a document
+    // inside the interest IS admitted and the assembly IS open. Without it
+    // the assertion above passes for a fixture that never sent anything.
+    let (mut alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    bob.protocol
+        .data_set_interest(&bob_space, vec!["wanted*".to_string()])
+        .expect("interest");
+    let payload = vec![7u8; 2 * 1024 * 1024];
+    alice
+        .protocol
+        .send_media_inner(
+            bob.address.clone(),
+            payload,
+            "wanted.notes".to_string(),
+            offline_protocol_core::ContentType::File,
+            crate::protocol::types::MediaSendOptions::default(),
+            Some(crate::media_envelope::DataPurpose::Snapshot {
+                doc: "wanted.notes".to_string(),
+            }),
+        )
+        .expect("send");
+    pump(&mut alice, &mut bob);
+    assert_eq!(
+        bob.protocol.file_transfer_manager.active_transfer_count(),
+        1,
+        "the same transfer must be admitted for a document inside the interest"
+    );
 }

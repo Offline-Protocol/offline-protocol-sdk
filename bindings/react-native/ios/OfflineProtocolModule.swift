@@ -1880,6 +1880,24 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
+    @objc func dataSetInterest(_ spaceId: String,
+                               patterns: [String],
+                               resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let store = dataStoreInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "DataStore not initialized"])
+            }
+            try store.setInterest(spaceId: spaceId, patterns: patterns)
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_DATASETINTEREST",
+                                    fallbackMessage: "setInterest failed")
+        }
+    }
+
     @objc func dataListDocs(_ spaceId: String,
                             resolver: @escaping RCTPromiseResolveBlock,
                             rejecter: @escaping RCTPromiseRejectBlock) {

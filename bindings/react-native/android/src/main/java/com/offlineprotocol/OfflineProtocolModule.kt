@@ -1966,6 +1966,27 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     @ReactMethod
+    fun dataSetInterest(spaceId: String, patterns: ReadableArray, promise: Promise) {
+        try {
+            val store = dataStore ?: throw IllegalStateException("DataStore not initialized")
+            // An empty list is a real answer here ("send me nothing"), so it
+            // is passed through rather than rejected the way an empty id
+            // list is elsewhere in this bridge.
+            //
+            // A null entry becomes the empty string rather than being
+            // dropped. Dropping it would silently hand the core a narrower
+            // list than the application wrote; the empty string is not a
+            // document name, so the core refuses the call and the mistake
+            // is reported where it was made.
+            val list = (0 until patterns.size()).map { patterns.getString(it) ?: "" }
+            store.setInterest(spaceId, list)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_DATASETINTEREST", "setInterest failed")
+        }
+    }
+
+    @ReactMethod
     fun dataListDocs(spaceId: String, promise: Promise) {
         try {
             val store = dataStore ?: throw IllegalStateException("DataStore not initialized")

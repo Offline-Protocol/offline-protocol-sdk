@@ -448,6 +448,17 @@ pub struct OfflineProtocol {
     /// [`DATA_TOMBSTONE_V1`]: crate::protocol::types::DATA_TOMBSTONE_V1
     peer_data_tombstones: std::collections::HashSet<String>,
 
+    /// Peers whose key package advertised interest-scoped replication
+    /// ([`DATA_INTEREST_V1`] in `data_versions`), so a version offer toward
+    /// them carries the `want` field.
+    ///
+    /// A fifth set, and a traffic gate like the fourth: a peer missing from
+    /// it answers with everything it holds, and this device refuses what it
+    /// did not ask for on arrival.
+    ///
+    /// [`DATA_INTEREST_V1`]: crate::protocol::types::DATA_INTEREST_V1
+    peer_data_interest: std::collections::HashSet<String>,
+
     /// Peers already flagged with a `PlaintextSend` security warning, so the
     /// explicit-opt-out plaintext path warns once per peer instead of once
     /// per message.
@@ -1034,6 +1045,7 @@ impl OfflineProtocol {
             peer_data_group_attested: std::collections::HashSet::new(),
             peer_data_media: std::collections::HashSet::new(),
             peer_data_tombstones: std::collections::HashSet::new(),
+            peer_data_interest: std::collections::HashSet::new(),
             peer_rich_attested: std::collections::HashSet::new(),
             plaintext_send_warned: std::collections::HashSet::new(),
             plaintext_receive_warned: std::collections::HashSet::new(),
@@ -1236,6 +1248,7 @@ impl OfflineProtocol {
         let previous_peer_data_group_attested = self.peer_data_group_attested.clone();
         let previous_peer_data_media = self.peer_data_media.clone();
         let previous_peer_data_tombstones = self.peer_data_tombstones.clone();
+        let previous_peer_data_interest = self.peer_data_interest.clone();
 
         let previous_local_id = std::mem::replace(&mut self.local_id, local_id.clone());
         let previous_identity_established = self.identity_established;
@@ -1397,6 +1410,7 @@ impl OfflineProtocol {
             self.peer_data_group_attested = previous_peer_data_group_attested;
             self.peer_data_media = previous_peer_data_media;
             self.peer_data_tombstones = previous_peer_data_tombstones;
+            self.peer_data_interest = previous_peer_data_interest;
             return Err(err);
         }
 
@@ -2145,6 +2159,7 @@ impl OfflineProtocol {
         self.peer_data_group_attested.remove(peer);
         self.peer_data_media.remove(peer);
         self.peer_data_tombstones.remove(peer);
+        self.peer_data_interest.remove(peer);
         // A peer we have stopped replicating with cannot answer anything we
         // asked them for, so the questions go too. Left behind they would
         // hold slots against the fetch bound until they timed out.
@@ -2161,6 +2176,7 @@ impl OfflineProtocol {
         self.peer_data_group_attested.clear();
         self.peer_data_media.clear();
         self.peer_data_tombstones.clear();
+        self.peer_data_interest.clear();
         // Reported, not merely dropped, exactly as the single-peer road
         // reports. Nothing the application did reaches this one: the bound
         // on remembered peers is hit, a stranger's key package forgets every
@@ -3815,7 +3831,7 @@ impl OfflineProtocol {
     /// forever. Once running, this is a plain emit — the same call is used from
     /// `process()`-driven expiry, where no deferral is wanted.
     pub(crate) fn settle_restored_message_failure(&mut self, event: Event) {
-        let running = self.event_pipeline_is_live();
+        let running = self.protocol_is_running();
         self.settle_one_restored_message_failure(event, running);
     }
 
@@ -3826,13 +3842,21 @@ impl OfflineProtocol {
         &mut self,
         events: impl IntoIterator<Item = Event>,
     ) {
-        let running = self.event_pipeline_is_live();
+        let running = self.protocol_is_running();
         for event in events {
             self.settle_one_restored_message_failure(event, running);
         }
     }
 
-    fn event_pipeline_is_live(&self) -> bool {
+    /// Whether [`Self::start`] has run and nothing has stopped it since.
+    ///
+    /// Two callers want different things from the same fact. The restore
+    /// paths above want to know whether an emit reaches an application at
+    /// all. The document layer wants to know whether a frame it is about to
+    /// build can leave the device, because a send attempted before the
+    /// transports are up stamps a rate-limit window against an offer that
+    /// was never carried.
+    pub(crate) fn protocol_is_running(&self) -> bool {
         lock_shared_state(&self.shared_state)
             .map(|state| state.state == ProtocolState::Running)
             .unwrap_or(false)

@@ -2933,14 +2933,17 @@ fn data_sync_is_advertised_only_when_the_layer_is_on() {
             DATA_SYNC_V1,
             DATA_GROUP_V1,
             DATA_MEDIA_V1,
-            DATA_TOMBSTONE_V1
+            DATA_TOMBSTONE_V1,
+            DATA_INTEREST_V1
         ],
         "every entry, and the order is append-only. Each says something a \
          build advertising only its predecessors does not do: intercept a \
          sync frame inside a group ciphertext, route a data-purposed \
          media transfer into the data layer instead of handing it to a \
          person as a received file, and read the removals an offer carries \
-         rather than offering the removed documents straight back. A peer \
+         rather than offering the removed documents straight back, and \
+         answer inside the interest an offer declares rather than with \
+         everything it holds. A peer \
          reads them independently, so replacing rather than appending would \
          silently stop 1:1 replication with every shipped install"
     );

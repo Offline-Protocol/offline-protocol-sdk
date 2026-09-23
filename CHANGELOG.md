@@ -15,6 +15,45 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **A space can replicate in part.** `DataStore.setInterest(space, patterns)`
+  names the documents this device wants from its peers: document names, each
+  optionally ending in `*` to match a prefix, at most 32 per space. `["*"]`
+  is everything and is the default, so a space nobody narrows behaves exactly
+  as before and its frames are byte-identical to the ones it sent last
+  release.
+
+  It does two things that fail differently, and the difference is the whole
+  design. Toward a peer it is a **request**: every version offer carries it,
+  so the peer answers only with what was asked for. That is the bandwidth
+  saving, and it needs the peer to read the field. Locally it is a
+  **refusal**: a document outside the patterns is never created from an offer
+  and never imported however it arrives. That half depends on nothing, which
+  is why a narrowed space is narrow even against a peer that ignores the
+  request, including every build that predates it.
+
+  Three rules keep it from losing documents. The answer is scoped by the
+  asker's declared interest and never by the names their frame happened to
+  carry, because the second drops a document they have never seen with no
+  symptom on either device. A counter-offer still carries the complete list:
+  the saving there is one name per unwanted document, which is not worth
+  narrowing a reply sweep for. And removals are never scoped, because a peer
+  that narrowed still holds what it held before, so a removal for a document
+  it no longer wants is exactly the one it still needs.
+
+  Interest is not persisted: it is application policy for this launch rather
+  than a fact about the store, so declare it before `start()`. `wipeAll()`
+  clears it along with the documents it scoped, because nothing may
+  distinguish a wiped space from one this device has never seen. Narrowing
+  does not delete what is already held, because a policy change should not
+  destroy data nobody asked to lose; `deleteDoc` is how a document leaves.
+  Widening asks, since the newly wanted documents are absent from this
+  device's next offer and inside its declared interest.
+
+  Negotiated as `data_versions` entry 5, appended. On the wire an absent
+  `want` means everything and an empty one means nothing; the two are
+  deliberately not collapsed, because collapsing them would turn the
+  narrowest request into the widest.
+
 - **Replicated documents can be removed from every replica.**
   `DataStore.removeDoc(space, doc)` records the version the document stood at
   and tells the space; a replica whose copy that version covers deletes it too

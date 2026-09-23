@@ -1031,6 +1031,7 @@ await store.flush('space-1', 'profile');
 | `deleteDoc(space, doc)` | `void` | Drops this device's copy. Records nothing about the name, so a replica that still holds the document refills it |
 | `removeDoc(space, doc)` | `void` | Removes the document from every replica of the space. An edit made concurrently with the removal wins and brings the document back whole. Reads and writes on the name throw `InvalidState` until `createDoc` |
 | `removeSpace(space)` | `void` | Removes every document the space holds, from every replica |
+| `setInterest(space, patterns)` | `void` | The documents this device wants from its peers. Names or `name*` prefixes, at most 32. `["*"]` is the default, `[]` is nothing. Not persisted: set it before `start()` |
 | `listDocs(space)` | `string[]` | |
 | `listSpaces()` | `string[]` | Spaces this device holds documents or removal records for |
 | `mapSet(space, doc, collection, key, value)` | `void` | |

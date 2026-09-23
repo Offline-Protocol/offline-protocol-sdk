@@ -565,6 +565,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space() != 40558:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_set_interest() != 31191:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete() != 53749:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert() != 3896:
@@ -1568,6 +1570,13 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_remove_space.argty
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_remove_space.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_set_interest.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_set_interest.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_text_delete.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2787,6 +2796,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_doc.r
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_set_interest.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_set_interest.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete.restype = ctypes.c_uint16
@@ -8071,6 +8083,8 @@ class DataStoreProtocol(typing.Protocol):
         raise NotImplementedError
     def remove_space(self, space_id: str) -> None:
         raise NotImplementedError
+    def set_interest(self, space_id: str,patterns: typing.List[str]) -> None:
+        raise NotImplementedError
     def text_delete(self, space_id: str,doc_id: str,collection: str,position: int,count: int) -> None:
         raise NotImplementedError
     def text_insert(self, space_id: str,doc_id: str,collection: str,position: int,text: str) -> None:
@@ -8580,6 +8594,24 @@ class DataStore(DataStoreProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_remove_space,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def set_interest(self, space_id: str,patterns: typing.List[str]) -> None:
+        
+        _UniffiFfiConverterString.check_lower(space_id)
+        
+        _UniffiFfiConverterSequenceString.check_lower(patterns)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(space_id),
+            _UniffiFfiConverterSequenceString.lower(patterns),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_set_interest,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)

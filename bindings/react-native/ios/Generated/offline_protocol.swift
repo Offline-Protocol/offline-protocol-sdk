@@ -684,6 +684,8 @@ public protocol DataStoreProtocol: AnyObject, Sendable {
     
     func removeSpace(spaceId: String) throws 
     
+    func setInterest(spaceId: String, patterns: [String]) throws 
+    
     func textDelete(spaceId: String, docId: String, collection: String, position: UInt32, count: UInt32) throws 
     
     func textInsert(spaceId: String, docId: String, collection: String, position: UInt32, text: String) throws 
@@ -982,6 +984,15 @@ open func removeSpace(spaceId: String)throws   {try rustCallWithError(FfiConvert
     uniffi_offline_protocol_uniffi_fn_method_datastore_remove_space(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),$0
+    )
+}
+}
+    
+open func setInterest(spaceId: String, patterns: [String])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_datastore_set_interest(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(spaceId),
+        FfiConverterSequenceString.lower(patterns),$0
     )
 }
 }
@@ -9573,6 +9584,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space() != 3889) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_set_interest() != 22009) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete() != 35552) {

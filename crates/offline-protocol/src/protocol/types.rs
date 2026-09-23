@@ -893,6 +893,22 @@ pub(crate) const DATA_MEDIA_V1: u8 = 3;
 /// whether the frame may be sent at all.
 pub(crate) const DATA_TOMBSTONE_V1: u8 = 4;
 
+/// Interest-scoped replication, advertised in
+/// [`KeyPackagePayload::data_versions`] alongside [`DATA_SYNC_V1`]: the
+/// sender reads the `want` field of a version offer and answers only the
+/// documents it names.
+///
+/// A fifth entry rather than a bump, and like the fourth it gates traffic
+/// rather than correctness. A peer without it ignores the field and answers
+/// with everything it holds, and the asking side refuses what it did not ask
+/// for on arrival, so the narrowing holds regardless; what it does not do is
+/// save the radio. Gating means a narrowed space says so only where saying so
+/// changes what comes back.
+///
+/// The half that does not depend on this entry is the local refusal, and it
+/// is the reason interest is safe to ship before any peer speaks it.
+pub(crate) const DATA_INTEREST_V1: u8 = 5;
+
 /// Rich fields accepted by the `send_message_with` surface. Only ever
 /// delivered inside the sealed [`RichPayloadV1`] body — toward a recipient
 /// that did not advertise [`RICH_PAYLOAD_V1`] they are silently dropped,
