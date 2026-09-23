@@ -430,6 +430,12 @@ impl PendingFetch {
 }
 
 /// A blob being reassembled from frames.
+///
+/// What it can hold is bounded by its own two rules rather than by a
+/// running total: at most [`MAX_GROUP_BLOB_CHUNKS`] chunks, since an index
+/// outside the declared count is refused and the count itself is capped,
+/// each at most [`MAX_SYNC_BLOB_BYTES`]. One assembly is therefore 1 MiB at
+/// the very most, and the fetch bound puts a ceiling on how many exist.
 #[derive(Debug, Default)]
 pub(crate) struct BlobAssembly {
     /// How many chunks the first arrival said there would be.
@@ -437,8 +443,6 @@ pub(crate) struct BlobAssembly {
     /// Chunks by index, so a duplicate replaces rather than appends and the
     /// order they arrive in does not matter.
     chunks: BTreeMap<u32, Vec<u8>>,
-    /// Bytes held, so the cap is checked without walking the map.
-    bytes: usize,
 }
 
 /// What one version offer says.
@@ -1274,6 +1278,19 @@ impl OfflineProtocol {
                 self.answer_blob_request(&space, channel, &hash, to.as_deref())
             }
             SyncBody::BlobGone { hash } => self.report_blob_gone(&space, sender, &hash),
+            // The group road only. A 1:1 fetch is answered over the media
+            // path, which has its own reassembly, its own resource caps and
+            // its own failure report; admitting a chunk here as well would
+            // give one outcome two roads to arrive by, differing in every
+            // bound they answer to and alike in nothing but the hash check
+            // at the end.
+            SyncBody::Chunk { .. } if matches!(channel, SyncChannel::Peer) => {
+                warn!(
+                    peer = %sender,
+                    "A blob chunk arrived on a 1:1 session, where bytes ride the media path"
+                );
+                Ok(())
+            }
             SyncBody::Chunk { hash, i, n, blob } => {
                 self.accept_blob_chunk(&space, sender, &hash, i, n, &blob)
             }
@@ -2169,10 +2186,10 @@ impl OfflineProtocol {
     /// do not hash to the address they are sent under, so a lying holder
     /// cannot be staged through it.
     #[cfg(test)]
-    pub(crate) fn send_group_chunk_for_test(
+    pub(crate) fn send_chunk_for_test(
         &mut self,
         space: &str,
-        member: &str,
+        channel: &SyncChannel,
         hash: &str,
         index: u32,
         total: u32,
@@ -2180,7 +2197,7 @@ impl OfflineProtocol {
     ) {
         self.send_sync_frame(
             space,
-            &SyncChannel::GroupDirected(member.to_string()),
+            channel,
             &SyncBody::Chunk {
                 hash: hash.to_string(),
                 i: index,
@@ -2274,10 +2291,7 @@ impl OfflineProtocol {
             );
             return Ok(());
         }
-        if let Some(previous) = assembly.chunks.insert(index, bytes) {
-            assembly.bytes -= previous.len();
-        }
-        assembly.bytes += assembly.chunks[&index].len();
+        assembly.chunks.insert(index, bytes);
         if (assembly.chunks.len() as u32) < assembly.total {
             return Ok(());
         }

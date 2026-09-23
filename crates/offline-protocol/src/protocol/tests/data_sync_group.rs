@@ -18,7 +18,7 @@ use crate::group_mesh::{RosterRatchetGap, MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS
 use crate::mls::InMemoryStorage;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
-use crate::protocol::data_sync::MAX_GROUP_BLOB_CHUNKS;
+use crate::protocol::data_sync::{SyncChannel, MAX_GROUP_BLOB_CHUNKS, MAX_SYNC_BLOB_BYTES};
 use crate::protocol::prefixes::internal_prefixes;
 use crate::protocol::tests::{create_test_config_for_user, id};
 use crate::protocol::types::{
@@ -1524,7 +1524,6 @@ fn a_long_run_of_directed_frames_all_arrive_and_decrypt() {
             )
             .expect("send a directed frame");
     }
-    let sent = alice.transport.sent_messages().len();
     pump(&mut alice, &mut [&mut bob, &mut carol]);
 
     let arrived = bob
@@ -1545,7 +1544,6 @@ fn a_long_run_of_directed_frames_all_arrive_and_decrypt() {
         carol_saw, 0,
         "a directed frame reached a member it was not addressed to"
     );
-    let _ = sent;
     assert!(
         !bob.saw_group_message(),
         "a replication frame was surfaced to the application as a chat message"
@@ -1642,6 +1640,11 @@ fn field<'a>(event: &'a serde_json::Value, key: &str) -> &'a str {
 
 #[test]
 fn a_member_fetches_a_blob_from_another_member() {
+    // Nothing roster-wide has gone out yet, so this device has no entry
+    // against the ratchet-gap budget and its first directed frame is
+    // promoted to the whole roster. That is not incidental to this test: it
+    // is why Carol receives the request at all, and so it is the `to` field
+    // rather than the addressing that keeps her application out of it.
     let (mut alice, mut bob, mut carol, group) = trio();
     let bytes = vec![7u8; 40 * 1024];
     let hash = OfflineProtocol::data_attachment_hash(&bytes);
@@ -1838,9 +1841,9 @@ fn a_blob_that_does_not_hash_to_what_was_asked_for_is_refused() {
     // send seam is reached directly, because `provide` checks the hash on
     // the way out and this is about the check on the way in.
     let lie = vec![2u8; 4 * 1024];
-    alice.protocol.send_group_chunk_for_test(
+    alice.protocol.send_chunk_for_test(
         &group,
-        &bob.address,
+        &SyncChannel::GroupDirected(bob.address.clone()),
         &hash,
         0,
         1,
@@ -2100,9 +2103,14 @@ fn a_chunk_declaring_a_shape_this_layer_does_not_carry_is_dropped() {
         (0, MAX_GROUP_BLOB_CHUNKS + 1, "a count past the cap"),
         (5, 1, "an index outside its own count"),
     ] {
-        alice
-            .protocol
-            .send_group_chunk_for_test(&group, &bob.address, &hash, index, total, &blob);
+        alice.protocol.send_chunk_for_test(
+            &group,
+            &SyncChannel::GroupDirected(bob.address.clone()),
+            &hash,
+            index,
+            total,
+            &blob,
+        );
         pump(&mut alice, &mut [&mut bob, &mut carol]);
         assert!(
             attachment_events(&bob, "data_attachment_received").is_empty(),
@@ -2122,6 +2130,91 @@ fn a_chunk_declaring_a_shape_this_layer_does_not_carry_is_dropped() {
         attachment_events(&bob, "data_attachment_received").len(),
         1,
         "a malformed chunk cancelled the fetch it arrived against"
+    );
+}
+
+#[test]
+fn a_chunk_over_the_frame_budget_is_dropped() {
+    // The per-piece bound, which is this device's and not a restatement of
+    // the sender's. A holder that ignored it would otherwise decide on its
+    // own how much of another member's memory one piece may cost.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let bytes = vec![2u8; 1024];
+    let hash = OfflineProtocol::data_attachment_hash(&bytes);
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+
+    let oversized = BASE64.encode(vec![0u8; MAX_SYNC_BLOB_BYTES + 1]);
+    alice.protocol.send_chunk_for_test(
+        &group,
+        &SyncChannel::GroupDirected(bob.address.clone()),
+        &hash,
+        0,
+        1,
+        &oversized,
+    );
+    pump(&mut alice, &mut [&mut bob, &mut carol]);
+    assert!(
+        attachment_events(&bob, "data_attachment_received").is_empty(),
+        "a chunk over the frame budget was assembled anyway"
+    );
+
+    // And the carriage survives it, like every other malformed piece.
+    alice
+        .protocol
+        .data_provide_attachment(&group, &bob.address, &hash, bytes)
+        .expect("provide");
+    pump(&mut alice, &mut [&mut bob, &mut carol]);
+    assert_eq!(
+        attachment_events(&bob, "data_attachment_received").len(),
+        1,
+        "an oversized chunk cancelled the fetch it arrived against"
+    );
+}
+
+#[test]
+fn a_duplicate_chunk_replaces_rather_than_appends() {
+    // What carrying the count on every piece buys: the pieces are
+    // independent, so one arriving twice is one piece and not two, and the
+    // answer still completes at the count it declared. Appending would
+    // leave the blob longer than it was and fail the hash that asked for
+    // it.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let bytes: Vec<u8> = (0..(MAX_SYNC_BLOB_BYTES + 512)).map(|i| i as u8).collect();
+    let hash = OfflineProtocol::data_attachment_hash(&bytes);
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+
+    let pieces: Vec<String> = bytes
+        .chunks(MAX_SYNC_BLOB_BYTES)
+        .map(|chunk| BASE64.encode(chunk))
+        .collect();
+    assert_eq!(pieces.len(), 2, "this test needs a blob of two pieces");
+    let total = pieces.len() as u32;
+    for index in [0usize, 0, 1] {
+        alice.protocol.send_chunk_for_test(
+            &group,
+            &SyncChannel::GroupDirected(bob.address.clone()),
+            &hash,
+            index as u32,
+            total,
+            &pieces[index],
+        );
+    }
+    pump(&mut alice, &mut [&mut bob, &mut carol]);
+
+    let received = attachment_events(&bob, "data_attachment_received");
+    assert_eq!(received.len(), 1, "the repeated piece broke the count");
+    assert_eq!(
+        BASE64.decode(field(&received[0], "data")).expect("base64"),
+        bytes,
+        "a duplicate piece was appended rather than replacing"
     );
 }
 

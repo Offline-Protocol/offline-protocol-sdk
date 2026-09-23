@@ -2416,6 +2416,44 @@ fn a_fetch_nobody_answers_eventually_reports() {
 }
 
 #[test]
+fn a_chunk_on_a_one_to_one_session_is_dropped() {
+    // Chunks are the group road. A 1:1 fetch is answered over the media
+    // path, which has its own reassembly, its own resource caps and its own
+    // failure report, so admitting a chunk here too would give one outcome
+    // two roads to arrive by that are alike in nothing but the hash check.
+    let (mut alice, mut bob) = pair();
+    let bob_space = Node::space_for(&alice);
+    let alice_space = Node::space_for(&bob);
+    let bytes = vec![4u8; 2048];
+    let hash = OfflineProtocol::data_attachment_hash(&bytes);
+
+    bob.protocol
+        .data_fetch_attachment(&bob_space, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut alice);
+    clear_events(&bob);
+
+    alice.protocol.send_chunk_for_test(
+        &alice_space,
+        &crate::protocol::data_sync::SyncChannel::Peer,
+        &hash,
+        0,
+        1,
+        &base64::engine::general_purpose::STANDARD.encode(&bytes),
+    );
+    pump(&mut alice, &mut bob);
+
+    assert!(
+        events_named(&bob, "data_attachment_received").is_empty(),
+        "a chunk was assembled on a session where bytes ride the media path"
+    );
+    assert!(
+        !bob.protocol.pending_attachment_fetches.is_empty(),
+        "the fetch was ended by a frame this road does not carry"
+    );
+}
+
+#[test]
 fn unsolicited_blob_bytes_are_refused_at_the_door() {
     // Refusing on completion still refuses, but only after the whole
     // transfer has been buffered, reassembled and checksummed. That is the
