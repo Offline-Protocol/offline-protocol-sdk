@@ -2176,6 +2176,61 @@ fn a_chunk_over_the_frame_budget_is_dropped() {
 }
 
 #[test]
+fn a_carriage_that_stops_half_way_still_ends() {
+    // Arriving bytes refresh the clock, which is what keeps a carriage in
+    // progress from expiring underneath itself. The other side of that is
+    // this: a member that sends one piece and stops has refreshed the clock
+    // once, and the question must still end rather than hold its slot and
+    // its assembled bytes for good.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let bytes: Vec<u8> = (0..(MAX_SYNC_BLOB_BYTES + 512)).map(|i| i as u8).collect();
+    let hash = OfflineProtocol::data_attachment_hash(&bytes);
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+
+    // One piece of two, then silence.
+    let first = BASE64.encode(&bytes[..MAX_SYNC_BLOB_BYTES]);
+    alice.protocol.send_chunk_for_test(
+        &group,
+        &SyncChannel::GroupDirected(bob.address.clone()),
+        &hash,
+        0,
+        2,
+        &first,
+    );
+    pump(&mut alice, &mut [&mut bob, &mut carol]);
+    assert!(
+        attachment_events(&bob, "data_attachment_received").is_empty(),
+        "an incomplete answer was handed over"
+    );
+    assert_eq!(
+        bob.protocol.pending_attachment_fetches.len(),
+        1,
+        "the half-arrived answer left no question behind"
+    );
+
+    let stale = std::time::Instant::now()
+        - crate::protocol::data_sync::ATTACHMENT_FETCH_TIMEOUT
+        - std::time::Duration::from_secs(1);
+    for pending in bob.protocol.pending_attachment_fetches.values_mut() {
+        pending.last_seen = stale;
+    }
+    bob.protocol.expire_attachment_fetches();
+
+    assert!(
+        bob.protocol.pending_attachment_fetches.is_empty(),
+        "a half-arrived answer held its slot and its bytes for good"
+    );
+    let ended = attachment_events(&bob, "data_attachment_unavailable");
+    assert_eq!(ended.len(), 1, "the stalled carriage was never reported");
+    assert_eq!(field(&ended[0], "reason"), "timeout");
+    assert_eq!(field(&ended[0], "peer_id"), alice.address);
+}
+
+#[test]
 fn a_duplicate_chunk_replaces_rather_than_appends() {
     // What carrying the count on every piece buys: the pieces are
     // independent, so one arriving twice is one piece and not two, and the
