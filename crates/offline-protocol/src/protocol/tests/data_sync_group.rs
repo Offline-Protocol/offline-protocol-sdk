@@ -1935,6 +1935,81 @@ fn forgetting_a_member_ends_the_group_fetch_put_to_them() {
 }
 
 #[test]
+fn asking_a_second_member_is_a_new_question_rather_than_a_repeat() {
+    // The SDK does not walk the roster, so falling back to another member
+    // is the application's move to make, and it has to work the moment the
+    // first member goes quiet. The record is keyed by the space and the
+    // blob, neither of which changes when the member does.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    let bytes = vec![8u8; 4 * 1024];
+    let hash = OfflineProtocol::data_attachment_hash(&bytes);
+
+    bob.protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect("fetch");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+    assert_eq!(
+        attachment_events(&alice, "data_attachment_requested").len(),
+        1,
+        "the first member was never asked"
+    );
+
+    // Alice says nothing. Well inside the repeat window, the application
+    // asks Carol instead.
+    bob.protocol
+        .data_fetch_attachment_from(&group, &carol.address, &hash)
+        .expect("fallback");
+    pump(&mut bob, &mut [&mut alice, &mut carol]);
+    assert_eq!(
+        attachment_events(&carol, "data_attachment_requested").len(),
+        1,
+        "the fallback was swallowed as a repeat and asked nobody"
+    );
+
+    // The question put to Alice is closed, and names her.
+    let ended = attachment_events(&bob, "data_attachment_unavailable");
+    assert_eq!(ended.len(), 1, "the displaced question never ended");
+    assert_eq!(field(&ended[0], "peer_id"), alice.address);
+
+    // And the member who was actually asked can still answer.
+    carol
+        .protocol
+        .data_provide_attachment(&group, &bob.address, &hash, bytes)
+        .expect("provide");
+    pump(&mut carol, &mut [&mut alice, &mut bob]);
+    let received = attachment_events(&bob, "data_attachment_received");
+    assert_eq!(
+        received.len(),
+        1,
+        "the fallback member's answer was refused"
+    );
+    assert_eq!(field(&received[0], "peer_id"), carol.address);
+}
+
+#[test]
+fn a_group_fetch_cannot_be_put_to_this_device() {
+    // A device is in the roster it just read. An application walking that
+    // roster to choose a member reaches this, and a question put to
+    // nobody would be answered by the silence timeout fifteen minutes
+    // later.
+    let (mut alice, _bob, _carol, group) = trio();
+    let hash = OfflineProtocol::data_attachment_hash(b"bytes this device would already have");
+
+    let err = alice
+        .protocol
+        .data_fetch_attachment_from(&group, &alice.address, &hash)
+        .expect_err("a device must not ask itself");
+    assert!(
+        format!("{err}").contains("not a peer of itself"),
+        "the refusal must name the reason: {err}"
+    );
+    assert!(
+        alice.protocol.pending_attachment_fetches.is_empty(),
+        "a refused fetch still spent a slot"
+    );
+}
+
+#[test]
 fn a_blob_too_large_for_a_group_is_refused_at_the_call() {
     // The cap is what keeps a request a single-hop question: the whole
     // answer leaves at once, so nothing has to ask for the next window.

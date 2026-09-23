@@ -2347,6 +2347,17 @@ impl OfflineProtocol {
                 "{peer} is not a member of {space}"
             )));
         }
+        // This device is in the roster it just read, so naming itself is a
+        // question it would put to nobody and then wait out the silence
+        // timeout for. An application walking a roster to choose a member
+        // reaches this, and the honest answer is that it has the bytes or
+        // it does not.
+        if peer == self.local_id {
+            return Err(Error::InvalidArgument(
+                "a group fetch names another member to ask, and a device is not a peer of itself"
+                    .to_string(),
+            ));
+        }
         // A question, and the only directed frame this layer puts to a
         // member who asked for nothing. Every other one answers something
         // that member sent, which is itself proof they intercept these
@@ -2380,14 +2391,44 @@ impl OfflineProtocol {
 
         let key = Self::attachment_fetch_key(space, hash);
         self.expire_attachment_fetches();
-        if let Some(pending) = self.pending_attachment_fetches.get(&key) {
-            if Instant::now().duration_since(pending.last_seen) < DATA_SYNC_OFFER_INTERVAL {
+        match self.pending_attachment_fetches.get(&key) {
+            // The same question asked twice, which is what the window is
+            // for: a spinner on a timer would otherwise seal and send one
+            // frame per retry.
+            Some(pending)
+                if pending.holder.as_deref() == Some(peer)
+                    && Instant::now().duration_since(pending.last_seen)
+                        < DATA_SYNC_OFFER_INTERVAL =>
+            {
                 debug!(
                     space,
                     peer, "Blob fetch repeated inside its window; already asked"
                 );
                 return Ok(());
             }
+            // A different member is a different question, and the one an
+            // application falls back to when the first goes quiet. The
+            // record is keyed by the space and the blob, neither of which
+            // changes, so without this a fallback inside the window
+            // returned `Ok` and asked nobody, and after it silently threw
+            // away whatever the first member had already sent.
+            //
+            // Displacing the first is reported like any other eviction,
+            // naming the member it was put to, so an application tracking
+            // a question per member is not left holding one that never
+            // ends.
+            Some(pending) if pending.holder.as_deref() != Some(peer) => {
+                let displaced = self.pending_attachment_fetches.remove(&key);
+                Self::report_fetch_ended(
+                    &self.shared_state,
+                    &key,
+                    displaced
+                        .as_ref()
+                        .and_then(|pending| pending.holder.as_deref()),
+                    "evicted",
+                );
+            }
+            _ => {}
         }
         if self.pending_attachment_fetches.len() >= MAX_PENDING_ATTACHMENT_FETCHES
             && !self.pending_attachment_fetches.contains_key(&key)
