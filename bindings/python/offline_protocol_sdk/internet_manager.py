@@ -12,6 +12,7 @@ import base64
 import json
 import logging
 import time
+import uuid
 from collections import deque
 from typing import Any, Coroutine
 
@@ -900,8 +901,24 @@ class InternetManager(TransportManager):
                 except Exception as exc:
                     logger.debug("internet_peer_presence(offline) failed: %s", exc)
 
-        elif msg_type in ("GroupCreated", "GroupInvitation", "GroupMessageReceived"):
+        elif msg_type in (
+            "GroupCreated",
+            "GroupMessageReceived",
+            "GroupMemberAdded",
+            "GroupMemberRemoved",
+            "GroupError",
+        ):
             self._handle_group_message(msg_type, msg)
+
+        elif msg_type == "GroupMessageSent":
+            # The relay's settled per-recipient delivery report for a group
+            # broadcast. It goes to the dedicated report entry point, never
+            # the message plane, so the report path cannot be forged through
+            # the notification injector below.
+            try:
+                self._protocol.internet_group_report_received(report_json=json.dumps(msg))
+            except Exception as exc:
+                self._emit_diagnostic("warning", f"Group delivery report rejected: {exc}")
 
         else:
             self._emit_diagnostic("debug", f"Unhandled relay message type: {msg_type}")
@@ -979,20 +996,14 @@ class InternetManager(TransportManager):
         except json.JSONDecodeError:
             pass
         if not is_full_message:
-            message_dict = {
-                "sender": sender_id,
-                "recipient": self._device_id,
-                "content": content,
-                "app_id": self._app_id,
-                "priority": "Medium",
-                "ttl": 8,
-                "hop_count": 0,
-                "requires_ack": True,
-            }
-            if message_id:
-                message_dict["id"] = message_id
-            if reply_to_msg:
-                message_dict["reply_to_msg"] = reply_to_msg
+            # A real peer transmitted this one and awaits the ACK.
+            message_dict = self._build_internal_message(
+                sender_id,
+                content,
+                message_id=message_id,
+                reply_to_msg=reply_to_msg,
+                requires_ack=True,
+            )
 
         data_bytes = json.dumps(message_dict).encode("utf-8")
         try:
@@ -1060,39 +1071,126 @@ class InternetManager(TransportManager):
             self._emit_diagnostic("error", f"Error processing ConnectionRejected: {exc}")
 
     def _handle_group_message(self, msg_type: str, msg: dict[str, Any]) -> None:
-        group_id = msg.get("group_id", "")
-        if not group_id:
-            return
-        sender_id = msg.get("sender", "system")
-        content_prefix = {
-            "GroupCreated": "__GRP_CREATED__",
-            "GroupInvitation": "__GRP_INVITE__",
-            "GroupMessageReceived": "__GRP_MSG__",
-        }.get(msg_type, "")
-        content = content_prefix + json.dumps(msg)
+        """Re-inject a relay group frame under the prefix the core handles.
+
+        A port of the group arms of the iOS and Android bridges' inbound
+        switch. The prefixes are the core's (``prefixes.rs``); the relay's own
+        names are not, and a frame under an unknown prefix is plaintext the
+        core rejects when encryption is required.
+
+        ``GroupMessageReceived`` is the one that carries a message: the relay
+        fans a phone's single broadcast out to every member as this frame and
+        counts the socket write as delivered, so the sender never re-sends a
+        per-member copy. It is attributed to its sender, since ``__GROUP_MSG__``
+        is data plane (MLS authenticates it afterwards) and the attribution is
+        the reachability signal for the relayed sender.
+
+        The others are relay answers (the core's ``RELAY_ANSWER_PREFIXES``) and
+        must reach the core unattributed: no peer sent them, so nothing can
+        sign them, and the core's exemption from the control-frame signature
+        gate only recognizes a frame with no transport peer identity. An
+        attributed answer is dropped as unsigned.
+        """
+        group_id = msg.get("group_id") or ""
+        if msg_type == "GroupMessageReceived":
+            message_id = msg.get("message_id") or ""
+            if not group_id or not message_id:
+                return
+            sender = msg.get("sender") or ""
+            payload: dict[str, Any] = {
+                "group_id": group_id,
+                "sender": sender,
+                "content": msg.get("content") or "",
+                "timestamp": msg.get("timestamp") or "",
+                "message_id": message_id,
+            }
+            if msg.get("reply_to_msg"):
+                payload["reply_to_msg"] = msg["reply_to_msg"]
+            if msg.get("forward_info"):
+                payload["forward_info"] = msg["forward_info"]
+            self._inject_group_frame(sender or None, "__GROUP_MSG__", payload)
+        elif msg_type == "GroupCreated":
+            if not group_id:
+                return
+            payload = {"group_id": group_id, "name": msg.get("name") or ""}
+            self._inject_group_frame(None, "__GROUP_CREATED__", payload)
+        elif msg_type in ("GroupMemberAdded", "GroupMemberRemoved"):
+            if not group_id:
+                return
+            actor = "added_by" if msg_type == "GroupMemberAdded" else "removed_by"
+            payload = {
+                "group_id": group_id,
+                "user_id": msg.get("user_id") or "",
+                actor: msg.get(actor) or "",
+            }
+            prefix = (
+                "__GROUP_MEMBER_ADDED__"
+                if msg_type == "GroupMemberAdded"
+                else "__GROUP_MEMBER_REMOVED__"
+            )
+            self._inject_group_frame(None, prefix, payload)
+        elif msg_type == "GroupError":
+            payload = {"reason": msg.get("reason") or "Unknown error"}
+            # group_id lets the core revoke relay_synced so group sends fall
+            # back to per-member delivery.
+            if group_id:
+                payload["group_id"] = group_id
+            self._inject_group_frame(None, "__GROUP_ERROR__", payload)
+
+    def _inject_group_frame(
+        self, actor: str | None, prefix: str, payload: dict[str, Any]
+    ) -> None:
+        """Feed ``prefix + json(payload)`` to the core as an inbound frame.
+
+        ``actor`` is both the FFI ``sender_id`` and the frame's ``sender``;
+        ``None`` selects unattributed ingest, with the "relay" placeholder as
+        the frame sender because the core rejects an empty one.
+        """
+        content = prefix + json.dumps(payload)
         data_bytes = json.dumps(
-            self._build_internal_message(sender_id, content)
+            self._build_internal_message(actor or "relay", content)
         ).encode("utf-8")
         try:
             self._protocol.internet_message_received(
-                sender_id=sender_id, data=list(data_bytes)
+                sender_id=actor or "", data=list(data_bytes)
             )
         except Exception as exc:
-            self._emit_diagnostic("error", f"Error processing {msg_type}: {exc}")
+            self._emit_diagnostic("error", f"Error injecting {prefix}: {exc}")
 
     def _build_internal_message(
-        self, sender_id: str, content: str
+        self,
+        sender_id: str,
+        content: str,
+        *,
+        message_id: str | None = None,
+        reply_to_msg: str | None = None,
+        requires_ack: bool = False,
     ) -> dict[str, Any]:
-        return {
+        """The full serialized ``Message`` for a frame the bridge synthesizes.
+
+        Mirrors ``LegacyRelayMessage.buildDict`` in the iOS and Android
+        bridges. Every field the core's deserializer requires must be present
+        and shaped as it expects: a missing ``id`` or ``timestamp``, or a
+        capitalized ``priority``, makes the transport drop the frame silently.
+        The recipient is our own address, because the core forwards rather
+        than processes a frame addressed to anyone else, and the profile name
+        is not an address.
+        """
+        message: dict[str, Any] = {
+            "id": message_id or str(uuid.uuid4()),
             "sender": sender_id,
-            "recipient": self._device_id,
+            "recipient": self._protocol.local_address() or self._device_id,
             "content": content,
             "app_id": self._app_id,
-            "priority": "Medium",
+            "priority": "medium",
             "ttl": 8,
             "hop_count": 0,
-            "requires_ack": False,
+            "requires_ack": requires_ack,
+            "timestamp": int(time.time() * 1000),
         }
+        if reply_to_msg:
+            message["reply_to_msg"] = reply_to_msg
+        return message
 
     # -- outgoing message poll loop -------------------------------------------
 

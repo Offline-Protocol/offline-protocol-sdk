@@ -213,6 +213,22 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A group message broadcast through the relay reaches a Python member.** A
+  phone whose group is registered with the relay sends one frame, the relay
+  fans it out to every member as `GroupMessageReceived`, and counts the socket
+  write as delivered, so the sender never re-sends a per-member copy. The
+  Python bridge re-injected that frame under a prefix the core does not
+  recognize (`__GRP_MSG__`), addressed to the profile name rather than the
+  device's address, and without the `id` and `timestamp` the deserializer
+  requires. The core treated it as plaintext for someone else and the message
+  was lost silently. The bridge now injects it as the iOS and Android bridges
+  do: `__GROUP_MSG__`, addressed to `local_address()`, in the full `Message`
+  shape. `GroupCreated`, `GroupMemberAdded`, `GroupMemberRemoved` and
+  `GroupError` are injected unattributed under the core's relay-answer
+  prefixes, and `GroupMessageSent` goes to `internet_group_report_received`
+  instead of the message plane. The same frame builder now backs the
+  plain-text `MessageReceived` fallback, which was dropped for the same
+  reason.
 - **A message evicted from a full outbox stays failed.** Eviction removed the
   outbox entry and reported `message_failed` (`"Outbox capacity exceeded"`),
   but left the message queued for retry. The next retry, or the next reconnect
