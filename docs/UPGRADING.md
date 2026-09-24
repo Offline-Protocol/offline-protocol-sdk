@@ -1,14 +1,14 @@
 # Upgrading
 
 Everything an application team has to change to move off `v0.16.x` and onto the
-current `v0.26.x` line.
+current `v0.27.x` line.
 
 The breaking changes all landed in the **storage-split release**, `v0.17.0` —
 `initialize_mls` changes shape, three config updaters become fallible, and
 several previously-accepted inputs are now rejected at the boundary. Sections
 1–12 below cover that release and are the ones that can stop your build.
 
-Since `v0.17.0` four releases can break a build. `v0.20.0` enables iOS
+Since `v0.17.0` six releases can break a build. `v0.20.0` enables iOS
 autolinking, so a manual `pod 'MeshSdk'` line left in your `Podfile` now fails
 `pod install` — React Native on iOS only; it is a one-line deletion, and
 [§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) has the
@@ -29,7 +29,7 @@ days is now refused, a control frame is judged against the device's clock, and
 rotating a session for post-compromise security became something your
 application schedules rather than something that happens on its own.
 [§17](#17-two-refusals-that-are-new-and-one-rotation-you-now-owe-v0240) covers
-all three. `v0.25.0` is the narrowest of the four: it breaks the
+all three. `v0.25.0` is narrow: it breaks the
 `offline-protocol-transport` **crate** only, where `ReticulumConfig` and
 everything built around it is deleted and `ReticulumTransport::new` is the one
 constructor left
@@ -41,7 +41,11 @@ respectively. `v0.26.0` is breaking on **every** binding again, in one area:
 the telemetry sink API is gone, and the SDK uploads its own telemetry once
 `enableTelemetry` is given a portal key.
 [§20](#20-the-sdk-uploads-its-own-telemetry-v0260) is the migration table,
-and it is short: the replacement is one call with two strings.
+and it is short: the replacement is one call with two strings. `v0.27.0`
+breaks two things, both narrow: the `offline-protocol-transport` crate drops
+`WIFI_DIRECT_MAX_PAYLOAD_SIZE`, and Python's `BlePeripheral` drops its
+`identity_json` argument
+([§25](#25-behaviour-that-changes-without-a-compile-error-v0270)).
 
 Otherwise, where a later section documents an
 addition or a behaviour change, it is labelled inline with the release that
@@ -144,6 +148,14 @@ inbound message events held while nothing could take them. None changes a
 signature.
 [§21](#21-delivery-state-survives-a-restart-and-two-defaults-grow-v0260) has
 all four.
+`v0.27.0` adds several, and the one most applications will notice is on iOS
+and Android with encryption on: the relay's answers about groups now reach the
+core, so group events that never fired start firing and a group registered
+with the relay sends one frame rather than a copy per member.
+`forceTransport("nostr")` and `forceTransport("reticulum")` now force that
+carrier instead of Bluetooth LE, and a send every carrier refused as not
+reachable fails as that refusal.
+[§25](#25-behaviour-that-changes-without-a-compile-error-v0270) has the list.
 
 Work through it in order. [§0](#0-before-you-ship-downgrade-is-not-a-rollback)
 is a release-engineering decision, not a code change, and it is the one that
@@ -2156,7 +2168,7 @@ happened.
 
 ---
 
-## 22. Documents can be removed from every replica *(unreleased)*
+## 22. Documents can be removed from every replica *(v0.27.0)*
 
 Replicated documents can be removed from every replica of a space. No
 existing call changes for a name that has never been removed, and an
@@ -2227,7 +2239,7 @@ accept a few sealed names surviving a logout on the older one.
 
 ---
 
-## 23. A space can replicate in part *(unreleased)*
+## 23. A space can replicate in part *(v0.27.0)*
 
 A space still replicates whole unless you narrow it, so nothing changes for
 an application that does nothing.
@@ -2255,7 +2267,7 @@ exactly the one whose removal you still need to hear about.
 
 ---
 
-## 24. Attachment bytes inside a group *(unreleased)*
+## 24. Attachment bytes inside a group *(v0.27.0)*
 
 References always replicated to every member; now the bytes can follow.
 
@@ -2297,6 +2309,73 @@ the new one goes out at once. Do not wait out the timeout first.
 group these differ, and every road that ends a fetch now reports the member
 the question was put to. If you keyed anything on that field being the space
 in a group, it was the group id before this release by mistake.
+
+## 25. Behaviour that changes without a compile error *(v0.27.0)*
+
+Everything here compiles against `v0.26.x` unchanged except the two removals
+at the end. Each paragraph says what to check.
+
+**Relay group answers reach an iOS or Android device with encryption on.**
+The React Native bridges rebuild the relay's group answers into messages for
+the core, and they addressed them to the profile name. Once `initialize_mls`
+has run, a device's id is its `off1…` address, and the core forwards a frame
+addressed to anyone else rather than processing it, so every one of these was
+lost. They now arrive. In practice:
+
+- `group_relay_sync_changed` fires when the relay acknowledges a group, and a
+  registered group sends one frame to the relay instead of one per member.
+- A group message another member broadcast through the relay is delivered as
+  `group_message_received`. Before this release it never arrived on a phone.
+- `group_error` and the member added and removed events built on relay answers
+  fire, and a relay group error revokes the registration.
+
+If your application compensated for missing group events, for example by
+polling group info or re-sending per member itself, remove that. A device with
+encryption off was never affected and sees no change.
+
+**`forceTransport` and `getTransportMetrics` name every carrier.** Both mobile
+bridges mapped only three transport names and treated anything else as
+Bluetooth LE, so `forceTransport("nostr")` and `forceTransport("reticulum")`
+forced the radio, and a metrics read for either answered for it. They now act
+on the carrier you named. A name the bridges do not know is rejected instead
+of quietly meaning Bluetooth LE, with `ERROR_TRANSPORT` from `forceTransport`
+and `ERROR_METRICS` from `getTransportMetrics`. The typed
+`TransportType` union cannot produce one, so only an untyped string can hit
+it.
+
+**A send every carrier refused as not reachable fails as that refusal.** It
+used to end as `SendFailed("All transports failed")`, with `message_deferred`
+giving the reason `transport_send_failed`. It now ends as the not-reachable
+error, and the deferral reason is `peer_not_reachable`. If you match on either
+string, match on the new one too.
+
+**The `wifi_direct` slot has a transport behind it.** With
+`wifi_direct_enabled` set, the slot is registered and the five React Native
+`wifiDirect*` operations are no longer deprecated; their contract is
+[the stream framing chapter](spec/stream-framing.md). The bundled iOS and
+Android managers exchange no identity preamble yet, so on a phone the slot
+reports `connecting`, is never selected, and refuses every recipient. A phone
+behaves as it did on `v0.26.x`. Only a host that runs the framing, today the
+Python `PeerStreamManager`, carries traffic on it.
+
+**`protocol.message.failed` telemetry rows are capped per reason.** Each
+reason sends up to 500 rows at once and then one every ten seconds. The minute
+rollup's `sends_failed_sum` still counts every failure, so read failure totals
+from the rollup, not by counting rows.
+
+**Python: `BlePeripheral` serves a verifiable identity.** It now serves its
+`off1…` address and the identity assertion the core builds, and `start()`
+refuses to advertise until MLS has minted an address, so start it after
+`ProtocolManager.start()`, which runs `initialize_mls`. The `identity_json` argument is gone;
+delete it from the constructor call. The Python Bluetooth LE central now
+verifies a peer's assertion and announces the derived address, never the
+Bluetooth address or a profile label, and drops a link that fails.
+
+**Rust: `WIFI_DIRECT_MAX_PAYLOAD_SIZE` is gone** from
+`offline-protocol-transport`. It stated a 64 KiB ceiling nothing enforced. The
+ceiling is the 1 MiB message ceiling, and the framing constants are
+`PEER_STREAM_MAX_FRAME_BYTES`, `PEER_STREAM_LENGTH_PREFIX_LEN` and
+`PEER_STREAM_PREAMBLE_FLOOR`.
 
 ---
 
