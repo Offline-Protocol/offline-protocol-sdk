@@ -245,36 +245,42 @@ impl PeerStreamReader {
         }
         self.buffer.extend_from_slice(bytes);
 
+        // Frames are consumed through an offset and the buffer is compacted
+        // once per call: draining per frame would move the remaining bytes
+        // once for every frame, quadratic in the frames one read carries.
+        let mut consumed = 0;
         loop {
-            if self.buffer.len() < PEER_STREAM_LENGTH_PREFIX_LEN {
+            let pending = &self.buffer[consumed..];
+            if pending.len() < PEER_STREAM_LENGTH_PREFIX_LEN {
                 break;
             }
             let mut prefix = [0u8; PEER_STREAM_LENGTH_PREFIX_LEN];
-            prefix.copy_from_slice(&self.buffer[..PEER_STREAM_LENGTH_PREFIX_LEN]);
+            prefix.copy_from_slice(&pending[..PEER_STREAM_LENGTH_PREFIX_LEN]);
             let length = u32::from_be_bytes(prefix) as usize;
 
             // Bounds on the prefix, before a byte of the body: the whole
             // point of reading the length first.
             if let Some(reason) = self.refuse_prefix(length) {
                 events.push(self.close(reason));
-                break;
+                return events;
             }
 
             let end = PEER_STREAM_LENGTH_PREFIX_LEN + length;
-            if self.buffer.len() < end {
+            if pending.len() < end {
                 break;
             }
-            let body = self.buffer[PEER_STREAM_LENGTH_PREFIX_LEN..end].to_vec();
-            self.buffer.drain(..end);
+            let body = pending[PEER_STREAM_LENGTH_PREFIX_LEN..end].to_vec();
+            consumed += end;
 
             match self.accept(body) {
                 Ok(event) => events.push(event),
                 Err(reason) => {
                     events.push(self.close(reason));
-                    break;
+                    return events;
                 }
             }
         }
+        self.buffer.drain(..consumed);
         events
     }
 
