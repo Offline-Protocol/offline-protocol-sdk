@@ -15963,6 +15963,127 @@ mod tests {
         }
     }
 
+    /// Each mobile bridge has one transport-name mapper, it knows every
+    /// transport the core has, and the two entry points that take a name
+    /// from JavaScript go through it.
+    ///
+    /// `getTransportMetrics` and `forceTransport` each carried their own
+    /// three-name switch that defaulted anything else to BLE, so
+    /// `forceTransport("nostr")` forced the radio and a metrics read for the
+    /// peer stream answered for it, while the bridge's third mapper already
+    /// knew four names. Neither bridge runs in CI, so the set is pinned here
+    /// as literals, the C5 route: a guard that read the enum would agree
+    /// with any mapper that merely compiled.
+    #[test]
+    fn react_native_transport_name_mappers_know_every_transport() {
+        let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+        );
+
+        let region = |label: &str, code: &str, from: &str, to: &str| -> String {
+            let start = code
+                .find(from)
+                .unwrap_or_else(|| panic!("{label}: `{from}` is gone; it moved or was renamed"));
+            let end = code[start..]
+                .find(to)
+                .map(|i| start + i)
+                .unwrap_or_else(|| panic!("{label}: `{to}` no longer follows `{from}`"));
+            code[start..end].to_string()
+        };
+
+        // (label, the one mapper, its default arm, the two callers and the call they make)
+        let bridges: [(&str, String, &str, [String; 2], &str); 2] = [
+            (
+                "Swift",
+                region(
+                    "Swift transportType(from:)",
+                    &swift,
+                    "func transportType(from type: String)",
+                    "func buildTopologyJson(",
+                ),
+                "default:",
+                [
+                    region(
+                        "Swift getTransportMetrics",
+                        &swift,
+                        "func getTransportMetrics(",
+                        "proto.getTransportMetrics(",
+                    ),
+                    region(
+                        "Swift forceTransport",
+                        &swift,
+                        "func forceTransport(",
+                        "try proto.forceTransport(",
+                    ),
+                ],
+                "transportType(from: transportType)",
+            ),
+            (
+                "Kotlin",
+                region(
+                    "Kotlin mapTransportType",
+                    &kotlin,
+                    "fun mapTransportType(",
+                    "fun buildTopologyJson(",
+                ),
+                "else ->",
+                [
+                    region(
+                        "Kotlin getTransportMetrics",
+                        &kotlin,
+                        "fun getTransportMetrics(",
+                        "protocol?.getTransportMetrics(",
+                    ),
+                    region(
+                        "Kotlin forceTransport",
+                        &kotlin,
+                        "fun forceTransport(",
+                        "protocol?.forceTransport(",
+                    ),
+                ],
+                "mapTransportType(transportType)",
+            ),
+        ];
+
+        for (label, mapper, default_arm, callers, call) in bridges {
+            for name in [
+                "\"ble\"",
+                "\"internet\"",
+                "\"wifidirect\"",
+                "\"wifi_direct\"",
+                "\"reticulum\"",
+                "\"nostr\"",
+            ] {
+                assert!(
+                    mapper.contains(name),
+                    "{label}: the mapper does not know {name}; it must name all five transports \
+                     (and both spellings of the peer-stream slot)"
+                );
+            }
+            let default = mapper
+                .find(default_arm)
+                .map(|i| &mapper[i..])
+                .unwrap_or_else(|| panic!("{label}: the mapper has no default arm"));
+            assert!(
+                !default.contains(".ble") && !default.contains("TransportType.BLE"),
+                "{label}: the mapper's default arm names BLE; an unknown transport is an error, \
+                 not a silent reroute onto the radio"
+            );
+            for caller in callers {
+                assert!(
+                    caller.contains(call),
+                    "{label}: an entry point maps a transport name without `{call}`; \
+                     the bridge has one mapper so a transport added to it is added everywhere"
+                );
+                assert!(
+                    !caller.contains("lowercased()") && !caller.contains("lowercase()"),
+                    "{label}: an entry point carries its own name switch again"
+                );
+            }
+        }
+    }
+
     /// The one transport for which the post-identity rebuild is load-bearing.
     ///
     /// `NostrTransport` computes its routing tag from the id it is constructed

@@ -3508,16 +3508,17 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejecter("ERROR_METRICS", "Protocol not initialized", nil)
             return
         }
+        // One mapper for every transport name that crosses this bridge
+        // (`transportType(from:)`); pinned by the Rust guard
+        // `react_native_transport_name_mappers_know_every_transport`. This
+        // used to switch on three names and default the rest to BLE, so a
+        // metrics read for any other carrier answered for the radio.
         let type: TransportType
-        switch transportType.lowercased() {
-        case "ble":
-            type = .ble
-        case "wifidirect":
-            type = .wiFiDirect
-        case "internet":
-            type = .internet
-        default:
-            type = .ble
+        do {
+            type = try transportType(from: transportType)
+        } catch {
+            rejecter("ERROR_METRICS", "Unsupported transport type: \(transportType)", error)
+            return
         }
         
         if let metrics = proto.getTransportMetrics(transportType: type) {
@@ -3545,18 +3546,9 @@ class OfflineProtocolModule: RCTEventEmitter {
             return
         }
         do {
-            let type: TransportType
-            switch transportType.lowercased() {
-            case "ble":
-                type = .ble
-            case "wifidirect":
-                type = .wiFiDirect
-            case "internet":
-                type = .internet
-            default:
-                type = .ble
-            }
-            
+            // See getTransportMetrics: one mapper. This used to default an
+            // unknown name to BLE, so forceTransport("nostr") forced the radio.
+            let type = try transportType(from: transportType)
             try proto.forceTransport(transportType: type)
             resolver(nil)
         } catch {
@@ -5231,6 +5223,9 @@ class OfflineProtocolModule: RCTEventEmitter {
         return (host, UInt16(finalPort))
     }
 
+    /// The one transport-name mapper on this bridge. Every transport the core
+    /// has is here, and an unknown name is an error rather than a default:
+    /// `react_native_transport_name_mappers_know_every_transport` pins both.
     private func transportType(from type: String) throws -> TransportType {
         switch type.lowercased() {
         case "internet":
@@ -5241,6 +5236,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             return .wiFiDirect
         case "reticulum":
             return .reticulum
+        case "nostr":
+            return .nostr
         default:
             throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [NSLocalizedDescriptionKey: "Unsupported transport type: \(type)"])
         }

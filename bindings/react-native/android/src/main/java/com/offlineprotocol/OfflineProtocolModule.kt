@@ -3338,12 +3338,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun getTransportMetrics(transportType: String, promise: Promise) {
         try {
-            val type = when (transportType.lowercase()) {
-                "ble" -> TransportType.BLE
-                "wifidirect" -> TransportType.WI_FI_DIRECT
-                "internet" -> TransportType.INTERNET
-                else -> TransportType.BLE
-            }
+            // One mapper for every transport name that crosses this bridge
+            // (`mapTransportType`); pinned by the Rust guard
+            // `react_native_transport_name_mappers_know_every_transport`. This
+            // used to match three names and default the rest to BLE, so a
+            // metrics read for any other carrier answered for the radio.
+            val type = mapTransportType(transportType)
             
             val metrics = protocol?.getTransportMetrics(type)
             if (metrics != null) {
@@ -3368,12 +3368,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun forceTransport(transportType: String, promise: Promise) {
         try {
-            val type = when (transportType.lowercase()) {
-                "ble" -> TransportType.BLE
-                "wifidirect" -> TransportType.WI_FI_DIRECT
-                "internet" -> TransportType.INTERNET
-                else -> TransportType.BLE
-            }
+            // See getTransportMetrics: one mapper. This used to default an
+            // unknown name to BLE, so forceTransport("nostr") forced the radio.
+            val type = mapTransportType(transportType)
             
             protocol?.forceTransport(type)
             promise.resolve(null)
@@ -4931,8 +4928,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         manager.onMessagesAvailable()
                     }
                 })
-                android.util.Log.w(NAME, "WiFi Direct transport callback registered, but no Wi-Fi Direct transport is registered in Rust — it will not fire; polling is doing all the work")
-                emitDiagnostic("warning", "WiFi Direct transport callback is inert (no Wi-Fi Direct transport registered)")
+                // The peer-stream transport behind the `wifi_direct` slot is
+                // registered whenever the slot is enabled, and it wakes this
+                // callback only for a message queued toward an address a
+                // stream proved. This manager exchanges no preamble yet, so
+                // it proves none and is never woken; the polling loop finds
+                // the same empty queue.
+                emitDiagnostic("info", "WiFi Direct transport callback registered")
             } catch (e: Throwable) {
                 android.util.Log.w(NAME, "WiFi Direct transport callback not available; using fallback polling", e)
                 emitDiagnostic("warning", "WiFi Direct callback wiring skipped (regenerate UniFFI bindings)")
@@ -5151,12 +5153,18 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         return host!! to safePort
     }
 
+    /**
+     * The one transport-name mapper on this bridge. Every transport the core
+     * has is here, and an unknown name is an error rather than a default:
+     * `react_native_transport_name_mappers_know_every_transport` pins both.
+     */
     private fun mapTransportType(type: String): TransportType {
         return when (type.lowercase()) {
             "internet" -> TransportType.INTERNET
             "ble" -> TransportType.BLE
             "wifidirect", "wifi_direct" -> TransportType.WI_FI_DIRECT
             "reticulum" -> TransportType.RETICULUM
+            "nostr" -> TransportType.NOSTR
             else -> throw IllegalArgumentException("Unsupported transport type: $type")
         }
     }
