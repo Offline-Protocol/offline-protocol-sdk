@@ -12,16 +12,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from offline_protocol_sdk import ble_manager as ble_manager_module
 from offline_protocol_sdk.ble_manager import (
     ADAPTIVE_COOLDOWN_PER_PERIPHERAL,
     ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE,
     ADAPTIVE_MIN_RSSI,
     DEVICE_ID_CHAR_UUID,
+    IDENTITY_CHAR_UUID,
     MESSAGE_CHAR_UUID,
     SERVICE_UUID,
     BleManager,
 )
 from offline_protocol_sdk.transport_manager import TransportError, TransportState
+
+# A peer's proved address and the (opaque to this layer) bytes that prove it.
+PEER_ADDRESS = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+PEER_ASSERTION = bytes(range(96))
 
 
 # ---------------------------------------------------------------------------
@@ -127,8 +133,15 @@ class TestAdvertisementHandling:
 
         mock_protocol.ble_peer_discovered.assert_not_called()
 
-    def test_advertisement_updates_last_seen(self, manager, mock_protocol):
-        """Valid advertisements update the last-seen timestamp."""
+    def test_advertisement_updates_last_seen_without_announcing_a_label(
+        self, manager, mock_protocol
+    ):
+        """An unverified link is tracked, never announced.
+
+        A Bluetooth address is a label. The core keys routes by whatever it
+        is handed, so announcing one here put a name nothing could prove
+        into the routing table on every scan.
+        """
         manager._loop = MagicMock()
         manager._loop.is_closed.return_value = False
         manager._loop.is_running.return_value = True
@@ -142,7 +155,28 @@ class TestAdvertisementHandling:
         manager._on_advertisement(device, adv)
 
         assert "AA:BB:CC:DD:EE:FF" in manager._last_seen
-        mock_protocol.ble_peer_discovered.assert_called_once()
+        mock_protocol.ble_peer_discovered.assert_not_called()
+
+    def test_advertisement_refreshes_a_verified_peer_under_its_address(
+        self, manager, mock_protocol
+    ):
+        manager._loop = MagicMock()
+        manager._loop.is_closed.return_value = False
+        manager._loop.is_running.return_value = True
+        addr = "AA:BB:CC:DD:EE:FF"
+        manager._clients[addr] = MagicMock()
+        manager._peer_device_ids[addr] = PEER_ADDRESS
+
+        device = MagicMock()
+        device.address = addr
+        adv = MagicMock()
+        adv.rssi = -55
+
+        manager._on_advertisement(device, adv)
+
+        mock_protocol.ble_peer_discovered.assert_called_once_with(
+            peer_id=PEER_ADDRESS, rssi=-55
+        )
 
     def test_advertisement_triggers_connection(self, manager, mock_protocol):
         """First advertisement for an unknown peer triggers connection."""
@@ -179,6 +213,161 @@ class TestAdvertisementHandling:
         manager._on_advertisement(device, adv)
 
         mock_loop.call_soon_threadsafe.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Peer verification
+# ---------------------------------------------------------------------------
+
+
+class TestPeerVerification:
+    """The four steps of the BLE framing chapter, and what each failure does.
+
+    Steps one to three run in the core behind ``verify_identity_assertion``;
+    the module-level name is patched so these run without the library. The
+    fourth step, the exact comparison to the Device id characteristic, is
+    this binding's and is exercised for real.
+    """
+
+    def test_a_matching_proof_yields_the_derived_address(
+        self, manager, monkeypatch
+    ):
+        seen = {}
+
+        def verifier(assertion):
+            seen["assertion"] = assertion
+            return PEER_ADDRESS
+
+        monkeypatch.setattr(ble_manager_module, "verify_identity_assertion", verifier)
+        assert manager._verify_peer("AA:BB", PEER_ADDRESS, PEER_ASSERTION) == PEER_ADDRESS
+        # Bytes in, as the sequence the FFI takes; nothing split here.
+        assert seen["assertion"] == list(PEER_ASSERTION)
+
+    def test_no_identity_is_no_peer(self, manager, monkeypatch):
+        verifier = MagicMock(return_value=PEER_ADDRESS)
+        monkeypatch.setattr(ble_manager_module, "verify_identity_assertion", verifier)
+        assert manager._verify_peer("AA:BB", PEER_ADDRESS, None) is None
+        verifier.assert_not_called()
+
+    def test_a_refused_assertion_is_no_peer(self, manager, monkeypatch):
+        """Whatever the core refuses (short, off-curve, bad signature) is refused here."""
+        monkeypatch.setattr(
+            ble_manager_module,
+            "verify_identity_assertion",
+            MagicMock(side_effect=Exception("Identity assertion is 95 bytes, minimum is 96")),
+        )
+        assert manager._verify_peer("AA:BB", PEER_ADDRESS, PEER_ASSERTION[:95]) is None
+
+    def test_a_proof_of_another_address_is_no_peer(self, manager, monkeypatch):
+        """The claim and the proof must name the same address."""
+        monkeypatch.setattr(
+            ble_manager_module,
+            "verify_identity_assertion",
+            MagicMock(return_value=PEER_ADDRESS),
+        )
+        other = "off1q9nxs74dlp3t6amv3lqchr5l3csq39c5s5grq3yh"
+        assert manager._verify_peer("AA:BB", other, PEER_ASSERTION) is None
+
+    def test_the_comparison_is_exact_not_case_folded(self, manager, monkeypatch):
+        """A value differing only in case belongs to a peer that did not
+        derive its own id the way this one did, and is refused rather than
+        normalised into agreement."""
+        monkeypatch.setattr(
+            ble_manager_module,
+            "verify_identity_assertion",
+            MagicMock(return_value=PEER_ADDRESS),
+        )
+        assert manager._verify_peer("AA:BB", PEER_ADDRESS.upper(), PEER_ASSERTION) is None
+
+
+class TestConnectVerifiesBeforeAnnouncing:
+    """The connect path, end to end, against a fake GATT client."""
+
+    def _client(self, reads: dict[str, bytes]) -> MagicMock:
+        client = MagicMock()
+        client.connect = AsyncMock()
+        client.disconnect = AsyncMock()
+        client.start_notify = AsyncMock()
+
+        async def read_gatt_char(uuid):
+            if uuid in reads:
+                return bytearray(reads[uuid])
+            raise RuntimeError(f"no such characteristic {uuid}")
+
+        client.read_gatt_char = AsyncMock(side_effect=read_gatt_char)
+        return client
+
+    @pytest.mark.asyncio
+    async def test_a_verified_peer_is_announced_under_the_derived_address(
+        self, manager, mock_protocol, monkeypatch
+    ):
+        monkeypatch.setattr(
+            ble_manager_module,
+            "verify_identity_assertion",
+            MagicMock(return_value=PEER_ADDRESS),
+        )
+        client = self._client({
+            DEVICE_ID_CHAR_UUID: PEER_ADDRESS.encode("utf-8"),
+            IDENTITY_CHAR_UUID: PEER_ASSERTION,
+        })
+        device = MagicMock()
+        device.address = "AA:BB"
+        manager._connecting.add("AA:BB")
+
+        with patch("offline_protocol_sdk.ble_manager.BleakClient", return_value=client):
+            await manager._connect_to_peer(device)
+
+        mock_protocol.ble_peer_discovered.assert_called_once_with(peer_id=PEER_ADDRESS, rssi=-70)
+        assert manager._peer_device_ids["AA:BB"] == PEER_ADDRESS
+        assert manager._device_id_to_addr[PEER_ADDRESS] == "AA:BB"
+        client.start_notify.assert_awaited_once()
+        client.disconnect.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_peer_whose_proof_names_another_address_is_dropped(
+        self, manager, mock_protocol, monkeypatch
+    ):
+        monkeypatch.setattr(
+            ble_manager_module,
+            "verify_identity_assertion",
+            MagicMock(return_value=PEER_ADDRESS),
+        )
+        client = self._client({
+            DEVICE_ID_CHAR_UUID: b"coordinator",
+            IDENTITY_CHAR_UUID: PEER_ASSERTION,
+        })
+        device = MagicMock()
+        device.address = "AA:BB"
+        manager._connecting.add("AA:BB")
+
+        with patch("offline_protocol_sdk.ble_manager.BleakClient", return_value=client):
+            await manager._connect_to_peer(device)
+
+        mock_protocol.ble_peer_discovered.assert_not_called()
+        client.disconnect.assert_awaited_once()
+        client.start_notify.assert_not_awaited()
+        assert "AA:BB" not in manager._clients
+        assert "AA:BB" not in manager._peer_device_ids
+        assert "AA:BB" not in manager._connecting
+
+    @pytest.mark.asyncio
+    async def test_a_peer_that_serves_no_identity_is_dropped(
+        self, manager, mock_protocol, monkeypatch
+    ):
+        """The device id alone was enough before. It is not: it is a claim."""
+        verifier = MagicMock(return_value=PEER_ADDRESS)
+        monkeypatch.setattr(ble_manager_module, "verify_identity_assertion", verifier)
+        client = self._client({DEVICE_ID_CHAR_UUID: PEER_ADDRESS.encode("utf-8")})
+        device = MagicMock()
+        device.address = "AA:BB"
+        manager._connecting.add("AA:BB")
+
+        with patch("offline_protocol_sdk.ble_manager.BleakClient", return_value=client):
+            await manager._connect_to_peer(device)
+
+        verifier.assert_not_called()
+        mock_protocol.ble_peer_discovered.assert_not_called()
+        client.disconnect.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +516,19 @@ class TestPeerDisconnect:
         assert addr not in manager._peer_device_ids
         assert "phone-1" not in manager._device_id_to_addr
         mock_protocol.ble_peer_lost.assert_called_once_with(peer_id="phone-1")
+
+    @pytest.mark.asyncio
+    async def test_an_unverified_link_closing_reports_no_peer_lost(
+        self, manager, mock_protocol
+    ):
+        """Never announced, so nothing to report: the core has no such peer."""
+        addr = "AA:BB"
+        manager._clients[addr] = MagicMock()
+
+        await manager._on_peer_disconnected(addr)
+
+        assert addr not in manager._clients
+        mock_protocol.ble_peer_lost.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

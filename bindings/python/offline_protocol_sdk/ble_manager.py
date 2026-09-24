@@ -2,8 +2,17 @@
 
 Mirrors the central (scanner) role from ``BleManager.swift`` /
 ``BleManager.kt``.  Connects to nearby mesh peers over Bluetooth Low
-Energy, reads their device IDs, subscribes to message notifications, and
+Energy, verifies their identity, subscribes to message notifications, and
 drives the UniFFI ``OfflineProtocol`` BLE transport methods.
+
+A peer id handed to the core is a proved address, never a label. The
+central reads the peer's Identity characteristic, hands the bytes to the
+core's ``verify_identity_assertion`` (the one verifier of that layout), and
+compares the address it returns to the Device id characteristic, exactly.
+Only then is the peer announced, and it is announced under the derived
+address rather than the string it served. A link whose peer cannot be
+verified is disconnected and never announced, not even under its Bluetooth
+address: an unverifiable identity and an absent one are the same thing.
 
 **Known limitation:** ``bleak`` only supports the *central* (scanner/client)
 role.  Peripheral (advertiser/GATT server) support requires the ``bless``
@@ -25,6 +34,7 @@ from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
+from .offline_protocol import verify_identity_assertion
 from .transport_manager import TransportError, TransportManager, TransportState
 
 logger = logging.getLogger(__name__)
@@ -51,8 +61,9 @@ class BleManager(TransportManager):
     """BLE transport — central (scanner) role.
 
     Discovers nearby mesh peripherals advertising ``SERVICE_UUID``, connects
-    to them, reads their device ID, subscribes to the message characteristic,
-    and forwards incoming BLE fragments to the Rust protocol core.
+    to them, verifies the address they claim, subscribes to the message
+    characteristic, and forwards incoming BLE fragments to the Rust protocol
+    core.
 
     Outgoing fragments are sent event-driven: the protocol calls
     ``BleTransportCallback.on_fragments_available()`` which triggers
@@ -232,7 +243,10 @@ class BleManager(TransportManager):
         with self._lock:
             self._last_seen[addr] = now
 
-            peer_id = self._peer_device_ids.get(addr, addr)
+            # A peer is announced only under an address this link proved.
+            # Before that there is nothing to announce: a Bluetooth address
+            # is a label, and the core keys routes by what it is handed.
+            peer_id = self._peer_device_ids.get(addr)
 
             # Attempt connection if not already connected / connecting.
             if addr not in self._clients and addr not in self._connecting:
@@ -241,10 +255,11 @@ class BleManager(TransportManager):
                     should_connect = True
 
         # Protocol calls outside the lock to avoid holding it during FFI
-        try:
-            self._protocol.ble_peer_discovered(peer_id=peer_id, rssi=rssi)
-        except Exception:
-            logger.debug("ble_peer_discovered failed for %s", peer_id)
+        if peer_id is not None:
+            try:
+                self._protocol.ble_peer_discovered(peer_id=peer_id, rssi=rssi)
+            except Exception:
+                logger.debug("ble_peer_discovered failed for %s", peer_id)
 
         if should_connect:
             loop = self._loop
@@ -299,8 +314,14 @@ class BleManager(TransportManager):
             )
             await client.connect()
 
-            # Read device ID characteristic
-            device_id = await self._read_device_id(client)
+            # The claim, then the proof. Both reads must succeed and the
+            # proof must name the claim, or the link is dropped unannounced.
+            claimed = await self._read_device_id(client)
+            if claimed is None:
+                await client.disconnect()
+                return
+            identity = await self._read_identity(client)
+            device_id = self._verify_peer(addr, claimed, identity)
             if device_id is None:
                 await client.disconnect()
                 return
@@ -310,7 +331,7 @@ class BleManager(TransportManager):
                 self._peer_device_ids[addr] = device_id
                 self._device_id_to_addr[device_id] = addr
 
-            # Re-notify protocol with the real device ID
+            # Announce the peer under the address it proved
             try:
                 rssi = -70  # approximate; bleak doesn't expose RSSI post-connect
                 self._protocol.ble_peer_discovered(peer_id=device_id, rssi=rssi)
@@ -339,6 +360,55 @@ class BleManager(TransportManager):
         except Exception as exc:
             self._emit_diagnostic("debug", f"Failed to read device ID: {exc}")
             return None
+
+    async def _read_identity(self, client: BleakClient) -> bytes | None:
+        """Read the Identity characteristic from a connected peripheral."""
+        try:
+            return bytes(await client.read_gatt_char(IDENTITY_CHAR_UUID))
+        except Exception as exc:
+            self._emit_diagnostic("debug", f"Failed to read identity: {exc}")
+            return None
+
+    def _verify_peer(
+        self, addr: str, claimed: str, identity: bytes | None
+    ) -> str | None:
+        """Turn a claim and a proof into the one address to announce.
+
+        Runs the four steps the Bluetooth LE framing chapter specifies. The
+        first three (parse, verify the signature under the key, derive the
+        address) are the core's, through ``verify_identity_assertion``; the
+        fourth, the exact comparison against the Device id characteristic,
+        is here because only this side read that characteristic. Every
+        failure returns ``None`` and emits why, and the caller disconnects:
+        there is no accept-but-flag state, because what this returns becomes
+        ``Message.recipient`` on every outbound frame and the peer id the
+        core matches ``Message.sender`` against.
+        """
+        if identity is None:
+            self._emit_diagnostic("warning", "Peer served no identity", {
+                "address": addr,
+                "claimed": claimed,
+            })
+            return None
+        try:
+            derived = verify_identity_assertion(list(identity))
+        except Exception as exc:
+            self._emit_diagnostic("warning", "Peer identity did not verify", {
+                "address": addr,
+                "claimed": claimed,
+                "error": str(exc),
+            })
+            return None
+        if derived != claimed:
+            # Exact, never normalised: a value differing only in case belongs
+            # to a peer that did not derive its own id the way this one did.
+            self._emit_diagnostic("warning", "Peer identity names another address", {
+                "address": addr,
+                "claimed": claimed,
+                "derived": derived,
+            })
+            return None
+        return derived
 
     async def _subscribe_to_messages(
         self, client: BleakClient, addr: str, device_id: str
@@ -369,9 +439,16 @@ class BleManager(TransportManager):
     async def _on_peer_disconnected(self, addr: str) -> None:
         """Called when a peer disconnects."""
         with self._lock:
-            device_id = self._peer_device_ids.pop(addr, addr)
+            device_id = self._peer_device_ids.pop(addr, None)
             self._clients.pop(addr, None)
-            self._device_id_to_addr.pop(device_id, None)
+            if device_id is not None:
+                self._device_id_to_addr.pop(device_id, None)
+
+        # A link that never proved a peer was never announced, so there is
+        # nothing to report lost.
+        if device_id is None:
+            self._emit_diagnostic("debug", f"Unverified link closed: {addr}")
+            return
 
         try:
             self._protocol.ble_peer_lost(peer_id=device_id)
@@ -470,7 +547,9 @@ class BleManager(TransportManager):
                     ]
                     for addr in stale:
                         self._last_seen.pop(addr, None)
-                        device_id = self._peer_device_ids.pop(addr, addr)
+                        device_id = self._peer_device_ids.pop(addr, None)
+                        if device_id is None:
+                            continue  # never announced, nothing to report
                         self._device_id_to_addr.pop(device_id, None)
                         stale_device_ids.append(device_id)
                 # Notify protocol outside the lock

@@ -11,14 +11,22 @@ Typical usage::
 
     peripheral = BlePeripheral(protocol, device_id="coordinator")
     await peripheral.start()   # begins advertising
-    # phones now discover "coordinator" and connect
+    # phones now discover this device, read and verify its address, connect
     await peripheral.stop()
+
+What a central reads from this peripheral is the pair the Bluetooth LE
+framing chapter requires: the Device id characteristic carries this device's
+``off1...`` address, and the Identity characteristic carries the identity
+assertion the core builds over that address's key. A phone verifies the
+second and compares it to the first, exactly, before it surfaces the peer.
+Neither value exists before MLS has been initialised, so ``start()`` refuses
+to advertise without an address rather than advertise something no central
+can verify.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import sys
 import threading
@@ -65,13 +73,12 @@ class BlePeripheral(TransportManager):
     protocol:
         The ``OfflineProtocol`` UniFFI instance (shared with ``BleManager``).
     device_id:
-        Device identifier written to the DEVICE_ID characteristic.  Phones
-        that read ``"coordinator"`` auto-detect a training cluster.
+        A label for this peripheral, used only as the advertised local name
+        (truncated to ten characters). It is **not** what a central learns as
+        this device's id: the Device id characteristic carries the derived
+        ``off1...`` address, resolved from the core when ``start()`` runs.
     max_connections:
         Maximum number of simultaneous central connections (default 4).
-    identity_json:
-        Optional JSON string for the IDENTITY characteristic.  If ``None``,
-        a default is generated from *device_id*.
     """
 
     transport_id = "ble-peripheral"
@@ -83,23 +90,20 @@ class BlePeripheral(TransportManager):
         device_id: str,
         *,
         max_connections: int = 4,
-        identity_json: str | None = None,
     ) -> None:
         super().__init__()
         self._protocol = protocol
         self._device_id = device_id
         self._max_connections = max_connections
 
-        # Identity characteristic payload
-        if identity_json is not None:
-            self._identity_bytes = identity_json.encode("utf-8")
-        else:
-            self._identity_bytes = json.dumps({
-                "device_id": device_id,
-                "role": "coordinator",
-                "protocol": "offline-protocol",
-                "version": "0.1.0",
-            }).encode("utf-8")
+        # What the two identity characteristics serve. Both come from the
+        # core at start(): the address is derived from the identity key MLS
+        # initialisation minted or loaded, and the assertion is signed by
+        # that key. Before then there is nothing to serve, and _on_read
+        # answers with nothing rather than with a label a central would
+        # refuse anyway.
+        self._address: str | None = None
+        self._identity_bytes: bytes = b""
 
         # Server (created on start)
         self._server: BlessServer | None = None
@@ -148,6 +152,37 @@ class BlePeripheral(TransportManager):
         """Return True on platforms where bless is supported (macOS, Linux)."""
         return sys.platform in ("darwin", "linux")
 
+    def _resolve_identity(self) -> None:
+        """Fetch the address and the assertion this peripheral will serve.
+
+        The assertion is built by the core (``identity_assertion``): the
+        whole ``public_key(32) || signature(64) || signed_data`` layout,
+        so this binding assembles nothing and serves the same bytes for the
+        same key as a peripheral on any other platform. ``signed_data`` is
+        empty here. The chapter gives those bytes no meaning and a central
+        never reads them; the mobile peripherals put their mesh
+        advertisement there only because they have one.
+
+        Raises :class:`TransportError` when the core has no address yet,
+        which means MLS has not been initialised. A peripheral serving a
+        label in place of an address is one every conforming central
+        refuses, so refusing to start is the honest answer.
+        """
+        address = self._protocol.local_address()
+        if not address:
+            raise TransportError(
+                "BLE peripheral has no address to serve: initialise MLS "
+                "(ProtocolManager.start()) before starting the peripheral"
+            )
+        try:
+            assertion = bytes(self._protocol.identity_assertion([]))
+        except Exception as exc:
+            raise TransportError(
+                f"BLE peripheral could not build its identity assertion: {exc}"
+            ) from exc
+        self._address = address
+        self._identity_bytes = assertion
+
     async def start(self) -> None:
         """Set up the GATT server, register characteristics, and advertise."""
         if self._state == TransportState.RUNNING:
@@ -158,10 +193,13 @@ class BlePeripheral(TransportManager):
                 f"BLE peripheral not available on {sys.platform}"
             )
 
+        self._resolve_identity()
+
         self._loop = asyncio.get_running_loop()
         self._update_state(TransportState.STARTING)
         self._emit_diagnostic("info", "Starting BLE peripheral", {
             "device_id": self._device_id,
+            "address": self._address,
         })
 
         try:
@@ -298,16 +336,16 @@ class BlePeripheral(TransportManager):
             msg_perms,
         )
 
-        # DEVICE_ID characteristic — readable identity
+        # DEVICE_ID characteristic — this device's address, as UTF-8
         await self._server.add_new_characteristic(
             SERVICE_UUID,
             DEVICE_ID_CHAR_UUID,
             GATTCharacteristicProperties.read,
-            bytearray(self._device_id.encode("utf-8")),
+            bytearray(self._device_id_bytes()),
             GATTAttributePermissions.readable,
         )
 
-        # IDENTITY characteristic — readable JSON metadata
+        # IDENTITY characteristic — the assertion that proves the address
         await self._server.add_new_characteristic(
             SERVICE_UUID,
             IDENTITY_CHAR_UUID,
@@ -335,11 +373,15 @@ class BlePeripheral(TransportManager):
             return str(char_uuid.UUID().UUIDString()).lower()
         return str(char_uuid).lower()
 
+    def _device_id_bytes(self) -> bytes:
+        """The Device id characteristic's value: the address, or nothing."""
+        return self._address.encode("utf-8") if self._address else b""
+
     def _on_read(self, char_uuid: Any) -> bytearray:
         """Handle incoming GATT read requests."""
         uuid = self._resolve_char_uuid(char_uuid)
         if uuid == DEVICE_ID_CHAR_UUID.lower():
-            return bytearray(self._device_id.encode("utf-8"))
+            return bytearray(self._device_id_bytes())
         if uuid == IDENTITY_CHAR_UUID.lower():
             return bytearray(self._identity_bytes)
         return bytearray(b"")

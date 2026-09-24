@@ -7,14 +7,20 @@ actual Bluetooth hardware.
 from __future__ import annotations
 
 import asyncio
-import json
+import inspect
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from offline_protocol_sdk.ble_peripheral import BlePeripheral
-from offline_protocol_sdk.transport_manager import TransportState
+from offline_protocol_sdk.transport_manager import TransportError, TransportState
+
+# What the core would answer for this peripheral's identity. The assertion is
+# opaque to the binding: 96 bytes of key and signature and nothing after,
+# because the peripheral signs nothing (see `_resolve_identity`).
+LOCAL_ADDRESS = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+ASSERTION = bytes(range(96))
 
 
 # ---------------------------------------------------------------------------
@@ -31,6 +37,8 @@ def mock_protocol():
     p.ble_peer_discovered = MagicMock()
     p.ble_peer_lost = MagicMock()
     p.ble_status_changed = MagicMock()
+    p.local_address = MagicMock(return_value=LOCAL_ADDRESS)
+    p.identity_assertion = MagicMock(return_value=list(ASSERTION))
     return p
 
 
@@ -67,27 +75,95 @@ class TestInitialState:
 # ---------------------------------------------------------------------------
 
 class TestReadHandler:
-    def test_read_device_id(self, peripheral):
+    def test_read_device_id_is_the_address_not_the_label(self, peripheral):
+        """A phone compares the verified identity to this string, exactly.
+
+        The label passed to the constructor is the advertised name and
+        nothing else; serving it here is what made every Python peripheral
+        unverifiable before.
+        """
         from offline_protocol_sdk.ble_manager import DEVICE_ID_CHAR_UUID
+        peripheral._resolve_identity()
         result = peripheral._on_read(DEVICE_ID_CHAR_UUID)
-        assert result == bytearray(b"coordinator")
+        assert result == bytearray(LOCAL_ADDRESS.encode("utf-8"))
+        assert b"coordinator" not in result
 
     def test_read_device_id_case_insensitive(self, peripheral):
         from offline_protocol_sdk.ble_manager import DEVICE_ID_CHAR_UUID
+        peripheral._resolve_identity()
         result = peripheral._on_read(DEVICE_ID_CHAR_UUID.upper())
-        assert result == bytearray(b"coordinator")
+        assert result == bytearray(LOCAL_ADDRESS.encode("utf-8"))
 
-    def test_read_identity(self, peripheral):
+    def test_read_identity_is_the_core_built_assertion_verbatim(
+        self, peripheral, mock_protocol
+    ):
+        """The binding assembles nothing: bytes in from the core, bytes out.
+
+        The assertion is `public_key(32) || signature(64) || signed_data`
+        and the one place that layout is written is the Rust core. A JSON
+        document here, which is what this characteristic used to serve, is
+        refused by every central before any cryptography runs.
+        """
         from offline_protocol_sdk.ble_manager import IDENTITY_CHAR_UUID
+        peripheral._resolve_identity()
         result = peripheral._on_read(IDENTITY_CHAR_UUID)
-        parsed = json.loads(result.decode("utf-8"))
-        assert parsed["device_id"] == "coordinator"
-        assert parsed["role"] == "coordinator"
-        assert parsed["protocol"] == "offline-protocol"
+        assert bytes(result) == ASSERTION
+        assert len(result) >= 96
+        mock_protocol.identity_assertion.assert_called_once_with([])
+
+    def test_reads_serve_nothing_before_the_identity_is_resolved(self, peripheral):
+        """Unstarted, there is no address and no assertion to serve."""
+        from offline_protocol_sdk.ble_manager import DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID
+        assert peripheral._on_read(DEVICE_ID_CHAR_UUID) == bytearray(b"")
+        assert peripheral._on_read(IDENTITY_CHAR_UUID) == bytearray(b"")
 
     def test_read_unknown_char_returns_empty(self, peripheral):
         result = peripheral._on_read("00000000-0000-0000-0000-000000000000")
         assert result == bytearray(b"")
+
+
+# ---------------------------------------------------------------------------
+# Identity resolution
+# ---------------------------------------------------------------------------
+
+class TestIdentityResolution:
+    def test_refuses_to_start_without_an_address(self, mock_protocol):
+        """No MLS, no address, no advertising.
+
+        Serving a label in place of an address is something every
+        conforming central refuses, so advertising would only cost the
+        phones a connect-read-refuse cycle each.
+        """
+        mock_protocol.local_address = MagicMock(return_value=None)
+        peripheral = BlePeripheral(mock_protocol, device_id="coordinator")
+        with pytest.raises(TransportError, match="initialise MLS"):
+            peripheral._resolve_identity()
+        mock_protocol.identity_assertion.assert_not_called()
+
+    def test_wraps_a_failed_assertion_build(self, mock_protocol):
+        mock_protocol.identity_assertion = MagicMock(side_effect=RuntimeError("no key"))
+        peripheral = BlePeripheral(mock_protocol, device_id="coordinator")
+        with pytest.raises(TransportError, match="identity assertion"):
+            peripheral._resolve_identity()
+
+    @pytest.mark.asyncio
+    async def test_start_refuses_before_creating_a_server(self, mock_protocol):
+        """The refusal happens before bless is touched and leaves the state STOPPED."""
+        mock_protocol.local_address = MagicMock(return_value=None)
+        peripheral = BlePeripheral(mock_protocol, device_id="coordinator")
+        with patch("offline_protocol_sdk.ble_peripheral.BlessServer") as server_cls, patch.object(
+            BlePeripheral, "is_available", return_value=True
+        ):
+            with pytest.raises(TransportError):
+                await peripheral.start()
+            server_cls.assert_not_called()
+        assert peripheral.state == TransportState.STOPPED
+        mock_protocol.ble_status_changed.assert_not_called()
+
+    def test_the_json_identity_parameter_is_gone(self):
+        """The JSON form was the divergent copy; nothing may reintroduce it."""
+        params = inspect.signature(BlePeripheral.__init__).parameters
+        assert "identity_json" not in params
 
 
 # ---------------------------------------------------------------------------
