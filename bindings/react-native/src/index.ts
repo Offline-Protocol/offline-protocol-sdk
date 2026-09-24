@@ -2393,10 +2393,11 @@ export class OfflineProtocol {
   /**
    * Notifies the protocol that the platform's stream layer is up or down.
    *
-   * Up means streams can be established, not that a peer is reachable: the
-   * transport queues a message only toward an address a stream has proved,
-   * so an up layer with no announced peer takes nothing and the selector
-   * falls through to the next carrier. Down clears every announced link.
+   * Up means streams can be established, not that a peer is reachable. The
+   * slot counts as an available carrier only once a stream has proved a peer,
+   * and it queues a message only toward an address a stream has proved, so an
+   * up layer with no announced peer is not a carrier at all. Down clears every
+   * announced link.
    *
    * @param isConnected - Whether the stream layer is up
    */

@@ -279,13 +279,18 @@ scoring profile weights bandwidth most heavily and does not score energy. A peer
 so nothing here interacts with the fragment bounds of the Bluetooth LE chapter
 or with the message-count budgets of the relay carriers.
 
-The engine's transport queues a message toward an address only while a
-stream has proved it, and refuses any other recipient as not reachable on
-this carrier, which the selector treats as "try the next one". The refusal
-is what makes the invariants above safe to register: a stream layer that is
-up but has exchanged no preamble (the shipped mobile managers today) would
-otherwise win the selection on bandwidth and hold every direct message in a
-queue the platform has no proved stream to write to.
+The engine counts the slot as an available carrier only while a stream has
+proved a peer; a stream layer that is up with nothing proved is not a
+carrier. And its transport queues a message toward an address only while a
+stream has proved that address, refusing any other recipient as not
+reachable on this carrier, which the selector treats as "try the next one".
+Both are what make the invariants above safe to register. A stream layer
+that is up but has exchanged no preamble (the shipped mobile managers today)
+would otherwise win the selection on bandwidth and hold every direct message
+in a queue the platform has no proved stream to write to, and would be
+chosen for a file transfer whose chunks it then refuses one by one. For the
+same reason a file transfer is pinned to the slot only when a stream has
+proved the recipient itself.
 
 ## Conformance vectors
 

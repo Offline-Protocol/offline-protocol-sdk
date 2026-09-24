@@ -2634,7 +2634,7 @@ impl OfflineProtocol {
         let file_id = options
             .file_id
             .unwrap_or_else(|| format!("file_{}", MessageId::new().as_str()));
-        let pinned_transport = self.select_media_transport()?;
+        let pinned_transport = self.select_media_transport(&recipient_str)?;
 
         let (chunk_size, window_size) = match pinned_transport {
             TransportType::BLE => {
@@ -5601,11 +5601,27 @@ impl OfflineProtocol {
         transport.label()
     }
 
-    pub(super) fn select_media_transport(&self) -> Result<TransportType> {
+    /// The carrier a media transfer to `recipient` is pinned to, for every
+    /// chunk and every retry.
+    ///
+    /// The peer stream is eligible only while a stream has proved `recipient`
+    /// itself. The stream carries one peer, so pinned toward anyone else it
+    /// refuses every chunk; the refused chunks, sized and windowed for a
+    /// stream, are then offered to the mesh and reach a Bluetooth LE
+    /// neighbour with no window at all, and the ones past the own-send budget
+    /// retry against the pin until the transfer fails.
+    pub(super) fn select_media_transport(&self, recipient: &str) -> Result<TransportType> {
         let available = self.transport_manager.get_available_transports();
+        let eligible = |transport: TransportType| {
+            available.contains_key(&transport)
+                && (transport != TransportType::WiFiDirect
+                    || self
+                        .transport_manager
+                        .holds_mesh_link(TransportType::WiFiDirect, recipient))
+        };
 
         if let Some(current) = self.transport_manager.current_transport() {
-            if available.contains_key(&current) {
+            if eligible(current) {
                 return Ok(current);
             }
         }
@@ -5616,7 +5632,7 @@ impl OfflineProtocol {
             TransportType::WiFiDirect,
             TransportType::BLE,
         ] {
-            if available.contains_key(&preferred) {
+            if eligible(preferred) {
                 return Ok(preferred);
             }
         }

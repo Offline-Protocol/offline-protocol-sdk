@@ -1102,6 +1102,27 @@ impl TransportManager {
         })
     }
 
+    /// Whether the mesh carrier `transport_type` holds a live link straight
+    /// to `peer_id`.
+    ///
+    /// [`Self::mesh_transport_for`] answers with the preferred carrier only,
+    /// so a peer linked over both never names the second; this asks about one
+    /// carrier. `false` for a carrier that is not registered, not available,
+    /// or not a mesh carrier.
+    pub fn holds_mesh_link(&self, transport_type: TransportType, peer_id: &str) -> bool {
+        MESH_TRANSPORTS.contains(&transport_type)
+            && self
+                .transports
+                .get(&transport_type)
+                .filter(|transport| transport.status() == TransportStatus::Available)
+                .is_some_and(|transport| {
+                    transport
+                        .connected_peers()
+                        .iter()
+                        .any(|link| link.peer_id == peer_id)
+                })
+    }
+
     /// Every available carrier that does its own routing.
     ///
     /// The enumerated form of [`Self::has_infrastructure_carrier`], for callers

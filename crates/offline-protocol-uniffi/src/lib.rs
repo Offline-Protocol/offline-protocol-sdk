@@ -4602,10 +4602,12 @@ impl OfflineProtocol {
 
     /// Peer stream: the platform's stream layer is up (`true`) or down.
     ///
-    /// Up means streams can be established, not that any peer is reachable:
-    /// the transport refuses to queue for a recipient no stream has proved,
-    /// so an up layer with no announced peer sends nothing and the selector
-    /// falls through to the next carrier.
+    /// Up means streams can be established, not that any peer is reachable.
+    /// The slot counts as an available carrier only once a stream has proved
+    /// a peer (`wifi_direct_peer_connected`), and it refuses to queue for a
+    /// recipient no stream has proved, so an up layer with no announced peer
+    /// is not a carrier: the selector does not score it and no transfer is
+    /// pinned to it.
     pub fn wifi_direct_status_changed(&self, is_connected: bool) -> Result<(), ProtocolError> {
         // Update internal state
         {
@@ -9688,6 +9690,15 @@ mod tests {
             engine.internet_get_next_message().is_some(),
             "the send fell through to the carrier that can take it"
         );
+        // The slot proved nobody, so it is not a carrier at all: the selector
+        // never scores it, rather than scoring it first and being refused on
+        // every send.
+        assert!(
+            !drained_events(&engine)
+                .iter()
+                .any(|e| e.contains("dors_transport_selected") && e.contains("wifiDirect")),
+            "a slot with no proved stream must not be selected"
+        );
 
         // Forced onto the slot, there is no carrier to fall through to: the
         // engine defers the message for retry and says so, and still nothing
@@ -9709,6 +9720,121 @@ mod tests {
                 && e.contains(&deferred_id)),
             "a forced send the slot refuses is deferred, never queued for a stream that does not exist"
         );
+    }
+
+    /// A phone whose only "up" carrier is a slot that proved nobody has no
+    /// carrier, and says so: the deferral names the missing carrier, as it
+    /// did before the slot was registered, rather than a carrier that failed
+    /// mid-send. The welcome lifecycle reads the same fact and parks instead
+    /// of spending attempts.
+    #[test]
+    fn test_peer_stream_slot_alone_with_nothing_proved_is_no_carrier() {
+        let engine = OfflineProtocol::new(ProtocolConfig {
+            profile: "slot-only".to_string(),
+            ble_enabled: false,
+            ..create_test_config()
+        })
+        .unwrap();
+        engine.start().unwrap();
+        engine.wifi_direct_status_changed(true).unwrap();
+        drained_events(&engine);
+
+        let id = engine
+            .send_message(
+                "bob".to_string(),
+                "hi".to_string(),
+                MessagePriority::Medium,
+                None,
+            )
+            .unwrap();
+        let deferred = drained_events(&engine)
+            .into_iter()
+            .find(|e| e.contains("\"type\":\"message_deferred\"") && e.contains(&id))
+            .expect("the message is deferred");
+        let deferred: serde_json::Value = serde_json::from_str(&deferred).unwrap();
+        assert_eq!(deferred["reason"], "transport_not_connected");
+    }
+
+    /// A file to a Bluetooth LE neighbour leaves under the Bluetooth LE
+    /// window whatever the peer-stream slot is doing.
+    ///
+    /// The shipped mobile managers report the slot's layer up when they start
+    /// and prove no peer. When the slot counted as available, a transfer
+    /// started after the internet dropped was pinned to it, sized its chunks
+    /// for a stream, had every chunk refused, and handed each refused chunk to
+    /// the neighbour through the mesh with no window: a 256 KiB file queued
+    /// fifteen times the Bluetooth LE fragments of the same file with the slot
+    /// down, and past the own-send budget the rest retried against the pin
+    /// until the transfer failed. A slot linked to somebody else is the same
+    /// failure one step later, which is why the pin asks for a link to the
+    /// recipient and not only for an available slot.
+    #[test]
+    fn test_peer_stream_slot_never_pins_a_file_for_a_bluetooth_neighbour() {
+        fn ble_fragments_for_a_file(slot: Option<&str>) -> (usize, usize) {
+            let engine = OfflineProtocol::new(ProtocolConfig {
+                profile: "media-sender".to_string(),
+                encryption_enabled: false,
+                auto_key_exchange: false,
+                require_encryption: false,
+                ..create_test_config()
+            })
+            .unwrap();
+            engine.start().unwrap();
+            // Online first, so the internet is the current transport, then
+            // offline beside a Bluetooth LE neighbour.
+            engine.internet_status_changed(true).unwrap();
+            engine
+                .send_message(
+                    "someone".to_string(),
+                    "hi".to_string(),
+                    MessagePriority::Medium,
+                    None,
+                )
+                .unwrap();
+            while engine.internet_get_next_message().is_some() {}
+            engine.internet_status_changed(false).unwrap();
+            engine.ble_status_changed(true).unwrap();
+            engine.ble_peer_discovered("bob".to_string(), -50).unwrap();
+            while engine.ble_get_next_fragment().is_some() {}
+            if let Some(linked) = slot {
+                engine.wifi_direct_status_changed(true).unwrap();
+                if !linked.is_empty() {
+                    engine
+                        .wifi_direct_peer_connected(linked.to_string())
+                        .unwrap();
+                }
+            }
+
+            engine
+                .send_file("bob".to_string(), vec![7u8; 262_144], "f.bin".to_string())
+                .unwrap();
+            let mut ble = 0;
+            while engine.ble_get_next_fragment().is_some() {
+                ble += 1;
+            }
+            let mut stream = 0;
+            while engine.wifi_direct_get_next_message().is_some() {
+                stream += 1;
+            }
+            (ble, stream)
+        }
+
+        let (baseline, _) = ble_fragments_for_a_file(None);
+        assert!(baseline > 0, "the Bluetooth LE window sends something");
+        for (label, slot) in [
+            ("layer up, nothing proved", ""),
+            ("linked to carol", "carol"),
+        ] {
+            let (ble, stream) = ble_fragments_for_a_file(Some(slot));
+            assert_eq!(
+                ble, baseline,
+                "{label}: the file must leave under the Bluetooth LE window, as with the slot down"
+            );
+            assert_eq!(
+                stream, 0,
+                "{label}: nothing is queued on a stream to someone else"
+            );
+        }
     }
 
     #[test]

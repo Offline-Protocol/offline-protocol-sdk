@@ -141,11 +141,13 @@ page is an orientation to the implementation.
 
 ### Peer stream (the `wifi_direct` slot)
 
-**Status**: Registered behind `wifi_direct_enabled`. The transport queues a
+**Status**: Registered behind `wifi_direct_enabled`. The slot counts as an
+available carrier only while a stream has proved a peer, and it queues a
 message only toward an address a stream has proved, so the bundled mobile
-managers, which exchange no preamble yet, announce no peer and drain nothing;
-until they adopt the chapter the slot carries traffic only for a host that
-runs the framing itself.
+managers, which report the stream layer up at start but exchange no preamble
+yet, announce no peer, are never selected, and drain nothing; until they
+adopt the chapter the slot carries traffic only for a host that runs the
+framing itself.
 
 **Use Case**: A byte stream the platform established to exactly one peer: a
 Wi-Fi Direct group socket, a Multipeer session, a TCP connection over a LAN or

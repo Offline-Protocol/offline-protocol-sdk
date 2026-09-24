@@ -1290,10 +1290,10 @@ interface OfflineProtocol {
     //
     // The identity contract of the BLE block above applies to `sender_id` and
     // `peer_id` unchanged: a proved address, never a socket address, a device
-    // name, or an address read from a discovery record. The transport queues
-    // for a recipient only while a stream has proved it, so an up stream layer
-    // with no announced peer takes no message and the selector falls through
-    // to the next carrier.
+    // name, or an address read from a discovery record. The slot counts as an
+    // available carrier only while a stream has proved a peer, and it queues
+    // for a recipient only while a stream has proved that recipient, so an up
+    // stream layer with no announced peer is not a carrier at all.
 
     // The platform's stream layer is up (streams can be established) or down.
     // Down clears every announced link.

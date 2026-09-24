@@ -24,14 +24,24 @@
 //! [`Transport::on_data_received_from`], which is what the receiving core
 //! matches `Message.sender` against.
 //!
-//! The same rule bounds the outbound side. [`Transport::send`] refuses a
-//! recipient no stream has proved with [`crate::Error::PeerNotReachable`],
-//! which the transport manager treats as "not this carrier" and falls through
-//! to the next one. Without that refusal a Wi-Fi Direct group that has formed
-//! but exchanged no preamble would be `Available` with nothing to address,
-//! and the selector, which weights bandwidth most heavily, would route direct
-//! messages into a queue whose frames the far side must drop: a message lost
-//! on the carrier that scored best, with BLE and the relay never tried.
+//! The same rule bounds the outbound side, twice. [`Transport::status`] is
+//! `Available` only while the platform's stream layer is up *and* a stream
+//! has proved a peer; with the layer up and nothing proved it is
+//! `Connecting`, so the engine does not count the slot as a carrier at all.
+//! And [`Transport::send`] refuses a recipient no stream has proved with
+//! [`crate::Error::PeerNotReachable`], which the transport manager treats as
+//! "not this carrier" and falls through to the next one.
+//!
+//! Both halves are needed, because the shipped mobile managers report the
+//! layer up when they start and prove no peer. Without the refusal, the
+//! selector, which weights this slot's bandwidth most heavily, would route
+//! direct messages into a queue whose frames the far side must drop. Without
+//! the narrower status, every consumer that reads "available" as "a carrier
+//! that can take a frame for somebody" would count a carrier that takes
+//! nothing: the media path would pin a file for a Bluetooth LE neighbour
+//! here, size its chunks for a stream and hand them to the neighbour through
+//! the mesh with no window, and a welcome would be charged an attempt on a
+//! device with no carrier that could make one.
 //!
 //! The bridge contract, in full: the platform reports connectivity via
 //! [`Transport::on_status_changed`], proved links via
@@ -96,8 +106,12 @@ pub struct WifiDirectTransport {
     device_id: String,
     /// Configuration
     config: WifiDirectConfig,
-    /// Transport status
-    status: Arc<Mutex<TransportStatus>>,
+    /// The status the platform reported for its stream layer.
+    ///
+    /// Not what [`Transport::status`] answers: the engine sees `Available`
+    /// only while this is `Available` *and* a stream has proved a peer. See
+    /// [`Self::layer_status`] for why the two differ.
+    layer_status: Arc<Mutex<TransportStatus>>,
     /// Discovered peers, keyed by device address (MAC).
     ///
     /// This is the *discovery* view reported by `WifiP2pManager`, so its key
@@ -135,7 +149,7 @@ impl WifiDirectTransport {
         Self {
             device_id: device_id.into(),
             config,
-            status: Arc::new(Mutex::new(TransportStatus::Unavailable)),
+            layer_status: Arc::new(Mutex::new(TransportStatus::Unavailable)),
             peers: Arc::new(Mutex::new(HashMap::new())),
             connected_links: Arc::new(Mutex::new(HashMap::new())),
             receive_queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -250,6 +264,24 @@ impl WifiDirectTransport {
         crate::common::serialize_message_with(message)
     }
 
+    /// The status the platform last reported for its stream layer, whatever
+    /// the links.
+    ///
+    /// [`Transport::status`] is narrower: it answers `Available` only while
+    /// the layer is up and at least one stream has proved a peer, and
+    /// [`TransportStatus::Connecting`] while the layer is up with none. The
+    /// engine reads `Available` as "a carrier that can take a frame for
+    /// somebody": the selector scores it, the media path pins a transfer to
+    /// it, and the welcome lifecycle counts it as a carrier. The shipped
+    /// mobile managers report the layer up when they start and prove no peer,
+    /// so a layer-up answer would put a carrier in all three that refuses
+    /// every recipient: a file to a Bluetooth LE neighbour pinned here, its
+    /// chunks sized for a stream and handed to the neighbour unwindowed, and
+    /// a welcome charged an attempt it could never have made.
+    pub fn layer_status(&self) -> TransportStatus {
+        *self.layer_status.lock_or_recover()
+    }
+
     /// Checks if there are messages to send.
     pub fn has_pending_sends(&self) -> bool {
         let queue = self.send_queue.lock_or_recover();
@@ -266,8 +298,16 @@ impl Transport for WifiDirectTransport {
         TransportType::WiFiDirect
     }
 
+    /// `Available` only while the stream layer is up and a stream has proved
+    /// a peer; `Connecting` while the layer is up with none. See
+    /// [`WifiDirectTransport::layer_status`].
     fn status(&self) -> TransportStatus {
-        *self.status.lock_or_recover()
+        let layer = self.layer_status();
+        if layer == TransportStatus::Available && self.connected_links.lock_or_recover().is_empty()
+        {
+            return TransportStatus::Connecting;
+        }
+        layer
     }
 
     fn metrics(&self) -> TransportMetrics {
@@ -286,7 +326,7 @@ impl Transport for WifiDirectTransport {
     /// happens without it).
     fn send(&self, message: &Message) -> Result<()> {
         // Check status
-        if self.status() != TransportStatus::Available {
+        if self.layer_status() != TransportStatus::Available {
             return Err(crate::Error::TransportNotAvailable(
                 "Wi-Fi Direct transport is not available".to_string(),
             ));
@@ -327,7 +367,7 @@ impl Transport for WifiDirectTransport {
     /// live link — a forwarding caller needs the failure synchronously so it
     /// can pick another neighbor instead.
     fn send_to_peer(&self, peer_id: &str, message: &Message) -> Result<()> {
-        if self.status() != TransportStatus::Available {
+        if self.layer_status() != TransportStatus::Available {
             return Err(crate::Error::TransportNotAvailable(
                 "Wi-Fi Direct transport is not available".to_string(),
             ));
@@ -355,7 +395,7 @@ impl Transport for WifiDirectTransport {
     }
 
     fn connected_peers(&self) -> Vec<crate::PeerLink> {
-        if self.status() != TransportStatus::Available {
+        if self.layer_status() != TransportStatus::Available {
             return Vec::new();
         }
         self.connected_links
@@ -376,7 +416,7 @@ impl Transport for WifiDirectTransport {
     }
 
     fn stop(&self) -> Result<()> {
-        *self.status.lock_or_recover() = TransportStatus::Disconnected;
+        *self.layer_status.lock_or_recover() = TransportStatus::Disconnected;
         self.peers.lock_or_recover().clear();
         self.connected_links.lock_or_recover().clear();
         self.send_queue.lock_or_recover().clear();
@@ -393,7 +433,7 @@ impl Transport for WifiDirectTransport {
     /// and queues are drained so a subsequent reconnect starts clean.
     fn on_status_changed(&self, status: TransportStatus) {
         let previous = {
-            let mut guard = self.status.lock_or_recover();
+            let mut guard = self.layer_status.lock_or_recover();
             let prev = *guard;
             *guard = status;
             prev
@@ -643,6 +683,36 @@ mod tests {
             transport.send(&create_test_message()),
             Err(crate::Error::PeerNotReachable(_))
         ));
+    }
+
+    /// The engine sees the slot as a carrier only while a stream has proved
+    /// a peer. A layer that is up with nothing proved is what the shipped
+    /// mobile managers report from the moment they start, and every consumer
+    /// of "available" (selection, the media pin, the welcome lifecycle)
+    /// would otherwise count a carrier that refuses every recipient.
+    #[test]
+    fn the_slot_is_available_only_while_a_stream_has_proved_a_peer() {
+        let transport = WifiDirectTransport::new("test-device");
+        assert_eq!(transport.status(), TransportStatus::Unavailable);
+
+        transport.on_status_changed(TransportStatus::Available);
+        assert_eq!(transport.layer_status(), TransportStatus::Available);
+        assert_eq!(
+            transport.status(),
+            TransportStatus::Connecting,
+            "a layer up with no proved stream is not a carrier"
+        );
+
+        transport.on_peer_connected("bob");
+        assert_eq!(transport.status(), TransportStatus::Available);
+
+        transport.on_peer_disconnected("bob");
+        assert_eq!(transport.status(), TransportStatus::Connecting);
+
+        // A proved link while the layer is down makes nothing available.
+        transport.on_status_changed(TransportStatus::Disconnected);
+        transport.on_peer_connected("bob");
+        assert_eq!(transport.status(), TransportStatus::Disconnected);
     }
 
     #[test]
