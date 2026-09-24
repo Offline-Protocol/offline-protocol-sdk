@@ -30,6 +30,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   first piece of the peer-stream transport, which sends the same assertion as
   its first frame.
 
+- **The peer-stream framing chapter.** `docs/spec/stream-framing.md`
+  specifies the transport behind the `wifi_direct` slot as what it is to the
+  engine: a stream the platform established to one peer, whether a Wi-Fi
+  Direct group socket, a Multipeer session, or a TCP connection over a LAN or
+  a routed mesh. The first frame in each direction is the identity assertion,
+  every frame is a `u32` big-endian length plus body under the 1 MiB message
+  ceiling, and a peer is announced only under the address its preamble
+  proved. It also names the DNS-SD service type and TXT record a LAN
+  advertiser uses, with the address there a hint the preamble proves. The
+  vectors are generated: a preamble, a framed message, the ordered exchange,
+  and four refusals. Nothing ships in this entry but the contract; the
+  registration and the managers follow it.
+
 - **Attachment bytes move inside a group.** `DataStore.fetchAttachmentFrom(space, peer, hash)`
   asks one member for the bytes behind a reference, and they come back as
   frames sealed under the group key. Before this, references replicated to

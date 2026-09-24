@@ -22,6 +22,7 @@ document says which reading is normative for the wire.
 | [Capability negotiation](capability-negotiation.md) | What peers advertise, what each capability gates, and what happens on absence |
 | [Leaf node provisioning](leaf-provisioning.md) | What a constrained device owes at pairing, the never-committing profile, and the provisioning-time adversary |
 | [Bluetooth LE framing](ble-framing.md) | The GATT contract, the fragment header, and what a receiver owes on reassembly |
+| [Peer-stream framing](stream-framing.md) | The preamble that proves a stream's peer, the length-prefixed message frame, and the LAN discovery hint |
 | [Username discovery and invites](username-discovery.md) | The self-certifying invite payload, and the non-authoritative username directory |
 | [The gateway contract](gateway-contract.md) | What a gateway is, the five verbs it implements, the gateway-daemon wire protocol, and the backbone |
 | [Conformance](conformance.md) | The two profiles, what every implementation owes, and how the vectors decide it |
@@ -44,6 +45,7 @@ the crate whose code they pin, so a packaged build carries its own vectors:
 | `crates/offline-protocol-sealed/tests/data/identity-assertion-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md#the-identity-assertion) |
 | `crates/offline-protocol/tests/data/data-sync-v1.vectors.json` | [Document replication](data-sync.md) |
 | `crates/offline-protocol-transport/tests/data/ble-framing-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md) |
+| `crates/offline-protocol-transport/tests/data/stream-framing-v1.vectors.json` | [Peer-stream framing](stream-framing.md) |
 | `crates/offline-protocol-transport/tests/data/nip44.vectors.json` | None. These are the NIP-44 spec's own published vectors, vendored for the Nostr carrier's sealing and pinned to the checksum that spec publishes. Transport framing is out of scope here, so there is no chapter for them to pin |
 
 Every file above was computed independently of the code it pins. A vector

@@ -26,9 +26,11 @@ the fragment payload is a hop-local encoding, and this layer neither reads nor
 constrains it. What sits below is Bluetooth itself, which this document does
 not restate.
 
-Wi-Fi Direct has no equivalent chapter because it has no equivalent problem: it
-carries a stream, so a whole message crosses in one write and there is nothing
-to fragment.
+A peer stream (Wi-Fi Direct, a LAN socket) has nothing to fragment, so it
+has no equivalent of the codec here. What it lacks instead is the identity
+GATT serves and the message boundary an ATT write gives for free, and
+[peer-stream framing](stream-framing.md) supplies both, reusing the identity
+assertion below unchanged.
 
 ## Invariants
 
