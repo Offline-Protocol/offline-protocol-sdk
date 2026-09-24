@@ -9228,22 +9228,6 @@ mod tests {
         );
     }
 
-    /// The recipient rule the platform bridges' frame builders are measured
-    /// against: once `initialize_mls` has run, a synthesized relay answer is
-    /// processed only when it names this device's address.
-    ///
-    /// Regression (mobile relay answers forwarded, not processed): the iOS
-    /// and Android bridges addressed every frame they rebuild to the
-    /// `profile`. Before MLS init that is `local_id`, which is why the pre-MLS
-    /// tests above pass; after it `local_id` is the derived address, and the
-    /// receive loop hands any frame for someone else to the mesh forwarder
-    /// first. So every relay group answer (the registration acknowledgement
-    /// that alone sets `relay_synced`, relay-broadcast group messages, member
-    /// changes, errors) and every legacy plain-text DM was lost silently on an
-    /// MLS-initialized phone. The bridges now pick the address in
-    /// `LegacyRelayMessage`, pinned by
-    /// `react_native_relay_frames_are_addressed_to_a_live_local_address`.
-    #[test]
     /// The assertion a device builds is the assertion the namespace verifier
     /// accepts, and it names the device's own address. Across the FFI rather
     /// than in the MLS crate because this is the pair every bridge calls: a
@@ -9300,6 +9284,22 @@ mod tests {
         }
     }
 
+    /// The recipient rule the platform bridges' frame builders are measured
+    /// against: once `initialize_mls` has run, a synthesized relay answer is
+    /// processed only when it names this device's address.
+    ///
+    /// Regression (mobile relay answers forwarded, not processed): the iOS
+    /// and Android bridges addressed every frame they rebuild to the
+    /// `profile`. Before MLS init that is `local_id`, which is why the pre-MLS
+    /// tests above pass; after it `local_id` is the derived address, and the
+    /// receive loop hands any frame for someone else to the mesh forwarder
+    /// first. So every relay group answer (the registration acknowledgement
+    /// that alone sets `relay_synced`, relay-broadcast group messages, member
+    /// changes, errors) and every legacy plain-text DM was lost silently on an
+    /// MLS-initialized phone. The bridges now pick the address in
+    /// `LegacyRelayMessage`, pinned by
+    /// `react_native_relay_frames_are_addressed_to_a_live_local_address`.
+    #[test]
     fn test_synthesized_relay_frame_must_name_the_local_address_after_mls_init() {
         let receiver = OfflineProtocol::new(ProtocolConfig {
             profile: "receiver-user".to_string(),
@@ -13181,18 +13181,6 @@ mod tests {
         }
     }
 
-    /// Every frame a React Native bridge rebuilds and injects into the receive
-    /// path names this device, resolved live.
-    ///
-    /// `LegacyRelayMessage` on each platform picks the recipient from the
-    /// address and the profile, and that choice is unit-tested there. What no
-    /// platform test can see is that `InternetManager` hands it a *live*
-    /// `localAddress()` at every call: `InternetManager.swift` is on
-    /// `Package.swift`'s `exclude:` list and `InternetManager.kt` needs a live
-    /// OkHttp socket, so neither is executed by any CI job. A captured or
-    /// omitted address silently restores the bug that
-    /// `test_synthesized_relay_frame_must_name_the_local_address_after_mls_init`
-    /// describes: relay answers forwarded to the mesh instead of processed.
     /// The two mobile `SignedIdentityData` decoders are the last copies of
     /// the identity assertion's split. They verify and derive through the
     /// core already; what they still own is the 32/64 boundary, and neither
@@ -13263,6 +13251,18 @@ mod tests {
         }
     }
 
+    /// Every frame a React Native bridge rebuilds and injects into the receive
+    /// path names this device, resolved live.
+    ///
+    /// `LegacyRelayMessage` on each platform picks the recipient from the
+    /// address and the profile, and that choice is unit-tested there. What no
+    /// platform test can see is that `InternetManager` hands it a *live*
+    /// `localAddress()` at every call: `InternetManager.swift` is on
+    /// `Package.swift`'s `exclude:` list and `InternetManager.kt` needs a live
+    /// OkHttp socket, so neither is executed by any CI job. A captured or
+    /// omitted address silently restores the bug that
+    /// `test_synthesized_relay_frame_must_name_the_local_address_after_mls_init`
+    /// describes: relay answers forwarded to the mesh instead of processed.
     #[test]
     fn react_native_relay_frames_are_addressed_to_a_live_local_address() {
         let swift = rn_source_code_only("ios/InternetManager.swift");
