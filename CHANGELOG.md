@@ -44,8 +44,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   The chapter also records what the bundled managers still owe: iOS sends
   bare messages over its Multipeer session and advertises another service
   type, and the Android reader refuses a body of exactly 1 MiB and keeps
-  reading after a refused length. The threat model gains R16, the replayable
-  identity assertion on every carrier. Nothing ships in this entry but the
+  reading after a refused length. A receiver holds one announced stream per
+  address, so a second stream proving the same address never makes the first
+  one's close read as the peer's loss. The threat model gains R16, the
+  replayable identity assertion on every carrier. Nothing ships in this entry but the
   contract; the registration and the managers follow it.
 
 - **Attachment bytes move inside a group.** `DataStore.fetchAttachmentFrom(space, peer, hash)`

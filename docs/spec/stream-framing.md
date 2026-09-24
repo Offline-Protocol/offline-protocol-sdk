@@ -16,8 +16,8 @@ chapter fragments nothing. What a stream lacks that GATT supplies is **who the
 peer is** (the Identity characteristic) and **where one message ends** (an ATT
 write has a boundary; a stream does not). Without the first, no frame can be
 attributed and the receiving core refuses all of them, which is why the
-shipped Wi-Fi Direct managers dropped every inbound frame until this chapter
-existed. Without the second, two implementations that agree on every message
+shipped Wi-Fi Direct managers still drop every inbound frame: this chapter is
+what they were missing. Without the second, two implementations that agree on every message
 still cannot read each other's bytes.
 
 Two layers are specified here:
@@ -202,11 +202,25 @@ On the stream's end, for any reason, the receiver reports the peer lost to
 the core if and only if it was announced. A stream that never proved a peer
 was never announced, and there is nothing to report.
 
+A receiver holds at most one announced stream per address. When a preamble
+proves an address the receiver has already announced, it MUST either refuse
+the new stream or close the older one, and in either case the core sees one
+announcement and, later, one loss for that address: a stream refused or
+superseded while another stream for the same address is live is never
+reported as a loss. Which stream to keep is local policy. The count is not,
+because a receiver that announces twice and reports the first close tells the
+core a reachable peer is gone, and a copied preamble
+([R16](../security/threat-model.md#r16-the-identity-assertion-is-static-and-replayable-on-every-carrier))
+is enough to make it do so. The engine keys its peer-stream links by address,
+so a second announcement is not a second link, and the first loss report
+removes the only one.
+
 The bounds this gives a receiver are the ones that matter. Memory per stream
 is at most one body in flight, `DEFAULT_MAX_MESSAGE_SIZE + 4` bytes, because a
 frame is read whole before the next prefix. The number of streams a receiver
-accepts, and the preamble deadline, are local policy; the shipped managers
-carry their own values and a conforming implementation chooses its own.
+accepts, and the preamble deadline, are local policy, and a conforming
+implementation chooses its own. The shipped managers exchange no preamble
+yet, so they have no deadline to inherit.
 
 ## Finding a peer on a LAN
 

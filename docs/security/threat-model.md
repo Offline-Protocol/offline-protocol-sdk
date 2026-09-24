@@ -658,7 +658,9 @@ characteristic, and the preamble that opens every peer stream
 [peer-stream framing](../spec/stream-framing.md#the-preamble)). Nothing in it
 is challenged or timestamped. Anyone who has read a peer's assertion once can
 present it again and have their own link or stream labelled with that peer's
-address. On Bluetooth LE that takes radio range (A1). On a peer stream it
+address. On Bluetooth LE that takes radio range: A1's position with A2's
+capability, since reading the characteristic and presenting it again are both
+active. On a peer stream it
 takes only the ability to open a connection to the receiver, which on a LAN
 or a routed mesh is A2.
 
@@ -670,7 +672,10 @@ only possession of the key, which every frame the address sends proves anyway.
 a frame the address must sign, so every message it sends under the borrowed
 label is refused above this layer, and what it gains is at most a slot in the
 receiver's neighbour table and the frames addressed to that peer over that
-link, which are sealed to the real holder. A receiver MUST NOT read a verified
+link, which are sealed to the real holder. On a receiver that does not hold
+the stream chapter's one-stream-per-address rule it gains one more thing: its
+close is reported as the peer's loss, which evicts the real peer's link until
+it reconnects. That is why the rule is normative rather than policy. A receiver MUST NOT read a verified
 assertion as evidence that the peer is live, recent, or the only holder of the
 address. Two things that look like they would close the gap do not, and the
 stream chapter says so normatively: link encryption (TLS, a framework's
