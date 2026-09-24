@@ -1166,7 +1166,7 @@ class TestOutboundIsolation:
         finally:
             await manager.stop()
 
-    async def test_a_slow_peer_queue_is_bounded(self, fake_verifier):
+    async def test_a_stalled_peer_queue_is_bounded(self, fake_verifier):
         protocol, queue = queued_protocol()
         manager = PeerStreamManager(protocol, listen_host="127.0.0.1", listen_port=0)
         await manager.start()
@@ -1174,14 +1174,76 @@ class TestOutboundIsolation:
             _, stalled_writer = await stalled_handshake(manager, PEER_ASSERTION)
             await until(lambda: manager.connected_peers() == [PEER_ADDRESS])
             shrink_send_buffer(manager, PEER_ADDRESS)
+            # Wedged first, so the drops below are the stall's and not a
+            # burst's: a burst arrives before the writer has run at all.
+            queue.append(body_for(PEER_ADDRESS, b"x" * MAX_FRAME_BYTES))
+            manager.on_messages_available()
+            await until_wedged(manager, PEER_ADDRESS)
+            stream = manager._by_peer[PEER_ADDRESS]
+            assert stream.write_blocked
+
             for _ in range(12):
                 queue.append(body_for(PEER_ADDRESS, b"x" * MAX_FRAME_BYTES))
             manager.on_messages_available()
             await until(lambda: not queue)
-            stream = manager._by_peer[PEER_ADDRESS]
             assert stream.queued_bytes <= psm.MAX_QUEUED_BYTES
-            assert manager.get_metrics()["frames_dropped"] > 0
+            accepted = stream.outbound_queue.qsize()
+            assert accepted >= 1, "one frame always fits on an empty queue"
+            assert manager.get_metrics()["frames_dropped"] == 12 - accepted
             stalled_writer.close()
+        finally:
+            await manager.stop()
+
+    async def test_a_burst_to_a_reading_peer_is_delivered_whole(self, fake_verifier):
+        protocol, queue = queued_protocol()
+        manager = PeerStreamManager(protocol, listen_host="127.0.0.1", listen_port=0)
+        await manager.start()
+        try:
+            reader, writer = await handshake(manager)
+            await until(lambda: manager.connected_peers() == [PEER_ADDRESS])
+            # Over the queue bound, handed over in one tick.
+            count = psm.MAX_QUEUED_BYTES // MAX_FRAME_BYTES + 2
+            for i in range(count):
+                queue.append(body_for(PEER_ADDRESS, bytes([i]) * MAX_FRAME_BYTES))
+            manager.on_messages_available()
+            for i in range(count):
+                prefix = await asyncio.wait_for(reader.readexactly(LENGTH_PREFIX_LEN), 5.0)
+                body = await asyncio.wait_for(
+                    reader.readexactly(int.from_bytes(prefix, "big")), 5.0
+                )
+                assert body == bytes([i]) * MAX_FRAME_BYTES
+            assert manager.get_metrics()["frames_dropped"] == 0
+            writer.close()
+        finally:
+            await manager.stop()
+
+    async def test_a_slow_reader_that_keeps_reading_is_not_cut(self, fake_verifier):
+        protocol, queue = queued_protocol()
+        # One frame takes several deadlines to cross at the pace below; a
+        # per-frame deadline would abort it after the first.
+        manager = PeerStreamManager(
+            protocol, listen_host="127.0.0.1", listen_port=0, write_timeout=0.4
+        )
+        await manager.start()
+        try:
+            reader, writer = await stalled_handshake(manager, PEER_ASSERTION)
+            await until(lambda: manager.connected_peers() == [PEER_ADDRESS])
+            shrink_send_buffer(manager, PEER_ADDRESS)
+            queue.append(body_for(PEER_ADDRESS, b"z" * MAX_FRAME_BYTES))
+            manager.on_messages_available()
+
+            prefix = await asyncio.wait_for(reader.readexactly(LENGTH_PREFIX_LEN), 5.0)
+            remaining = int.from_bytes(prefix, "big")
+            began = time.monotonic()
+            while remaining:
+                chunk = await asyncio.wait_for(reader.read(min(16 * 1024, remaining)), 2.0)
+                assert chunk, "the stream was cut while the peer was reading"
+                remaining -= len(chunk)
+                await asyncio.sleep(0.02)
+            assert time.monotonic() - began > 2 * 0.4, "slow enough to span deadlines"
+            protocol.wifi_direct_peer_disconnected.assert_not_called()
+            assert manager.connected_peers() == [PEER_ADDRESS]
+            writer.close()
         finally:
             await manager.stop()
 

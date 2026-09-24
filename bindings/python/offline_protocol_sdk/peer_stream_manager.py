@@ -43,10 +43,12 @@ message ends and who the peer is, and both are settled here:
   pace.
 * **One peer's receive window never holds another peer's traffic.** The
   core hands every outbound body through one queue, and each is moved at
-  once onto its stream's own bounded queue, written by that stream's own
-  writer under a write deadline. A peer that stops reading, or reads
-  slowly, stalls only itself; past the deadline its stream is aborted and
-  reported lost. Keepalive does not cover that case: a stream with data in
+  once onto its stream's own queue, written by that stream's own writer.
+  A peer that stops reading, or reads slowly, stalls only itself. The queue
+  is bounded only while its writer is blocked on the peer, so a burst to a
+  peer that is reading is never dropped, and the stream is aborted and
+  reported lost only when the peer has taken nothing for the write
+  deadline, so a slow link that is moving is never cut. Keepalive does not cover that case: a stream with data in
   flight is not idle, and outside Linux nothing bounds its retransmissions.
 
 The Rust reference for the same rules is ``stream_framing.rs`` in the
@@ -135,16 +137,20 @@ REFUSAL_BACKOFF_MAX = 600.0
 KEEPALIVE_IDLE = 15
 KEEPALIVE_INTERVAL = 5
 KEEPALIVE_COUNT = 3
-#: Seconds one frame's write may wait on the peer's receive window before
-#: the stream is aborted. Keepalive ends an *idle* dead stream; a stream with
+#: Seconds a write may go without the peer taking a single byte before the
+#: stream is aborted. Keepalive ends an *idle* dead stream; a stream with
 #: unacknowledged data is not idle, and on macOS and Windows nothing else
 #: bounds it, so without this a peer that stops reading holds its stream,
 #: and everything queued to it, for as long as TCP keeps retransmitting.
+#: Measured on progress, not per frame: a per-frame deadline is a throughput
+#: floor (1 MiB in thirty seconds), and a slow link below it would be
+#: aborted, reconnected, offered the same frame and aborted again, forever.
 WRITE_TIMEOUT = 30.0
-#: Bytes queued toward one stream and not yet written. A body that would go
-#: over is dropped (the reliability layer retries it) rather than buffered
-#: without bound behind a slow peer. One frame is always accepted onto an
-#: empty queue, so the largest legal frame is never refused by this bound.
+#: Bytes queued toward one stream and not yet written, while its writer is
+#: blocked on the peer. A body that would go over is dropped (the
+#: reliability layer retries it) rather than buffered without bound behind a
+#: peer that is not taking any. One frame is always accepted onto an empty
+#: queue, so the largest legal frame is never refused by this bound.
 MAX_QUEUED_BYTES = 4 * 1024 * 1024
 
 
@@ -216,6 +222,7 @@ class _Stream:
         "outbound_queue",
         "queued_bytes",
         "writer_task",
+        "write_blocked",
     )
 
     def __init__(
@@ -254,6 +261,12 @@ class _Stream:
         self.queued_bytes = 0
         #: The task writing ``outbound_queue``, once the preamble is out.
         self.writer_task: asyncio.Task[None] | None = None
+        #: Whether the writer is waiting on the peer's receive window right
+        #: now. The queue bound applies only then: a burst the core hands
+        #: over in one tick arrives before the writer has run at all, says
+        #: nothing about the peer, and its bytes were already held by the
+        #: core's queue.
+        self.write_blocked = False
 
 
 def frame(body: bytes) -> bytes:
@@ -369,8 +382,8 @@ class PeerStreamManager(TransportManager):
         Publish this host over DNS-SD, and connect to hosts found there.
         Either requires the optional ``zeroconf`` dependency.
     write_timeout:
-        Seconds one frame's write may wait on the peer before its stream is
-        aborted and reported lost.
+        Seconds a write may go without the peer taking a byte before its
+        stream is aborted and reported lost.
     """
 
     transport_id = "wifi_direct"
@@ -958,16 +971,20 @@ class PeerStreamManager(TransportManager):
             )
 
     async def _write_loop(self, stream: _Stream) -> None:
-        """Write ``stream``'s queued frames, one at a time, each under the
-        write deadline. A frame the peer does not take in time aborts the
-        stream: the peer is reported lost, and nothing else waited on it."""
+        """Write ``stream``'s queued frames, one at a time. A peer that takes
+        nothing for the write deadline aborts the stream: the peer is
+        reported lost, and nothing else waited on it."""
         reason = "write failed"
         try:
             while True:
                 data = await stream.outbound_queue.get()
                 stream.queued_bytes -= len(data)
                 stream.writer.write(data)
-                await asyncio.wait_for(stream.writer.drain(), timeout=self._write_timeout)
+                stream.write_blocked = True
+                try:
+                    await self._drain_while_moving(stream)
+                finally:
+                    stream.write_blocked = False
                 self._bytes_sent += len(data)
                 self._frames_sent += 1
         except asyncio.CancelledError:
@@ -980,6 +997,24 @@ class PeerStreamManager(TransportManager):
             "warning", "Peer stream write failed", {"peer": stream.peer, "reason": reason}
         )
         await self._close_stream(stream, reason)
+
+    async def _drain_while_moving(self, stream: _Stream) -> None:
+        """Wait for ``stream``'s write buffer to flush, for as long as the
+        peer keeps taking bytes. Raises :class:`asyncio.TimeoutError` once a
+        whole ``write_timeout`` passes with the buffer no smaller: the
+        deadline is on progress, so a slow link is never mistaken for a
+        dead one."""
+        transport = stream.writer.transport
+        last = transport.get_write_buffer_size()
+        while True:
+            try:
+                await asyncio.wait_for(stream.writer.drain(), timeout=self._write_timeout)
+                return
+            except asyncio.TimeoutError:
+                size = transport.get_write_buffer_size()
+                if size >= last:
+                    raise
+                last = size
 
     # -- outbound drain ---------------------------------------------------------
 
@@ -1030,10 +1065,16 @@ class PeerStreamManager(TransportManager):
                     "error", "Refusing to frame a body", {"peer": message.recipient_id, "error": str(exc)}
                 )
                 continue
-            if stream.queued_bytes and stream.queued_bytes + len(data) > MAX_QUEUED_BYTES:
-                # The peer is not keeping up. Buffering without bound would
-                # only move the stall into memory; the write deadline ends a
-                # peer that has stopped, and the retry path re-offers this.
+            if (
+                stream.write_blocked
+                and stream.queued_bytes
+                and stream.queued_bytes + len(data) > MAX_QUEUED_BYTES
+            ):
+                # The peer is not taking what it already has. Buffering
+                # without bound would only move the stall into memory; the
+                # write deadline ends a peer that has stopped, and the retry
+                # path re-offers this. Only while blocked: a burst handed
+                # over before the writer ran says nothing about the peer.
                 self._frames_dropped += 1
                 self._emit_diagnostic(
                     "warning", "Peer stream queue full, dropping a body", {"peer": message.recipient_id}
