@@ -1,0 +1,67 @@
+{
+  "_comment": [
+    "Frozen conformance vectors for the Bluetooth LE identity assertion,",
+    "from docs/spec/ble-framing.md.",
+    "",
+    "Computed from the layout stated in that chapter, not by running",
+    "the codec they pin.",
+    "",
+    "Each assertion is a public key, a signature and a message taken",
+    "verbatim from RFC 8032 section 7.1 test vectors 1 to 3, so every",
+    "signature here verifies under its key and every field traces to",
+    "a published source rather than to this file. The address is what",
+    "the key derives to under docs/spec/identity.md, which is what a",
+    "verifier returns after the signature checks.",
+    "",
+    "The refusals are inputs a reader must reject before any",
+    "cryptography runs: nothing under 96 bytes has a whole signature."
+  ],
+  "layout": "public_key(32) || signature(64) || signed_data",
+  "minimum_length": 96,
+  "assertions": [
+    {
+      "name": "rfc8032-tv1",
+      "note": "An empty signed_data. The assertion is exactly 96 bytes, the floor, and a reader that refuses 'at most 96' instead of 'under 96' refuses a valid one.",
+      "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "signature_hex": "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+      "signed_data_hex": "",
+      "assertion_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511ae5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+      "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+    },
+    {
+      "name": "rfc8032-tv2",
+      "note": "One byte of signed_data.",
+      "public_key_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+      "signature_hex": "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+      "signed_data_hex": "72",
+      "assertion_hex": "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c0072",
+      "address": "off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0"
+    },
+    {
+      "name": "rfc8032-tv3",
+      "note": "Two bytes of signed_data.",
+      "public_key_hex": "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025",
+      "signature_hex": "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a",
+      "signed_data_hex": "af82",
+      "assertion_hex": "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb9115489080256291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac18ff9b538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40aaf82",
+      "address": "off1q8dvqulqzgaaafvamxemm2w0vqmlvwk2sgxvx0lk"
+    }
+  ],
+  "refusals": [
+    {
+      "name": "empty",
+      "note": "Nothing at all.",
+      "assertion_hex": ""
+    },
+    {
+      "name": "a public key alone",
+      "note": "Thirty-two bytes: a key with nothing proving possession of it.",
+      "assertion_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+    },
+    {
+      "name": "one byte under the floor",
+      "note": "Ninety-five bytes. The last byte of a valid signature is missing, so this is the off-by-one a floor check exists for.",
+      "assertion_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511ae5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a10"
+    }
+  ]
+}

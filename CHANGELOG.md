@@ -15,6 +15,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **The identity assertion has one implementation.** The
+  `public_key(32) || signature(64) || signed_data` value a Bluetooth LE
+  peripheral serves to prove its address was split three times, once per
+  bridge, and the Python copy was a JSON document no phone could verify. The
+  codec now lives in `offline-protocol-sealed`, pinned by a generated vector
+  file whose signatures are RFC 8032's own, and the one verifier is the
+  namespace-level `verify_identity_assertion(assertion)`: it parses, verifies
+  the signature under the key, derives the address, and returns it, or throws.
+  A peripheral builds its value with `identity_assertion(signedData)` on the
+  instance, so no bridge assembles the layout. The Swift and Kotlin decoders
+  still split the bytes (they already called the core to verify and derive)
+  and are now pinned to the sealed offsets by a source guard. This is the
+  first piece of the peer-stream transport, which sends the same assertion as
+  its first frame.
+
 - **Attachment bytes move inside a group.** `DataStore.fetchAttachmentFrom(space, peer, hash)`
   asks one member for the bytes behind a reference, and they come back as
   frames sealed under the group key. Before this, references replicated to
@@ -212,6 +227,25 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   retry ladder, and the app hears `welcome_send_failed` once.
 
 ### Fixed
+
+- **A Python Bluetooth LE peripheral can be verified by a phone.** It served
+  the profile label as its Device id and a JSON document as its Identity, so
+  every conforming central refused it before any cryptography ran; no phone
+  has ever paired with a Python node over Bluetooth LE. The peripheral now
+  serves its `off1...` address and the core-built identity assertion, and
+  `start()` refuses to advertise until MLS has minted an address rather than
+  advertise something unverifiable. The `identity_json` constructor argument
+  is gone. Any Python peripheral already deployed changes behaviour, but no
+  working pairing regresses, because none could have worked.
+
+- **The Python Bluetooth LE central verifies a peer before announcing it.** It
+  announced whatever string the Device id characteristic carried, and before
+  connecting it announced the Bluetooth address itself, so the core's routing
+  table held labels nothing had proved. It now reads the Identity
+  characteristic, hands it to `verify_identity_assertion`, compares the result
+  to the Device id exactly, and announces the derived address or drops the
+  link unannounced. A link that never proved a peer is no longer reported lost
+  either, since nothing was ever announced for it.
 
 - **Relay group notifications reach an iOS or Android member.** The React
   Native bridges rebuild some relay traffic into a full `Message` before

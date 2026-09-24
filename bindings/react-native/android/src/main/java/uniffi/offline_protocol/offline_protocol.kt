@@ -830,6 +830,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_func_parse_invite(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment(
@@ -1015,6 +1017,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_grou
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls(
 ): Short
@@ -1509,6 +1513,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_rich
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Byte
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_identity_assertion(`ptr`: Long,`signedData`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(`ptr`: Long,`secureStorage`: Long,`protocolStateStorage`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declaration_refused(`ptr`: Long,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1757,6 +1763,8 @@ external fun uniffi_offline_protocol_uniffi_fn_func_parse_invite(`blob`: RustBuf
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance(`storage`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion(`assertion`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 external fun ffi_offline_protocol_uniffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun ffi_offline_protocol_uniffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
@@ -1883,6 +1891,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() != 20699.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion() != 63230.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash() != 20923.toShort()) {
@@ -2162,6 +2173,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 30881.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion() != 46988.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 43685.toShort()) {
@@ -4266,6 +4280,8 @@ public interface OfflineProtocolInterface {
     
     fun `hasPendingKeyPackage`(`peerId`: kotlin.String): kotlin.Boolean
     
+    fun `identityAssertion`(`signedData`: List<kotlin.UByte>): List<kotlin.UByte>
+    
     fun `initializeMls`(`secureStorage`: MlsStorageProvider, `protocolStateStorage`: ProtocolStateStorageProvider)
     
     fun `internetAddressDeclarationRefused`(`reason`: kotlin.String)
@@ -5375,6 +5391,20 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(
         it,
         FfiConverterString.lower(`peerId`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `identityAssertion`(`signedData`: List<kotlin.UByte>): List<kotlin.UByte> {
+            return FfiConverterSequenceUByte.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_identity_assertion(
+        it,
+        FfiConverterSequenceUByte.lower(`signedData`),_status)
 }
     }
     )
@@ -11838,6 +11868,17 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     UniffiLib.uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance(
     
         FfiConverterTypeProtocolStateStorageProvider.lower(`storage`),_status)
+}
+    )
+    }
+    
+
+    @Throws(ProtocolException::class) fun `verifyIdentityAssertion`(`assertion`: List<kotlin.UByte>): kotlin.String {
+            return FfiConverterString.lift(
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion(
+    
+        FfiConverterSequenceUByte.lower(`assertion`),_status)
 }
     )
     }

@@ -1393,6 +1393,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func hasPendingKeyPackage(peerId: String)  -> Bool
     
+    func identityAssertion(signedData: [UInt8]) throws  -> [UInt8]
+    
     func initializeMls(secureStorage: MlsStorageProvider, protocolStateStorage: ProtocolStateStorageProvider) throws 
     
     func internetAddressDeclarationRefused(reason: String) 
@@ -2172,6 +2174,15 @@ open func hasPendingKeyPackage(peerId: String) -> Bool  {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(peerId),$0
+    )
+})
+}
+    
+open func identityAssertion(signedData: [UInt8])throws  -> [UInt8]  {
+    return try  FfiConverterSequenceUInt8.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_identity_assertion(
+            self.uniffiCloneHandle(),
+        FfiConverterSequenceUInt8.lower(signedData),$0
     )
 })
 }
@@ -9504,6 +9515,13 @@ public func runStorageConformance(storage: ProtocolStateStorageProvider) -> Stri
     )
 })
 }
+public func verifyIdentityAssertion(assertion: [UInt8])throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion(
+        FfiConverterSequenceUInt8.lower(assertion),$0
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -9527,6 +9545,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() != 20699) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion() != 63230) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash() != 20923) {
@@ -9806,6 +9827,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 30881) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion() != 46988) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 43685) {

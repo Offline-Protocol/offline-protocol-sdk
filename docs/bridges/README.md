@@ -116,9 +116,9 @@ in the uniffi crate pins the mobile call sites, which no CI job executes.
 
 ## C5. Hand-mirrored constants must be pinned in every language
 
-Some constants exist in several places no single compiler sees together. Ten
-sets do today, and they are pinned by **two different** mechanisms, so knowing
-which one you are touching matters.
+Some constants exist in several places no single compiler sees together.
+Eleven sets do today, and they are pinned by **two different** mechanisms, so
+knowing which one you are touching matters.
 
 **The relay-answer prefix exemption list** is the canonical example: the core,
 the Swift bridge, and the Kotlin bridge each hold a copy. A prefix present in one
@@ -231,6 +231,23 @@ asserts that every service lookup in `BleManager.swift` and
 callback chain runs in CI. A drift on one side makes that platform's instances
 read as untagged, which falls back to the first instance and looks like the
 bug the tag fixed.
+
+**The Bluetooth LE identity assertion's layout** is the eleventh, and the one
+that has been collapsing rather than growing. The
+`public_key(32) ‖ signature(64) ‖ signed_data` split used to be written once
+per bridge, and the Python copy was not a split at all but a JSON document,
+so no phone could verify a Python peripheral. The layout now has one home,
+`offline-protocol-sealed`, pinned by a generated vector file CI regenerates,
+and one verifier, the namespace-level `verify_identity_assertion`. Python
+holds no copy: its peripheral serves the bytes `identity_assertion` returns
+and its central hands what it read to the verifier, and `pytest` pins both
+against the real library and the RFC 8032 vectors. The Swift and Kotlin
+`SignedIdentityData` decoders are the remaining copies; they never derive or
+verify (both call the core for that) but they still split, and
+`react_native_ble_identity_decoders_split_at_the_sealed_offsets` reads both
+files for the two sizes, because neither BLE callback chain runs in CI. A
+sealed guard refuses a second `fn parse_identity_assertion` anywhere in the
+workspace.
 
 ## C6. Config parsers must not default to literals
 
@@ -454,7 +471,7 @@ never told the pipe it backgrounded, or a main-thread watchdog kill on
 |---------|------|
 | Swift | The manual Objective-C bridge kept in step with every `@objc` method; secure storage backed by Keychain; a live-instance check before emitting; the telemetry session boundary inside a background task (C12) |
 | Kotlin | Secure storage backed by Keystore; no blocking work on the main looper; awareness that platform callbacks arrive on binder threads; the telemetry session boundary from an `Application.ActivityLifecycleCallbacks` watcher, never `onHostPause` (C12) |
-| Python | Nothing platform-specific; it is the thinnest binding and therefore the best place to smoke-test an ABI change; the host platform for telemetry from `platform` |
+| Python | Nothing platform-specific; it is the thinnest binding and therefore the best place to smoke-test an ABI change; the host platform for telemetry from `platform`; a BLE peripheral that serves the address and the core-built identity assertion, and a central that verifies before it announces (P8) |
 | TypeScript | Config normalization, event typing kept in step with the core, no assumption that a native method exists in an older binary, and no telemetry lifecycle code of its own |
 
 A storage adapter written in any of them owes the same thing: a green

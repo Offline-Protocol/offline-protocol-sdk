@@ -107,6 +107,7 @@ arrived when the leaf crate needed them:
 |---|---|---|
 | The six 1:1 control-frame prefixes | `offline-protocol`, a private module | A frame's type is the prefix its content begins with, so two ends that disagree about one do not have a conversation |
 | `KeyPackagePayload` and the compact envelope version | `offline-protocol`, a private module | It is the only channel by which capabilities are advertised, and a leaf builds it with the other MLS implementation |
+| The identity assertion codec | Three bridges, and nowhere in Rust | It is how a peer proves its address over a link the platform established, on Bluetooth LE today and on a peer stream next; a leaf serves one, and the three copies had already diverged (the Python one was JSON) |
 
 Neither changes what this ADR decided, and both were pure relocations: the
 prefix registry that reserves a prefix and refuses application content

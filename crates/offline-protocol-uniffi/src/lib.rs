@@ -132,6 +132,30 @@ pub fn parse_invite(blob: String) -> Result<InviteInfo, ProtocolError> {
         .map_err(|e| ProtocolError::MlsError(e.to_string()))
 }
 
+/// Verifies a peer's identity assertion and returns the address it proves.
+///
+/// The layout, `public_key(32) ‖ signature(64) ‖ signed_data`, has one home
+/// (`offline_protocol_sealed::identity_assertion`) and one verifier
+/// (`offline_protocol_mls::verify_identity_assertion`); this is that verifier
+/// over the FFI. A Bluetooth LE central hands it the bytes it read from the
+/// Identity characteristic and announces what comes back, never the string
+/// the peer served as its Device id. Where such a claim exists the caller
+/// compares the two exactly; the announced value is always the derived one.
+///
+/// Instance-less like [`derive_address`]: nothing about it needs protocol
+/// state, and a bridge must be able to refuse a peer before `create()`.
+///
+/// # Errors
+///
+/// Returns [`ProtocolError::MlsError`] for anything under 96 bytes, a key that
+/// is not on the curve, or a signature that does not verify. Every case means
+/// the peer is not surfaced at all.
+pub fn verify_identity_assertion(assertion: Vec<u8>) -> Result<String, ProtocolError> {
+    offline_protocol_mls::verify_identity_assertion(&assertion)
+        .map(|address| address.to_string())
+        .map_err(|e| ProtocolError::MlsError(e.to_string()))
+}
+
 // ---------------------------------------------------------------------------
 // Poison-recovery utilities for non-Result methods.
 //
@@ -6428,6 +6452,29 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
+    /// This identity's assertion over `signed_data`: the whole
+    /// `public_key(32) ‖ signature(64) ‖ signed_data` layout, built in the
+    /// core so that no bridge assembles it and every peripheral on every
+    /// platform serves the same bytes for the same key.
+    ///
+    /// `signed_data` means nothing to a verifier and may be empty. The mobile
+    /// peripherals put their mesh advertisement there; a peripheral with
+    /// nothing to say passes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::MlsNotInitialized`] before `initialize_mls`,
+    /// since there is no identity to sign with.
+    pub fn identity_assertion(&self, signed_data: Vec<u8>) -> Result<Vec<u8>, ProtocolError> {
+        let manager = self.get_mls_manager()?;
+        let guard = manager
+            .read()
+            .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
+        guard
+            .identity_assertion(&signed_data)
+            .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
     /// Builds the signed proof this device presents to attach to a gateway.
     ///
     /// Give it the 32-byte `challenge` the gateway minted for this connection
@@ -9179,6 +9226,62 @@ mod tests {
              no delivery ACK); got outbound recipients: {:?}",
             outbound_recipients
         );
+    }
+
+    /// The assertion a device builds is the assertion the namespace verifier
+    /// accepts, and it names the device's own address. Across the FFI rather
+    /// than in the MLS crate because this is the pair every bridge calls: a
+    /// peripheral serves the first, a central hands the bytes to the second.
+    #[test]
+    fn test_identity_assertion_round_trips_over_the_ffi_to_the_local_address() {
+        let device = OfflineProtocol::new(create_test_config()).unwrap();
+        assert!(
+            matches!(
+                device.identity_assertion(Vec::new()),
+                Err(ProtocolError::MlsNotInitialized)
+            ),
+            "no identity before initialize_mls, so nothing to assert"
+        );
+        device
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::default()),
+                Box::new(TestMlsStorageProvider::default()),
+            )
+            .unwrap();
+        let address = device.local_address().expect("address after init");
+
+        for signed_data in [Vec::new(), b"mesh advertisement".to_vec()] {
+            let assertion = device.identity_assertion(signed_data.clone()).unwrap();
+            assert_eq!(assertion.len(), 96 + signed_data.len());
+            assert_eq!(&assertion[96..], &signed_data[..]);
+            assert_eq!(
+                verify_identity_assertion(assertion.clone()).unwrap(),
+                address,
+                "the verifier must return the address the device announces as its own"
+            );
+
+            // The refusals a central relies on: one byte short, and one
+            // byte of the signature flipped.
+            let short = assertion[..assertion.len() - 1].to_vec();
+            if signed_data.is_empty() {
+                assert!(
+                    matches!(
+                        verify_identity_assertion(short),
+                        Err(ProtocolError::MlsError(_))
+                    ),
+                    "95 bytes is under the floor"
+                );
+            }
+            let mut tampered = assertion;
+            tampered[40] ^= 0x01;
+            assert!(
+                matches!(
+                    verify_identity_assertion(tampered),
+                    Err(ProtocolError::MlsError(_))
+                ),
+                "a tampered signature must not verify"
+            );
+        }
     }
 
     /// The recipient rule the platform bridges' frame builders are measured
@@ -13075,6 +13178,76 @@ mod tests {
                  sessions while being unable to start new ones, and only the SDK can tell the \
                  app that"
             );
+        }
+    }
+
+    /// The two mobile `SignedIdentityData` decoders are the last copies of
+    /// the identity assertion's split. They verify and derive through the
+    /// core already; what they still own is the 32/64 boundary, and neither
+    /// BLE callback chain runs in CI, so a boundary that drifted from
+    /// `offline-protocol-sealed` would read a peer's key as its signature and
+    /// refuse every peer with no test going red. The sizes are asserted as
+    /// literals for the C5 reason: a test that read them from the sealed
+    /// constants would agree with any edit made to both.
+    #[test]
+    fn react_native_ble_identity_decoders_split_at_the_sealed_offsets() {
+        let swift = rn_source_code_only("ios/mesh/Mesh.swift");
+        let kotlin = rn_source_code_only("android/src/main/java/com/offlineprotocol/mesh/Mesh.kt");
+
+        // Just the decoder type: from its declaration to the next type in
+        // the file. The rest of each file hashes for mesh scoring, which is
+        // not a derivation and is not this guard's business.
+        let decoder = |label: &str, code: &str, from: &str, to: &str| -> String {
+            let start = code.find(from).unwrap_or_else(|| {
+                panic!("{label}: `{from}` is gone; the decoder moved or was renamed")
+            });
+            let end = code[start..]
+                .find(to)
+                .map(|i| start + i)
+                .unwrap_or_else(|| panic!("{label}: `{to}` no longer follows the decoder"));
+            code[start..end].to_string()
+        };
+        let swift_decoder = decoder(
+            "Mesh.swift",
+            &swift,
+            "struct SignedIdentityData",
+            "struct MeshAdvertisementData",
+        );
+        let kotlin_decoder = decoder(
+            "Mesh.kt",
+            &kotlin,
+            "data class SignedIdentityData",
+            "data class MeshAdvertisementData",
+        );
+
+        for (label, code, key, sig) in [
+            (
+                "Mesh.swift",
+                &swift_decoder,
+                "static let publicKeySize = 32",
+                "static let signatureSize = 64",
+            ),
+            (
+                "Mesh.kt",
+                &kotlin_decoder,
+                "const val PUBLIC_KEY_SIZE = 32",
+                "const val SIGNATURE_SIZE = 64",
+            ),
+        ] {
+            assert!(
+                code.contains(key) && code.contains(sig),
+                "{label}: SignedIdentityData must split at 32 and 64, the offsets \
+                 offline-protocol-sealed's identity assertion codec defines"
+            );
+            // The decoders never derive or verify: that is the core's, through
+            // `deriveAddress` and `verifySignature`, and a local SHA-256 here
+            // is the drift ADR 0022 exists to prevent.
+            for banned in ["SHA256", "sha256", "MessageDigest", "bech32"] {
+                assert!(
+                    !code.contains(banned),
+                    "{label}: `{banned}` in the identity decoder means a local derivation"
+                );
+            }
         }
     }
 
