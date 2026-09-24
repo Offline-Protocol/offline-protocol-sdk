@@ -1,0 +1,101 @@
+{
+  "_comment": [
+    "Frozen conformance vectors for the peer-stream framing, from",
+    "docs/spec/stream-framing.md.",
+    "",
+    "Computed from the layout stated in that chapter, not by running",
+    "the transport they pin.",
+    "",
+    "The preamble body is RFC 8032 section 7.1 test vector 1, verbatim,",
+    "so it verifies under its own key and derives to `preamble.address`.",
+    "The message body is a binary v1 wire frame from the same message",
+    "spec the wire vectors use, so the whole stream frame is pinned.",
+    "",
+    "The length refusals carry only the four-byte prefix: a conforming",
+    "receiver refuses on the prefix and never reads a body, so a vector",
+    "carrying one would pin bytes the receiver must not have read."
+  ],
+  "layout": "u32be(len(body)) || body",
+  "byte_order": "big-endian",
+  "ceiling": 1048576,
+  "preamble_floor": 96,
+  "preamble": {
+    "note": "The first frame in each direction. Its body is the identity assertion; here signed_data is empty, so the body sits exactly on the 96-byte floor and the prefix reads 00000060.",
+    "address": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+    "body_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511ae5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+    "frame_hex": "00000060d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511ae5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+  },
+  "message": {
+    "note": "One message, one frame. The body is the hop-local encoding (binary v1 here) and is handed to the core attributed to the address the preamble proved.",
+    "message": {
+      "id": "11111111-2222-3333-4444-555555555555",
+      "sender": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+      "recipient": "off1qyulwy7s5ezz20cy222zrw04rwds39uapqv9j8r0",
+      "app_id": "app",
+      "priority": "medium",
+      "ttl": 8,
+      "hop_count": 0,
+      "timestamp_ms": 1700000000000,
+      "lamport_clock": 0,
+      "content_type": "text",
+      "content": "hello over a stream",
+      "binary_content_hex": null,
+      "media_metadata_json": null,
+      "metadata": {},
+      "requires_ack": true,
+      "reply_to_msg": null,
+      "forwarded_from_json": null,
+      "reply_context_json": null
+    },
+    "body_hex": "f5111111112222333344445555555555552c6f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e2c6f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a3872300361707001080080a0abfef96200001368656c6c6f206f76657220612073747265616d00000001000000",
+    "frame_hex": "00000095f5111111112222333344445555555555552c6f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e2c6f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a3872300361707001080080a0abfef96200001368656c6c6f206f76657220612073747265616d00000001000000"
+  },
+  "exchange": {
+    "note": "The bytes one direction of a stream carries, in order. A receiver announces `from` after the first frame and delivers the second body attributed to it.",
+    "frames_hex": [
+      "00000060d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511ae5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+      "00000095f5111111112222333344445555555555552c6f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e2c6f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a3872300361707001080080a0abfef96200001368656c6c6f206f76657220612073747265616d00000001000000"
+    ],
+    "announces": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+    "delivers": [
+      {
+        "from": "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn",
+        "body_hex": "f5111111112222333344445555555555552c6f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e2c6f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a3872300361707001080080a0abfef96200001368656c6c6f206f76657220612073747265616d00000001000000"
+      }
+    ]
+  },
+  "refusals": [
+    {
+      "name": "zero length",
+      "note": "No encoding produces an empty message.",
+      "frames_hex": [
+        "00000000"
+      ],
+      "reads_body": false
+    },
+    {
+      "name": "one over the ceiling",
+      "note": "1 MiB + 1. Refused on the prefix; a receiver that allocates first has handed the peer the allocation.",
+      "frames_hex": [
+        "00100001"
+      ],
+      "reads_body": false
+    },
+    {
+      "name": "preamble one under the floor",
+      "note": "Ninety-five bytes: a key and most of a signature. A receiver may refuse this on the prefix or after the read; either way the stream closes and nothing is announced.",
+      "frames_hex": [
+        "0000005fd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511ae5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a10"
+      ],
+      "reads_body": true
+    },
+    {
+      "name": "a message before the preamble",
+      "note": "A well-formed message frame as the first frame. Position makes it the preamble, and it is not one: the stream closes and the body never reaches the core.",
+      "frames_hex": [
+        "00000095f5111111112222333344445555555555552c6f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e2c6f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a3872300361707001080080a0abfef96200001368656c6c6f206f76657220612073747265616d00000001000000"
+      ],
+      "reads_body": true
+    }
+  ]
+}

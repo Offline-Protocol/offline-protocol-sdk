@@ -34,6 +34,7 @@ REPO = Path(__file__).resolve().parents[2]
 
 CORE_DATA = REPO / "crates" / "offline-protocol-core" / "tests" / "data"
 SEALED_DATA = REPO / "crates" / "offline-protocol-sealed" / "tests" / "data"
+TRANSPORT_DATA = REPO / "crates" / "offline-protocol-transport" / "tests" / "data"
 
 
 # --------------------------------------------------------------------------
@@ -1436,6 +1437,134 @@ def build_identity_assertion_vectors() -> dict:
     }
 
 
+def build_stream_framing_vectors() -> dict:
+    """The peer-stream framing, from docs/spec/stream-framing.md.
+
+    `u32be(len(body)) || body`, with the first body in each direction the
+    identity assertion and every later body one message. The ceiling is the
+    transport message ceiling; the preamble floor is the assertion's own.
+    """
+    CEILING = 1_048_576
+    PREAMBLE_FLOOR = 96
+
+    def framed(body: bytes) -> bytes:
+        return len(body).to_bytes(4, "big") + body
+
+    # The preamble: RFC 8032 test vector 1 with its empty message, so the
+    # body is exactly the floor and is the same assertion the identity
+    # assertion vectors already pin.
+    preamble_body = bytes.fromhex(RFC8032_TV1_PK + RFC8032_TV1_SIG)
+    assert len(preamble_body) == PREAMBLE_FLOOR
+    peer = derive_address(bytes.fromhex(RFC8032_TV1_PK))
+    other = derive_address(bytes.fromhex(RFC8032_TV2_PK))
+    preamble_frame = framed(preamble_body)
+
+    # One message from that peer, as a binary v1 frame: byte-normative, so
+    # the whole stream frame is pinned and not just its prefix.
+    msg = message(
+        id="11111111-2222-3333-4444-555555555555",
+        sender=peer,
+        recipient=other,
+        app_id="app",
+        content="hello over a stream",
+        timestamp_ms=1_700_000_000_000,
+    )
+    msg_body = encode_frame(msg)
+    msg_frame = framed(msg_body)
+
+    short_preamble = framed(preamble_body[: PREAMBLE_FLOOR - 1])
+
+    return {
+        "_comment": [
+            "Frozen conformance vectors for the peer-stream framing, from",
+            "docs/spec/stream-framing.md.",
+            "",
+            "Computed from the layout stated in that chapter, not by running",
+            "the transport they pin.",
+            "",
+            "The preamble body is RFC 8032 section 7.1 test vector 1, verbatim,",
+            "so it verifies under its own key and derives to `preamble.address`.",
+            "The message body is a binary v1 wire frame from the same message",
+            "spec the wire vectors use, so the whole stream frame is pinned.",
+            "",
+            "The length refusals carry only the four-byte prefix: a conforming",
+            "receiver refuses on the prefix and never reads a body, so a vector",
+            "carrying one would pin bytes the receiver must not have read.",
+        ],
+        "layout": "u32be(len(body)) || body",
+        "byte_order": "big-endian",
+        "ceiling": CEILING,
+        "preamble_floor": PREAMBLE_FLOOR,
+        "preamble": {
+            "note": (
+                "The first frame in each direction. Its body is the identity "
+                "assertion; here signed_data is empty, so the body sits exactly "
+                "on the 96-byte floor and the prefix reads 00000060."
+            ),
+            "address": peer,
+            "body_hex": preamble_body.hex(),
+            "frame_hex": preamble_frame.hex(),
+        },
+        "message": {
+            "note": (
+                "One message, one frame. The body is the hop-local encoding "
+                "(binary v1 here) and is handed to the core attributed to the "
+                "address the preamble proved."
+            ),
+            "message": msg,
+            "body_hex": msg_body.hex(),
+            "frame_hex": msg_frame.hex(),
+        },
+        "exchange": {
+            "note": (
+                "The bytes one direction of a stream carries, in order. A "
+                "receiver announces `from` after the first frame and delivers "
+                "the second body attributed to it."
+            ),
+            "frames_hex": [preamble_frame.hex(), msg_frame.hex()],
+            "announces": peer,
+            "delivers": [{"from": peer, "body_hex": msg_body.hex()}],
+        },
+        "refusals": [
+            {
+                "name": "zero length",
+                "note": "No encoding produces an empty message.",
+                "frames_hex": ["00000000"],
+                "reads_body": False,
+            },
+            {
+                "name": "one over the ceiling",
+                "note": (
+                    "1 MiB + 1. Refused on the prefix; a receiver that "
+                    "allocates first has handed the peer the allocation."
+                ),
+                "frames_hex": [(CEILING + 1).to_bytes(4, "big").hex()],
+                "reads_body": False,
+            },
+            {
+                "name": "preamble one under the floor",
+                "note": (
+                    "Ninety-five bytes: a key and most of a signature. A "
+                    "receiver may refuse this on the prefix or after the read; "
+                    "either way the stream closes and nothing is announced."
+                ),
+                "frames_hex": [short_preamble.hex()],
+                "reads_body": True,
+            },
+            {
+                "name": "a message before the preamble",
+                "note": (
+                    "A well-formed message frame as the first frame. Position "
+                    "makes it the preamble, and it is not one: the stream "
+                    "closes and the body never reaches the core."
+                ),
+                "frames_hex": [msg_frame.hex()],
+                "reads_body": True,
+            },
+        ],
+    }
+
+
 def build_gateway_proof_vectors() -> dict:
     def case(name: str, note: str, address: str, challenge: bytes) -> dict:
         return {
@@ -1546,6 +1675,7 @@ FILES = [
     (SEALED_DATA / "mls-envelope-v1.vectors.json", build_envelope_vectors),
     (SEALED_DATA / "key-package-v1.vectors.json", build_key_package_vectors),
     (SEALED_DATA / "identity-assertion-v1.vectors.json", build_identity_assertion_vectors),
+    (TRANSPORT_DATA / "stream-framing-v1.vectors.json", build_stream_framing_vectors),
 ]
 
 
