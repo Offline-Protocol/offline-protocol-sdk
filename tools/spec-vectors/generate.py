@@ -522,6 +522,26 @@ def encode_envelope(e: dict) -> bytes:
 RFC8032_TV1_PK = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
 RFC8032_TV2_PK = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
 RFC8032_TV3_PK = "fc51cd8e6218a1a38da47ed00230f0580816ed13ba3303ac5deb911548908025"
+
+# The published signatures and messages of the same three vectors. They are
+# pasted from RFC 8032 section 7.1, never computed here: the generator carries
+# no Ed25519 implementation, and a signature it produced would be a value this
+# script chose rather than one a reader can check against the RFC.
+RFC8032_TV1_MSG = ""
+RFC8032_TV1_SIG = (
+    "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb882"
+    "1590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b"
+)
+RFC8032_TV2_MSG = "72"
+RFC8032_TV2_SIG = (
+    "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1"
+    "e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"
+)
+RFC8032_TV3_MSG = "af82"
+RFC8032_TV3_SIG = (
+    "6291d657deec24024827e69c3abe01a30ce548a284743a445e3680d7db5ac3ac18ff9b"
+    "538d16f290ae67f760984dc6594a7c15e9716ed28dc027beceea1ec40a"
+)
 ZEROS_PK = "00" * 32
 FF_PK = "ff" * 32
 
@@ -1330,6 +1350,92 @@ def build_key_package_vectors() -> dict:
     }
 
 
+def build_identity_assertion_vectors() -> dict:
+    """The Bluetooth LE identity assertion, from docs/spec/ble-framing.md.
+
+    `public_key(32) || signature(64) || signed_data`, with `signed_data`
+    whatever follows and possibly empty. A reader refuses anything under 96
+    bytes. There is no framing to compute, which is exactly why a vector is
+    worth having: the only mistakes available are a wrong field order, a wrong
+    boundary, and a floor off by one, and all three pass a round-trip test
+    against the encoder that made them.
+    """
+    published = [
+        ("rfc8032-tv1", RFC8032_TV1_PK, RFC8032_TV1_MSG, RFC8032_TV1_SIG),
+        ("rfc8032-tv2", RFC8032_TV2_PK, RFC8032_TV2_MSG, RFC8032_TV2_SIG),
+        ("rfc8032-tv3", RFC8032_TV3_PK, RFC8032_TV3_MSG, RFC8032_TV3_SIG),
+    ]
+    notes = {
+        "rfc8032-tv1": (
+            "An empty signed_data. The assertion is exactly 96 bytes, the "
+            "floor, and a reader that refuses 'at most 96' instead of 'under "
+            "96' refuses a valid one."
+        ),
+        "rfc8032-tv2": "One byte of signed_data.",
+        "rfc8032-tv3": "Two bytes of signed_data.",
+    }
+    assertions = []
+    for name, pk, msg, sig in published:
+        assert len(bytes.fromhex(pk)) == 32 and len(bytes.fromhex(sig)) == 64
+        assertions.append(
+            {
+                "name": name,
+                "note": notes[name],
+                "public_key_hex": pk,
+                "signature_hex": sig,
+                "signed_data_hex": msg,
+                "assertion_hex": pk + sig + msg,
+                "address": derive_address(bytes.fromhex(pk)),
+            }
+        )
+
+    whole = bytes.fromhex(RFC8032_TV1_PK + RFC8032_TV1_SIG)
+    refusals = [
+        {
+            "name": "empty",
+            "note": "Nothing at all.",
+            "assertion_hex": "",
+        },
+        {
+            "name": "a public key alone",
+            "note": "Thirty-two bytes: a key with nothing proving possession of it.",
+            "assertion_hex": RFC8032_TV1_PK,
+        },
+        {
+            "name": "one byte under the floor",
+            "note": (
+                "Ninety-five bytes. The last byte of a valid signature is "
+                "missing, so this is the off-by-one a floor check exists for."
+            ),
+            "assertion_hex": whole[:95].hex(),
+        },
+    ]
+
+    return {
+        "_comment": [
+            "Frozen conformance vectors for the Bluetooth LE identity assertion,",
+            "from docs/spec/ble-framing.md.",
+            "",
+            "Computed from the layout stated in that chapter, not by running",
+            "the codec they pin.",
+            "",
+            "Each assertion is a public key, a signature and a message taken",
+            "verbatim from RFC 8032 section 7.1 test vectors 1 to 3, so every",
+            "signature here verifies under its key and every field traces to",
+            "a published source rather than to this file. The address is what",
+            "the key derives to under docs/spec/identity.md, which is what a",
+            "verifier returns after the signature checks.",
+            "",
+            "The refusals are inputs a reader must reject before any",
+            "cryptography runs: nothing under 96 bytes has a whole signature.",
+        ],
+        "layout": "public_key(32) || signature(64) || signed_data",
+        "minimum_length": 96,
+        "assertions": assertions,
+        "refusals": refusals,
+    }
+
+
 def build_gateway_proof_vectors() -> dict:
     def case(name: str, note: str, address: str, challenge: bytes) -> dict:
         return {
@@ -1439,6 +1545,7 @@ FILES = [
     (SEALED_DATA / "gateway-address-proof-v1.vectors.json", build_gateway_proof_vectors),
     (SEALED_DATA / "mls-envelope-v1.vectors.json", build_envelope_vectors),
     (SEALED_DATA / "key-package-v1.vectors.json", build_key_package_vectors),
+    (SEALED_DATA / "identity-assertion-v1.vectors.json", build_identity_assertion_vectors),
 ]
 
 

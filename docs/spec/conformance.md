@@ -115,6 +115,7 @@ are computed independently of that code.
 | `crates/offline-protocol-sealed/tests/data/gateway-address-proof-v1.vectors.json` | [The gateway contract](gateway-contract.md) | Encode |
 | `crates/offline-protocol-sealed/tests/data/mls-envelope-v1.vectors.json` | [Encryption envelopes](encryption-envelopes.md) | Both |
 | `crates/offline-protocol-sealed/tests/data/key-package-v1.vectors.json` | [Capability negotiation](capability-negotiation.md) | Parse |
+| `crates/offline-protocol-sealed/tests/data/identity-assertion-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md#the-identity-assertion) | Both |
 | `crates/offline-protocol/tests/data/data-sync-v1.vectors.json` | [Document replication](data-sync.md) | Both |
 | `crates/offline-protocol-transport/tests/data/ble-framing-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md) | Both |
 
@@ -123,8 +124,9 @@ are computed independently of that code.
 `tools/spec-vectors/generate.py` is a second implementation of these encodings,
 written from the chapters and forbidden from importing, linking against or
 shelling out to the Rust crates it pins. Running it with `--check` regenerates
-the seven files it owns (every row above except document replication and Bluetooth
-LE framing) and fails on any difference, which is what CI does.
+the eight files it owns (every row above except document replication and the
+Bluetooth LE fragment framing) and fails on any difference, which is what CI
+does.
 
 Those two remaining files predate the generator and were computed by hand from
 their chapters, as each says in its own header. They carry the same independence
@@ -167,7 +169,9 @@ exactly the reader who most needs to know about them.
 - **Signatures.** The control-signing vectors pin the bytes that go under the
   key, not any signature over them. Ed25519 is specified by RFC 8032 and carries
   its own vectors; what is specific to this protocol is which bytes are signed,
-  and that is the half a second implementation gets wrong.
+  and that is the half a second implementation gets wrong. The one file that
+  does carry signatures, the identity assertion, carries the RFC's own,
+  pasted rather than computed, for the same reason.
 - **The JSON floor's exact serialization.** The floor is not byte-normative:
   [wire format](wire-format.md#json-encoding) requires a receiver to accept both
   spellings of every optional field. The key package vectors therefore pin the

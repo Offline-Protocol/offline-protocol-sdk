@@ -41,6 +41,7 @@ the crate whose code they pin, so a packaged build carries its own vectors:
 | `crates/offline-protocol-sealed/tests/data/gateway-address-proof-v1.vectors.json` | [The gateway contract](gateway-contract.md) |
 | `crates/offline-protocol-sealed/tests/data/mls-envelope-v1.vectors.json` | [Encryption envelopes](encryption-envelopes.md) |
 | `crates/offline-protocol-sealed/tests/data/key-package-v1.vectors.json` | [Capability negotiation](capability-negotiation.md) |
+| `crates/offline-protocol-sealed/tests/data/identity-assertion-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md#the-identity-assertion) |
 | `crates/offline-protocol/tests/data/data-sync-v1.vectors.json` | [Document replication](data-sync.md) |
 | `crates/offline-protocol-transport/tests/data/ble-framing-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md) |
 | `crates/offline-protocol-transport/tests/data/nip44.vectors.json` | None. These are the NIP-44 spec's own published vectors, vendored for the Nostr carrier's sealing and pinned to the checksum that spec publishes. Transport framing is out of scope here, so there is no chapter for them to pin |

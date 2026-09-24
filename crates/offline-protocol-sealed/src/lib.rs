@@ -25,6 +25,10 @@
 //! - [`freshness`]: two ends that disagree about how old a signed control
 //!   frame may be produce a pair that refuses its own traffic in one direction
 //!   and accepts a replayed frame in the other.
+//! - [`identity_assertion`]: a second copy of the byte layout a peer proves
+//!   its address with is a peer one platform can verify and another cannot,
+//!   and the symptom is a link that carries frames the receiving core then
+//!   refuses as unattributed.
 //!
 //! # Why this is not part of `offline-protocol-core`
 //!
@@ -54,6 +58,7 @@ pub mod derive;
 pub mod envelope;
 pub mod error;
 pub mod freshness;
+pub mod identity_assertion;
 pub mod keypackage;
 pub mod prefixes;
 
@@ -73,6 +78,10 @@ pub use error::{Result, SealedError};
 pub use freshness::{
     control_frame_freshness, Freshness, CTRL_FRESHNESS_FUTURE_MS, CTRL_FRESHNESS_PAST_MS,
     LEAF_CTRL_FRESHNESS_PAST_MS,
+};
+pub use identity_assertion::{
+    encode_identity_assertion, parse_identity_assertion, IdentityAssertion, ED25519_SIGNATURE_LEN,
+    IDENTITY_ASSERTION_MIN_LEN,
 };
 pub use keypackage::{KeyPackagePayload, CTRL_SIGN_V2, MLS_ENVELOPE_COMPACT_V1};
 
@@ -202,6 +211,73 @@ mod interop_harness_guard_tests {
                 "`{copy}` is back in tools/mls-interop/src/main.rs: the harness has to use \
                  offline-protocol-sealed's, or it stops testing the SDK's configuration"
             );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod second_codec_guard_tests {
+    /// Every `src/` tree in the workspace and the tools, except this crate's.
+    fn other_rust_sources() -> Vec<std::path::PathBuf> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut out = Vec::new();
+        for group in ["crates", "tools"] {
+            let Ok(entries) = std::fs::read_dir(root.join(group)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let dir = entry.path();
+                if dir.file_name().and_then(|n| n.to_str()) == Some("offline-protocol-sealed") {
+                    continue;
+                }
+                collect_rs(&dir.join("src"), &mut out);
+            }
+        }
+        out
+    }
+
+    fn collect_rs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// The identity assertion was split three times before this crate held
+    /// it, once per bridge, and the Python copy was not even the same
+    /// format. The convenient route back is a harness, a transport or a
+    /// fixture writing `bytes[..32]`, `bytes[32..96]` and a second `fn
+    /// parse_identity_assertion` rather than taking the dependency. This is
+    /// the only thing in the workspace test run that can notice.
+    #[test]
+    fn no_other_crate_declares_an_identity_assertion_codec() {
+        let sources = other_rust_sources();
+        // A published .crate archive has no sibling crates; see the manifest
+        // guard above for why that is a skip and not a failure.
+        if sources.is_empty() {
+            eprintln!("no sibling crates present, skipping the second-codec check");
+            return;
+        }
+        for path in sources {
+            let text = std::fs::read_to_string(&path).expect("source is readable");
+            for copy in [
+                "fn parse_identity_assertion",
+                "fn encode_identity_assertion",
+            ] {
+                assert!(
+                    !text.contains(copy),
+                    "`{copy}` is declared in {}: the assertion layout has one home, \
+                     offline-protocol-sealed, and everything else calls it",
+                    path.display()
+                );
+            }
         }
     }
 }
