@@ -37,9 +37,17 @@ message ends and who the peer is, and both are settled here:
   peer to reconnect, is bounded by the same rule to exactly that, and the
   threat model records it as R16. The higher address gets no such help: its
   reconnect is the losing kind for as long as the lower side holds a stream
-  it believes live. So every stream carries TCP keepalive, which ends a dead
-  peer's stream within a bound, and every attempt that ends unannounced
-  climbs the reconnect ladder rather than retrying at a fixed pace.
+  it believes live. So every stream carries TCP keepalive, which ends an
+  idle dead peer's stream within a bound, and every attempt that ends
+  unannounced climbs the reconnect ladder rather than retrying at a fixed
+  pace.
+* **One peer's receive window never holds another peer's traffic.** The
+  core hands every outbound body through one queue, and each is moved at
+  once onto its stream's own bounded queue, written by that stream's own
+  writer under a write deadline. A peer that stops reading, or reads
+  slowly, stalls only itself; past the deadline its stream is aborted and
+  reported lost. Keepalive does not cover that case: a stream with data in
+  flight is not idle, and outside Linux nothing bounds its retransmissions.
 
 The Rust reference for the same rules is ``stream_framing.rs`` in the
 transport crate, and its conformance vectors are the ones this manager's
@@ -127,6 +135,17 @@ REFUSAL_BACKOFF_MAX = 600.0
 KEEPALIVE_IDLE = 15
 KEEPALIVE_INTERVAL = 5
 KEEPALIVE_COUNT = 3
+#: Seconds one frame's write may wait on the peer's receive window before
+#: the stream is aborted. Keepalive ends an *idle* dead stream; a stream with
+#: unacknowledged data is not idle, and on macOS and Windows nothing else
+#: bounds it, so without this a peer that stops reading holds its stream,
+#: and everything queued to it, for as long as TCP keeps retransmitting.
+WRITE_TIMEOUT = 30.0
+#: Bytes queued toward one stream and not yet written. A body that would go
+#: over is dropped (the reliability layer retries it) rather than buffered
+#: without bound behind a slow peer. One frame is always accepted onto an
+#: empty queue, so the largest legal frame is never refused by this bound.
+MAX_QUEUED_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -194,7 +213,9 @@ class _Stream:
         "learned",
         "was_announced",
         "superseded",
-        "write_lock",
+        "outbound_queue",
+        "queued_bytes",
+        "writer_task",
     )
 
     def __init__(
@@ -227,7 +248,12 @@ class _Stream:
         #: may still have a body in its buffer, and none may reach the core:
         #: its frames belong to no announced peer any more.
         self.superseded = False
-        self.write_lock = asyncio.Lock()
+        #: Framed bodies waiting for this stream's writer, and their total
+        #: size. Per stream, so a peer that stops reading holds only its own.
+        self.outbound_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self.queued_bytes = 0
+        #: The task writing ``outbound_queue``, once the preamble is out.
+        self.writer_task: asyncio.Task[None] | None = None
 
 
 def frame(body: bytes) -> bytes:
@@ -296,6 +322,28 @@ def _set_keepalive(writer: asyncio.StreamWriter) -> None:
             pass
 
 
+def _discard_socket(writer: asyncio.StreamWriter) -> None:
+    """Close a stream's socket now, whatever is still buffered.
+
+    ``writer.close()`` waits for the write buffer to flush before the socket
+    goes, and toward a peer that stopped reading it never flushes: the
+    socket, and a writer awaiting ``drain()`` on it, would outlive the close.
+    Abort discards the buffer, which is correct for a stream being
+    discarded; a stream with nothing buffered closes gracefully.
+    """
+    try:
+        transport = writer.transport
+        if transport.get_write_buffer_size() > 0:
+            transport.abort()
+            return
+    except Exception:
+        pass
+    try:
+        writer.close()
+    except Exception:
+        pass
+
+
 class PeerStreamManager(TransportManager):
     """The host's peer-stream transport: a TCP listener, outbound connections
     to configured and discovered peers, the preamble exchange, and the drain
@@ -320,6 +368,9 @@ class PeerStreamManager(TransportManager):
     advertise, discover:
         Publish this host over DNS-SD, and connect to hosts found there.
         Either requires the optional ``zeroconf`` dependency.
+    write_timeout:
+        Seconds one frame's write may wait on the peer before its stream is
+        aborted and reported lost.
     """
 
     transport_id = "wifi_direct"
@@ -337,6 +388,7 @@ class PeerStreamManager(TransportManager):
         preamble_timeout: float = PREAMBLE_TIMEOUT,
         max_streams: int = MAX_STREAMS,
         max_streams_per_host: int = MAX_STREAMS_PER_HOST,
+        write_timeout: float = WRITE_TIMEOUT,
     ) -> None:
         super().__init__()
         self._protocol = protocol
@@ -352,6 +404,7 @@ class PeerStreamManager(TransportManager):
         self._preamble_timeout = preamble_timeout
         self._max_streams = max_streams
         self._max_streams_per_host = max_streams_per_host
+        self._write_timeout = write_timeout
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server: asyncio.base_events.Server | None = None
@@ -374,7 +427,6 @@ class PeerStreamManager(TransportManager):
         #: outbound endpoints: an inbound one is a fresh ephemeral port every
         #: time, and remembering it would only grow the map.
         self._refusals: dict[str, int] = {}
-        self._draining = False
         self._discovery: _LanDiscovery | None = None
 
         # Metrics
@@ -384,6 +436,7 @@ class PeerStreamManager(TransportManager):
         self._frames_received = 0
         self._streams_refused = 0
         self._streams_superseded = 0
+        self._frames_dropped = 0
 
     # -- TransportManager interface -------------------------------------------
 
@@ -511,8 +564,10 @@ class PeerStreamManager(TransportManager):
         # Streams before the server's wait: since Python 3.12 `wait_closed`
         # waits for every connection handler to finish, and a handler
         # finishes only once its stream is closed.
+        writers = [s.writer_task for s in self._streams if s.writer_task is not None]
         for stream in list(self._streams):
             await self._close_stream(stream, "transport stopping")
+        await asyncio.gather(*writers, return_exceptions=True)
         self._streams.clear()
         self._by_peer.clear()
         self._refusals.clear()
@@ -532,6 +587,7 @@ class PeerStreamManager(TransportManager):
             "frames_received": self._frames_received,
             "streams_refused": self._streams_refused,
             "streams_superseded": self._streams_superseded,
+            "frames_dropped": self._frames_dropped,
             "connected_peers": len(self._by_peer),
             "open_streams": len(self._streams),
             "listen_port": self.listen_port,
@@ -546,7 +602,12 @@ class PeerStreamManager(TransportManager):
         endpoint = f"{peername[0]}:{peername[1]}" if peername else "?"
         remote_host = peername[0] if peername else None
         refusal = None
-        if len(self._streams) >= self._max_streams:
+        if self._state not in (TransportState.RUNNING, TransportState.STARTING):
+            # Accepted before the listener closed and scheduled after the
+            # stop swept the streams: serving it would announce a peer to a
+            # core already told the layer is down.
+            refusal = "Stream refused: transport stopping"
+        elif len(self._streams) >= self._max_streams:
             refusal = "Stream refused: at capacity"
         elif (
             remote_host is not None
@@ -698,11 +759,19 @@ class PeerStreamManager(TransportManager):
             # Ours first, without waiting for theirs: a peer that never speaks
             # cannot hold the stream half-open on purpose.
             assertion = bytes(self._protocol.identity_assertion(signed_data=[]))
-            await self._write(stream, frame(assertion))
-
-            # One deadline for the whole preamble frame, prefix and body: a
-            # deadline on the prefix alone lets four bytes hold the slot.
+            # One deadline for the whole preamble exchange, our write and
+            # their frame, prefix and body: a deadline on the prefix alone
+            # lets four bytes hold the slot.
             deadline: float | None = loop.time() + self._preamble_timeout
+            stream.writer.write(frame(assertion))
+            try:
+                await asyncio.wait_for(stream.writer.drain(), timeout=self._remaining(deadline))
+            except asyncio.TimeoutError:
+                reason = "preamble write stalled"
+                return
+            # Every later frame goes through this stream's own writer, so
+            # the preamble is first on the wire by construction.
+            stream.writer_task = asyncio.ensure_future(self._write_loop(stream))
             first = True
             while True:
                 if stream.superseded:
@@ -791,6 +860,10 @@ class PeerStreamManager(TransportManager):
             )
             return False
         if derived == self.local_address:
+            # Counted, so a peer entry that points at this host climbs to the
+            # refusal ceiling instead of reconnecting at the ladder's pace
+            # forever.
+            self._record_refusal(stream)
             self._emit_diagnostic(
                 "debug", "Refusing a stream to ourselves", {"endpoint": stream.endpoint}
             )
@@ -866,10 +939,10 @@ class PeerStreamManager(TransportManager):
         announced = stream.peer is not None and self._by_peer.get(stream.peer) is stream
         if announced:
             self._by_peer.pop(stream.peer, None)
-        try:
-            stream.writer.close()
-        except Exception:
-            pass
+        task = stream.writer_task
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+        _discard_socket(stream.writer)
         # A stream that never proved a peer was never announced, and there
         # is nothing to report.
         if announced:
@@ -884,10 +957,29 @@ class PeerStreamManager(TransportManager):
                 "debug", "Unannounced stream closed", {"endpoint": stream.endpoint, "reason": reason}
             )
 
-    async def _write(self, stream: _Stream, data: bytes) -> None:
-        async with stream.write_lock:
-            stream.writer.write(data)
-            await stream.writer.drain()
+    async def _write_loop(self, stream: _Stream) -> None:
+        """Write ``stream``'s queued frames, one at a time, each under the
+        write deadline. A frame the peer does not take in time aborts the
+        stream: the peer is reported lost, and nothing else waited on it."""
+        reason = "write failed"
+        try:
+            while True:
+                data = await stream.outbound_queue.get()
+                stream.queued_bytes -= len(data)
+                stream.writer.write(data)
+                await asyncio.wait_for(stream.writer.drain(), timeout=self._write_timeout)
+                self._bytes_sent += len(data)
+                self._frames_sent += 1
+        except asyncio.CancelledError:
+            return
+        except asyncio.TimeoutError:
+            reason = "write stalled past the deadline"
+        except Exception as exc:
+            reason = f"write failed: {exc}"
+        self._emit_diagnostic(
+            "warning", "Peer stream write failed", {"peer": stream.peer, "reason": reason}
+        )
+        await self._close_stream(stream, reason)
 
     # -- outbound drain ---------------------------------------------------------
 
@@ -903,43 +995,52 @@ class PeerStreamManager(TransportManager):
     def _schedule_drain(self) -> None:
         loop = self._loop
         if loop is not None and not loop.is_closed() and loop.is_running():
-            loop.call_soon_threadsafe(asyncio.ensure_future, self._drain())
+            loop.call_soon_threadsafe(self._drain)
 
-    async def _drain(self) -> None:
-        if self._draining:
-            return
-        self._draining = True
-        try:
-            while True:
-                try:
-                    message = self._protocol.wifi_direct_get_next_message()
-                except Exception as exc:
-                    logger.warning("wifi_direct_get_next_message failed: %s", exc)
-                    break
-                if message is None:
-                    break
-                stream = self._by_peer.get(message.recipient_id)
-                if stream is None:
-                    # The stream closed between the queue and the drain; the
-                    # core's retry path re-offers the message.
-                    self._emit_diagnostic(
-                        "debug", "No announced stream for a queued body", {"peer": message.recipient_id}
-                    )
-                    continue
-                body = bytes(message.data)
-                try:
-                    await self._write(stream, frame(body))
-                    self._bytes_sent += LENGTH_PREFIX_LEN + len(body)
-                    self._frames_sent += 1
-                except Exception as exc:
-                    self._emit_diagnostic(
-                        "warning",
-                        "Failed to write a frame",
-                        {"peer": message.recipient_id, "error": str(exc)},
-                    )
-                    await self._close_stream(stream, f"write failed: {exc}")
-        finally:
-            self._draining = False
+    def _drain(self) -> None:
+        """Move every body the core holds onto its stream's own queue.
+
+        Never awaits: the core's queue is one FIFO for every peer, and a
+        drain that waited on one peer's socket would hold every other
+        peer's traffic behind it. Each stream's writer does the waiting.
+        """
+        while True:
+            try:
+                message = self._protocol.wifi_direct_get_next_message()
+            except Exception as exc:
+                logger.warning("wifi_direct_get_next_message failed: %s", exc)
+                return
+            if message is None:
+                return
+            stream = self._by_peer.get(message.recipient_id)
+            if stream is None or stream.writer_task is None:
+                # The stream closed between the queue and the drain; the
+                # core's retry path re-offers the message.
+                self._emit_diagnostic(
+                    "debug", "No announced stream for a queued body", {"peer": message.recipient_id}
+                )
+                continue
+            try:
+                data = frame(bytes(message.data))
+            except ValueError as exc:
+                # A body no receiver would accept. Refused here, and the
+                # stream, which did nothing wrong, stays up.
+                self._frames_dropped += 1
+                self._emit_diagnostic(
+                    "error", "Refusing to frame a body", {"peer": message.recipient_id, "error": str(exc)}
+                )
+                continue
+            if stream.queued_bytes and stream.queued_bytes + len(data) > MAX_QUEUED_BYTES:
+                # The peer is not keeping up. Buffering without bound would
+                # only move the stall into memory; the write deadline ends a
+                # peer that has stopped, and the retry path re-offers this.
+                self._frames_dropped += 1
+                self._emit_diagnostic(
+                    "warning", "Peer stream queue full, dropping a body", {"peer": message.recipient_id}
+                )
+                continue
+            stream.queued_bytes += len(data)
+            stream.outbound_queue.put_nowait(data)
 
     # -- discovery hooks --------------------------------------------------------
 

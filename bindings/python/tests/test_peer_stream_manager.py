@@ -1016,3 +1016,196 @@ class TestDiscoveryLifecycle:
             b_protocol.wifi_direct_peer_connected.assert_called_once_with(peer_id=OUR_ADDRESS)
         finally:
             await asyncio.gather(a.stop(), b.stop())
+
+
+# ---------------------------------------------------------------------------
+# Outbound isolation: one peer's receive window holds only that peer
+# ---------------------------------------------------------------------------
+
+
+def queued_protocol() -> tuple[MagicMock, list]:
+    """A protocol whose outbound queue is a list the test fills."""
+    protocol = make_protocol()
+    queue: list = []
+    protocol.wifi_direct_get_next_message = MagicMock(
+        side_effect=lambda: queue.pop(0) if queue else None
+    )
+    return protocol, queue
+
+
+def body_for(recipient: str, data: bytes):
+    return MagicMock(recipient_id=recipient, data=data)
+
+
+async def stalled_handshake(manager: PeerStreamManager, assertion: bytes):
+    """A peer that proves itself and then never reads: small buffers on
+    both ends, so a few hundred KiB fill them."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", manager.listen_port)
+    writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8192)
+    assert await read_frame(reader) == OUR_ASSERTION
+    writer.write(frame(assertion))
+    await writer.drain()
+    return reader, writer
+
+
+def shrink_send_buffer(manager: PeerStreamManager, peer: str) -> None:
+    stream = manager._by_peer[peer]
+    stream.writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8192)
+
+
+async def until_wedged(manager: PeerStreamManager, peer: str, timeout: float = 5.0) -> None:
+    """Wait until writes toward ``peer`` have stopped moving: bytes are
+    buffered and the buffer has not shrunk for a while. A fixed sleep is not
+    enough, because the kernel keeps accepting for a moment after the peer
+    stops reading, and a stream that is still flushing closes cleanly."""
+    transport = manager._by_peer[peer].writer.transport
+    deadline = time.monotonic() + timeout
+    last = -1
+    while time.monotonic() < deadline:
+        size = transport.get_write_buffer_size()
+        if size > 0 and size == last:
+            return
+        last = size
+        await asyncio.sleep(0.25)
+    raise AssertionError("the stream never wedged")
+
+
+class TestOutboundIsolation:
+    async def test_a_peer_that_stops_reading_does_not_hold_the_others(self, fake_verifier):
+        protocol, queue = queued_protocol()
+        manager = PeerStreamManager(protocol, listen_host="127.0.0.1", listen_port=0)
+        await manager.start()
+        try:
+            _, stalled_writer = await stalled_handshake(manager, PEER_ASSERTION)
+            healthy_reader, healthy_writer = await handshake(manager, OTHER_ASSERTION)
+            await until(lambda: len(manager.connected_peers()) == 2)
+            shrink_send_buffer(manager, PEER_ADDRESS)
+
+            for _ in range(8):
+                queue.append(body_for(PEER_ADDRESS, b"x" * (256 * 1024)))
+            queue.append(body_for(OTHER_ADDRESS, b"for the healthy peer"))
+            manager.on_messages_available()
+
+            assert await read_frame(healthy_reader) == b"for the healthy peer"
+            stalled_writer.close()
+            healthy_writer.close()
+        finally:
+            await manager.stop()
+
+    async def test_a_write_past_the_deadline_aborts_the_stream_and_reports_it_lost(
+        self, fake_verifier
+    ):
+        protocol, queue = queued_protocol()
+        manager = PeerStreamManager(
+            protocol, listen_host="127.0.0.1", listen_port=0, write_timeout=0.2
+        )
+        await manager.start()
+        try:
+            _, stalled_writer = await stalled_handshake(manager, PEER_ASSERTION)
+            await until(lambda: manager.connected_peers() == [PEER_ADDRESS])
+            shrink_send_buffer(manager, PEER_ADDRESS)
+            for _ in range(8):
+                queue.append(body_for(PEER_ADDRESS, b"x" * (256 * 1024)))
+            manager.on_messages_available()
+
+            await until(lambda: protocol.wifi_direct_peer_disconnected.called, timeout=3.0)
+            protocol.wifi_direct_peer_disconnected.assert_called_once_with(peer_id=PEER_ADDRESS)
+            # Aborted, not waiting on a flush that never comes.
+            await until(lambda: not manager._streams)
+            stalled_writer.close()
+        finally:
+            await manager.stop()
+
+    async def test_stop_after_a_stalled_peer_is_prompt_and_a_restart_writes_again(
+        self, fake_verifier
+    ):
+        protocol, queue = queued_protocol()
+        manager = PeerStreamManager(protocol, listen_host="127.0.0.1", listen_port=0)
+        await manager.start()
+        _, stalled_writer = await stalled_handshake(manager, PEER_ASSERTION)
+        await until(lambda: manager.connected_peers() == [PEER_ADDRESS])
+        shrink_send_buffer(manager, PEER_ADDRESS)
+        for _ in range(8):
+            queue.append(body_for(PEER_ADDRESS, b"x" * (256 * 1024)))
+        manager.on_messages_available()
+        await until_wedged(manager, PEER_ADDRESS)
+
+        began = time.monotonic()
+        await manager.stop()
+        assert time.monotonic() - began < 1.5, "stop() did not wait on the stalled flush"
+        queue.clear()
+
+        await manager.start()
+        try:
+            reader, writer = await handshake(manager, OTHER_ASSERTION)
+            await until(lambda: manager.connected_peers() == [OTHER_ADDRESS])
+            queue.append(body_for(OTHER_ADDRESS, b"after the restart"))
+            manager.on_messages_available()
+            assert await read_frame(reader) == b"after the restart"
+            writer.close()
+            stalled_writer.close()
+        finally:
+            await manager.stop()
+
+    async def test_a_body_no_receiver_would_accept_is_dropped_and_the_stream_kept(
+        self, fake_verifier
+    ):
+        protocol, queue = queued_protocol()
+        manager = PeerStreamManager(protocol, listen_host="127.0.0.1", listen_port=0)
+        await manager.start()
+        try:
+            reader, writer = await handshake(manager)
+            await until(lambda: manager.connected_peers() == [PEER_ADDRESS])
+            queue.append(body_for(PEER_ADDRESS, b"x" * (MAX_FRAME_BYTES + 1)))
+            queue.append(body_for(PEER_ADDRESS, b"the next one"))
+            manager.on_messages_available()
+            assert await read_frame(reader) == b"the next one"
+            assert manager.connected_peers() == [PEER_ADDRESS]
+            assert manager.get_metrics()["frames_dropped"] == 1
+            writer.close()
+        finally:
+            await manager.stop()
+
+    async def test_a_slow_peer_queue_is_bounded(self, fake_verifier):
+        protocol, queue = queued_protocol()
+        manager = PeerStreamManager(protocol, listen_host="127.0.0.1", listen_port=0)
+        await manager.start()
+        try:
+            _, stalled_writer = await stalled_handshake(manager, PEER_ASSERTION)
+            await until(lambda: manager.connected_peers() == [PEER_ADDRESS])
+            shrink_send_buffer(manager, PEER_ADDRESS)
+            for _ in range(12):
+                queue.append(body_for(PEER_ADDRESS, b"x" * MAX_FRAME_BYTES))
+            manager.on_messages_available()
+            await until(lambda: not queue)
+            stream = manager._by_peer[PEER_ADDRESS]
+            assert stream.queued_bytes <= psm.MAX_QUEUED_BYTES
+            assert manager.get_metrics()["frames_dropped"] > 0
+            stalled_writer.close()
+        finally:
+            await manager.stop()
+
+
+class TestStopAndSelf:
+    async def test_an_inbound_stream_accepted_while_stopping_is_refused(
+        self, running, mock_protocol
+    ):
+        running._update_state(TransportState.STOPPING)
+        try:
+            reader, writer = await connect(running)
+            assert await closed_by_peer(reader), "refused, and no preamble sent"
+            assert not running._streams
+            writer.close()
+        finally:
+            running._update_state(TransportState.RUNNING)
+
+    async def test_a_peer_entry_that_is_ourselves_backs_off(self, mock_protocol, fake_verifier):
+        manager = PeerStreamManager(mock_protocol, listen_host="127.0.0.1", listen_port=0)
+        await manager.start()
+        try:
+            entry = PeerEntry("127.0.0.1", manager.listen_port)
+            manager._ensure_connector(entry.endpoint, [entry])
+            await until(lambda: manager._refusals.get(entry.endpoint, 0) >= 1)
+            mock_protocol.wifi_direct_peer_connected.assert_not_called()
+        finally:
+            await manager.stop()
