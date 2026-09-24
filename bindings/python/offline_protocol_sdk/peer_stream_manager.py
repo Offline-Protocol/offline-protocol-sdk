@@ -31,11 +31,15 @@ message ends and who the peer is, and both are settled here:
   stream opened by the lower address wins. Two hosts that each list the
   other open toward each other at once, and without a shared rule each would
   keep the stream the other discards, close the other's, and reconnect
-  forever. Between two streams of the winning kind (a peer that reconnects
-  while its old stream is still half-open here) the newer one supersedes
-  the older, so a stale stream never blocks a reconnect; the cost, that a
-  copied preamble can force the real peer to reconnect, is bounded by the
-  same rule to exactly that, and the threat model records it as R16.
+  forever. Between two streams of the winning kind (the lower address
+  reconnecting while its old stream is still half-open here) the newer one
+  supersedes the older; the cost, that a copied preamble can force the real
+  peer to reconnect, is bounded by the same rule to exactly that, and the
+  threat model records it as R16. The higher address gets no such help: its
+  reconnect is the losing kind for as long as the lower side holds a stream
+  it believes live. So every stream carries TCP keepalive, which ends a dead
+  peer's stream within a bound, and every attempt that ends unannounced
+  climbs the reconnect ladder rather than retrying at a fixed pace.
 
 The Rust reference for the same rules is ``stream_framing.rs`` in the
 transport crate, and its conformance vectors are the ones this manager's
@@ -64,7 +68,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import logging
+import socket
 from dataclasses import dataclass
 from typing import Any
 
@@ -92,17 +98,35 @@ TXT_VERSION = "1"
 
 # -- Policy (local, not wire format) ------------------------------------------
 
-#: Seconds a freshly opened stream has to deliver its preamble.
+#: Seconds a freshly opened stream has to deliver its whole preamble frame,
+#: prefix and body together. A deadline on the prefix alone would let four
+#: bytes and then silence hold a slot forever.
 PREAMBLE_TIMEOUT = 10.0
+#: Seconds an outbound connect may take before it counts as a failed attempt.
+CONNECT_TIMEOUT = 10.0
 #: Streams this host holds open at once, announced or not.
 MAX_STREAMS = 64
-#: Outbound reconnect ladder for a configured peer.
+#: Inbound streams one remote host may hold at once, announced or not. A host
+#: needs one, two while it reconnects past its own stale stream; without a
+#: per-host bound one machine on the LAN fills ``MAX_STREAMS`` alone, with
+#: silent sockets or with as many self-made identities.
+MAX_STREAMS_PER_HOST = 8
+#: Outbound reconnect ladder for a configured peer. Doubled after every
+#: attempt that ends without an announced stream (connect failure, a silent
+#: or closing endpoint, a tie-break loss), reset once a stream is announced.
 RECONNECT_INITIAL_DELAY = 1.0
 RECONNECT_MAX_DELAY = 30.0
 #: Ceiling on the cooldown after repeated preamble refusals from one endpoint,
 #: doubled per refusal from ``RECONNECT_INITIAL_DELAY``. A peer that cannot
 #: prove its address fails the same way every time.
 REFUSAL_BACKOFF_MAX = 600.0
+#: TCP keepalive on every stream: idle seconds, probe interval, probe count.
+#: An idle stream to a host that lost power or left the network is otherwise
+#: never noticed, and the tie-break keeps an announced stream over a new one
+#: of the losing kind, so an unnoticed dead stream would lock the peer out.
+KEEPALIVE_IDLE = 15
+KEEPALIVE_INTERVAL = 5
+KEEPALIVE_COUNT = 3
 
 
 @dataclass(frozen=True)
@@ -159,7 +183,19 @@ class PeerEntry:
 class _Stream:
     """One stream, both directions, and what it has proved."""
 
-    __slots__ = ("reader", "writer", "endpoint", "expected", "outbound", "peer", "learned", "write_lock")
+    __slots__ = (
+        "reader",
+        "writer",
+        "endpoint",
+        "remote_host",
+        "expected",
+        "outbound",
+        "peer",
+        "learned",
+        "was_announced",
+        "superseded",
+        "write_lock",
+    )
 
     def __init__(
         self,
@@ -168,10 +204,13 @@ class _Stream:
         endpoint: str,
         expected: str | None,
         outbound: bool,
+        remote_host: str | None = None,
     ) -> None:
         self.reader = reader
         self.writer = writer
         self.endpoint = endpoint
+        #: The remote IP, for the per-host bound on inbound streams.
+        self.remote_host = remote_host
         self.expected = expected
         #: Whether this host opened the stream. Decides the tie-break.
         self.outbound = outbound
@@ -180,6 +219,14 @@ class _Stream:
         #: The address the preamble derived, kept even when the stream was
         #: not the one announced, so a connector knows whom it reached.
         self.learned: str | None = None
+        #: Whether this stream was ever the announced one, so a connector
+        #: can tell a lost link (reconnect now) from an attempt that went
+        #: nowhere (climb the ladder).
+        self.was_announced = False
+        #: Set when a newer stream took the announcement over. The stream
+        #: may still have a body in its buffer, and none may reach the core:
+        #: its frames belong to no announced peer any more.
+        self.superseded = False
         self.write_lock = asyncio.Lock()
 
 
@@ -188,15 +235,65 @@ def frame(body: bytes) -> bytes:
     if not body:
         raise ValueError("a frame body is at least one byte")
     if len(body) > MAX_FRAME_BYTES:
-        raise ValueError(f"frame body of {len(body)} bytes is above the {MAX_FRAME_BYTES}-byte ceiling")
+        raise ValueError(
+            f"frame body of {len(body)} bytes is above the {MAX_FRAME_BYTES}-byte ceiling"
+        )
     return len(body).to_bytes(LENGTH_PREFIX_LEN, "big") + body
+
+
+def _digest(address: str) -> str:
+    return hashlib.sha256(address.encode("utf-8")).hexdigest()[:16]
 
 
 def service_instance_name(address: str) -> str:
     """The DNS-SD instance name for an address: a short digest, not the
     address itself, which the TXT record already carries."""
-    digest = hashlib.sha256(address.encode("utf-8")).hexdigest()[:16]
-    return f"op-{digest}.{SERVICE_TYPE}"
+    return f"op-{_digest(address)}.{SERVICE_TYPE}"
+
+
+def service_host_name(address: str) -> str:
+    """The host name the SRV record targets and the A/AAAA records name.
+
+    Its own name rather than the machine's: the operating system's responder
+    may already publish ``<hostname>.local.``, and two responders answering
+    for one name is a conflict. Without a host name and addresses at all the
+    record is unresolvable: a browser sees the service appear and can never
+    learn where it is.
+    """
+    return f"op-{_digest(address)}.local."
+
+
+def _set_keepalive(writer: asyncio.StreamWriter) -> None:
+    """Turn TCP keepalive on for a stream, with the tightest timers the
+    platform exposes. Best effort: a socket that refuses an option keeps the
+    rest."""
+    sock = writer.get_extra_info("socket")
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except OSError:
+        return
+    # TCP_KEEPIDLE on Linux and Windows, TCP_KEEPALIVE (the idle time) on macOS.
+    idle_option = getattr(socket, "TCP_KEEPIDLE", None) or getattr(socket, "TCP_KEEPALIVE", None)
+    options = [
+        (idle_option, KEEPALIVE_IDLE),
+        (getattr(socket, "TCP_KEEPINTVL", None), KEEPALIVE_INTERVAL),
+        (getattr(socket, "TCP_KEEPCNT", None), KEEPALIVE_COUNT),
+        # Linux: bound how long unacknowledged data may sit, which keepalive
+        # does not cover once a write is in flight.
+        (
+            getattr(socket, "TCP_USER_TIMEOUT", None),
+            (KEEPALIVE_IDLE + KEEPALIVE_INTERVAL * KEEPALIVE_COUNT) * 1000,
+        ),
+    ]
+    for option, value in options:
+        if option is None:
+            continue
+        try:
+            sock.setsockopt(socket.IPPROTO_TCP, option, value)
+        except OSError:
+            pass
 
 
 class PeerStreamManager(TransportManager):
@@ -211,9 +308,11 @@ class PeerStreamManager(TransportManager):
         before :meth:`start`, because a stream layer that cannot prove its
         own address is refused by every conforming peer.
     listen_host, listen_port:
-        Where to accept streams. Port ``0`` binds an ephemeral port, readable
-        afterwards as :attr:`listen_port`; ``listen_port=None`` accepts
-        nothing and only connects out.
+        Where to accept streams. The default ``0.0.0.0`` accepts on every
+        interface; pass ``127.0.0.1`` or one interface's address to narrow
+        it. Port ``0`` binds an ephemeral port, readable afterwards as
+        :attr:`listen_port`; ``listen_port=None`` accepts nothing and only
+        connects out.
     peers:
         Static peer entries, as :class:`PeerEntry` values or strings
         :meth:`PeerEntry.parse` accepts. Each is connected with a reconnect
@@ -237,6 +336,7 @@ class PeerStreamManager(TransportManager):
         discover: bool = False,
         preamble_timeout: float = PREAMBLE_TIMEOUT,
         max_streams: int = MAX_STREAMS,
+        max_streams_per_host: int = MAX_STREAMS_PER_HOST,
     ) -> None:
         super().__init__()
         self._protocol = protocol
@@ -251,6 +351,7 @@ class PeerStreamManager(TransportManager):
         self.discover = discover
         self._preamble_timeout = preamble_timeout
         self._max_streams = max_streams
+        self._max_streams_per_host = max_streams_per_host
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server: asyncio.base_events.Server | None = None
@@ -258,8 +359,20 @@ class PeerStreamManager(TransportManager):
         self._streams: set[_Stream] = set()
         #: The one announced stream per proved address.
         self._by_peer: dict[str, _Stream] = {}
+        #: connector key -> the task keeping a stream open toward it.
         self._connector_tasks: dict[str, asyncio.Task[None]] = {}
-        #: endpoint -> consecutive preamble refusals, for the backoff.
+        #: connector key -> the entries it tries, in order, on each attempt.
+        #: A discovered host's addresses can change while its connector runs.
+        self._connector_entries: dict[str, list[PeerEntry]] = {}
+        #: Connector keys whose source is gone (a DNS-SD record removed). The
+        #: connector finishes its current stream and does not open another.
+        self._retired: set[str] = set()
+        #: Set on every reported loss, so a connector idling on an announced
+        #: peer wakes when that peer is lost rather than on a poll.
+        self._loss = asyncio.Event()
+        #: endpoint -> consecutive preamble refusals, for the backoff. Only
+        #: outbound endpoints: an inbound one is a fresh ephemeral port every
+        #: time, and remembering it would only grow the map.
         self._refusals: dict[str, int] = {}
         self._draining = False
         self._discovery: _LanDiscovery | None = None
@@ -270,6 +383,7 @@ class PeerStreamManager(TransportManager):
         self._frames_sent = 0
         self._frames_received = 0
         self._streams_refused = 0
+        self._streams_superseded = 0
 
     # -- TransportManager interface -------------------------------------------
 
@@ -357,7 +471,7 @@ class PeerStreamManager(TransportManager):
 
         self._update_state(TransportState.RUNNING)
         for entry in self._peers:
-            self._ensure_connector(entry)
+            self._ensure_connector(entry.endpoint, [entry])
         self._emit_diagnostic(
             "info",
             "Peer-stream transport started",
@@ -377,9 +491,15 @@ class PeerStreamManager(TransportManager):
         self._emit_diagnostic("info", "Peer-stream transport stopped")
 
     async def _close_everything(self) -> None:
-        for task in list(self._connector_tasks.values()):
+        tasks = list(self._connector_tasks.values())
+        for task in tasks:
             task.cancel()
+        # Awaited, so no connector outlives the manager: one that never
+        # yields again would otherwise be destroyed pending with the loop.
+        await asyncio.gather(*tasks, return_exceptions=True)
         self._connector_tasks.clear()
+        self._connector_entries.clear()
+        self._retired.clear()
         if self._discovery is not None:
             try:
                 await self._discovery.stop()
@@ -411,6 +531,7 @@ class PeerStreamManager(TransportManager):
             "frames_sent": self._frames_sent,
             "frames_received": self._frames_received,
             "streams_refused": self._streams_refused,
+            "streams_superseded": self._streams_superseded,
             "connected_peers": len(self._by_peer),
             "open_streams": len(self._streams),
             "listen_port": self.listen_port,
@@ -423,65 +544,145 @@ class PeerStreamManager(TransportManager):
     ) -> None:
         peername = writer.get_extra_info("peername")
         endpoint = f"{peername[0]}:{peername[1]}" if peername else "?"
+        remote_host = peername[0] if peername else None
+        refusal = None
         if len(self._streams) >= self._max_streams:
+            refusal = "Stream refused: at capacity"
+        elif (
+            remote_host is not None
+            and self._inbound_from(remote_host) >= self._max_streams_per_host
+        ):
+            refusal = "Stream refused: per-host limit"
+        if refusal is not None:
             self._streams_refused += 1
-            self._emit_diagnostic("warning", "Stream refused: at capacity", {"endpoint": endpoint})
+            self._emit_diagnostic("warning", refusal, {"endpoint": endpoint})
             writer.close()
             return
+        _set_keepalive(writer)
         # An inbound connection carries no claim: the derived address is the
         # peer's id, and there is nothing to compare.
-        await self._run_stream(_Stream(reader, writer, endpoint, expected=None, outbound=False))
+        await self._run_stream(
+            _Stream(reader, writer, endpoint, expected=None, outbound=False, remote_host=remote_host)
+        )
 
-    def _ensure_connector(self, entry: PeerEntry) -> None:
-        key = entry.endpoint
+    def _inbound_from(self, remote_host: str) -> int:
+        return sum(1 for s in self._streams if not s.outbound and s.remote_host == remote_host)
+
+    def _ensure_connector(self, key: str, entries: list[PeerEntry]) -> None:
+        """Keep a connector running toward ``key``, trying ``entries`` in
+        order. A running connector picks up new entries on its next attempt."""
+        self._connector_entries[key] = list(entries)
+        self._retired.discard(key)
         existing = self._connector_tasks.get(key)
         if existing is not None and not existing.done():
             return
-        self._connector_tasks[key] = asyncio.ensure_future(self._connector(entry))
+        self._connector_tasks[key] = asyncio.ensure_future(self._connector(key))
 
-    async def _connector(self, entry: PeerEntry) -> None:
-        """Keep one stream open toward a configured peer, with a ladder."""
+    def _retire_connector(self, key: str) -> None:
+        """The source of ``key`` is gone. Its connector keeps a live stream
+        until that stream ends, then stops instead of reconnecting."""
+        if key in self._connector_tasks:
+            self._retired.add(key)
+
+    async def _wait_while_announced(self, address: str) -> None:
+        """Idle while ``address`` is announced over another stream, waking on
+        each reported loss (and at the ladder's ceiling, as a safety net)."""
+        while address in self._by_peer and self._state == TransportState.RUNNING:
+            self._loss.clear()
+            try:
+                await asyncio.wait_for(self._loss.wait(), timeout=RECONNECT_MAX_DELAY)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _connector(self, key: str) -> None:
+        """Keep one stream open toward a configured or discovered peer."""
         delay = RECONNECT_INITIAL_DELAY
-        # The address this endpoint turned out to hold, once a preamble said.
-        reached: str | None = entry.expected_address
+        # The address this peer turned out to hold, once a preamble said.
+        entries = self._connector_entries.get(key) or []
+        reached: str | None = entries[0].expected_address if entries else None
         try:
             while self._state in (TransportState.RUNNING, TransportState.STARTING):
+                if key in self._retired:
+                    return
                 if reached is not None and reached in self._by_peer:
                     # The peer is announced over another stream (it reached us
                     # first, or its stream won the tie-break). Nothing to open
                     # until that one ends.
-                    await asyncio.sleep(RECONNECT_MAX_DELAY)
+                    await self._wait_while_announced(reached)
                     continue
-                try:
-                    reader, writer = await asyncio.wait_for(
-                        asyncio.open_connection(entry.host, entry.port),
-                        timeout=PREAMBLE_TIMEOUT,
-                    )
-                except (OSError, asyncio.TimeoutError) as exc:
-                    self._emit_diagnostic(
-                        "debug", "Peer connect failed", {"endpoint": entry.endpoint, "error": str(exc)}
-                    )
+                stream = await self._open(key)
+                if stream is None:
                     await asyncio.sleep(delay)
                     delay = min(delay * 2, RECONNECT_MAX_DELAY)
                     continue
-                delay = RECONNECT_INITIAL_DELAY
-                stream = _Stream(
-                    reader, writer, entry.endpoint, expected=entry.expected_address, outbound=True
-                )
                 await self._run_stream(stream)
                 if stream.learned is not None:
                     reached = stream.learned
-                # The stream ended (peer closed, refusal, or our stop); the
-                # refusal backoff, if any, decides how soon we try again.
-                await asyncio.sleep(self._cooldown(entry.endpoint))
+                if stream.was_announced:
+                    # A link that worked and was lost: try again promptly.
+                    delay = RECONNECT_INITIAL_DELAY
+                    wait = self._cooldown(stream.endpoint)
+                else:
+                    # An attempt that went nowhere (silent or closing endpoint,
+                    # refused preamble, tie-break loss): climb the ladder, and
+                    # longer still if the endpoint keeps failing verification.
+                    wait = max(delay, self._cooldown(stream.endpoint))
+                    delay = min(delay * 2, RECONNECT_MAX_DELAY)
+                await asyncio.sleep(wait)
         except asyncio.CancelledError:
             return
+        finally:
+            if self._connector_tasks.get(key) is asyncio.current_task():
+                self._connector_tasks.pop(key, None)
+                self._connector_entries.pop(key, None)
+                self._retired.discard(key)
+
+    async def _open(self, key: str) -> _Stream | None:
+        """One connect attempt toward ``key``: each of its entries in turn,
+        the first that connects wins. ``None`` when none did."""
+        for entry in list(self._connector_entries.get(key) or []):
+            try:
+                reader, writer = await asyncio.wait_for(
+                    asyncio.open_connection(entry.host, entry.port),
+                    timeout=CONNECT_TIMEOUT,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Not only OSError: a malformed host raises ValueError or
+                # UnicodeError, and a connector that died on one would never
+                # retry the peer, silently.
+                self._emit_diagnostic(
+                    "debug", "Peer connect failed", {"endpoint": entry.endpoint, "error": str(exc)}
+                )
+                continue
+            _set_keepalive(writer)
+            return _Stream(
+                reader, writer, entry.endpoint, expected=entry.expected_address, outbound=True
+            )
+        return None
 
     def _cooldown(self, endpoint: str) -> float:
         refusals = self._refusals.get(endpoint, 0)
         if refusals == 0:
             return RECONNECT_INITIAL_DELAY
         return min(RECONNECT_INITIAL_DELAY * (2 ** min(refusals, 16)), REFUSAL_BACKOFF_MAX)
+
+    async def _read_frame_prefix(self, stream: _Stream, deadline: float | None) -> bytes:
+        read = stream.reader.readexactly(LENGTH_PREFIX_LEN)
+        if deadline is None:
+            return await read
+        return await asyncio.wait_for(read, timeout=self._remaining(deadline))
+
+    async def _read_frame_body(self, stream: _Stream, length: int, deadline: float | None) -> bytes:
+        read = stream.reader.readexactly(length)
+        if deadline is None:
+            return await read
+        return await asyncio.wait_for(read, timeout=self._remaining(deadline))
+
+    def _remaining(self, deadline: float) -> float:
+        assert self._loop is not None
+        return max(0.0, deadline - self._loop.time())
 
     async def _run_stream(self, stream: _Stream) -> None:
         """Send our preamble, then read frames until the stream ends.
@@ -492,22 +693,23 @@ class PeerStreamManager(TransportManager):
         """
         self._streams.add(stream)
         reason = "peer closed the stream"
+        loop = asyncio.get_running_loop()
         try:
             # Ours first, without waiting for theirs: a peer that never speaks
             # cannot hold the stream half-open on purpose.
             assertion = bytes(self._protocol.identity_assertion(signed_data=[]))
             await self._write(stream, frame(assertion))
 
+            # One deadline for the whole preamble frame, prefix and body: a
+            # deadline on the prefix alone lets four bytes hold the slot.
+            deadline: float | None = loop.time() + self._preamble_timeout
+            first = True
             while True:
-                first = stream.peer is None
+                if stream.superseded:
+                    reason = "superseded"
+                    break
                 try:
-                    if first:
-                        prefix = await asyncio.wait_for(
-                            stream.reader.readexactly(LENGTH_PREFIX_LEN),
-                            timeout=self._preamble_timeout,
-                        )
-                    else:
-                        prefix = await stream.reader.readexactly(LENGTH_PREFIX_LEN)
+                    prefix = await self._read_frame_prefix(stream, deadline)
                 except asyncio.TimeoutError:
                     reason = "no preamble within the deadline"
                     break
@@ -521,11 +723,14 @@ class PeerStreamManager(TransportManager):
                     break
                 if first and length < PREAMBLE_FLOOR:
                     reason = f"refused preamble length {length}"
-                    self._record_refusal(stream.endpoint)
+                    self._record_refusal(stream)
                     break
 
                 try:
-                    body = await stream.reader.readexactly(length)
+                    body = await self._read_frame_body(stream, length, deadline)
+                except asyncio.TimeoutError:
+                    reason = "no preamble within the deadline"
+                    break
                 except (asyncio.IncompleteReadError, ConnectionError, OSError):
                     break
                 self._bytes_received += LENGTH_PREFIX_LEN + length
@@ -534,8 +739,15 @@ class PeerStreamManager(TransportManager):
                     if not self._accept_preamble(stream, bytes(body)):
                         reason = "preamble refused"
                         break
+                    first = False
+                    deadline = None
                     continue
 
+                # Checked after the read as well as before it: a newer stream
+                # may have taken the announcement over while this one waited.
+                if stream.superseded or stream.peer is None:
+                    reason = "superseded"
+                    break
                 self._frames_received += 1
                 try:
                     self._protocol.wifi_direct_message_received(
@@ -543,7 +755,9 @@ class PeerStreamManager(TransportManager):
                     )
                 except Exception as exc:
                     self._emit_diagnostic(
-                        "error", "Error handing a frame to the core", {"peer": stream.peer, "error": str(exc)}
+                        "error",
+                        "Error handing a frame to the core",
+                        {"peer": stream.peer, "error": str(exc)},
                     )
         except asyncio.CancelledError:
             reason = "transport stopping"
@@ -559,15 +773,17 @@ class PeerStreamManager(TransportManager):
         try:
             derived = verify_identity_assertion(list(body))
         except Exception as exc:
-            self._record_refusal(stream.endpoint)
+            self._record_refusal(stream)
             self._emit_diagnostic(
-                "warning", "Peer preamble did not verify", {"endpoint": stream.endpoint, "error": str(exc)}
+                "warning",
+                "Peer preamble did not verify",
+                {"endpoint": stream.endpoint, "error": str(exc)},
             )
             return False
         stream.learned = derived
         if stream.expected is not None and derived != stream.expected:
             # Exact, never normalised, and the claim is never announced.
-            self._record_refusal(stream.endpoint)
+            self._record_refusal(stream)
             self._emit_diagnostic(
                 "warning",
                 "Peer preamble names another address",
@@ -575,7 +791,9 @@ class PeerStreamManager(TransportManager):
             )
             return False
         if derived == self.local_address:
-            self._emit_diagnostic("debug", "Refusing a stream to ourselves", {"endpoint": stream.endpoint})
+            self._emit_diagnostic(
+                "debug", "Refusing a stream to ourselves", {"endpoint": stream.endpoint}
+            )
             return False
         self._refusals.pop(stream.endpoint, None)
 
@@ -586,25 +804,33 @@ class PeerStreamManager(TransportManager):
             # two of that kind the newer one. If that is this stream, it
             # takes the announcement over and the older one closes silently;
             # if not, this one closes silently. The core sees neither.
-            self._streams_refused += 1
             if not self._new_stream_wins(stream, derived):
+                self._streams_refused += 1
                 self._emit_diagnostic(
                     "info", "Refusing a second stream for an announced address", {"peer": derived}
                 )
                 return False
+            self._streams_superseded += 1
             older.peer = None
+            older.superseded = True
             stream.peer = derived
+            stream.was_announced = True
             self._by_peer[derived] = stream
-            self._emit_diagnostic("info", "A newer stream supersedes the announced one", {"peer": derived})
+            self._emit_diagnostic(
+                "info", "A newer stream supersedes the announced one", {"peer": derived}
+            )
             asyncio.ensure_future(self._close_stream(older, "superseded"))
             return True
 
         stream.peer = derived
+        stream.was_announced = True
         self._by_peer[derived] = stream
         try:
             self._protocol.wifi_direct_peer_connected(peer_id=derived)
         except Exception as exc:
-            self._emit_diagnostic("error", "wifi_direct_peer_connected failed", {"peer": derived, "error": str(exc)})
+            self._emit_diagnostic(
+                "error", "wifi_direct_peer_connected failed", {"peer": derived, "error": str(exc)}
+            )
         self._emit_diagnostic("info", "Peer announced", {"peer": derived, "endpoint": stream.endpoint})
         # Something may already be queued for this address.
         self._schedule_drain()
@@ -612,13 +838,26 @@ class PeerStreamManager(TransportManager):
 
     def _new_stream_wins(self, new: _Stream, peer: str) -> bool:
         """The tie-break both ends compute alike: the stream opened by the
-        lower of the two addresses is the one to keep."""
-        local = self.local_address or ""
+        lower of the two addresses is the one to keep.
+
+        This helps only the lower address past its own stale stream. The
+        higher address's reconnect is the losing kind while the lower side
+        still holds a stream it believes live, which is why every stream
+        carries TCP keepalive: a dead peer's stream ends within a bound, and
+        the reconnect wins from then on.
+        """
+        local = self.local_address
+        if local is None:
+            # No address of our own to order by; keep what is announced.
+            return False
         we_open = local < peer
         return new.outbound == we_open
 
-    def _record_refusal(self, endpoint: str) -> None:
-        self._refusals[endpoint] = self._refusals.get(endpoint, 0) + 1
+    def _record_refusal(self, stream: _Stream) -> None:
+        # Only an outbound endpoint is ever connected to again; an inbound
+        # one is a new ephemeral port each time.
+        if stream.outbound:
+            self._refusals[stream.endpoint] = self._refusals.get(stream.endpoint, 0) + 1
 
     async def _close_stream(self, stream: _Stream, reason: str) -> None:
         if stream not in self._streams:
@@ -639,8 +878,11 @@ class PeerStreamManager(TransportManager):
             except Exception:
                 logger.debug("wifi_direct_peer_disconnected failed for %s", stream.peer)
             self._emit_diagnostic("info", "Peer lost", {"peer": stream.peer, "reason": reason})
+            self._loss.set()
         else:
-            self._emit_diagnostic("debug", "Unannounced stream closed", {"endpoint": stream.endpoint, "reason": reason})
+            self._emit_diagnostic(
+                "debug", "Unannounced stream closed", {"endpoint": stream.endpoint, "reason": reason}
+            )
 
     async def _write(self, stream: _Stream, data: bytes) -> None:
         async with stream.write_lock:
@@ -691,7 +933,9 @@ class PeerStreamManager(TransportManager):
                     self._frames_sent += 1
                 except Exception as exc:
                     self._emit_diagnostic(
-                        "warning", "Failed to write a frame", {"peer": message.recipient_id, "error": str(exc)}
+                        "warning",
+                        "Failed to write a frame",
+                        {"peer": message.recipient_id, "error": str(exc)},
                     )
                     await self._close_stream(stream, f"write failed: {exc}")
         finally:
@@ -699,12 +943,57 @@ class PeerStreamManager(TransportManager):
 
     # -- discovery hooks --------------------------------------------------------
 
-    def _on_peer_discovered(self, entry: PeerEntry) -> None:
-        """A DNS-SD record named a host. Its ``addr`` is a hint the preamble
-        proves; nothing is announced from the record."""
-        if entry.expected_address is not None and entry.expected_address == self.local_address:
+    def _on_record_resolved(self, name: str, entries: list[PeerEntry]) -> None:
+        """A DNS-SD record named a host, under ``name``. Its ``addr`` is a
+        hint the preamble proves; nothing is announced from the record. One
+        connector per record, trying the record's addresses in turn."""
+        if not entries:
             return
-        self._ensure_connector(entry)
+        claimed = entries[0].expected_address
+        if claimed is not None and claimed == self.local_address:
+            return
+        self._ensure_connector(f"dns-sd:{name}", entries)
+
+    def _on_record_removed(self, name: str) -> None:
+        """A DNS-SD record went away: stop reconnecting toward it once its
+        current stream, if any, ends. A live stream is not cut, because a
+        record expiring says nothing about the stream."""
+        self._retire_connector(f"dns-sd:{name}")
+
+
+def advertised_addresses(listen_host: str) -> list[str]:
+    """The addresses a DNS-SD record should carry for a listener on
+    ``listen_host``: that address when it names one, otherwise every
+    non-loopback address of every interface (``ifaddr`` comes with the
+    ``lan`` extra)."""
+    try:
+        bound = ipaddress.ip_address(listen_host)
+    except ValueError:
+        bound = None
+    if bound is not None and not bound.is_unspecified:
+        return [str(bound)]
+
+    import ifaddr
+
+    want_v4 = bound is None or bound.version == 4 or listen_host == "::"
+    want_v6 = bound is None or bound.version == 6
+    found: list[str] = []
+    for adapter in ifaddr.get_adapters():
+        for ip in adapter.ips:
+            if isinstance(ip.ip, tuple):
+                if not want_v6:
+                    continue
+                address = ipaddress.ip_address(ip.ip[0])
+            else:
+                if not want_v4:
+                    continue
+                address = ipaddress.ip_address(ip.ip)
+            if address.is_loopback:
+                continue
+            text = str(address)
+            if text not in found:
+                found.append(text)
+    return found
 
 
 class _LanDiscovery:
@@ -720,6 +1009,7 @@ class _LanDiscovery:
         self._zc: Any = None
         self._info: Any = None
         self._browser: Any = None
+        self._pending: set[asyncio.Task[None]] = set()
 
     async def start(self) -> None:
         try:
@@ -738,11 +1028,16 @@ class _LanDiscovery:
             port = manager.listen_port
             if address is None or port is None:
                 raise TransportError("advertising needs an address and a listening port")
+            addresses = advertised_addresses(manager.listen_host)
+            if not addresses:
+                raise TransportError("advertising found no interface address to publish")
             self._info = ServiceInfo(
                 SERVICE_TYPE,
                 service_instance_name(address),
                 port=port,
                 properties=txt_record(address),
+                server=service_host_name(address),
+                parsed_addresses=addresses,
             )
             await self._zc.async_register_service(self._info)
 
@@ -750,20 +1045,24 @@ class _LanDiscovery:
             zc = self._zc.zeroconf
 
             def on_change(zeroconf: Any, service_type: str, name: str, state_change: Any) -> None:
-                if state_change is not ServiceStateChange.Added:
+                if state_change is ServiceStateChange.Removed:
+                    manager._on_record_removed(name)
                     return
                 info = AsyncServiceInfo(service_type, name)
 
                 async def resolve() -> None:
                     if await info.async_request(zeroconf, 3000):
-                        for entry in peers_from_record(info):
-                            manager._on_peer_discovered(entry)
+                        manager._on_record_resolved(name, peers_from_record(info))
 
-                asyncio.ensure_future(resolve())
+                task = asyncio.ensure_future(resolve())
+                self._pending.add(task)
+                task.add_done_callback(self._pending.discard)
 
             self._browser = AsyncServiceBrowser(zc, SERVICE_TYPE, handlers=[on_change])
 
     async def stop(self) -> None:
+        for task in list(self._pending):
+            task.cancel()
         if self._browser is not None:
             await self._browser.async_cancel()
             self._browser = None
@@ -786,6 +1085,9 @@ def peers_from_record(info: Any) -> list[PeerEntry]:
     verify against. A record without a well-formed ``addr`` yields nothing:
     the chapter makes the entry mandatory, and a host that omits it is not
     advertising this service.
+
+    Link-local IPv6 addresses come with their scope (``fe80::1%en0``); an
+    unscoped one cannot be connected to.
     """
     properties = getattr(info, "properties", None) or {}
     raw = properties.get(b"addr")
@@ -801,15 +1103,18 @@ def peers_from_record(info: Any) -> list[PeerEntry]:
     if not port:
         return []
     hosts: list[str] = []
-    parsed = getattr(info, "parsed_addresses", None)
-    if callable(parsed):
+    for accessor in ("parsed_scoped_addresses", "parsed_addresses"):
+        parsed = getattr(info, accessor, None)
+        if not callable(parsed):
+            continue
         try:
-            hosts = list(parsed())
+            hosts = [str(h) for h in parsed()]
         except Exception:
             hosts = []
+        if hosts:
+            break
     if not hosts:
         server = getattr(info, "server", None)
         if server:
             hosts = [str(server).rstrip(".")]
     return [PeerEntry(host=h, port=int(port), expected_address=claimed) for h in hosts]
-

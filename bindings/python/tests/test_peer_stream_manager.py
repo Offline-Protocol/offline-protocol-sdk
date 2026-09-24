@@ -12,8 +12,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import socket
 import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -231,9 +232,9 @@ class TestDiscoveryRecords:
     def test_our_own_record_is_ignored(self, mock_protocol, fake_verifier):
         manager = PeerStreamManager(mock_protocol)
         manager._ensure_connector = MagicMock()
-        manager._on_peer_discovered(PeerEntry("127.0.0.1", 1, OUR_ADDRESS))
+        manager._on_record_resolved("ours", [PeerEntry("127.0.0.1", 1, OUR_ADDRESS)])
         manager._ensure_connector.assert_not_called()
-        manager._on_peer_discovered(PeerEntry("127.0.0.1", 1, PEER_ADDRESS))
+        manager._on_record_resolved("theirs", [PeerEntry("127.0.0.1", 1, PEER_ADDRESS)])
         manager._ensure_connector.assert_called_once()
 
 
@@ -315,7 +316,9 @@ class TestPreamble:
         assert await closed_by_peer(reader)
         mock_protocol.wifi_direct_peer_connected.assert_not_called()
         mock_protocol.wifi_direct_peer_disconnected.assert_not_called()
-        assert running._refusals, "a refusal is remembered for the backoff"
+        assert not running._refusals, (
+            "an inbound endpoint is a fresh ephemeral port each time; remembering it only grows the map"
+        )
         writer.close()
 
     async def test_a_preamble_under_the_floor_is_refused_on_the_prefix(self, running, mock_protocol):
@@ -577,8 +580,10 @@ class TestOneStreamPerAddress:
         b = PeerStreamManager(b_protocol, listen_host="127.0.0.1", listen_port=0)
         await asyncio.gather(a.start(), b.start())
         try:
-            a._ensure_connector(PeerEntry("127.0.0.1", b.listen_port))
-            b._ensure_connector(PeerEntry("127.0.0.1", a.listen_port))
+            to_b = PeerEntry("127.0.0.1", b.listen_port)
+            to_a = PeerEntry("127.0.0.1", a.listen_port)
+            a._ensure_connector(to_b.endpoint, [to_b])
+            b._ensure_connector(to_a.endpoint, [to_a])
             await until(lambda: a.connected_peers() == [PEER_ADDRESS] and b.connected_peers() == [OUR_ADDRESS])
             # Let any losing stream be refused and any connector settle.
             await asyncio.sleep(0.3)
@@ -734,3 +739,280 @@ class TestChapterVectors:
             writer.close()
         finally:
             await manager.stop()
+
+
+# ---------------------------------------------------------------------------
+# Stream lifetime: deadlines, bounds, liveness, the ladder
+# ---------------------------------------------------------------------------
+
+
+def _fake_stream(outbound: bool = False) -> "psm._Stream":
+    """A stream over an in-memory reader the test feeds, and a writer that
+    only records, so the read loop can be driven byte by byte."""
+    writer = MagicMock()
+    writer.drain = AsyncMock()
+    return psm._Stream(asyncio.StreamReader(), writer, "fake", expected=None, outbound=outbound)
+
+
+class TestStreamLifetime:
+    async def test_the_preamble_deadline_covers_the_body_too(self, mock_protocol, fake_verifier):
+        # A preamble prefix and then silence must not hold the slot: the
+        # deadline is on the whole first frame, not on its four-byte prefix.
+        manager = PeerStreamManager(
+            mock_protocol, listen_host="127.0.0.1", listen_port=0, preamble_timeout=0.1
+        )
+        await manager.start()
+        try:
+            reader, writer = await connect(manager)
+            await read_frame(reader)
+            writer.write(PREAMBLE_FLOOR.to_bytes(4, "big"))  # and no body, ever
+            await writer.drain()
+            assert await closed_by_peer(reader)
+            await until(lambda: not manager._streams)
+            mock_protocol.wifi_direct_peer_connected.assert_not_called()
+            writer.close()
+        finally:
+            await manager.stop()
+
+    async def test_one_host_cannot_hold_more_than_its_share_of_streams(
+        self, mock_protocol, fake_verifier
+    ):
+        manager = PeerStreamManager(
+            mock_protocol, listen_host="127.0.0.1", listen_port=0, max_streams_per_host=2
+        )
+        await manager.start()
+        try:
+            held = []
+            for _ in range(2):
+                reader, writer = await connect(manager)
+                await read_frame(reader)  # served: our preamble arrives
+                held.append(writer)
+            reader, writer = await connect(manager)
+            assert await closed_by_peer(reader), "the third stream from one host is refused"
+            assert manager.get_metrics()["streams_refused"] == 1
+            for w in held + [writer]:
+                w.close()
+        finally:
+            await manager.stop()
+
+    async def test_every_stream_carries_tcp_keepalive(self, mock_protocol, fake_verifier):
+        sessions: list = []  # held, or the writer's collection closes the socket
+
+        async def serve(reader, writer):
+            sessions.append(writer)
+            await read_frame(reader)
+            writer.write(frame(PEER_ASSERTION))
+            await writer.drain()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        manager = PeerStreamManager(
+            mock_protocol, listen_host="127.0.0.1", listen_port=0, peers=[f"127.0.0.1:{port}"]
+        )
+        await manager.start()
+        try:
+            await until(lambda: manager.connected_peers() == [PEER_ADDRESS])
+            in_reader, in_writer = await handshake(manager, assertion=OTHER_ASSERTION)
+            await until(lambda: len(manager.connected_peers()) == 2)
+            kinds = set()
+            for stream in manager._streams:
+                sock = stream.writer.get_extra_info("socket")
+                assert sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE) != 0
+                kinds.add(stream.outbound)
+            assert kinds == {True, False}, "both an outbound and an inbound stream were checked"
+            in_writer.close()
+        finally:
+            await manager.stop()
+            server.close()
+
+    async def test_a_superseded_stream_hands_nothing_more_to_the_core(
+        self, mock_protocol, fake_verifier
+    ):
+        # A body already in the superseded stream's buffer must not reach the
+        # core: its frames belong to no announced peer any more.
+        manager = PeerStreamManager(mock_protocol, listen_port=None)
+        await manager.start()
+        try:
+            older = _fake_stream()
+            older_task = asyncio.ensure_future(manager._run_stream(older))
+            older.reader.feed_data(frame(PEER_ASSERTION))
+            await until(lambda: manager._by_peer.get(PEER_ADDRESS) is older)
+
+            newer = _fake_stream()
+            newer_task = asyncio.ensure_future(manager._run_stream(newer))
+            newer.reader.feed_data(frame(PEER_ASSERTION))
+            await until(lambda: manager._by_peer.get(PEER_ADDRESS) is newer)
+
+            older.reader.feed_data(frame(b"late"))
+            older.reader.feed_eof()
+            await asyncio.wait_for(older_task, 2.0)
+            mock_protocol.wifi_direct_message_received.assert_not_called()
+            mock_protocol.wifi_direct_peer_connected.assert_called_once()
+            mock_protocol.wifi_direct_peer_disconnected.assert_not_called()
+            assert manager.get_metrics()["streams_superseded"] == 1
+            newer.reader.feed_eof()
+            await asyncio.wait_for(newer_task, 2.0)
+        finally:
+            await manager.stop()
+
+    async def test_an_endpoint_that_never_proves_a_peer_climbs_the_ladder(
+        self, mock_protocol, fake_verifier, fast_reconnect
+    ):
+        # A wrong port in a peer list: some service that accepts and closes.
+        # Every attempt ends unannounced, so the delay doubles to the ceiling
+        # rather than retrying at the initial pace forever.
+        connects: list = []
+
+        async def serve(reader, writer):
+            connects.append(time.monotonic())
+            writer.close()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        manager = PeerStreamManager(mock_protocol, listen_port=None, peers=[f"127.0.0.1:{port}"])
+        await manager.start()
+        try:
+            await asyncio.sleep(0.6)
+            # Ladder 0.02, 0.04, 0.08, 0.1, 0.1, ...: about seven attempts in
+            # 0.6 s, where a fixed 0.02 s pace would make about thirty.
+            assert 2 <= len(connects) <= 10, len(connects)
+        finally:
+            await manager.stop()
+            server.close()
+
+    async def test_a_connector_survives_an_unexpected_connect_error(
+        self, mock_protocol, fake_verifier, fast_reconnect, monkeypatch
+    ):
+        sessions: list = []  # held, or the writer's collection closes the socket
+
+        async def serve(reader, writer):
+            sessions.append(writer)
+            await read_frame(reader)
+            writer.write(frame(PEER_ASSERTION))
+            await writer.drain()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        real_open = asyncio.open_connection
+        calls = {"n": 0}
+
+        async def flaky_open(host, port_):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ValueError("not an OSError")
+            return await real_open(host, port_)
+
+        monkeypatch.setattr(psm.asyncio, "open_connection", flaky_open)
+        manager = PeerStreamManager(mock_protocol, listen_port=None, peers=[f"127.0.0.1:{port}"])
+        await manager.start()
+        try:
+            await until(lambda: manager.connected_peers() == [PEER_ADDRESS])
+            assert calls["n"] >= 2, "the connector retried after the ValueError"
+        finally:
+            await manager.stop()
+            server.close()
+
+    async def test_only_an_outbound_endpoint_is_remembered_as_refusing(
+        self, mock_protocol, fake_verifier, fast_reconnect
+    ):
+        async def serve(reader, writer):
+            await read_frame(reader)
+            writer.write(frame(bytes([0xEE]) * 100))  # does not verify
+            await writer.drain()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        manager = PeerStreamManager(mock_protocol, listen_port=None, peers=[f"127.0.0.1:{port}"])
+        await manager.start()
+        try:
+            await until(lambda: manager._refusals.get(f"127.0.0.1:{port}", 0) >= 1)
+        finally:
+            await manager.stop()
+            server.close()
+
+    async def test_stop_awaits_every_connector(self, mock_protocol, fake_verifier):
+        manager = PeerStreamManager(mock_protocol, listen_port=None, peers=["127.0.0.1:9"])
+        await manager.start()
+        tasks = list(manager._connector_tasks.values())
+        assert tasks
+        await manager.stop()
+        assert all(t.done() for t in tasks)
+        assert manager._connector_tasks == {}
+
+
+# ---------------------------------------------------------------------------
+# DNS-SD: record lifecycle, and a live advertise-and-browse round trip
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoveryLifecycle:
+    def test_a_record_prefers_scoped_addresses(self):
+        info = MagicMock()
+        info.properties = {b"txtvers": b"1", b"addr": PEER_ADDRESS.encode()}
+        info.port = 7878
+        info.parsed_scoped_addresses = MagicMock(return_value=["fe80::1%en0", "192.168.1.9"])
+        info.parsed_addresses = MagicMock(return_value=["fe80::1", "192.168.1.9"])
+        assert [e.host for e in peers_from_record(info)] == ["fe80::1%en0", "192.168.1.9"]
+
+    def test_one_listen_address_is_advertised_as_itself(self):
+        assert psm.advertised_addresses("192.168.1.9") == ["192.168.1.9"]
+        assert psm.advertised_addresses("::1") == ["::1"]
+
+    def test_a_wildcard_listener_advertises_no_loopback(self):
+        pytest.importorskip("ifaddr")
+        for address in psm.advertised_addresses("0.0.0.0"):
+            assert not address.startswith("127.") and address != "::1"
+
+    def test_the_record_names_a_host_of_its_own(self):
+        name = psm.service_host_name(PEER_ADDRESS)
+        assert name.endswith(".local.") and PEER_ADDRESS not in name
+        assert not name.endswith(SERVICE_TYPE), "the SRV target is a host, not the instance"
+
+    async def test_a_removed_record_stops_reconnecting_but_keeps_the_live_stream(
+        self, mock_protocol, fake_verifier, fast_reconnect
+    ):
+        sessions: list = []
+
+        async def serve(reader, writer):
+            sessions.append(writer)
+            await read_frame(reader)
+            writer.write(frame(PEER_ASSERTION))
+            await writer.drain()
+
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        manager = PeerStreamManager(mock_protocol, listen_port=None)
+        await manager.start()
+        try:
+            manager._on_record_resolved("peer", [PeerEntry("127.0.0.1", port, PEER_ADDRESS)])
+            await until(lambda: manager.connected_peers() == [PEER_ADDRESS])
+            manager._on_record_removed("peer")
+            await asyncio.sleep(0.1)
+            assert manager.connected_peers() == [PEER_ADDRESS], "a record expiring cuts nothing"
+
+            sessions[0].close()
+            await until(lambda: not manager._connector_tasks)
+            await asyncio.sleep(0.2)
+            assert len(sessions) == 1, "no reconnect toward a removed record"
+            assert manager._connector_entries == {}
+        finally:
+            await manager.stop()
+            server.close()
+
+    async def test_a_host_advertised_over_dns_sd_is_found_and_proved(self, fake_verifier):
+        pytest.importorskip("zeroconf")
+        a_protocol = make_protocol(assertion=OUR_ASSERTION, address=OUR_ADDRESS)
+        b_protocol = make_protocol(assertion=PEER_ASSERTION, address=PEER_ADDRESS)
+        a = PeerStreamManager(a_protocol, listen_host="127.0.0.1", listen_port=0, advertise=True)
+        b = PeerStreamManager(b_protocol, listen_port=None, discover=True)
+        await a.start()
+        await b.start()
+        try:
+            await until(
+                lambda: a.connected_peers() == [PEER_ADDRESS]
+                and b.connected_peers() == [OUR_ADDRESS],
+                timeout=15.0,
+            )
+            b_protocol.wifi_direct_peer_connected.assert_called_once_with(peer_id=OUR_ADDRESS)
+        finally:
+            await asyncio.gather(a.stop(), b.stop())

@@ -513,7 +513,7 @@ jobs:
         run: |
           cd bindings/python
           pip install pip-audit
-          pip install bleak websockets keyring
+          pip install bleak websockets keyring zeroconf ifaddr
           pip-audit --strict
 
   python-package:
