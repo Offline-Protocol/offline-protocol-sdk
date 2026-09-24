@@ -44,8 +44,8 @@ use offline_protocol_router::{
 };
 use offline_protocol_transport::{
     ble::BleTransport, internet::InternetTransport, nostr::NostrTransport, nostr::ResolvedRecord,
-    reticulum::ReticulumTransport, Transport, TransportMetrics as CoreTransportMetrics,
-    TransportType as CoreTransportType,
+    reticulum::ReticulumTransport, wifi_direct::WifiDirectTransport, Transport,
+    TransportMetrics as CoreTransportMetrics, TransportType as CoreTransportType,
 };
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -2441,13 +2441,11 @@ pub struct OfflineProtocol {
 /// to transports rebuilt against the derived address.
 ///
 /// Internet is absent because it has no callback API — it does not override
-/// `set_on_messages_available`, so there is nothing to carry forward. Wi-Fi
-/// Direct is absent for a different reason: `WifiDirectTransport` is never
-/// registered, so its setter has nothing to install onto in the first place
-/// and storing the callback would imply a wiring that does not exist.
+/// `set_on_messages_available`, so there is nothing to carry forward.
 #[derive(Default, Clone)]
 struct TransportCallbacks {
     ble: Option<Arc<dyn BleTransportCallback>>,
+    wifi_direct: Option<Arc<dyn WifiDirectTransportCallback>>,
     reticulum: Option<Arc<dyn ReticulumTransportCallback>>,
     nostr: Option<Arc<dyn NostrTransportCallback>>,
 }
@@ -2456,6 +2454,7 @@ struct TransportCallbacks {
 #[derive(Debug, Clone, Copy)]
 struct EnabledTransports {
     ble: bool,
+    wifi_direct: bool,
     internet: bool,
     reticulum: bool,
     nostr: bool,
@@ -2469,6 +2468,7 @@ impl OfflineProtocol {
         // point this device knows who it is.
         let user_id = config.profile.clone();
         let ble_enabled = config.ble_enabled;
+        let wifi_direct_enabled = config.wifi_direct_enabled;
         let internet_enabled = config.internet_enabled;
         let reticulum_enabled = config.reticulum_enabled;
         let nostr_enabled = config.nostr_enabled;
@@ -2484,6 +2484,20 @@ impl OfflineProtocol {
             protocol
                 .transport_manager_mut()
                 .add_transport(CoreTransportType::BLE, Box::new(ble_transport));
+        }
+
+        // Add the peer-stream transport (the `wifi_direct` slot) if enabled.
+        // The platform owns the streams, the framing and the preamble; it
+        // announces a link only under the address the peer's preamble proved
+        // (`wifi_direct_peer_connected`), and the transport refuses to queue
+        // for any recipient no stream has proved, so a group that formed but
+        // exchanged no preamble is never a black hole for direct messages.
+        if wifi_direct_enabled {
+            let wifi_direct_transport = WifiDirectTransport::new(user_id.clone());
+            protocol.transport_manager_mut().add_transport(
+                CoreTransportType::WiFiDirect,
+                Box::new(wifi_direct_transport),
+            );
         }
 
         // Add Internet transport if enabled
@@ -2588,6 +2602,7 @@ impl OfflineProtocol {
             forced_transport: RwLock::new(None),
             enabled_transports: EnabledTransports {
                 ble: ble_enabled,
+                wifi_direct: wifi_direct_enabled,
                 internet: internet_enabled,
                 reticulum: reticulum_enabled,
                 nostr: nostr_enabled,
@@ -2628,6 +2643,12 @@ impl OfflineProtocol {
 
         if enabled.ble {
             rebuilt.push((CoreTransportType::BLE, Box::new(BleTransport::new(address))));
+        }
+        if enabled.wifi_direct {
+            rebuilt.push((
+                CoreTransportType::WiFiDirect,
+                Box::new(WifiDirectTransport::new(address)),
+            ));
         }
         if enabled.internet {
             rebuilt.push((
@@ -3185,33 +3206,24 @@ impl OfflineProtocol {
         self.install_ble_callback(&callback);
     }
 
-    /// Registers a WiFi Direct transport callback that fires when outgoing
-    /// messages become available. This replaces timer-based polling.
+    /// Registers a peer-stream (`wifi_direct` slot) transport callback that
+    /// fires when outgoing messages become available. This replaces
+    /// timer-based polling: the platform should call
+    /// `wifi_direct_get_next_message()` inside the callback.
     ///
-    /// **Currently inert.** `WifiDirectTransport` is not registered by this
-    /// crate (see `rebuild_transports_for_identity`), so there is no
-    /// transport to install onto and Wi-Fi Direct sending runs entirely from
-    /// the platform manager's own polling loop. Kept as the restoration hook
-    /// for when the transport is wired up; it warns rather than pretending.
+    /// Safe to call before `initialize_mls`: the callback is retained and
+    /// re-applied to the transport rebuilt against the derived address. It
+    /// fires only for a message the transport queued, and the transport
+    /// queues only for a recipient a stream has proved, so a platform whose
+    /// streams have exchanged no preamble is never woken for nothing.
     pub fn set_wifi_direct_transport_callback(
         &self,
         callback: Box<dyn WifiDirectTransportCallback>,
     ) {
         let callback: Arc<dyn WifiDirectTransportCallback> = Arc::from(callback);
-        let installed = self
-            .with_transport(CoreTransportType::WiFiDirect, |transport| {
-                transport.set_on_messages_available(Arc::new(move || {
-                    callback.on_messages_available();
-                }));
-            })
-            .is_some();
-        if !installed {
-            tracing::warn!(
-                "Wi-Fi Direct transport callback registered but no Wi-Fi Direct \
-                 transport exists; event-driven sending is NOT active and the \
-                 platform polling loop is doing all the work"
-            );
-        }
+        recover_rwlock_write(&self.transport_callbacks, "transport_callbacks").wifi_direct =
+            Some(callback.clone());
+        self.install_wifi_direct_callback(&callback);
     }
 
     /// Registers a Reticulum transport callback that fires when outgoing
@@ -3252,6 +3264,21 @@ impl OfflineProtocol {
         .is_some()
     }
 
+    /// Installs a stored peer-stream callback onto the live transport, if
+    /// there is one. Returns whether it landed.
+    fn install_wifi_direct_callback(
+        &self,
+        callback: &Arc<dyn WifiDirectTransportCallback>,
+    ) -> bool {
+        let callback = callback.clone();
+        self.with_transport(CoreTransportType::WiFiDirect, |transport| {
+            transport.set_on_messages_available(Arc::new(move || {
+                callback.on_messages_available();
+            }));
+        })
+        .is_some()
+    }
+
     /// Installs a stored Reticulum callback onto the live transport, if there
     /// is one. Returns whether it landed.
     fn install_reticulum_callback(&self, callback: &Arc<dyn ReticulumTransportCallback>) -> bool {
@@ -3285,6 +3312,9 @@ impl OfflineProtocol {
         let stored = recover_rwlock_read(&self.transport_callbacks, "transport_callbacks").clone();
         if let Some(cb) = stored.ble.as_ref() {
             self.install_ble_callback(cb);
+        }
+        if let Some(cb) = stored.wifi_direct.as_ref() {
+            self.install_wifi_direct_callback(cb);
         }
         if let Some(cb) = stored.reticulum.as_ref() {
             self.install_reticulum_callback(cb);
@@ -4557,10 +4587,27 @@ impl OfflineProtocol {
     }
 
     // ========================================================================
-    // WIFI DIRECT TRANSPORT OPERATIONS
+    // PEER-STREAM TRANSPORT OPERATIONS (the `wifi_direct` slot)
+    //
+    // A byte stream the platform established to one peer: a Wi-Fi Direct
+    // group socket, a Multipeer session, a TCP connection over a LAN or a
+    // routed mesh. `docs/spec/stream-framing.md` is the contract. The
+    // platform frames (`u32` big-endian length plus body), exchanges the
+    // identity assertion as the first frame in each direction, and announces
+    // a peer here only under the address `verify_identity_assertion` derived
+    // from its preamble. The identity rule of the BLE block applies to
+    // `sender_id` and `peer_id` unchanged: a proved address, never a socket
+    // string, a device name or an address read from a discovery record.
     // ========================================================================
 
-    /// WiFi Direct: Status changed (connected/disconnected to peer group)
+    /// Peer stream: the platform's stream layer is up (`true`) or down.
+    ///
+    /// Up means streams can be established, not that any peer is reachable.
+    /// The slot counts as an available carrier only once a stream has proved
+    /// a peer (`wifi_direct_peer_connected`), and it refuses to queue for a
+    /// recipient no stream has proved, so an up layer with no announced peer
+    /// is not a carrier: the selector does not score it and no transfer is
+    /// pinned to it.
     pub fn wifi_direct_status_changed(&self, is_connected: bool) -> Result<(), ProtocolError> {
         // Update internal state
         {
@@ -4600,7 +4647,14 @@ impl OfflineProtocol {
         Ok(())
     }
 
-    /// WiFi Direct: Message received from peer
+    /// Peer stream: one frame body arrived on the stream that proved
+    /// `sender_id`.
+    ///
+    /// `data` is the body after the length prefix, exactly one message in the
+    /// hop-local encoding, and `sender_id` is the address the stream's
+    /// preamble proved. The core attributes the frame to that address and
+    /// matches `Message.sender` against it, so a body handed up under any
+    /// other name is refused as unattributed.
     pub fn wifi_direct_message_received(
         &self,
         sender_id: String,
@@ -4627,7 +4681,12 @@ impl OfflineProtocol {
         self.notify_neighbor_reachable(&sender_id, "WiFiDirect", None)
     }
 
-    /// WiFi Direct: Get next message to send
+    /// Peer stream: the next body to write, and the proved address of the
+    /// stream to write it on.
+    ///
+    /// The platform frames it (`u32` big-endian length, then the body) and
+    /// writes it to the stream whose preamble proved `recipient_id`. Nothing
+    /// is ever returned for an address no stream proved.
     pub fn wifi_direct_get_next_message(&self) -> Option<WifiDirectMessage> {
         // Check if connected
         {
@@ -4650,7 +4709,14 @@ impl OfflineProtocol {
         .flatten()
     }
 
-    /// WiFi Direct: Peer connected
+    /// Peer stream: a stream's preamble verified, and `peer_id` is the
+    /// address it proved.
+    ///
+    /// Call this once per announced stream, with the derived address and
+    /// nothing else. The chapter's one-announced-stream-per-address rule is
+    /// the platform's: links here are keyed by address, so a second stream
+    /// proving an address already held is not a second link, and the first
+    /// loss reported removes the only one.
     pub fn wifi_direct_peer_connected(&self, peer_id: String) -> Result<(), ProtocolError> {
         // Update internal state
         {
@@ -4667,7 +4733,11 @@ impl OfflineProtocol {
         self.notify_neighbor_reachable(&peer_id, "WiFiDirect", None)
     }
 
-    /// WiFi Direct: Peer disconnected
+    /// Peer stream: the announced stream for `peer_id` ended.
+    ///
+    /// Report it if and only if the stream was announced: a stream that never
+    /// proved a peer was never announced, and reporting its close would tell
+    /// the core a peer it may still hold over another stream is gone.
     pub fn wifi_direct_peer_disconnected(&self, peer_id: String) -> Result<(), ProtocolError> {
         // Update internal state
         {
@@ -9431,6 +9501,340 @@ mod tests {
                 .any(|e| e.contains("neighbor_lost") && e.contains("wifi-peer")),
             "WiFi Direct disconnect must still emit NeighborLost"
         );
+    }
+
+    /// A reader over the FFI verifier, the way a host that owns its own
+    /// sockets builds one.
+    fn peer_stream_reader() -> offline_protocol_transport::PeerStreamReader {
+        offline_protocol_transport::PeerStreamReader::new(Box::new(|bytes| {
+            verify_identity_assertion(bytes.to_vec()).ok()
+        }))
+    }
+
+    /// Two engines with identities, so each can build the preamble the other
+    /// verifies. Encryption is off so the first body a send produces is the
+    /// message itself rather than a key package request; the transport is
+    /// what is under test, and the handshake above it is covered elsewhere.
+    fn peer_stream_pair() -> (OfflineProtocol, OfflineProtocol, String, String) {
+        let engine = |profile: &str| {
+            let engine = OfflineProtocol::new(ProtocolConfig {
+                profile: profile.to_string(),
+                encryption_enabled: false,
+                auto_key_exchange: false,
+                ..create_test_config()
+            })
+            .unwrap();
+            engine
+                .initialize_mls(
+                    Box::new(TestMlsStorageProvider::default()),
+                    Box::new(TestMlsStorageProvider::default()),
+                )
+                .unwrap();
+            engine.start().unwrap();
+            engine.wifi_direct_status_changed(true).unwrap();
+            engine
+        };
+        let a = engine("stream-a");
+        let b = engine("stream-b");
+        let a_address = a.local_address().expect("address after init");
+        let b_address = b.local_address().expect("address after init");
+        (a, b, a_address, b_address)
+    }
+
+    /// The whole contract end to end, on the shape a host runs: each side
+    /// sends its assertion as the first frame, verifies the other's, announces
+    /// the derived address, and a message then crosses attributed to it and
+    /// is delivered at hop zero.
+    ///
+    /// The registration is what this pins. Before it, `wifi_direct_*` had no
+    /// transport behind it: `peer_connected` reached the core's neighbour
+    /// table, `get_next_message` was always `None`, and a body handed to
+    /// `message_received` was dropped before the core saw it.
+    #[test]
+    fn test_peer_stream_delivers_a_message_between_two_engines_over_the_preamble() {
+        use offline_protocol_transport::{frame, StreamEvent};
+
+        let (a, b, a_address, b_address) = peer_stream_pair();
+        drained_events(&a);
+        drained_events(&b);
+
+        // Each direction of the stream: the first frame is the assertion, and
+        // the reader at the far end announces what it proves.
+        let mut a_reads = peer_stream_reader();
+        let mut b_reads = peer_stream_reader();
+        let a_to_b = frame(&a.identity_assertion(Vec::new()).unwrap()).unwrap();
+        let b_to_a = frame(&b.identity_assertion(b"host".to_vec()).unwrap()).unwrap();
+        assert_eq!(
+            b_reads.feed(&a_to_b),
+            vec![StreamEvent::Announced(a_address.clone())]
+        );
+        assert_eq!(
+            a_reads.feed(&b_to_a),
+            vec![StreamEvent::Announced(b_address.clone())]
+        );
+        b.wifi_direct_peer_connected(a_address.clone()).unwrap();
+        a.wifi_direct_peer_connected(b_address.clone()).unwrap();
+        assert!(b.lock_inner().unwrap().is_known_peer(&a_address));
+        assert!(
+            drained_events(&b)
+                .iter()
+                .any(|e| e.contains("neighbor_discovered") && e.contains(&a_address)),
+            "the announced peer is the derived address"
+        );
+
+        // A message from A, drained from the slot, framed by the host, read
+        // by B's reader, handed to B attributed to the proved address.
+        a.force_transport(TransportType::WiFiDirect).unwrap();
+        let id = a
+            .send_message(
+                b_address.clone(),
+                "hello over a stream".to_string(),
+                MessagePriority::Medium,
+                None,
+            )
+            .unwrap();
+        let outbound = a
+            .wifi_direct_get_next_message()
+            .expect("the registered transport queued the message");
+        assert_eq!(
+            outbound.recipient_id, b_address,
+            "the host writes it on the stream whose preamble proved this address"
+        );
+        let events = b_reads.feed(&frame(&outbound.data).unwrap());
+        let [StreamEvent::Message { from, body }] = events.as_slice() else {
+            panic!("expected one message event, got {events:?}");
+        };
+        assert_eq!(from, &a_address);
+        b.wifi_direct_message_received(from.clone(), body.clone())
+            .unwrap();
+
+        let received = drained_events(&b)
+            .into_iter()
+            .find(|e| e.contains("\"type\":\"message_received\""))
+            .expect("B delivers the message");
+        let received: serde_json::Value = serde_json::from_str(&received).unwrap();
+        assert_eq!(received["message_id"], id);
+        assert_eq!(received["sender"], a_address);
+        assert_eq!(received["content"], "hello over a stream");
+        assert_eq!(received["hop_count"], 0, "one stream, one hop");
+        assert_eq!(
+            received["transport"].as_str().unwrap().to_lowercase(),
+            "wifidirect"
+        );
+    }
+
+    /// A frame before the preamble closes the stream, and a closed stream
+    /// announces nothing: the core never learns a peer it cannot name.
+    #[test]
+    fn test_peer_stream_frame_before_the_preamble_announces_nothing() {
+        use offline_protocol_transport::{frame, CloseReason, StreamEvent};
+
+        let (a, b, a_address, b_address) = peer_stream_pair();
+        drained_events(&b);
+
+        // A's message arrives on B before A's assertion did.
+        a.wifi_direct_peer_connected(b_address.clone()).unwrap();
+        a.force_transport(TransportType::WiFiDirect).unwrap();
+        a.send_message(
+            b_address,
+            "too early".to_string(),
+            MessagePriority::Medium,
+            None,
+        )
+        .unwrap();
+        let outbound = a.wifi_direct_get_next_message().unwrap();
+
+        let mut b_reads = peer_stream_reader();
+        assert_eq!(
+            b_reads.feed(&frame(&outbound.data).unwrap()),
+            vec![StreamEvent::Closed(CloseReason::PreambleRejected)]
+        );
+        // The host closes the socket and calls nothing: no announce, no loss.
+        assert!(!b.lock_inner().unwrap().is_known_peer(&a_address));
+        assert!(
+            drained_events(&b).is_empty(),
+            "nothing about the refused stream reaches the app"
+        );
+    }
+
+    /// An up stream layer with no proved peer takes no direct message. The
+    /// selector weights this slot's bandwidth most heavily, so without the
+    /// refusal it would win the selection and hold the message in a queue
+    /// the platform has no stream to drain to; with it, the manager falls
+    /// through to the next carrier and only a forced send fails.
+    #[test]
+    fn test_peer_stream_send_falls_through_when_no_stream_proved_the_recipient() {
+        let engine = OfflineProtocol::new(ProtocolConfig {
+            profile: "stream-sender".to_string(),
+            ..create_test_config()
+        })
+        .unwrap();
+        engine.start().unwrap();
+        engine.wifi_direct_status_changed(true).unwrap();
+        engine.internet_status_changed(true).unwrap();
+        while engine.internet_get_next_message().is_some() {}
+
+        engine
+            .send_message(
+                "nobody-proved".to_string(),
+                "which carrier".to_string(),
+                MessagePriority::Medium,
+                None,
+            )
+            .unwrap();
+        assert!(
+            engine.wifi_direct_get_next_message().is_none(),
+            "no stream proved the recipient, so the slot queues nothing"
+        );
+        assert!(
+            engine.internet_get_next_message().is_some(),
+            "the send fell through to the carrier that can take it"
+        );
+        // The slot proved nobody, so it is not a carrier at all: the selector
+        // never scores it, rather than scoring it first and being refused on
+        // every send.
+        assert!(
+            !drained_events(&engine)
+                .iter()
+                .any(|e| e.contains("dors_transport_selected") && e.contains("wifiDirect")),
+            "a slot with no proved stream must not be selected"
+        );
+
+        // Forced onto the slot, there is no carrier to fall through to: the
+        // engine defers the message for retry and says so, and still nothing
+        // reaches the queue.
+        drained_events(&engine);
+        engine.force_transport(TransportType::WiFiDirect).unwrap();
+        let deferred_id = engine
+            .send_message(
+                "nobody-proved".to_string(),
+                "forced".to_string(),
+                MessagePriority::Medium,
+                None,
+            )
+            .unwrap();
+        assert!(engine.wifi_direct_get_next_message().is_none());
+        assert!(
+            drained_events(&engine).iter().any(|e| e
+                .contains("\"type\":\"message_deferred\"")
+                && e.contains(&deferred_id)),
+            "a forced send the slot refuses is deferred, never queued for a stream that does not exist"
+        );
+    }
+
+    /// A phone whose only "up" carrier is a slot that proved nobody has no
+    /// carrier, and says so: the deferral names the missing carrier, as it
+    /// did before the slot was registered, rather than a carrier that failed
+    /// mid-send. The welcome lifecycle reads the same fact and parks instead
+    /// of spending attempts.
+    #[test]
+    fn test_peer_stream_slot_alone_with_nothing_proved_is_no_carrier() {
+        let engine = OfflineProtocol::new(ProtocolConfig {
+            profile: "slot-only".to_string(),
+            ble_enabled: false,
+            ..create_test_config()
+        })
+        .unwrap();
+        engine.start().unwrap();
+        engine.wifi_direct_status_changed(true).unwrap();
+        drained_events(&engine);
+
+        let id = engine
+            .send_message(
+                "bob".to_string(),
+                "hi".to_string(),
+                MessagePriority::Medium,
+                None,
+            )
+            .unwrap();
+        let deferred = drained_events(&engine)
+            .into_iter()
+            .find(|e| e.contains("\"type\":\"message_deferred\"") && e.contains(&id))
+            .expect("the message is deferred");
+        let deferred: serde_json::Value = serde_json::from_str(&deferred).unwrap();
+        assert_eq!(deferred["reason"], "transport_not_connected");
+    }
+
+    /// A file to a Bluetooth LE neighbour leaves under the Bluetooth LE
+    /// window whatever the peer-stream slot is doing.
+    ///
+    /// The shipped mobile managers report the slot's layer up when they start
+    /// and prove no peer. When the slot counted as available, a transfer
+    /// started after the internet dropped was pinned to it, sized its chunks
+    /// for a stream, had every chunk refused, and handed each refused chunk to
+    /// the neighbour through the mesh with no window: a 256 KiB file queued
+    /// fifteen times the Bluetooth LE fragments of the same file with the slot
+    /// down, and past the own-send budget the rest retried against the pin
+    /// until the transfer failed. A slot linked to somebody else is the same
+    /// failure one step later, which is why the pin asks for a link to the
+    /// recipient and not only for an available slot.
+    #[test]
+    fn test_peer_stream_slot_never_pins_a_file_for_a_bluetooth_neighbour() {
+        fn ble_fragments_for_a_file(slot: Option<&str>) -> (usize, usize) {
+            let engine = OfflineProtocol::new(ProtocolConfig {
+                profile: "media-sender".to_string(),
+                encryption_enabled: false,
+                auto_key_exchange: false,
+                require_encryption: false,
+                ..create_test_config()
+            })
+            .unwrap();
+            engine.start().unwrap();
+            // Online first, so the internet is the current transport, then
+            // offline beside a Bluetooth LE neighbour.
+            engine.internet_status_changed(true).unwrap();
+            engine
+                .send_message(
+                    "someone".to_string(),
+                    "hi".to_string(),
+                    MessagePriority::Medium,
+                    None,
+                )
+                .unwrap();
+            while engine.internet_get_next_message().is_some() {}
+            engine.internet_status_changed(false).unwrap();
+            engine.ble_status_changed(true).unwrap();
+            engine.ble_peer_discovered("bob".to_string(), -50).unwrap();
+            while engine.ble_get_next_fragment().is_some() {}
+            if let Some(linked) = slot {
+                engine.wifi_direct_status_changed(true).unwrap();
+                if !linked.is_empty() {
+                    engine
+                        .wifi_direct_peer_connected(linked.to_string())
+                        .unwrap();
+                }
+            }
+
+            engine
+                .send_file("bob".to_string(), vec![7u8; 262_144], "f.bin".to_string())
+                .unwrap();
+            let mut ble = 0;
+            while engine.ble_get_next_fragment().is_some() {
+                ble += 1;
+            }
+            let mut stream = 0;
+            while engine.wifi_direct_get_next_message().is_some() {
+                stream += 1;
+            }
+            (ble, stream)
+        }
+
+        let (baseline, _) = ble_fragments_for_a_file(None);
+        assert!(baseline > 0, "the Bluetooth LE window sends something");
+        for (label, slot) in [
+            ("layer up, nothing proved", ""),
+            ("linked to carol", "carol"),
+        ] {
+            let (ble, stream) = ble_fragments_for_a_file(Some(slot));
+            assert_eq!(
+                ble, baseline,
+                "{label}: the file must leave under the Bluetooth LE window, as with the slot down"
+            );
+            assert_eq!(
+                stream, 0,
+                "{label}: nothing is queued on a stream to someone else"
+            );
+        }
     }
 
     #[test]
@@ -15926,12 +16330,14 @@ mod tests {
     /// Both managers used to pass a transport-level string — a TCP endpoint on
     /// Android, the remote's profile on iOS — to the `wifi_direct_*` entry
     /// points, whose parameters are documented as the peer's user-level id.
-    /// Neither is one, and this transport has no handshake that could supply
-    /// one. The frames were already going nowhere (`WifiDirectTransport` is
-    /// never registered), but the announcements still reached
-    /// `on_neighbor_discovered`, which entered the bogus id into the
-    /// capacity-bounded `known_peers` — evicting real neighbours — and started
-    /// an auto key exchange toward it.
+    /// Neither is one, and neither manager exchanges the preamble that would
+    /// supply one. The frames were already going nowhere (the transport was
+    /// not registered then; it is now, and it refuses a recipient no stream
+    /// proved), but the announcements still reached `on_neighbor_discovered`,
+    /// which entered the bogus id into the capacity-bounded `known_peers`,
+    /// evicting real neighbours, and started an auto key exchange toward it.
+    /// The calls return when the managers exchange the preamble
+    /// (`docs/spec/stream-framing.md`), and only then.
     #[test]
     fn react_native_wifi_direct_announces_no_unproven_peer_ids() {
         for (label, code) in [
@@ -15958,6 +16364,127 @@ mod tests {
                      peer's user-level id — matching it against Message.sender and entering it \
                      into known_peers. Restoring these calls requires an identity exchange \
                      first (see wifiDirectPeerIdIsUnavailable on the type)"
+                );
+            }
+        }
+    }
+
+    /// Each mobile bridge has one transport-name mapper, it knows every
+    /// transport the core has, and the two entry points that take a name
+    /// from JavaScript go through it.
+    ///
+    /// `getTransportMetrics` and `forceTransport` each carried their own
+    /// three-name switch that defaulted anything else to BLE, so
+    /// `forceTransport("nostr")` forced the radio and a metrics read for the
+    /// peer stream answered for it, while the bridge's third mapper already
+    /// knew four names. Neither bridge runs in CI, so the set is pinned here
+    /// as literals, the C5 route: a guard that read the enum would agree
+    /// with any mapper that merely compiled.
+    #[test]
+    fn react_native_transport_name_mappers_know_every_transport() {
+        let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+        );
+
+        let region = |label: &str, code: &str, from: &str, to: &str| -> String {
+            let start = code
+                .find(from)
+                .unwrap_or_else(|| panic!("{label}: `{from}` is gone; it moved or was renamed"));
+            let end = code[start..]
+                .find(to)
+                .map(|i| start + i)
+                .unwrap_or_else(|| panic!("{label}: `{to}` no longer follows `{from}`"));
+            code[start..end].to_string()
+        };
+
+        // (label, the one mapper, its default arm, the two callers and the call they make)
+        let bridges: [(&str, String, &str, [String; 2], &str); 2] = [
+            (
+                "Swift",
+                region(
+                    "Swift transportType(from:)",
+                    &swift,
+                    "func transportType(from type: String)",
+                    "func buildTopologyJson(",
+                ),
+                "default:",
+                [
+                    region(
+                        "Swift getTransportMetrics",
+                        &swift,
+                        "func getTransportMetrics(",
+                        "proto.getTransportMetrics(",
+                    ),
+                    region(
+                        "Swift forceTransport",
+                        &swift,
+                        "func forceTransport(",
+                        "try proto.forceTransport(",
+                    ),
+                ],
+                "transportType(from: transportType)",
+            ),
+            (
+                "Kotlin",
+                region(
+                    "Kotlin mapTransportType",
+                    &kotlin,
+                    "fun mapTransportType(",
+                    "fun buildTopologyJson(",
+                ),
+                "else ->",
+                [
+                    region(
+                        "Kotlin getTransportMetrics",
+                        &kotlin,
+                        "fun getTransportMetrics(",
+                        "protocol?.getTransportMetrics(",
+                    ),
+                    region(
+                        "Kotlin forceTransport",
+                        &kotlin,
+                        "fun forceTransport(",
+                        "protocol?.forceTransport(",
+                    ),
+                ],
+                "mapTransportType(transportType)",
+            ),
+        ];
+
+        for (label, mapper, default_arm, callers, call) in bridges {
+            for name in [
+                "\"ble\"",
+                "\"internet\"",
+                "\"wifidirect\"",
+                "\"wifi_direct\"",
+                "\"reticulum\"",
+                "\"nostr\"",
+            ] {
+                assert!(
+                    mapper.contains(name),
+                    "{label}: the mapper does not know {name}; it must name all five transports \
+                     (and both spellings of the peer-stream slot)"
+                );
+            }
+            let default = mapper
+                .find(default_arm)
+                .map(|i| &mapper[i..])
+                .unwrap_or_else(|| panic!("{label}: the mapper has no default arm"));
+            assert!(
+                !default.contains(".ble") && !default.contains("TransportType.BLE"),
+                "{label}: the mapper's default arm names BLE; an unknown transport is an error, \
+                 not a silent reroute onto the radio"
+            );
+            for caller in callers {
+                assert!(
+                    caller.contains(call),
+                    "{label}: an entry point maps a transport name without `{call}`; \
+                     the bridge has one mapper so a transport added to it is added everywhere"
+                );
+                assert!(
+                    !caller.contains("lowercased()") && !caller.contains("lowercase()"),
+                    "{label}: an entry point carries its own name switch again"
                 );
             }
         }
@@ -16098,19 +16625,28 @@ mod tests {
                 self.0.fetch_add(1, Ordering::SeqCst);
             }
         }
+        struct CountingStream(Arc<AtomicU64>);
+        impl WifiDirectTransportCallback for CountingStream {
+            fn on_messages_available(&self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
 
         let protocol = OfflineProtocol::new(ProtocolConfig {
             profile: "callback-profile".to_string(),
             nostr_enabled: true,
             ble_enabled: true,
+            wifi_direct_enabled: true,
             ..create_test_config()
         })
         .unwrap();
 
         let nostr_hits = Arc::new(AtomicU64::new(0));
         let ble_hits = Arc::new(AtomicU64::new(0));
+        let stream_hits = Arc::new(AtomicU64::new(0));
         protocol.set_nostr_transport_callback(Box::new(CountingNostr(nostr_hits.clone())));
         protocol.set_ble_transport_callback(Box::new(CountingBle(ble_hits.clone())));
+        protocol.set_wifi_direct_transport_callback(Box::new(CountingStream(stream_hits.clone())));
 
         protocol
             .initialize_mls(
@@ -16161,6 +16697,23 @@ mod tests {
             ble_hits.load(Ordering::SeqCst),
             1,
             "the retained BLE callback must be the one the app registered"
+        );
+
+        // The peer-stream slot is registered at `new` and replaced by the
+        // rebuild, like BLE, and its wake path can be driven for real: a
+        // proved link to an address makes a send to that address queue, and
+        // the queue wakes the callback.
+        protocol.wifi_direct_status_changed(true).unwrap();
+        protocol
+            .wifi_direct_peer_connected(address.clone())
+            .unwrap();
+        protocol.with_transport(CoreTransportType::WiFiDirect, |t| {
+            t.send(&msg).expect("queueing to the peer stream");
+        });
+        assert_eq!(
+            stream_hits.load(Ordering::SeqCst),
+            1,
+            "the peer-stream callback must reach the transport the rebuild installed"
         );
     }
 

@@ -141,9 +141,13 @@ page is an orientation to the implementation.
 
 ### Peer stream (the `wifi_direct` slot)
 
-**Status**: Specified; the Rust transport exists and is being registered
-behind `wifi_direct_enabled`. The bundled mobile managers drop inbound frames
-until they exchange the preamble.
+**Status**: Registered behind `wifi_direct_enabled`. The slot counts as an
+available carrier only while a stream has proved a peer, and it queues a
+message only toward an address a stream has proved, so the bundled mobile
+managers, which report the stream layer up at start but exchange no preamble
+yet, announce no peer, are never selected, and drain nothing; until they
+adopt the chapter the slot carries traffic only for a host that runs the
+framing itself.
 
 **Use Case**: A byte stream the platform established to exactly one peer: a
 Wi-Fi Direct group socket, a Multipeer session, a TCP connection over a LAN or
@@ -152,8 +156,10 @@ a routed mesh. Higher bandwidth than BLE, whole messages in one write.
 **Files**:
 - iOS: `bindings/react-native/ios/WifiDirectManager.swift`
 - Android: `bindings/react-native/android/.../WifiDirectManager.kt`
-- Rust: `crates/offline-protocol-transport/src/wifi_direct.rs` (queues, peer
-  registry, metrics; the platform owns the sockets)
+- Rust: `crates/offline-protocol-transport/src/wifi_direct.rs` (queues, the
+  proved links, metrics; the platform owns the sockets) and
+  `stream_framing.rs` (the reference framing and preamble reader for a host
+  that owns its own sockets)
 
 **The contract**: [Peer-stream framing](spec/stream-framing.md) is the
 authority. The first frame in each direction is the identity assertion the

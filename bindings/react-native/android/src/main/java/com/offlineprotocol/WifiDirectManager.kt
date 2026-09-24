@@ -43,9 +43,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * transport peer id exists to cross-check and therefore cannot supply.
  *
  * So the announcements are gone rather than wrong. Nothing is lost by that:
- * `WifiDirectTransport` is never registered with the transport manager (see
- * `OfflineProtocol::new` and `rebuild_transports_for_identity` in the UniFFI
- * crate), so inbound frames were already dropped and no send could ever leave.
+ * the transport behind the `wifi_direct` slot is registered, but it queues
+ * only for a recipient a stream has proved, and this manager proves none, so
+ * `wifiDirectGetNextMessage` is always empty here and inbound frames are
+ * dropped below.
  * What the announcements *did* do was reach `notify_neighbor_reachable` →
  * `on_neighbor_discovered`, which entered the socket string into `known_peers`
  * and started an auto key exchange toward it — burning a slot in a
@@ -53,10 +54,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  * `neighbor_discovered` whose `peer_id` the public API promises is an `off1…`
  * address usable as a `recipient`.
  *
- * Restoring the transport means adding an identity exchange — the natural
- * shape is a length-prefixed preamble carrying the same signed blob the BLE
- * IDENTITY characteristic serves, cross-checked the same way — and registering
- * `WifiDirectTransport`. Both are out of scope here.
+ * Restoring delivery here means exchanging the preamble that
+ * `docs/spec/stream-framing.md` specifies: the identity assertion as the first
+ * frame in each direction, verified with `verifyIdentityAssertion`, the peer
+ * announced under the derived address. That chapter also records what this
+ * reader owes when it does: an inclusive 1 MiB ceiling, and closing the
+ * socket on a refused length instead of reading on. Out of scope here.
  */
 class WifiDirectManager(
     private val context: Context,

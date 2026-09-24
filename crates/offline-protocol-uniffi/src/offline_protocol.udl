@@ -1121,7 +1121,10 @@ interface OfflineProtocol {
     // BLE transport callback (event-driven sending, replaces timer-based polling)
     void set_ble_transport_callback(BleTransportCallback callback);
     
-    // WiFi Direct transport callback (event-driven sending, replaces timer-based polling)
+    // Peer-stream (`wifi_direct` slot) transport callback: fires when a body
+    // is queued toward an announced peer, so the platform drains
+    // `wifi_direct_get_next_message` instead of polling. Retained across the
+    // identity rebuild like the BLE one.
     void set_wifi_direct_transport_callback(WifiDirectTransportCallback callback);
     
     // BLE transport operations
@@ -1268,31 +1271,53 @@ interface OfflineProtocol {
     // from scratch.
     void internet_address_declaration_refused(string reason);
 
-    // WiFi Direct transport operations
+    // Peer-stream transport operations (the `wifi_direct` slot)
     //
-    // DEPRECATED and currently inert: `WifiDirectTransport` is not registered,
-    // so frames passed here go nowhere. The bundled managers no longer call
-    // the three peer/message entry points.
+    // A byte stream the platform established to exactly one peer: a Wi-Fi
+    // Direct group socket, a Multipeer session, a TCP connection over a LAN
+    // or a routed mesh. To the engine they are one transport, registered
+    // behind `wifi_direct_enabled`; the slot's name is historical, recorded
+    // as debt in docs/spec/stream-framing.md, which is the contract for
+    // everything below.
     //
-    // They are kept as the restoration hook, not deleted, because Wi-Fi Direct
-    // returns once it has a handshake that yields a proven id. That is exactly
-    // what it lacks today: the same identity contract as the BLE block above
-    // applies to `sender_id`/`peer_id` here, and Wi-Fi Direct has no
-    // equivalent of BLE's signed IDENTITY characteristic to satisfy it. The
-    // only identity on that wire is the `Message.sender` inside the frame —
-    // which is the very value these parameters exist to cross-check, so it
-    // cannot serve as its own proof.
+    // The platform owns the stream, the framing and the preamble. Every frame
+    // is a u32 big-endian length then that many bytes, at most 1 MiB. The
+    // first frame in each direction is the identity assertion this instance
+    // builds with `identity_assertion` and the far side checks with
+    // `verify_identity_assertion`; a peer is announced only under the address
+    // that verification derived, and a stream whose preamble did not verify
+    // carries nothing and is closed.
+    //
+    // The identity contract of the BLE block above applies to `sender_id` and
+    // `peer_id` unchanged: a proved address, never a socket address, a device
+    // name, or an address read from a discovery record. The slot counts as an
+    // available carrier only while a stream has proved a peer, and it queues
+    // for a recipient only while a stream has proved that recipient, so an up
+    // stream layer with no announced peer is not a carrier at all.
+
+    // The platform's stream layer is up (streams can be established) or down.
+    // Down clears every announced link.
     [Throws=ProtocolError]
     void wifi_direct_status_changed(boolean is_connected);
     
+    // One frame body (after the length prefix) arrived on the stream whose
+    // preamble proved `sender_id`.
     [Throws=ProtocolError]
     void wifi_direct_message_received(string sender_id, sequence<u8> data);
     
+    // The next body to frame and write, on the stream that proved
+    // `recipient_id`. Never returns a body for an address no stream proved.
     WifiDirectMessage? wifi_direct_get_next_message();
     
+    // A stream's preamble verified and `peer_id` is the address it derived.
+    // One announcement per address: a second stream proving an address that is
+    // already announced is refused or supersedes the first, and the core sees
+    // one announcement and, later, one loss.
     [Throws=ProtocolError]
     void wifi_direct_peer_connected(string peer_id);
     
+    // The announced stream for `peer_id` ended. Called only for a stream that
+    // was announced; a stream that never proved a peer has nothing to report.
     [Throws=ProtocolError]
     void wifi_direct_peer_disconnected(string peer_id);
 

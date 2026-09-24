@@ -2471,6 +2471,8 @@ dependencies = [
  "hmac",
  "k256",
  "offline-protocol-core",
+ "offline-protocol-mls",
+ "offline-protocol-sealed",
  "rand_core 0.6.4",
  "serde",
  "serde_json",

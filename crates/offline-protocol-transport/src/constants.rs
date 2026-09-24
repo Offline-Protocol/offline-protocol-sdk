@@ -68,9 +68,30 @@ pub const EMA_WEIGHT_NEW_LATENCY: f32 = 0.3;
 /// Weight for existing latency values in EMA calculation.
 pub const EMA_WEIGHT_EXISTING_LATENCY: f32 = 0.7;
 
-// WiFi Direct Transport Constants
-/// Maximum payload size for WiFi Direct transmission (bytes).
-pub const WIFI_DIRECT_MAX_PAYLOAD_SIZE: usize = 65535;
+// Peer-stream (`wifi_direct` slot) Constants
+//
+// The chapter is `docs/spec/stream-framing.md`. A frame on a peer stream is a
+// `u32` big-endian length and that many bytes; the constants here are the
+// prefix, the ceiling the prefix is checked against, and the preamble floor.
+/// Length of the prefix on every peer-stream frame: a `u32`, big-endian.
+pub const PEER_STREAM_LENGTH_PREFIX_LEN: usize = 4;
+
+/// Ceiling on a peer-stream frame body, inclusive.
+///
+/// It is [`DEFAULT_MAX_MESSAGE_SIZE`], the bound every carrier applies to one
+/// message, read off the prefix before a byte of the body instead of measured
+/// after the fact. A frame is one message, so this is not a second limit; it
+/// is the existing one at the point where a hostile length would otherwise
+/// cost an allocation. A body of exactly this many bytes is a valid frame,
+/// which the conformance vectors pin from both sides.
+pub const PEER_STREAM_MAX_FRAME_BYTES: usize = DEFAULT_MAX_MESSAGE_SIZE;
+
+/// Floor on a peer-stream preamble body: the identity assertion's own floor.
+///
+/// A receiver may refuse a preamble on its prefix alone below this, without
+/// reading the body. The value has one home, in `offline-protocol-sealed`,
+/// beside the codec that defines the layout.
+pub const PEER_STREAM_PREAMBLE_FLOOR: usize = offline_protocol_sealed::IDENTITY_ASSERTION_MIN_LEN;
 
 /// Connection timeout for WiFi Direct in seconds.
 pub const WIFI_DIRECT_CONNECTION_TIMEOUT_SECS: u64 = 30;

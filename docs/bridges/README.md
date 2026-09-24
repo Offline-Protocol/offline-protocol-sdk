@@ -117,7 +117,7 @@ in the uniffi crate pins the mobile call sites, which no CI job executes.
 ## C5. Hand-mirrored constants must be pinned in every language
 
 Some constants exist in several places no single compiler sees together.
-Eleven sets do today, and they are pinned by **two different** mechanisms, so
+Twelve sets do today, and they are pinned by **two different** mechanisms, so
 knowing which one you are touching matters.
 
 **The relay-answer prefix exemption list** is the canonical example: the core,
@@ -140,8 +140,14 @@ literal `8 * 1024 * 1024` in each. There is no per-language test for it, so a
 binding edited alone fails the Rust suite rather than its own. See
 [S6](swift.md#s6-secure-storage).
 
-The one-shot event tag list, the buffered inbound event set and the mesh wake
-task key are pinned the same way, by Rust guards that read the binding sources.
+The one-shot event tag list, the buffered inbound event set, the mesh wake
+task key and the transport-name mapper are pinned the same way, by Rust guards
+that read the binding sources. The mapper is the newest: each mobile bridge
+has one function that turns a transport name from JavaScript into the enum,
+it must name all five transports, and the two entry points that take a name
+(`getTransportMetrics`, `forceTransport`) must go through it. Each of those
+used to carry its own three-name copy that defaulted the rest to BLE, so
+forcing a transport the copy did not know silently forced the radio.
 
 **The relay address-proof signing domain** is the fifth, and it is the one set
 pinned by both mechanisms at once. The Swift and Kotlin

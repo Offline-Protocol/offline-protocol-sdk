@@ -50,6 +50,40 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   replayable identity assertion on every carrier. Nothing ships in this entry but the
   contract; the registration and the managers follow it.
 
+- **The peer-stream transport is registered.** The transport behind the
+  `wifi_direct` slot existed and was never constructed, so the slot's five
+  FFI operations had nothing behind them: a body handed to
+  `wifi_direct_message_received` was dropped before the engine saw it and
+  `wifi_direct_get_next_message` was always empty. It is now registered
+  whenever `wifi_direct_enabled` is set, rebuilt against the derived address
+  like the others, and its transport callback is retained across that rebuild
+  as the BLE one is. `docs/spec/stream-framing.md` is the contract, and the
+  transport crate gains its Rust reference: `PeerStreamReader` reads a
+  stream's bytes into events (the announced address, each message body, the
+  close and why) for a host that owns its own sockets, and
+  `stream_framing_vectors.rs` is the consumer that checks it against the
+  chapter's vectors with the one real verifier behind it.
+
+  Registering the slot changed two behaviours, deliberately. The slot counts
+  as an available carrier only while a stream has proved a peer: with the
+  platform's stream layer up and nothing proved it reports `connecting`, so
+  the selector does not score it, a media transfer is not pinned to it, and
+  the welcome lifecycle does not count it as a carrier. And the transport
+  queues a message only toward an address a stream has proved, refusing any
+  other recipient as not reachable on this carrier, which the selector treats
+  as "try the next one". The bundled mobile managers report the layer up when
+  they start and exchange no preamble yet, so they announce no peer. Without
+  the narrower status, a file sent to a Bluetooth LE neighbour after the
+  internet dropped was pinned to the slot, every chunk was refused, and the
+  refused chunks reached the neighbour through the mesh with no window;
+  without the refusal, the slot would win the selection on bandwidth and hold
+  direct messages in a queue those managers cannot deliver from. With both, a
+  phone with the slot enabled behaves as before this entry, and only a host
+  that runs the framing carries traffic on it. A media transfer is pinned to
+  the slot only when a stream has proved the recipient itself. The five React Native
+  operations are no longer marked deprecated; their contract is the chapter's,
+  and only a verifier's result may be announced.
+
 - **Attachment bytes move inside a group.** `DataStore.fetchAttachmentFrom(space, peer, hash)`
   asks one member for the bytes behind a reference, and they come back as
   frames sealed under the group key. Before this, references replicated to
@@ -185,6 +219,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Changed
 
+- **`WIFI_DIRECT_MAX_PAYLOAD_SIZE` is gone from the transport crate.** It
+  stated a 64 KiB ceiling nothing read, and the peer-stream chapter's ceiling
+  is the 1 MiB message ceiling; the framing constants that replace it are
+  `PEER_STREAM_MAX_FRAME_BYTES`, `PEER_STREAM_LENGTH_PREFIX_LEN` and
+  `PEER_STREAM_PREAMBLE_FLOOR`.
+
 - **The telemetry pipe caps `protocol.message.failed` rows per reason.** Each
   reason sends up to 500 rows at once, enough for a full outbox failing in one
   sweep, and then one row every ten seconds. Every failure is still counted
@@ -247,6 +287,22 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   retry ladder, and the app hears `welcome_send_failed` once.
 
 ### Fixed
+
+- **The mobile bridges map every transport name.** `forceTransport` and
+  `getTransportMetrics` on iOS and Android each carried a three-name copy of
+  the transport-name mapping that defaulted anything else to BLE, so forcing
+  `"nostr"` or `"reticulum"` from JavaScript forced the radio, and a metrics
+  read for either answered for it. Each bridge now has one mapper that names
+  all five transports and refuses an unknown name, both entry points go
+  through it, and a Rust guard reads both sources to keep it so.
+
+- **A send that every carrier refused as not reachable says so.** When the
+  selected carrier refused the recipient and there was nothing left to fall
+  back to, the send ended as `SendFailed("All transports failed")`, and the
+  `message_deferred` reason read `transport_send_failed`, as if a carrier had
+  broken mid-send. It now ends as the refusal, and the reason is
+  `peer_not_reachable`. The welcome lifecycle classifies both the same way,
+  so only the deferral reason changes.
 
 - **A Python Bluetooth LE peripheral can be verified by a phone.** It served
   the profile label as its Device id and a JSON document as its Identity, so

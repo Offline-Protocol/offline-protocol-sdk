@@ -1,18 +1,57 @@
-//! Wi-Fi Direct transport (Android P2P) queue engine.
+//! The peer-stream transport: the queue engine behind the `wifi_direct` slot.
 //!
-//! High-bandwidth peer-to-peer transport, primarily for Android, with much
-//! higher throughput than BLE. No Wi-Fi radio is touched here: the platform
-//! side (Android `WifiP2pManager`) owns group negotiation, discovery, and
-//! the sockets; the Rust side manages the send/receive queues, the peer
-//! registry, and metrics.
+//! A peer stream is a byte stream the platform established to exactly one
+//! other device: a Wi-Fi Direct group socket on Android, a Multipeer session
+//! on iOS, a TCP connection over a LAN or a routed mesh on a host. To the
+//! engine they are one transport, and this is it. The name is historical and
+//! recorded as debt in `docs/spec/stream-framing.md`; renaming the slot is a
+//! separate breaking change.
 //!
-//! The bridge contract: the platform reports connectivity via
-//! [`Transport::on_status_changed`] and peers via
-//! [`WifiDirectTransport::on_peer_discovered`] /
-//! [`WifiDirectTransport::on_peer_lost`], drains outbound wire bytes with
-//! [`Transport::get_next_message`] (woken by the
-//! [`Transport::set_on_messages_available`] callback), and
-//! injects inbound bytes via [`Transport::on_data_received`].
+//! No socket is touched here. The platform owns discovery, the connections,
+//! the framing (`u32` big-endian length plus body) and the preamble exchange;
+//! the Rust side holds the send and receive queues, the set of live links,
+//! and metrics. The Rust reference for the framing and the preamble position
+//! is [`crate::stream_framing`], for a host that owns its own sockets.
+//!
+//! # The link contract
+//!
+//! A link exists only under an address a preamble proved. The platform calls
+//! [`WifiDirectTransport::on_peer_connected`] with the address
+//! `verify_identity_assertion` derived from the peer's first frame, and
+//! nothing else: not a socket address, not a device name, not a MAC, and not
+//! an address it only read from a discovery record. Every inbound body is
+//! then attributed to that address through
+//! [`Transport::on_data_received_from`], which is what the receiving core
+//! matches `Message.sender` against.
+//!
+//! The same rule bounds the outbound side, twice. [`Transport::status`] is
+//! `Available` only while the platform's stream layer is up *and* a stream
+//! has proved a peer; with the layer up and nothing proved it is
+//! `Connecting`, so the engine does not count the slot as a carrier at all.
+//! And [`Transport::send`] refuses a recipient no stream has proved with
+//! [`crate::Error::PeerNotReachable`], which the transport manager treats as
+//! "not this carrier" and falls through to the next one.
+//!
+//! Both halves are needed, because the shipped mobile managers report the
+//! layer up when they start and prove no peer. Without the refusal, the
+//! selector, which weights this slot's bandwidth most heavily, would route
+//! direct messages into a queue whose frames the far side must drop. Without
+//! the narrower status, every consumer that reads "available" as "a carrier
+//! that can take a frame for somebody" would count a carrier that takes
+//! nothing: the media path would pin a file for a Bluetooth LE neighbour
+//! here, size its chunks for a stream and hand them to the neighbour through
+//! the mesh with no window, and a welcome would be charged an attempt on a
+//! device with no carrier that could make one.
+//!
+//! The bridge contract, in full: the platform reports connectivity via
+//! [`Transport::on_status_changed`], proved links via
+//! [`WifiDirectTransport::on_peer_connected`] and
+//! [`WifiDirectTransport::on_peer_disconnected`], drains outbound bodies
+//! with [`Transport::get_next_message`] (woken by the
+//! [`Transport::set_on_messages_available`] callback), and injects inbound
+//! bodies via [`Transport::on_data_received_from`]. The discovery view
+//! ([`WifiDirectTransport::on_peer_discovered`], keyed by hardware address)
+//! is informational and never routed by.
 
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::{Message, MutexExt};
@@ -56,17 +95,23 @@ impl Default for WifiDirectConfig {
     }
 }
 
-/// Wi-Fi Direct transport implementation.
+/// The peer-stream transport: queue engine for platform-established streams
+/// to one peer each, registered in the `wifi_direct` slot.
 ///
-/// Queue engine for platform-managed Wi-Fi Direct (Android) P2P links.
-/// Offers much higher throughput than BLE for large data transfers.
+/// See the module documentation for the link contract. Higher throughput
+/// than BLE, whole messages in one write, and every link is one proved
+/// address.
 pub struct WifiDirectTransport {
     /// Local device ID
     device_id: String,
     /// Configuration
     config: WifiDirectConfig,
-    /// Transport status
-    status: Arc<Mutex<TransportStatus>>,
+    /// The status the platform reported for its stream layer.
+    ///
+    /// Not what [`Transport::status`] answers: the engine sees `Available`
+    /// only while this is `Available` *and* a stream has proved a peer. See
+    /// [`Self::layer_status`] for why the two differ.
+    layer_status: Arc<Mutex<TransportStatus>>,
     /// Discovered peers, keyed by device address (MAC).
     ///
     /// This is the *discovery* view reported by `WifiP2pManager`, so its key
@@ -104,7 +149,7 @@ impl WifiDirectTransport {
         Self {
             device_id: device_id.into(),
             config,
-            status: Arc::new(Mutex::new(TransportStatus::Unavailable)),
+            layer_status: Arc::new(Mutex::new(TransportStatus::Unavailable)),
             peers: Arc::new(Mutex::new(HashMap::new())),
             connected_links: Arc::new(Mutex::new(HashMap::new())),
             receive_queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -157,9 +202,12 @@ impl WifiDirectTransport {
 
     /// Records a live link to `peer_id` (platform connect callback).
     ///
-    /// Takes the peer's **user-level id**, which is what the send path and
-    /// [`Transport::connected_peers`] are keyed by — unlike
-    /// [`Self::on_peer_discovered`], whose key is a hardware address.
+    /// Takes the address the peer's preamble proved, which is what the send
+    /// path and [`Transport::connected_peers`] are keyed by, unlike
+    /// [`Self::on_peer_discovered`], whose key is a hardware address. Links
+    /// are keyed by address, so a second stream proving an address already
+    /// held is not a second link; the chapter's one-announce-one-loss rule
+    /// for that case is the platform's to keep.
     pub fn on_peer_connected(&self, peer_id: impl Into<String>) {
         let peer_id = peer_id.into();
         if peer_id.is_empty() {
@@ -216,6 +264,24 @@ impl WifiDirectTransport {
         crate::common::serialize_message_with(message)
     }
 
+    /// The status the platform last reported for its stream layer, whatever
+    /// the links.
+    ///
+    /// [`Transport::status`] is narrower: it answers `Available` only while
+    /// the layer is up and at least one stream has proved a peer, and
+    /// [`TransportStatus::Connecting`] while the layer is up with none. The
+    /// engine reads `Available` as "a carrier that can take a frame for
+    /// somebody": the selector scores it, the media path pins a transfer to
+    /// it, and the welcome lifecycle counts it as a carrier. The shipped
+    /// mobile managers report the layer up when they start and prove no peer,
+    /// so a layer-up answer would put a carrier in all three that refuses
+    /// every recipient: a file to a Bluetooth LE neighbour pinned here, its
+    /// chunks sized for a stream and handed to the neighbour unwindowed, and
+    /// a welcome charged an attempt it could never have made.
+    pub fn layer_status(&self) -> TransportStatus {
+        *self.layer_status.lock_or_recover()
+    }
+
     /// Checks if there are messages to send.
     pub fn has_pending_sends(&self) -> bool {
         let queue = self.send_queue.lock_or_recover();
@@ -232,17 +298,35 @@ impl Transport for WifiDirectTransport {
         TransportType::WiFiDirect
     }
 
+    /// `Available` only while the stream layer is up and a stream has proved
+    /// a peer; `Connecting` while the layer is up with none. See
+    /// [`WifiDirectTransport::layer_status`].
     fn status(&self) -> TransportStatus {
-        *self.status.lock_or_recover()
+        let layer = self.layer_status();
+        if layer == TransportStatus::Available && self.connected_links.lock_or_recover().is_empty()
+        {
+            return TransportStatus::Connecting;
+        }
+        layer
     }
 
     fn metrics(&self) -> TransportMetrics {
         self.metrics.lock_or_recover().clone()
     }
 
+    /// Queues `message` for its recipient, if a stream has proved that
+    /// recipient.
+    ///
+    /// Refuses with [`crate::Error::PeerNotReachable`] otherwise, exactly as
+    /// BLE does for a recipient that is not a connected peer: a stream
+    /// carries one peer, and the platform drains this queue by recipient,
+    /// so a body for an address no stream proved has nowhere to go. The
+    /// transport manager treats the refusal as "try the next carrier", not
+    /// as a failure of this one (see the module documentation for what
+    /// happens without it).
     fn send(&self, message: &Message) -> Result<()> {
         // Check status
-        if self.status() != TransportStatus::Available {
+        if self.layer_status() != TransportStatus::Available {
             return Err(crate::Error::TransportNotAvailable(
                 "Wi-Fi Direct transport is not available".to_string(),
             ));
@@ -250,6 +334,16 @@ impl Transport for WifiDirectTransport {
 
         // Determine recipient and add to send queue
         let recipient = message.recipient.as_str().to_string();
+        if !self
+            .connected_links
+            .lock_or_recover()
+            .contains_key(&recipient)
+        {
+            return Err(crate::Error::PeerNotReachable(format!(
+                "peer stream: no stream has proved {}",
+                recipient
+            )));
+        }
         {
             let mut queue = self.send_queue.lock_or_recover();
             queue.push_back((recipient, message.clone()));
@@ -273,7 +367,7 @@ impl Transport for WifiDirectTransport {
     /// live link — a forwarding caller needs the failure synchronously so it
     /// can pick another neighbor instead.
     fn send_to_peer(&self, peer_id: &str, message: &Message) -> Result<()> {
-        if self.status() != TransportStatus::Available {
+        if self.layer_status() != TransportStatus::Available {
             return Err(crate::Error::TransportNotAvailable(
                 "Wi-Fi Direct transport is not available".to_string(),
             ));
@@ -301,7 +395,7 @@ impl Transport for WifiDirectTransport {
     }
 
     fn connected_peers(&self) -> Vec<crate::PeerLink> {
-        if self.status() != TransportStatus::Available {
+        if self.layer_status() != TransportStatus::Available {
             return Vec::new();
         }
         self.connected_links
@@ -322,7 +416,7 @@ impl Transport for WifiDirectTransport {
     }
 
     fn stop(&self) -> Result<()> {
-        *self.status.lock_or_recover() = TransportStatus::Disconnected;
+        *self.layer_status.lock_or_recover() = TransportStatus::Disconnected;
         self.peers.lock_or_recover().clear();
         self.connected_links.lock_or_recover().clear();
         self.send_queue.lock_or_recover().clear();
@@ -339,7 +433,7 @@ impl Transport for WifiDirectTransport {
     /// and queues are drained so a subsequent reconnect starts clean.
     fn on_status_changed(&self, status: TransportStatus) {
         let previous = {
-            let mut guard = self.status.lock_or_recover();
+            let mut guard = self.layer_status.lock_or_recover();
             let prev = *guard;
             *guard = status;
             prev
@@ -495,8 +589,9 @@ mod tests {
     fn test_send_receive() {
         let transport = WifiDirectTransport::new("test-device");
 
-        // Mark as available
+        // Mark as available, with a proved link to the recipient
         transport.on_status_changed(TransportStatus::Available);
+        transport.on_peer_connected("bob");
 
         // Send message
         let message = create_test_message();
@@ -533,6 +628,91 @@ mod tests {
             result.unwrap_err(),
             crate::Error::TransportNotAvailable(_)
         ));
+    }
+
+    /// A recipient no stream has proved is refused as "not reachable here",
+    /// the refusal the transport manager falls through on. Without it an
+    /// `Available` transport with no links would take every direct message
+    /// the selector's bandwidth weight sends its way and hand them to a
+    /// platform that has no stream to write them to.
+    #[test]
+    fn send_to_a_recipient_no_stream_proved_is_peer_not_reachable() {
+        let transport = WifiDirectTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+
+        let result = transport.send(&create_test_message());
+        assert!(
+            matches!(result, Err(crate::Error::PeerNotReachable(_))),
+            "got {result:?}"
+        );
+        assert!(!transport.has_pending_sends(), "nothing may be queued");
+
+        // A link to someone else does not make this recipient reachable.
+        transport.on_peer_connected("carol");
+        assert!(matches!(
+            transport.send(&create_test_message()),
+            Err(crate::Error::PeerNotReachable(_))
+        ));
+
+        // The proved link is what makes the difference.
+        transport.on_peer_connected("bob");
+        assert!(transport.send(&create_test_message()).is_ok());
+        assert!(transport.has_pending_sends());
+
+        // And its loss takes the reachability with it.
+        transport.on_peer_disconnected("bob");
+        assert!(matches!(
+            transport.send(&create_test_message()),
+            Err(crate::Error::PeerNotReachable(_))
+        ));
+    }
+
+    /// Leaving `Available` clears the links, so a reconnect starts with
+    /// nothing proved and nothing addressable.
+    #[test]
+    fn a_status_drop_clears_the_proved_links() {
+        let transport = WifiDirectTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+        transport.on_peer_connected("bob");
+        assert_eq!(transport.connected_peers().len(), 1);
+
+        transport.on_status_changed(TransportStatus::Disconnected);
+        transport.on_status_changed(TransportStatus::Available);
+        assert!(transport.connected_peers().is_empty());
+        assert!(matches!(
+            transport.send(&create_test_message()),
+            Err(crate::Error::PeerNotReachable(_))
+        ));
+    }
+
+    /// The engine sees the slot as a carrier only while a stream has proved
+    /// a peer. A layer that is up with nothing proved is what the shipped
+    /// mobile managers report from the moment they start, and every consumer
+    /// of "available" (selection, the media pin, the welcome lifecycle)
+    /// would otherwise count a carrier that refuses every recipient.
+    #[test]
+    fn the_slot_is_available_only_while_a_stream_has_proved_a_peer() {
+        let transport = WifiDirectTransport::new("test-device");
+        assert_eq!(transport.status(), TransportStatus::Unavailable);
+
+        transport.on_status_changed(TransportStatus::Available);
+        assert_eq!(transport.layer_status(), TransportStatus::Available);
+        assert_eq!(
+            transport.status(),
+            TransportStatus::Connecting,
+            "a layer up with no proved stream is not a carrier"
+        );
+
+        transport.on_peer_connected("bob");
+        assert_eq!(transport.status(), TransportStatus::Available);
+
+        transport.on_peer_disconnected("bob");
+        assert_eq!(transport.status(), TransportStatus::Connecting);
+
+        // A proved link while the layer is down makes nothing available.
+        transport.on_status_changed(TransportStatus::Disconnected);
+        transport.on_peer_connected("bob");
+        assert_eq!(transport.status(), TransportStatus::Disconnected);
     }
 
     #[test]
@@ -628,6 +808,7 @@ mod tests {
     fn test_stop_clears_session_state() {
         let transport = WifiDirectTransport::new("test-device");
         transport.on_status_changed(TransportStatus::Available);
+        transport.on_peer_connected("bob");
 
         let peer = WifiDirectPeer {
             device_name: "P".to_string(),
@@ -652,6 +833,7 @@ mod tests {
     fn test_wifi_direct_on_status_changed_clears_state() {
         let transport = WifiDirectTransport::new("test-device");
         transport.on_status_changed(TransportStatus::Available);
+        transport.on_peer_connected("bob");
 
         let peer = WifiDirectPeer {
             device_name: "P".to_string(),
@@ -675,6 +857,7 @@ mod tests {
     fn test_wifi_direct_on_status_changed_available_preserves_state() {
         let transport = WifiDirectTransport::new("test-device");
         transport.on_status_changed(TransportStatus::Available);
+        transport.on_peer_connected("bob");
 
         let peer = WifiDirectPeer {
             device_name: "P".to_string(),
@@ -698,6 +881,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         let transport = WifiDirectTransport::new("test-device");
         transport.on_status_changed(TransportStatus::Available);
+        transport.on_peer_connected("bob");
         let called = std::sync::Arc::new(AtomicBool::new(false));
         let c = called.clone();
         transport.set_on_messages_available(std::sync::Arc::new(move || {
@@ -711,6 +895,7 @@ mod tests {
     fn test_get_next_message_returns_recipient_and_data() {
         let transport = WifiDirectTransport::new("test-device");
         transport.on_status_changed(TransportStatus::Available);
+        transport.on_peer_connected("bob");
         let message = create_test_message();
         transport.send(&message).unwrap();
         let next = transport.get_next_message().unwrap();

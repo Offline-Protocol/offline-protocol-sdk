@@ -1,7 +1,9 @@
 //! Transport abstraction layer for the Offline Protocol SDK.
 //!
 //! This crate defines the [`Transport`] trait and the transport state
-//! machines for BLE, Wi-Fi Direct, Internet, Nostr, and Reticulum.
+//! machines for BLE, the peer stream (the `wifi_direct` slot), Internet,
+//! Nostr, and Reticulum, plus the one Rust implementation of the
+//! peer-stream framing ([`stream_framing`]).
 //!
 //! # This crate performs no network or radio I/O
 //!
@@ -49,6 +51,7 @@ mod nip44;
 pub mod nostr;
 pub mod nostr_crypto;
 pub mod reticulum;
+pub mod stream_framing;
 pub mod traits;
 pub mod types;
 pub mod wifi_direct;
@@ -62,6 +65,7 @@ pub use internet::{InternetConfig, InternetTransport};
 pub use nostr::{NostrConfig, NostrTransport, NostrTransportBuilder, SignedNostrEvent};
 pub use nostr_crypto::{routing_tag_for_address, NostrEvent, NostrKeypair};
 pub use reticulum::ReticulumTransport;
+pub use stream_framing::{frame, CloseReason, PeerStreamReader, PreambleVerifier, StreamEvent};
 pub use traits::{Transport, TransportStatus};
 pub use types::{
     LinkQuality, PeerLink, SharedCallback, TransportMetrics, TransportType,

@@ -802,6 +802,7 @@ impl TransportManager {
         });
 
         // Try the primary transport first.
+        let mut primary_refusal = None;
         let primary_result = {
             let transport = self
                 .transports
@@ -847,6 +848,13 @@ impl TransportManager {
                         error = %e,
                         "Peer not reachable via primary transport, trying fallback"
                     );
+                    // Kept as the terminal error until a fallback replaces it.
+                    // Without it, a primary that refused the recipient with
+                    // nothing left to try ended as `SendFailed("All transports
+                    // failed")`, which every classifier reads as a carrier that
+                    // broke mid-send: the deferral said `transport_send_failed`
+                    // for a recipient no carrier could address.
+                    primary_refusal = Some(e);
                 } else {
                     warn!(
                         transport = ?primary,
@@ -861,7 +869,7 @@ impl TransportManager {
         // Primary failed — try remaining transports in score order.
         // Reuse the scored ranking computed above; record_retry_failure only
         // mutates retry_counts which score_and_rank does not read.
-        let mut last_error = None;
+        let mut last_error = primary_refusal;
         let mut attempted: Vec<TransportType> = vec![primary];
 
         for (transport_type, _score) in &scored {
@@ -1092,6 +1100,27 @@ impl TransportManager {
                         .any(|link| link.peer_id == peer_id)
                 })
         })
+    }
+
+    /// Whether the mesh carrier `transport_type` holds a live link straight
+    /// to `peer_id`.
+    ///
+    /// [`Self::mesh_transport_for`] answers with the preferred carrier only,
+    /// so a peer linked over both never names the second; this asks about one
+    /// carrier. `false` for a carrier that is not registered, not available,
+    /// or not a mesh carrier.
+    pub fn holds_mesh_link(&self, transport_type: TransportType, peer_id: &str) -> bool {
+        MESH_TRANSPORTS.contains(&transport_type)
+            && self
+                .transports
+                .get(&transport_type)
+                .filter(|transport| transport.status() == TransportStatus::Available)
+                .is_some_and(|transport| {
+                    transport
+                        .connected_peers()
+                        .iter()
+                        .any(|link| link.peer_id == peer_id)
+                })
     }
 
     /// Every available carrier that does its own routing.
@@ -1709,6 +1738,26 @@ mod tests {
         assert_eq!(ble_metrics.success_count, 0);
         assert_eq!(ble_metrics.failure_count, 1);
         assert!(ble_metrics.drop_rate.expect("drop ratio") > 0.99);
+    }
+
+    /// A carrier that refuses the recipient with nothing left to fall back to
+    /// ends the send as `PeerNotReachable`, not as a carrier that broke
+    /// mid-send. The deferral token and every classifier read this variant.
+    #[test]
+    fn a_sole_carrier_refusing_the_recipient_ends_as_peer_not_reachable() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+
+        let transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        transport.set_reject_unknown_recipients(true);
+        manager.add_transport(TransportType::BLE, Box::new(transport));
+
+        let err = manager.send(&create_test_message()).unwrap_err();
+        assert!(
+            matches!(err, Error::Transport(TransportError::PeerNotReachable(_))),
+            "got {err:?}"
+        );
     }
 
     /// Two transports, neither reporting a battery level of its own — the

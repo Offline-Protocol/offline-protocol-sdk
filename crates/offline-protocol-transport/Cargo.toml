@@ -24,6 +24,9 @@ test-utils = []
 
 [dependencies]
 offline-protocol-core = { workspace = true }
+# The preamble floor is the identity assertion's own floor, and that constant
+# has one home (ADR 0022); a second spelling of 96 here would drift silently.
+offline-protocol-sealed = { workspace = true }
 serde = { workspace = true }
 serde_json = "1.0"
 thiserror = { workspace = true }
@@ -40,5 +43,10 @@ hex = { workspace = true }
 base64 = { workspace = true }
 
 [dev-dependencies]
+# The stream-framing conformance test verifies the vectors' preamble with the
+# one real verifier rather than a stand-in: a fake that says "not an
+# assertion" would pass the message-before-preamble refusal for the wrong
+# reason.
+offline-protocol-mls = { workspace = true }
 
 [lib]
