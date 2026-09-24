@@ -13,7 +13,10 @@
     "",
     "The length refusals carry only the four-byte prefix: a conforming",
     "receiver refuses on the prefix and never reads a body, so a vector",
-    "carrying one would pin bytes the receiver must not have read. The",
+    "carrying one would pin bytes the receiver must not have read.",
+    "`carries_body` says what a vector holds, not what a receiver must",
+    "read: the under-floor preamble carries its body, and a receiver",
+    "may still refuse it on the prefix alone. The",
     "accepted prefix at exactly the ceiling pins the boundary from the",
     "other side, so a reader that refuses `>=` instead of `>` fails."
   ],
@@ -54,7 +57,7 @@
   },
   "exchange": {
     "note": "The bytes one direction of a stream carries, in order. A receiver announces `from` after the first frame and delivers the second body attributed to it.",
-    "frames_hex": [
+    "frames": [
       "00000060d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511ae5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
       "00000095f5111111112222333344445555555555552c6f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e2c6f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a3872300361707001080080a0abfef96200001368656c6c6f206f76657220612073747265616d00000001000000"
     ],
@@ -78,34 +81,34 @@
     {
       "name": "zero length",
       "note": "No encoding produces an empty message.",
-      "frames_hex": [
+      "frames": [
         "00000000"
       ],
-      "reads_body": false
+      "carries_body": false
     },
     {
       "name": "one over the ceiling",
       "note": "1 MiB + 1. Refused on the prefix; a receiver that allocates first has handed the peer the allocation.",
-      "frames_hex": [
+      "frames": [
         "00100001"
       ],
-      "reads_body": false
+      "carries_body": false
     },
     {
       "name": "preamble one under the floor",
       "note": "Ninety-five bytes: a key and most of a signature. A receiver may refuse this on the prefix or after the read; either way the stream closes and nothing is announced.",
-      "frames_hex": [
+      "frames": [
         "0000005fd75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511ae5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a10"
       ],
-      "reads_body": true
+      "carries_body": true
     },
     {
       "name": "a message before the preamble",
       "note": "A well-formed message frame as the first frame. Position makes it the preamble, and it is not one: the stream closes and the body never reaches the core.",
-      "frames_hex": [
+      "frames": [
         "00000095f5111111112222333344445555555555552c6f6666317179736c7576776c353932327963747a643075396770723036676e336b376c64667667747767766e2c6f6666317179756c7779377335657a7a323063793232327a727730347277647333397561707176396a3872300361707001080080a0abfef96200001368656c6c6f206f76657220612073747265616d00000001000000"
       ],
-      "reads_body": true
+      "carries_body": true
     }
   ]
 }

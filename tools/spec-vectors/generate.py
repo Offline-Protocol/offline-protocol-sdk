@@ -1489,7 +1489,10 @@ def build_stream_framing_vectors() -> dict:
             "",
             "The length refusals carry only the four-byte prefix: a conforming",
             "receiver refuses on the prefix and never reads a body, so a vector",
-            "carrying one would pin bytes the receiver must not have read. The",
+            "carrying one would pin bytes the receiver must not have read.",
+            "`carries_body` says what a vector holds, not what a receiver must",
+            "read: the under-floor preamble carries its body, and a receiver",
+            "may still refuse it on the prefix alone. The",
             "accepted prefix at exactly the ceiling pins the boundary from the",
             "other side, so a reader that refuses `>=` instead of `>` fails.",
         ],
@@ -1523,7 +1526,7 @@ def build_stream_framing_vectors() -> dict:
                 "receiver announces `from` after the first frame and delivers "
                 "the second body attributed to it."
             ),
-            "frames_hex": [preamble_frame.hex(), msg_frame.hex()],
+            "frames": [preamble_frame.hex(), msg_frame.hex()],
             "announces": peer,
             "delivers": [{"from": peer, "body_hex": msg_body.hex()}],
         },
@@ -1545,8 +1548,8 @@ def build_stream_framing_vectors() -> dict:
             {
                 "name": "zero length",
                 "note": "No encoding produces an empty message.",
-                "frames_hex": ["00000000"],
-                "reads_body": False,
+                "frames": ["00000000"],
+                "carries_body": False,
             },
             {
                 "name": "one over the ceiling",
@@ -1554,8 +1557,8 @@ def build_stream_framing_vectors() -> dict:
                     "1 MiB + 1. Refused on the prefix; a receiver that "
                     "allocates first has handed the peer the allocation."
                 ),
-                "frames_hex": [(CEILING + 1).to_bytes(4, "big").hex()],
-                "reads_body": False,
+                "frames": [(CEILING + 1).to_bytes(4, "big").hex()],
+                "carries_body": False,
             },
             {
                 "name": "preamble one under the floor",
@@ -1564,8 +1567,8 @@ def build_stream_framing_vectors() -> dict:
                     "receiver may refuse this on the prefix or after the read; "
                     "either way the stream closes and nothing is announced."
                 ),
-                "frames_hex": [short_preamble.hex()],
-                "reads_body": True,
+                "frames": [short_preamble.hex()],
+                "carries_body": True,
             },
             {
                 "name": "a message before the preamble",
@@ -1574,8 +1577,8 @@ def build_stream_framing_vectors() -> dict:
                     "makes it the preamble, and it is not one: the stream "
                     "closes and the body never reaches the core."
                 ),
-                "frames_hex": [msg_frame.hex()],
-                "reads_body": True,
+                "frames": [msg_frame.hex()],
+                "carries_body": True,
             },
         ],
     }

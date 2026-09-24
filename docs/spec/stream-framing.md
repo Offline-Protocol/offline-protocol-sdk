@@ -278,8 +278,11 @@ a receiver must accept, and refusals: a zero length, a length one over the
 ceiling, a preamble one byte under the floor, and a message
 frame arriving before any preamble.
 
-The refusals for the length bounds carry only the four-byte prefix, because a
-conforming receiver refuses on the prefix and never reads a body. A vector
+The refusals for the length bounds carry only the four-byte prefix
+(`carries_body: false`), because a conforming receiver refuses on the prefix
+and never reads a body. `carries_body` says what the vector holds, not what a
+receiver must read: the under-floor preamble carries its 95 bytes, and a
+receiver may still refuse it on the prefix alone. A vector
 that carried the body would be pinning bytes the receiver must not have
 read.
 
