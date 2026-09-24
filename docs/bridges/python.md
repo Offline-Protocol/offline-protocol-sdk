@@ -171,9 +171,24 @@ and they are chosen so two hosts agree without talking: when a second stream
 proves an address already announced, the one opened by the lower address is
 kept (two hosts that each list the other open toward each other at once, and
 without a shared rule each would keep what the other discards, forever), and
-between two of the winning kind the newer supersedes the older (a reconnecting
-peer must not be blocked by its own half-open stream). Either way the core
-sees one announcement and one loss per address.
+between two of the winning kind the newer supersedes the older (the lower
+address reconnecting must not be blocked by its own half-open stream). Either
+way the core sees one announcement and one loss per address.
+
+The tie-break gives the higher address no such way past a stale stream: its
+reconnect is the losing kind for as long as the lower side holds a stream it
+believes live. That is why every stream carries TCP keepalive (fifteen idle
+seconds, three probes five seconds apart), and why an attempt that ends
+without an announced stream climbs the reconnect ladder instead of retrying at
+a fixed pace. A port on the mobile managers owes both, not only the tie-break.
+
+Three bounds keep a listener that binds every interface (the default) from
+being held by the network: one deadline covers the whole preamble frame,
+prefix and body, so four bytes and then silence cannot keep a slot; one remote
+host holds at most `max_streams_per_host` inbound streams (eight); and the
+total is `max_streams` (sixty-four). A DNS-SD record carries its own host name
+and the listener's interface addresses, because a record without them is seen
+by every browser and resolved by none.
 
 `test_peer_stream_manager.py` pins all of it on real loopback sockets, replays
 the chapter's vectors through the real verifier, and asserts the framing

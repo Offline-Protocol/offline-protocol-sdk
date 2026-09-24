@@ -101,8 +101,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   (`pip install 'offline-protocol-sdk[lan]'`), and the `addr` in a record is
   a hint the preamble proves, never a name to announce. Two hosts that list
   each other keep one stream, the one the lower address opened, so a
-  simultaneous open cannot loop; a peer that reconnects while its old stream
-  is still half-open supersedes it.
+  simultaneous open cannot loop; the lower address reconnecting while its
+  old stream is still half-open supersedes it. The higher address cannot, so
+  every stream carries TCP keepalive and a dead peer's stream ends within
+  about half a minute. The preamble deadline covers the whole first frame,
+  one remote host holds at most eight inbound streams, and a peer that never
+  proves an address is retried on a doubling ladder. The listener binds
+  every interface by default; pass `listen_host` to narrow it.
 
 - **Attachment bytes move inside a group.** `DataStore.fetchAttachmentFrom(space, peer, hash)`
   asks one member for the bytes behind a reference, and they come back as

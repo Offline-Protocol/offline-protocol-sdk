@@ -79,6 +79,25 @@ async def main():
 asyncio.run(main())
 ```
 
+### Two hosts without a relay
+
+Set `wifi_direct_enabled=True` and `ProtocolManager` builds a
+`PeerStreamManager` as `pm.peer_stream`. Configure and start it after
+`pm.start()`, once this device has an address to prove:
+
+```python
+pm.peer_stream.configure(
+    listen_host="0.0.0.0",            # every interface; the default
+    listen_port=7878,                 # 0 = ephemeral, None = connect out only
+    peers=["off1...@10.0.0.7:7878"],  # or plain "host:port"; the address is then learned
+    advertise=True, discover=True,    # DNS-SD, needs: pip install 'offline-protocol-sdk[lan]'
+)
+await pm.peer_stream.start()
+```
+
+A peer is announced only under the address its preamble proves, and
+`pm.stop()` stops the stream layer with everything else.
+
 ## Architecture
 
 ```
@@ -86,6 +105,7 @@ offline_protocol_sdk/
 ├── offline_protocol.py      # Auto-generated UniFFI bindings (DO NOT EDIT)
 ├── protocol_manager.py      # High-level wrapper (processing loop, lifecycle)
 ├── internet_manager.py      # WebSocket transport (websockets library)
+├── peer_stream_manager.py   # TCP peer streams + DNS-SD (the wifi_direct slot)
 ├── ble_manager.py           # BLE transport (bleak library)
 ├── secure_storage.py        # MLS key storage (keyring library)
 ├── state_storage.py         # Restartable protocol state (application data)
@@ -98,7 +118,7 @@ offline_protocol_sdk/
 |-----------|---------|-----------|-------|
 | Internet/WebSocket | `websockets` | All | Primary transport for desktop |
 | BLE | `bleak` | All | Central (scanner) role only; peripheral/GATT server requires `bless` |
-| Peer stream (the `wifi_direct` slot) | `asyncio` sockets; `zeroconf` for LAN discovery (optional extra `lan`) | All | `PeerStreamManager`: TCP streams to configured `host:port` peers or hosts found over DNS-SD, each proved by the identity-assertion preamble ([spec](../../docs/spec/stream-framing.md)). Start it after `ProtocolManager.start()` |
+| Peer stream (the `wifi_direct` slot) | `asyncio` sockets; `zeroconf` for LAN discovery (optional extra `lan`) | All | `PeerStreamManager`: TCP streams to configured `host:port` peers or hosts found over DNS-SD, each proved by the identity-assertion preamble ([spec](../../docs/spec/stream-framing.md)). Start it after `ProtocolManager.start()`; binds every interface unless `listen_host` narrows it |
 | Reticulum | Built-in | All | Handled in Rust core; `ProtocolManager` wires a stub callback when `reticulum_enabled=True` — apps driving Reticulum themselves replace it via `protocol.set_reticulum_transport_callback(...)` |
 | Nostr | Built-in | All | Handled in Rust core (BIP-340 signing); `ProtocolManager` wires a stub callback when `nostr_enabled=True` — apps driving Nostr themselves replace it via `protocol.set_nostr_transport_callback(...)` |
 
