@@ -1489,7 +1489,9 @@ def build_stream_framing_vectors() -> dict:
             "",
             "The length refusals carry only the four-byte prefix: a conforming",
             "receiver refuses on the prefix and never reads a body, so a vector",
-            "carrying one would pin bytes the receiver must not have read.",
+            "carrying one would pin bytes the receiver must not have read. The",
+            "accepted prefix at exactly the ceiling pins the boundary from the",
+            "other side, so a reader that refuses `>=` instead of `>` fails.",
         ],
         "layout": "u32be(len(body)) || body",
         "byte_order": "big-endian",
@@ -1525,6 +1527,20 @@ def build_stream_framing_vectors() -> dict:
             "announces": peer,
             "delivers": [{"from": peer, "body_hex": msg_body.hex()}],
         },
+        "accepted_prefixes": [
+            {
+                "name": "exactly the ceiling",
+                "note": (
+                    "The ceiling is inclusive. A receiver MUST pass this prefix "
+                    "and go on to read a 1 MiB body; one that refuses it drops "
+                    "the largest message a conforming sender may send. Only the "
+                    "prefix is carried, because the body would be a megabyte of "
+                    "bytes the prefix check never looks at."
+                ),
+                "prefix_hex": CEILING.to_bytes(4, "big").hex(),
+                "length": CEILING,
+            },
+        ],
         "refusals": [
             {
                 "name": "zero length",
