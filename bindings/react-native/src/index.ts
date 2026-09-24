@@ -2376,13 +2376,29 @@ export class OfflineProtocol {
   }
 
   // ============================================================================
-  // WIFI DIRECT TRANSPORT METHODS (Low-Level)
+  // PEER-STREAM TRANSPORT METHODS (the `wifiDirect` slot, Low-Level)
+  //
+  // A byte stream the platform established to exactly one peer: a Wi-Fi
+  // Direct group socket, a Multipeer session, a TCP connection over a LAN or
+  // a routed mesh. To the engine they are one transport, and the slot's name
+  // is historical. The contract is docs/spec/stream-framing.md: every frame
+  // is a u32 big-endian length then the body (at most 1 MiB); the first frame
+  // in each direction is the identity assertion (`identityAssertion` builds
+  // it, `verifyIdentityAssertion` checks it); a peer is announced only under
+  // the address that verification derived. The bundled mobile managers do not
+  // exchange the preamble yet and therefore call none of the three peer and
+  // message entry points; an application that owns its own streams may.
   // ============================================================================
 
   /**
-   * Notifies the protocol of WiFi Direct connection state change.
+   * Notifies the protocol that the platform's stream layer is up or down.
    *
-   * @param isConnected - Whether WiFi Direct is connected
+   * Up means streams can be established, not that a peer is reachable: the
+   * transport queues a message only toward an address a stream has proved,
+   * so an up layer with no announced peer takes nothing and the selector
+   * falls through to the next carrier. Down clears every announced link.
+   *
+   * @param isConnected - Whether the stream layer is up
    */
   async wifiDirectStatusChanged(isConnected: boolean): Promise<void> {
     return await OfflineProtocolNativeModule.wifiDirectStatusChanged(
@@ -2391,22 +2407,18 @@ export class OfflineProtocol {
   }
 
   /**
-   * Handles an incoming WiFi Direct message.
+   * Hands the protocol one frame body that arrived on the stream whose
+   * preamble proved `senderId`.
    *
-   * @deprecated The bundled Wi-Fi Direct managers no longer call this, and no
-   * application should. `senderId` is treated by the core as the peer's
-   * *proven* user-level id: it becomes the frame's transport peer identity and
-   * is matched against `Message.sender`, so a value the peer did not prove is
-   * either rejected or — worse — accepted into routing state under a name
-   * anyone could claim. Wi-Fi Direct has no handshake that yields such a
-   * value; the only identity on that wire is the `Message.sender` inside the
-   * frame, which is the very thing this parameter exists to cross-check.
-   * `WifiDirectTransport` is also not registered, so frames passed here are
-   * dropped. Restoring the transport requires a signed identity preamble
-   * cross-checked the way BLE's IDENTITY characteristic is.
+   * `senderId` is the address `verifyIdentityAssertion` derived from that
+   * stream's first frame, and nothing else: the core attributes the body to
+   * it and matches `Message.sender` against it, so a body handed up under a
+   * socket address, a device name, or an address merely read from a discovery
+   * record is refused as unattributed. `data` is the body after the length
+   * prefix, exactly one message.
    *
-   * @param senderId - Sender peer ID. Must be a verified `off1…` address.
-   * @param data - Message data as array of bytes
+   * @param senderId - The `off1…` address the stream's preamble proved.
+   * @param data - One frame body as an array of bytes
    */
   async wifiDirectMessageReceived(
     senderId: string,
@@ -2419,9 +2431,12 @@ export class OfflineProtocol {
   }
 
   /**
-   * Gets the next outgoing WiFi Direct message.
+   * Gets the next outgoing body and the proved address of the stream to
+   * write it on. The caller frames it (u32 big-endian length, then the body)
+   * and writes it to the stream whose preamble proved `recipientId`; nothing
+   * is ever returned for an address no stream proved.
    *
-   * @returns Message to send or null if queue is empty
+   * @returns The body and its stream's address, or null if the queue is empty
    */
   async wifiDirectGetNextMessage(): Promise<{
     recipientId: string;
@@ -2431,27 +2446,31 @@ export class OfflineProtocol {
   }
 
   /**
-   * Notifies the protocol that a WiFi Direct peer has connected.
+   * Announces a stream whose preamble verified, under the address it proved.
    *
-   * @deprecated See {@link OfflineProtocol.wifiDirectMessageReceived}. An
-   * unproven `peerId` here is entered into the core's capacity-bounded
-   * `known_peers` — evicting genuine neighbours — and starts an automatic key
-   * exchange toward a peer that cannot answer it. The bundled managers no
-   * longer call this.
+   * Call it once per announced stream with the derived address. An unproven
+   * `peerId` here is entered into the core's capacity-bounded `known_peers`,
+   * evicting genuine neighbours, and starts an automatic key exchange toward
+   * a peer that cannot answer it, which is why nothing but the verifier's
+   * result may be passed. A receiver holds one announced stream per address:
+   * a second stream proving an address already announced is refused or
+   * supersedes the first, and either way the core sees one announcement and,
+   * later, one loss.
    *
-   * @param peerId - Peer ID. Must be a verified `off1…` address.
+   * @param peerId - The `off1…` address the stream's preamble proved.
    */
   async wifiDirectPeerConnected(peerId: string): Promise<void> {
     return await OfflineProtocolNativeModule.wifiDirectPeerConnected(peerId);
   }
 
   /**
-   * Notifies the protocol that a WiFi Direct peer has disconnected.
+   * Reports that the announced stream for `peerId` ended.
    *
-   * @deprecated See {@link OfflineProtocol.wifiDirectMessageReceived}. The
-   * bundled managers no longer call this.
+   * Only for a stream that was announced: a stream that never proved a peer
+   * has nothing to report, and reporting it would tell the core a peer it may
+   * still hold over another stream is gone.
    *
-   * @param peerId - Peer ID. Must be a verified `off1…` address.
+   * @param peerId - The `off1…` address the stream's preamble proved.
    */
   async wifiDirectPeerDisconnected(peerId: string): Promise<void> {
     return await OfflineProtocolNativeModule.wifiDirectPeerDisconnected(peerId);

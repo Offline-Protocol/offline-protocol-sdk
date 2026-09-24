@@ -23,16 +23,19 @@ import MultipeerConnectivity
 /// — nothing here can prove a name.
 ///
 /// So peers are not announced and inbound frames are not ingested. Nothing is
-/// lost by that: `WifiDirectTransport` is never registered with the transport
-/// manager (see `OfflineProtocol::new` and `rebuild_transports_for_identity`
-/// in the UniFFI crate), so frames were already dropped and no send could ever
-/// leave. What the announcements *did* do was enter an unprovable id into the
-/// core's capacity-bounded `known_peers` — evicting genuine neighbours — and
-/// start an auto key exchange toward it.
+/// lost by that: the transport behind the `wifi_direct` slot is registered,
+/// but it queues only for a recipient a stream has proved, and this manager
+/// proves none, so `wifiDirectGetNextMessage` is always empty here. What the
+/// announcements *did* do was enter an unprovable id into the core's
+/// capacity-bounded `known_peers` — evicting genuine neighbours — and start an
+/// auto key exchange toward it.
 ///
-/// Restoring the transport means exchanging and verifying the same signed
-/// identity blob BLE serves, and registering `WifiDirectTransport`. Both are
-/// out of scope here. Mirrors android's WifiDirectManager.kt.
+/// Restoring delivery here means adopting `docs/spec/stream-framing.md`: the
+/// identity assertion as the first frame in each direction, verified with
+/// `verifyIdentityAssertion` and announced under the derived address; each
+/// message wrapped as one `u32` big-endian length-prefixed frame (this manager
+/// sends bare messages over the session today); and the Multipeer service
+/// type `offlineprotocol`. Out of scope here. Mirrors android's WifiDirectManager.kt.
 public class WifiDirectManager: NSObject, TransportManager {
     
     // MARK: - TransportManager Protocol
