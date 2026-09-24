@@ -152,6 +152,35 @@ the RFC 8032 vectors; `test_ble_peripheral.py` and `test_ble_manager.py` pin
 what each role does with the answer. The JSON form is gone, and a test asserts
 the constructor no longer accepts it.
 
+## P9. A socket client's verdict is the preamble, not the connect
+
+`PeerStreamManager` is the host's implementation of the peer-stream slot the
+FFI names `wifi_direct`: TCP streams to configured `host:port` peers or to
+hosts found over DNS-SD, framed as [the chapter](../spec/stream-framing.md)
+specifies. It announces a peer to the core only under the address
+`verify_identity_assertion` derived from the stream's first frame, and only
+then, never on connect, never from the `addr` in a discovery record, and never
+under a socket address. A stream whose preamble fails, arrives late, or names
+a different address than the peer list claimed is closed and was never
+announced, so its close reports nothing. The same holds for the outbound
+side: the core queues a body only toward an address a stream proved, so this
+manager is woken only for a stream it holds.
+
+Two rules here are local policy the chapter leaves to the implementation,
+and they are chosen so two hosts agree without talking: when a second stream
+proves an address already announced, the one opened by the lower address is
+kept (two hosts that each list the other open toward each other at once, and
+without a shared rule each would keep what the other discards, forever), and
+between two of the winning kind the newer supersedes the older (a reconnecting
+peer must not be blocked by its own half-open stream). Either way the core
+sees one announcement and one loss per address.
+
+`test_peer_stream_manager.py` pins all of it on real loopback sockets, replays
+the chapter's vectors through the real verifier, and asserts the framing
+bounds as literals (`4`, `1_048_576`, `96`) for the C5 reason. DNS-SD needs
+the optional extra (`pip install 'offline-protocol-sdk[lan]'`); the base
+install carries no LGPL dependency.
+
 ## Testing
 
 ```bash

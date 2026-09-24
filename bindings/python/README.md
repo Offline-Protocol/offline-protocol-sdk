@@ -98,7 +98,7 @@ offline_protocol_sdk/
 |-----------|---------|-----------|-------|
 | Internet/WebSocket | `websockets` | All | Primary transport for desktop |
 | BLE | `bleak` | All | Central (scanner) role only; peripheral/GATT server requires `bless` |
-| WiFi Direct | — | — | Not implemented on desktop |
+| Peer stream (the `wifi_direct` slot) | `asyncio` sockets; `zeroconf` for LAN discovery (optional extra `lan`) | All | `PeerStreamManager`: TCP streams to configured `host:port` peers or hosts found over DNS-SD, each proved by the identity-assertion preamble ([spec](../../docs/spec/stream-framing.md)). Start it after `ProtocolManager.start()` |
 | Reticulum | Built-in | All | Handled in Rust core; `ProtocolManager` wires a stub callback when `reticulum_enabled=True` — apps driving Reticulum themselves replace it via `protocol.set_reticulum_transport_callback(...)` |
 | Nostr | Built-in | All | Handled in Rust core (BIP-340 signing); `ProtocolManager` wires a stub callback when `nostr_enabled=True` — apps driving Nostr themselves replace it via `protocol.set_nostr_transport_callback(...)` |
 

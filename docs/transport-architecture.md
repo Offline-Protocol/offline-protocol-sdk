@@ -178,7 +178,11 @@ transport.
   messages over the session and advertises `offline-proto`; adopting the
   chapter wraps each message as one frame and advertises `offlineprotocol`.
 - Hosts: any TCP socket; DNS-SD `_offlineprotocol._tcp` with `addr=` is the
-  LAN discovery hint the chapter specifies
+  LAN discovery hint the chapter specifies. The Python binding ships one:
+  `PeerStreamManager` (`bindings/python/offline_protocol_sdk/peer_stream_manager.py`),
+  a listener plus outbound connections to configured or discovered peers
+  with the preamble exchange, so two hosts on one network reach each other
+  with no radio and no relay
 
 ### Internet (Relay Server)
 

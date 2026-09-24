@@ -84,6 +84,26 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   operations are no longer marked deprecated; their contract is the chapter's,
   and only a verifier's result may be announced.
 
+- **A Python host can reach another over a LAN or a routed mesh.**
+  `PeerStreamManager` is the peer-stream transport for a host that owns its
+  sockets: a TCP listener, outbound connections to configured `host:port`
+  peers (or `off1…@host:port`, which makes the derived address have to match
+  the claim exactly) and to hosts found over DNS-SD, and the preamble exchange
+  the chapter specifies. Each side sends its identity assertion as the first
+  frame without waiting for the other's, verifies what it receives through
+  `verify_identity_assertion`, and announces the peer under the derived
+  address only; a stream that fails any step is closed and was never
+  announced. `ProtocolManager` builds it when `wifi_direct_enabled` is set
+  and stops it with the rest; the application starts it after
+  `ProtocolManager.start()`, since a host with no address to prove is refused
+  by every peer. DNS-SD advertises `_offlineprotocol._tcp` with `txtvers=1`
+  and `addr=<off1…>` through the optional `lan` extra
+  (`pip install 'offline-protocol-sdk[lan]'`), and the `addr` in a record is
+  a hint the preamble proves, never a name to announce. Two hosts that list
+  each other keep one stream, the one the lower address opened, so a
+  simultaneous open cannot loop; a peer that reconnects while its old stream
+  is still half-open supersedes it.
+
 - **Attachment bytes move inside a group.** `DataStore.fetchAttachmentFrom(space, peer, hash)`
   asks one member for the bytes behind a reference, and they come back as
   frames sealed under the group key. Before this, references replicated to
