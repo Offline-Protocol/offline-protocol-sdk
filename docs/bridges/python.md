@@ -187,8 +187,15 @@ is not idle, and outside Linux nothing bounds its retransmissions, so the
 write path carries its own bound. The core hands every outbound body through
 one queue for all peers, and the manager moves each onto its stream's own
 queue without awaiting anything; each stream's writer then waits on its own
-peer and aborts the stream once the peer has taken no byte for
-`write_timeout` (thirty seconds). A single drain that awaited each write
+peer and aborts the stream once its write buffer has made no progress for
+`write_timeout` (thirty seconds). That deadline starts only when the
+buffers between the two hosts are full: until then the kernel takes every
+write, and on a default host the two sides absorb on the order of a megabyte,
+so a peer that is alive but has stopped reading stays announced under light
+traffic, and detection can take two windows because bytes moving into the
+kernel count as progress in the first. Nothing at this layer can do better;
+the core's acknowledgements are the signal, and a port must not promise
+more. A single drain that awaited each write
 would let one peer that stops reading hold every other peer's traffic, and
 `writer.close()` alone would not free it, because asyncio keeps a socket
 open until its buffer flushes; a discarded stream with bytes still buffered

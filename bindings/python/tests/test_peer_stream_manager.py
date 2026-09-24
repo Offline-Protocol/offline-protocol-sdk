@@ -1039,7 +1039,12 @@ def body_for(recipient: str, data: bytes):
 
 async def stalled_handshake(manager: PeerStreamManager, assertion: bytes):
     """A peer that proves itself and then never reads: small buffers on
-    both ends, so a few hundred KiB fill them."""
+    both ends, so a few hundred KiB fill them.
+
+    The small buffers are load-bearing, not a speed-up. The write deadline
+    sees only what the kernels refused, and with default buffers a peer that
+    stops reading absorbs a megabyte or more before a single write waits, so
+    a test on default buffers would pass or hang depending on the host."""
     reader, writer = await asyncio.open_connection("127.0.0.1", manager.listen_port)
     writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8192)
     assert await read_frame(reader) == OUR_ASSERTION

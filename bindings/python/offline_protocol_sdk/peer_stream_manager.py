@@ -45,11 +45,18 @@ message ends and who the peer is, and both are settled here:
   core hands every outbound body through one queue, and each is moved at
   once onto its stream's own queue, written by that stream's own writer.
   A peer that stops reading, or reads slowly, stalls only itself. The queue
-  is bounded only while its writer is blocked on the peer, so a burst to a
-  peer that is reading is never dropped, and the stream is aborted and
-  reported lost only when the peer has taken nothing for the write
-  deadline, so a slow link that is moving is never cut. Keepalive does not cover that case: a stream with data in
-  flight is not idle, and outside Linux nothing bounds its retransmissions.
+  is bounded (4 MiB) only while its writer is paused on the peer, so a
+  burst handed over while the writer is idle is never dropped; one that
+  arrives while a frame is still in flight can be, and the retry path
+  re-offers it. The stream is aborted and reported lost once the buffers
+  between the two hosts are full and the peer then takes nothing for the
+  write deadline, so a slow link that is moving is never cut. Below that
+  point this layer cannot tell a stopped peer from a buffering one: both
+  kernels absorb on the order of a megabyte on a default host, so a peer
+  that is alive but not reading, under light traffic, stays announced, and
+  the reliability layer's acknowledgements are the only signal. Keepalive
+  does not cover the case either: a stream with data in flight is not idle,
+  and outside Linux nothing bounds its retransmissions.
 
 The Rust reference for the same rules is ``stream_framing.rs`` in the
 transport crate, and its conformance vectors are the ones this manager's
@@ -137,8 +144,12 @@ REFUSAL_BACKOFF_MAX = 600.0
 KEEPALIVE_IDLE = 15
 KEEPALIVE_INTERVAL = 5
 KEEPALIVE_COUNT = 3
-#: Seconds a write may go without the peer taking a single byte before the
-#: stream is aborted. Keepalive ends an *idle* dead stream; a stream with
+#: Seconds the write buffer may sit with no byte leaving it, once the peer's
+#: receive window and our send buffer are both full, before the stream is
+#: aborted. Until those fill (on the order of a megabyte on a default host)
+#: the kernel takes every write and this deadline cannot start, and bytes
+#: moving into the kernel count as progress, so detection can take two of
+#: these. Keepalive ends an *idle* dead stream; a stream with
 #: unacknowledged data is not idle, and on macOS and Windows nothing else
 #: bounds it, so without this a peer that stops reading holds its stream,
 #: and everything queued to it, for as long as TCP keeps retransmitting.
@@ -393,8 +404,9 @@ class PeerStreamManager(TransportManager):
         Publish this host over DNS-SD, and connect to hosts found there.
         Either requires the optional ``zeroconf`` dependency.
     write_timeout:
-        Seconds a write may go without the peer taking a byte before its
-        stream is aborted and reported lost.
+        Seconds the write buffer may make no progress, once the kernel
+        buffers toward the peer are full, before its stream is aborted and
+        reported lost.
     """
 
     transport_id = "wifi_direct"
