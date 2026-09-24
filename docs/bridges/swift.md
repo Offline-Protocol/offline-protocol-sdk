@@ -230,16 +230,20 @@ test` does not run them.
 and `ble/` collaborators. They are typechecked on every run, just not
 unit-tested.
 
-**Two files are covered by neither**, and both ride the app build alone:
+**Two files need more than that step supplies**, and a second step covers
+both: "iOS bridge typecheck (OfflineProtocolModule.swift with React)" installs
+the React Native headers from the pinned devDependency, builds the symlink
+farm `ios/BRIDGE_MAINTENANCE.md` describes, and typechecks every hand-written
+source in `ios/` by glob, so a new file is covered without being listed.
 
-- `OfflineProtocolModule.swift`, which needs real React headers. The
-  symlink-farm harness in `ios/BRIDGE_MAINTENANCE.md` exists for this one. If
-  you touch it, run the harness, and negative-control it: a shell slip produces
-  a clean exit that proves nothing.
-- `ProtocolErrorBridge.swift`, which depends on the generated UniFFI module. It
-  is on the package manifest's exclusion list and absent from the CI typecheck
-  list, and its suite is excluded too, so nothing in CI compiles it.
+- `OfflineProtocolModule.swift` needs real React headers. It had no compile
+  coverage before that step, and a parameter named like the method it called
+  broke every iOS app build while CI stayed green. If you touch it, run the
+  local harness too, and negative-control it: a shell slip produces a clean
+  exit that proves nothing.
+- `ProtocolErrorBridge.swift` depends on the generated UniFFI module and is
+  absent from the first step's enumerated list, so the glob is what reaches
+  it. Its suite is still excluded from `swift test`.
 
-Note that the comment above the CI step claims `OfflineProtocolModule.swift` is
-the only uncovered file. That comment is stale; the exclusion list in
-`Package.swift` is the source of truth.
+The exclusion list in `Package.swift` remains the source of truth for what
+`swift test` skips.
