@@ -84,6 +84,41 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   operations are no longer marked deprecated; their contract is the chapter's,
   and only a verifier's result may be announced.
 
+- **A Python host can reach another over a LAN or a routed mesh.**
+  `PeerStreamManager` is the peer-stream transport for a host that owns its
+  sockets: a TCP listener, outbound connections to configured `host:port`
+  peers (or `off1…@host:port`, which makes the derived address have to match
+  the claim exactly) and to hosts found over DNS-SD, and the preamble exchange
+  the chapter specifies. Each side sends its identity assertion as the first
+  frame without waiting for the other's, verifies what it receives through
+  `verify_identity_assertion`, and announces the peer under the derived
+  address only; a stream that fails any step is closed and was never
+  announced. `ProtocolManager` builds it when `wifi_direct_enabled` is set
+  and stops it with the rest; the application starts it after
+  `ProtocolManager.start()`, since a host with no address to prove is refused
+  by every peer. DNS-SD advertises `_offlineprotocol._tcp` with `txtvers=1`
+  and `addr=<off1…>` through the optional `lan` extra
+  (`pip install 'offline-protocol-sdk[lan]'`), and the `addr` in a record is
+  a hint the preamble proves, never a name to announce. Two hosts that list
+  each other keep one stream, the one the lower address opened, so a
+  simultaneous open cannot loop; the lower address reconnecting while its
+  old stream is still half-open supersedes it. The higher address cannot, so
+  every stream carries TCP keepalive and an idle dead peer's stream ends
+  within about half a minute. Each stream writes from its own queue,
+  bounded at 4 MiB while a frame is in flight (a body over it goes back to
+  the retry path), and a peer that stops taking bytes once the buffers
+  between the two hosts are full has its stream aborted and reported lost
+  after thirty seconds without progress (`write_timeout`), without holding
+  any other peer's traffic; keepalive alone would not end it, since a
+  stream with data in flight is not idle. Until those buffers fill, on the
+  order of a megabyte on a default host, a peer that is alive but not
+  reading stays announced, and the core's acknowledgements are what notice
+  it. A slow link that is moving is never cut. The preamble deadline covers
+  the whole first frame,
+  one remote host holds at most eight inbound streams, and a peer that never
+  proves an address is retried on a doubling ladder. The listener binds
+  every interface by default; pass `listen_host` to narrow it.
+
 - **Attachment bytes move inside a group.** `DataStore.fetchAttachmentFrom(space, peer, hash)`
   asks one member for the bytes behind a reference, and they come back as
   frames sealed under the group key. Before this, references replicated to

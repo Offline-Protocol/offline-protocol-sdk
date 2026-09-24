@@ -152,6 +152,79 @@ the RFC 8032 vectors; `test_ble_peripheral.py` and `test_ble_manager.py` pin
 what each role does with the answer. The JSON form is gone, and a test asserts
 the constructor no longer accepts it.
 
+## P9. A socket client's verdict is the preamble, not the connect
+
+`PeerStreamManager` is the host's implementation of the peer-stream slot the
+FFI names `wifi_direct`: TCP streams to configured `host:port` peers or to
+hosts found over DNS-SD, framed as [the chapter](../spec/stream-framing.md)
+specifies. It announces a peer to the core only under the address
+`verify_identity_assertion` derived from the stream's first frame, and only
+then, never on connect, never from the `addr` in a discovery record, and never
+under a socket address. A stream whose preamble fails, arrives late, or names
+a different address than the peer list claimed is closed and was never
+announced, so its close reports nothing. The same holds for the outbound
+side: the core queues a body only toward an address a stream proved, so this
+manager is woken only for a stream it holds.
+
+Two rules here are local policy the chapter leaves to the implementation,
+and they are chosen so two hosts agree without talking: when a second stream
+proves an address already announced, the one opened by the lower address is
+kept (two hosts that each list the other open toward each other at once, and
+without a shared rule each would keep what the other discards, forever), and
+between two of the winning kind the newer supersedes the older (the lower
+address reconnecting must not be blocked by its own half-open stream). Either
+way the core sees one announcement and one loss per address.
+
+The tie-break gives the higher address no such way past a stale stream: its
+reconnect is the losing kind for as long as the lower side holds a stream it
+believes live. That is why every stream carries TCP keepalive (fifteen idle
+seconds, three probes five seconds apart), and why an attempt that ends
+without an announced stream climbs the reconnect ladder instead of retrying at
+a fixed pace. A port on the mobile managers owes both, not only the tie-break.
+
+Keepalive ends an *idle* dead stream only. A stream with unacknowledged data
+is not idle, and outside Linux nothing bounds its retransmissions, so the
+write path carries its own bound. The core hands every outbound body through
+one queue for all peers, and the manager moves each onto its stream's own
+queue without awaiting anything; each stream's writer then waits on its own
+peer and aborts the stream once its write buffer has made no progress for
+`write_timeout` (thirty seconds). That deadline starts only when the
+buffers between the two hosts are full: until then the kernel takes every
+write, and on a default host the two sides absorb on the order of a megabyte,
+so a peer that is alive but has stopped reading stays announced under light
+traffic, and detection can take two windows because bytes moving into the
+kernel count as progress in the first. Nothing at this layer can do better;
+the core's acknowledgements are the signal, and a port must not promise
+more. A single drain that awaited each write
+would let one peer that stops reading hold every other peer's traffic, and
+`writer.close()` alone would not free it, because asyncio keeps a socket
+open until its buffer flushes; a discarded stream with bytes still buffered
+is aborted. A port on the mobile managers owes this shape too.
+
+Both bounds on that path key on the peer's behaviour, never on the sender's
+scheduling. The per-stream queue (4 MiB) drops a body only while its writer
+is blocked on the peer: the core hands a burst over in one tick, before the
+writer has run at all, so a bound applied then drops frames for a peer that
+is reading, and those bytes were already held by the core's queue. The
+deadline is on progress rather than per frame: a per-frame deadline is a
+throughput floor (1 MiB in thirty seconds), and a slow link below it is
+aborted, reconnected, offered the same frame by the retry path and aborted
+again, forever.
+
+Three bounds keep a listener that binds every interface (the default) from
+being held by the network: one deadline covers the whole preamble frame,
+prefix and body, so four bytes and then silence cannot keep a slot; one remote
+host holds at most `max_streams_per_host` inbound streams (eight); and the
+total is `max_streams` (sixty-four). A DNS-SD record carries its own host name
+and the listener's interface addresses, because a record without them is seen
+by every browser and resolved by none.
+
+`test_peer_stream_manager.py` pins all of it on real loopback sockets, replays
+the chapter's vectors through the real verifier, and asserts the framing
+bounds as literals (`4`, `1_048_576`, `96`) for the C5 reason. DNS-SD needs
+the optional extra (`pip install 'offline-protocol-sdk[lan]'`); the base
+install carries no LGPL dependency.
+
 ## Testing
 
 ```bash

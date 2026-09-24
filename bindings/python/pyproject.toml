@@ -40,6 +40,21 @@ dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "pip-audit>=2.7",
+    # Not optional for the suite: the live DNS-SD round trip in
+    # test_peer_stream_manager.py is the only check that a published record
+    # resolves, and it skips without this.
+    "zeroconf>=0.140,<0.160",
+]
+# LAN discovery for the peer-stream transport (DNS-SD, `PeerStreamManager`).
+# Imported lazily and only when a manager asks to advertise or discover, so
+# the base install's audited dependency set is unchanged. python-zeroconf is
+# LGPL-2.1: it is a runtime dependency the user installs from PyPI, never
+# bundled in the wheel.
+lan = [
+    "zeroconf>=0.140,<0.160",
+    # Imported directly to list the interface addresses a record publishes;
+    # zeroconf depends on it too. MIT.
+    "ifaddr>=0.2,<1",
 ]
 
 [project.urls]

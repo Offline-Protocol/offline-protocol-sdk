@@ -202,6 +202,45 @@ class TestProtocolManagerTransports:
         assert pm.internet is not None
         assert pm.internet._app_id == "custom-app"
 
+    def test_peer_stream_none_when_disabled(self):
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        pm = ProtocolManager(_make_config(wifi_direct_enabled=False))
+        assert pm.peer_stream is None
+
+    def test_peer_stream_present_when_enabled(self):
+        from offline_protocol_sdk.peer_stream_manager import PeerStreamManager
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        pm = ProtocolManager(_make_config(wifi_direct_enabled=True))
+        assert isinstance(pm.peer_stream, PeerStreamManager)
+        assert pm.peer_stream.state.value == "stopped", "started by the caller, after start()"
+
+    @pytest.mark.asyncio
+    async def test_peer_stream_callback_is_installed_only_when_enabled(self):
+        """Mirrors the nostr/reticulum gating: a stub installed
+        unconditionally would swallow the slot's wake for an app that
+        drives the transport itself."""
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        pm = ProtocolManager(_make_config(wifi_direct_enabled=False))
+        await pm.start()
+        try:
+            assert pm._wifi_cb is None
+        finally:
+            await pm.stop()
+
+        pm = ProtocolManager(_make_config(wifi_direct_enabled=True))
+        await pm.start()
+        try:
+            assert pm._wifi_cb is not None
+            pm.peer_stream.on_messages_available = MagicMock()
+            pm._wifi_cb.on_messages_available()
+            pm.peer_stream.on_messages_available.assert_called_once()
+            assert pm._wifi_cb in pm._prevent_gc
+        finally:
+            await pm.stop()
+
 
 class TestProtocolManagerMessageDrain:
     @pytest.mark.asyncio
