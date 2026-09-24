@@ -186,13 +186,23 @@ Keepalive ends an *idle* dead stream only. A stream with unacknowledged data
 is not idle, and outside Linux nothing bounds its retransmissions, so the
 write path carries its own bound. The core hands every outbound body through
 one queue for all peers, and the manager moves each onto its stream's own
-bounded queue (4 MiB) without awaiting anything; each stream's writer then
-waits on its own peer under `write_timeout` (thirty seconds) and aborts the
-stream past it. A single drain that awaited each write would let one peer
-that stops reading hold every other peer's traffic, and `writer.close()`
-alone would not free it, because asyncio keeps a socket open until its
-buffer flushes; a discarded stream with bytes still buffered is aborted. A
-port on the mobile managers owes this shape too.
+queue without awaiting anything; each stream's writer then waits on its own
+peer and aborts the stream once the peer has taken no byte for
+`write_timeout` (thirty seconds). A single drain that awaited each write
+would let one peer that stops reading hold every other peer's traffic, and
+`writer.close()` alone would not free it, because asyncio keeps a socket
+open until its buffer flushes; a discarded stream with bytes still buffered
+is aborted. A port on the mobile managers owes this shape too.
+
+Both bounds on that path key on the peer's behaviour, never on the sender's
+scheduling. The per-stream queue (4 MiB) drops a body only while its writer
+is blocked on the peer: the core hands a burst over in one tick, before the
+writer has run at all, so a bound applied then drops frames for a peer that
+is reading, and those bytes were already held by the core's queue. The
+deadline is on progress rather than per frame: a per-frame deadline is a
+throughput floor (1 MiB in thirty seconds), and a slow link below it is
+aborted, reconnected, offered the same frame by the retry path and aborted
+again, forever.
 
 Three bounds keep a listener that binds every interface (the default) from
 being held by the network: one deadline covers the whole preamble frame,
