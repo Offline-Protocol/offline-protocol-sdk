@@ -279,6 +279,14 @@ scoring profile weights bandwidth most heavily and does not score energy. A peer
 so nothing here interacts with the fragment bounds of the Bluetooth LE chapter
 or with the message-count budgets of the relay carriers.
 
+The engine's transport queues a message toward an address only while a
+stream has proved it, and refuses any other recipient as not reachable on
+this carrier, which the selector treats as "try the next one". The refusal
+is what makes the invariants above safe to register: a stream layer that is
+up but has exchanged no preamble (the shipped mobile managers today) would
+otherwise win the selection on bandwidth and hold every direct message in a
+queue the platform has no proved stream to write to.
+
 ## Conformance vectors
 
 `crates/offline-protocol-transport/tests/data/stream-framing-v1.vectors.json`
@@ -299,6 +307,14 @@ receiver must read: the under-floor preamble carries its 95 bytes, and a
 receiver may still refuse it on the prefix alone. A vector
 that carried the body would be pinning bytes the receiver must not have
 read.
+
+The Rust reference for the framing and the preamble position is
+`PeerStreamReader` in `offline-protocol-transport` (`stream_framing.rs`),
+which a host that owns its own sockets feeds each read's bytes and acts on
+the events it yields. `tests/stream_framing_vectors.rs` in that crate is the
+consumer that checks it against this file, with the one real verifier behind
+it. The platform managers implement the same chapter in their own language;
+bodies cross the FFI whole, so nothing below the FFI reads a prefix for them.
 
 A vector that fails means the framing moved, which needs a versioned preamble
 and a new file. Editing an expected value to make a test pass converts a

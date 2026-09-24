@@ -100,6 +100,13 @@ exactly these `data` fields, and nothing else:
 | `mesh_metrics_rollup` | One row per minute: `bucket_start_ms`, `bucket_duration_s`, `neighbor_count_{avg,max,p50}`, `ack_pending_{avg,max}`, `retry_queue_total_{avg,max}`, `retry_queue_critical_count_max`, `transport_time_ms` (`ble`, `wifi_direct`, `internet`, `none`), `is_local_relay_duration_s`, `current_transport_at_bucket_end`, `sends_{attempted,succeeded,failed}_sum`, `bytes_{sent,received}_sum` (always 0) | The periodic metrics frames, folded on the device |
 | `mesh_session_summary` | `session_duration_s`, `routing_switches`, `routing_escalations`, `escalation_reasons` (six buckets), `mls_session_ready_latency_p50_ms` (absent when no handshake paired), `mls_encryption_used_count` | Computed on the device at each session boundary |
 
+`transport_time_ms.wifi_direct` is the dwell time of the peer-stream slot on
+every platform, not only Wi-Fi Direct: a Multipeer session on iOS and a LAN or
+routed-mesh stream on a host are the same transport to the engine
+([peer-stream framing](spec/stream-framing.md)), so their time lands under the
+slot's historical key. Renaming the key is part of renaming the slot, a
+separate breaking change.
+
 `mls_session_ready_latency_p50_ms` is the median time from the engine wanting
 a secure session with a peer and not having one, to that session being
 usable. The window opens where a handshake begins: normally when a session is
