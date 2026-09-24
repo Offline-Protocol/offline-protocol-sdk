@@ -288,6 +288,14 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   all five transports and refuses an unknown name, both entry points go
   through it, and a Rust guard reads both sources to keep it so.
 
+- **A send that every carrier refused as not reachable says so.** When the
+  selected carrier refused the recipient and there was nothing left to fall
+  back to, the send ended as `SendFailed("All transports failed")`, and the
+  `message_deferred` reason read `transport_send_failed`, as if a carrier had
+  broken mid-send. It now ends as the refusal, and the reason is
+  `peer_not_reachable`. The welcome lifecycle classifies both the same way,
+  so only the deferral reason changes.
+
 - **A Python Bluetooth LE peripheral can be verified by a phone.** It served
   the profile label as its Device id and a JSON document as its Identity, so
   every conforming central refused it before any cryptography ran; no phone
