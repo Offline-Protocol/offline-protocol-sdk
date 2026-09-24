@@ -1744,7 +1744,8 @@ public class InternetManager: NSObject, TransportManager {
                         // makes the transport silently drop the frame.
                         let messageDict = LegacyRelayMessage.buildDict(
                             senderId: senderId,
-                            recipientId: self.deviceId, // Will be corrected by protocol
+                            localAddress: self.protocolInstance.localAddress(),
+                            profile: self.deviceId,
                             content: content,
                             timestampMs: self.parseTimestampToMs(timestampStr),
                             messageId: messageId,
@@ -2051,7 +2052,11 @@ public class InternetManager: NSObject, TransportManager {
     private func buildInternalMessageData(senderId: String, content: String) throws -> Data {
         let messageDict = LegacyRelayMessage.buildDict(
             senderId: senderId,
-            recipientId: deviceId,
+            // Resolved per frame, never captured, for the same reason as the
+            // control-op translator's address provider: MLS may not have run
+            // when this manager was built. See LegacyRelayMessage's INVARIANT.
+            localAddress: protocolInstance.localAddress(),
+            profile: deviceId,
             content: content,
             timestampMs: Int64(Date().timeIntervalSince1970 * 1000),
             // Nothing transmitted this frame, so no sender is awaiting a

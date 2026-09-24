@@ -1442,7 +1442,8 @@ class InternetManager(
                             // silently drop the frame.
                             messageBytes = LegacyRelayMessage.buildJson(
                                 senderId = senderId,
-                                recipientId = deviceId, // Will be corrected by protocol
+                                localAddress = protocol.localAddress(),
+                                profile = deviceId,
                                 content = content,
                                 timestampMs = parseTimestampToMs(timestamp),
                                 messageId = messageId,
@@ -1454,7 +1455,8 @@ class InternetManager(
                         // (same required-field constraints as above).
                         messageBytes = LegacyRelayMessage.buildJson(
                             senderId = senderId,
-                            recipientId = deviceId, // Will be corrected by protocol
+                            localAddress = protocol.localAddress(),
+                            profile = deviceId,
                             content = content,
                             timestampMs = parseTimestampToMs(timestamp),
                             messageId = messageId,
@@ -1827,7 +1829,11 @@ class InternetManager(
     private fun buildInternalMessageBytes(senderId: String, content: String): ByteArray =
         LegacyRelayMessage.buildJson(
             senderId = senderId,
-            recipientId = deviceId,
+            // Resolved per frame, never captured, for the same reason as the
+            // control-op translator's address provider: MLS may not have run
+            // when this manager was built. See LegacyRelayMessage's INVARIANT.
+            localAddress = protocol.localAddress(),
+            profile = deviceId,
             content = content,
             timestampMs = System.currentTimeMillis(),
             // Nothing transmitted this frame, so no sender is awaiting a

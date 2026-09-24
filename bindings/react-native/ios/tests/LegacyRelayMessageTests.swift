@@ -18,7 +18,8 @@ final class LegacyRelayMessageTests: XCTestCase {
     func testEveryFieldRequiredByTheRustDeserializerIsPresent() {
         let dict = LegacyRelayMessage.buildDict(
             senderId: "alice",
-            recipientId: "bob",
+            localAddress: nil,
+            profile: "bob",
             content: "hello",
             timestampMs: 1_700_000_000_000
         )
@@ -38,7 +39,8 @@ final class LegacyRelayMessageTests: XCTestCase {
     func testPriorityIsTheCanonicalLowercaseVariant() {
         let dict = LegacyRelayMessage.buildDict(
             senderId: "alice",
-            recipientId: "bob",
+            localAddress: nil,
+            profile: "bob",
             content: "hello",
             timestampMs: 1_700_000_000_000
         )
@@ -49,7 +51,8 @@ final class LegacyRelayMessageTests: XCTestCase {
     func testIdFallsBackToAUuidWhenAbsentAndPassesThroughWhenGiven() {
         let generated = LegacyRelayMessage.buildDict(
             senderId: "alice",
-            recipientId: "bob",
+            localAddress: nil,
+            profile: "bob",
             content: "hello",
             timestampMs: 1_700_000_000_000,
             messageId: ""
@@ -59,7 +62,8 @@ final class LegacyRelayMessageTests: XCTestCase {
 
         let given = LegacyRelayMessage.buildDict(
             senderId: "alice",
-            recipientId: "bob",
+            localAddress: nil,
+            profile: "bob",
             content: "hello",
             timestampMs: 1_700_000_000_000,
             messageId: "6dd7f6f0-9d2c-4b6a-8f3e-2a1b0c9d8e7f"
@@ -70,7 +74,8 @@ final class LegacyRelayMessageTests: XCTestCase {
     func testReplyToMsgIncludedOnlyWhenNonEmpty() {
         let without = LegacyRelayMessage.buildDict(
             senderId: "alice",
-            recipientId: "bob",
+            localAddress: nil,
+            profile: "bob",
             content: "hello",
             timestampMs: 1_700_000_000_000,
             replyToMsg: ""
@@ -79,7 +84,8 @@ final class LegacyRelayMessageTests: XCTestCase {
 
         let with = LegacyRelayMessage.buildDict(
             senderId: "alice",
-            recipientId: "bob",
+            localAddress: nil,
+            profile: "bob",
             content: "hello",
             timestampMs: 1_700_000_000_000,
             replyToMsg: "7ee8f6f0-9d2c-4b6a-8f3e-2a1b0c9d8e7f"
@@ -90,7 +96,8 @@ final class LegacyRelayMessageTests: XCTestCase {
     func testScalarFieldsCarryTheWireValues() {
         let dict = LegacyRelayMessage.buildDict(
             senderId: "alice",
-            recipientId: "bob",
+            localAddress: nil,
+            profile: "bob",
             content: "hello",
             timestampMs: 1_700_000_000_000
         )
@@ -112,7 +119,8 @@ final class LegacyRelayMessageTests: XCTestCase {
     func testRequiresAckIsOptOutForSynthesizedFrames() {
         let dict = LegacyRelayMessage.buildDict(
             senderId: "relay",
-            recipientId: "bob",
+            localAddress: nil,
+            profile: "bob",
             content: "__GROUP_CREATED__{}",
             timestampMs: 1_700_000_000_000,
             requiresAck: false
@@ -124,6 +132,38 @@ final class LegacyRelayMessageTests: XCTestCase {
             "priority", "ttl", "hop_count", "requires_ack", "timestamp"
         ] {
             XCTAssertNotNil(dict[key], "required field '\(key)' missing")
+        }
+    }
+
+    /// The core forwards rather than processes a frame addressed to anyone
+    /// but this device, and once MLS has run this device is its address, not
+    /// its profile. Regression pin for the bug where every rebuilt relay frame
+    /// named the profile, so on an MLS-initialized phone relay group answers
+    /// and legacy plain-text DMs were handed to the mesh forwarder and lost.
+    func testRecipientIsTheLocalAddressOnceMlsHasMintedOne() {
+        let dict = LegacyRelayMessage.buildDict(
+            senderId: "relay",
+            localAddress: "off1abc",
+            profile: "bob",
+            content: "__GROUP_CREATED__{}",
+            timestampMs: 1_700_000_000_000,
+            requiresAck: false
+        )
+        XCTAssertEqual(dict["recipient"] as? String, "off1abc")
+    }
+
+    /// Before `initialize_mls` the profile is this device's id in the core,
+    /// so frames built then must stay exactly as they were.
+    func testRecipientFallsBackToTheProfileBeforeMlsInit() {
+        for address in [nil, ""] as [String?] {
+            let dict = LegacyRelayMessage.buildDict(
+                senderId: "alice",
+                localAddress: address,
+                profile: "bob",
+                content: "hello",
+                timestampMs: 1_700_000_000_000
+            )
+            XCTAssertEqual(dict["recipient"] as? String, "bob")
         }
     }
 }
