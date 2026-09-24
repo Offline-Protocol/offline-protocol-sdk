@@ -3245,6 +3245,11 @@ extension BleManager: CBPeripheralDelegate {
         if let error = error {
             print("[BleManager] Error discovering characteristics: \(error)")
             emitDiagnostic("error", "Error discovering characteristics", context: ["error": error.localizedDescription])
+            // An instance of a multi-instance link that failed discovery can
+            // never handshake. Recording it lets the choice complete now
+            // rather than wait out SERVICE_INSTANCE_SELECTION_TIMEOUT for an
+            // answer that already came.
+            recordServiceInstanceDiscoveryFailure(service, on: peripheral)
             return
         }
         
@@ -3685,6 +3690,23 @@ extension BleManager: CBPeripheralDelegate {
             return false
         case .bound(let bound)?:
             return service === bound
+        }
+    }
+
+    /// Records an instance whose characteristic discovery failed while its
+    /// link is choosing: known, unable to handshake, and with no tag to read.
+    /// A no-op outside a selection, so a link with one instance is unchanged.
+    private func recordServiceInstanceDiscoveryFailure(_ service: CBService, on peripheral: CBPeripheral) {
+        let identifier = peripheral.identifier
+        guard var probe = serviceInstanceProbes[identifier] else { return }
+        let key = ObjectIdentifier(service)
+        guard probe.instances.contains(where: { $0 === service }),
+              !probe.characteristicsKnown.contains(key) else { return }
+        probe.characteristicsKnown.insert(key)
+        probe.canHandshake[key] = false
+        serviceInstanceProbes[identifier] = probe
+        if probe.isComplete {
+            finishServiceInstanceSelection(on: peripheral, timedOut: false)
         }
     }
 
