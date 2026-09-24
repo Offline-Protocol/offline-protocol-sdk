@@ -182,6 +182,18 @@ seconds, three probes five seconds apart), and why an attempt that ends
 without an announced stream climbs the reconnect ladder instead of retrying at
 a fixed pace. A port on the mobile managers owes both, not only the tie-break.
 
+Keepalive ends an *idle* dead stream only. A stream with unacknowledged data
+is not idle, and outside Linux nothing bounds its retransmissions, so the
+write path carries its own bound. The core hands every outbound body through
+one queue for all peers, and the manager moves each onto its stream's own
+bounded queue (4 MiB) without awaiting anything; each stream's writer then
+waits on its own peer under `write_timeout` (thirty seconds) and aborts the
+stream past it. A single drain that awaited each write would let one peer
+that stops reading hold every other peer's traffic, and `writer.close()`
+alone would not free it, because asyncio keeps a socket open until its
+buffer flushes; a discarded stream with bytes still buffered is aborted. A
+port on the mobile managers owes this shape too.
+
 Three bounds keep a listener that binds every interface (the default) from
 being held by the network: one deadline covers the whole preamble frame,
 prefix and body, so four bytes and then silence cannot keep a slot; one remote

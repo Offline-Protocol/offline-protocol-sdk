@@ -103,8 +103,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   each other keep one stream, the one the lower address opened, so a
   simultaneous open cannot loop; the lower address reconnecting while its
   old stream is still half-open supersedes it. The higher address cannot, so
-  every stream carries TCP keepalive and a dead peer's stream ends within
-  about half a minute. The preamble deadline covers the whole first frame,
+  every stream carries TCP keepalive and an idle dead peer's stream ends
+  within about half a minute. Each stream writes from its own bounded queue
+  under a thirty-second write deadline (`write_timeout`), so a peer that
+  stops reading is aborted and reported lost without holding any other
+  peer's traffic; keepalive alone would not end it, since a stream with data
+  in flight is not idle. The preamble deadline covers the whole first frame,
   one remote host holds at most eight inbound streams, and a peer that never
   proves an address is retried on a doubling ladder. The listener binds
   every interface by default; pass `listen_host` to narrow it.
