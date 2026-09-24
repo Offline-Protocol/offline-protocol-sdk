@@ -268,11 +268,14 @@ Before committing changes:
 
 ## Type-checking `OfflineProtocolModule.swift` locally
 
-**Nothing in CI compiles this file.** It is on `Package.swift`'s `exclude:`
-list (it needs React, which the SwiftPM harness cannot supply) and it is the
-one bridge source the ci.yml `swiftc -typecheck` probe leaves out, for the
-same reason. Every other hand-written Swift file in this directory is covered
-by one or the other. So when you change this file, type-check it by hand.
+**CI compiles this file in one place only**, the "iOS bridge typecheck
+(OfflineProtocolModule.swift with React)" step, which runs the recipe below
+against the React Native headers of the pinned devDependency. It is on
+`Package.swift`'s `exclude:` list, since it needs React, and the SwiftPM
+harness cannot supply that. Until that step existed nothing compiled it, and
+a parameter that shadowed a method of the same name broke every iOS app build
+on `main` with CI green. Run the recipe locally before pushing a change to
+this file, since CI reports only on the macOS runner.
 
 The trick is to build a symlink farm of the vendored React Native headers and
 give Clang a minimal module map for them:

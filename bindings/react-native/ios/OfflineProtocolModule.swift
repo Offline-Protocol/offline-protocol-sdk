@@ -3515,7 +3515,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         // metrics read for any other carrier answered for the radio.
         let type: TransportType
         do {
-            type = try transportType(from: transportType)
+            type = try self.transportType(from: transportType)
         } catch {
             rejecter("ERROR_METRICS", "Unsupported transport type: \(transportType)", error)
             return
@@ -3548,7 +3548,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         do {
             // See getTransportMetrics: one mapper. This used to default an
             // unknown name to BLE, so forceTransport("nostr") forced the radio.
-            let type = try transportType(from: transportType)
+            let type = try self.transportType(from: transportType)
             try proto.forceTransport(transportType: type)
             resolver(nil)
         } catch {

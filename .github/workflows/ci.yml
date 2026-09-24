@@ -623,10 +623,9 @@ jobs:
       #
       # BleManager / WifiDirectManager / ReticulumManager joined this list in
       # #300: only their mesh/ and ble/ collaborators were missing, and adding
-      # those three sources is enough to typecheck all of them. The one file
-      # still uncovered is OfflineProtocolModule.swift, which needs real React
-      # headers — see ios/BRIDGE_MAINTENANCE.md for the local symlink-farm
-      # recipe to check it by hand when you touch it.
+      # those three sources is enough to typecheck all of them.
+      # OfflineProtocolModule.swift needs real React headers, so it is checked
+      # by the next step instead.
       - name: iOS bridge typecheck (files excluded from the SwiftPM harness)
         working-directory: bindings/react-native/ios
         run: |
@@ -653,3 +652,49 @@ jobs:
             PresenceWatchPolicy.swift RecipientInFlightTracker.swift \
             SocketGenerationTracker.swift SupersededLatchPolicy.swift \
             RelayTimestamps.swift WriteStallWatchdog.swift
+
+      # OfflineProtocolModule.swift is the file every iOS app compiles through
+      # the podspec, and it had no compile coverage at all: a parameter named
+      # `transportType` shadowed the method `transportType(from:)` in two
+      # callers, main stopped building for every iOS app, and CI stayed green.
+      # This step typechecks it together with every other hand-written source,
+      # against the React Native headers from the pinned devDependency,
+      # through the symlink farm ios/BRIDGE_MAINTENANCE.md describes. The file
+      # list is a glob, not the enumerated list above, so a new source is
+      # covered without being registered here.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: bindings/react-native/package-lock.json
+
+      - name: Install React Native headers
+        working-directory: bindings/react-native
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: iOS bridge typecheck (OfflineProtocolModule.swift with React)
+        working-directory: bindings/react-native/ios
+        run: |
+          set -euo pipefail
+          RN="$(cd ../node_modules/react-native && pwd)"
+          OUT="$(mktemp -d)"
+          mkdir -p "$OUT/React" "$OUT/RCTDeprecation"
+          find "$RN/React" "$RN/Libraries" -name '*.h' -exec ln -sf {} "$OUT/React/" \;
+          find "$RN" -name 'RCTDeprecation.h' -exec ln -sf {} "$OUT/RCTDeprecation/" \;
+          printf '#import <React/RCTBridgeModule.h>\n#import <React/RCTEventEmitter.h>\n#import <React/RCTBridge.h>\n' > "$OUT/React/ReactUmbrella.h"
+          printf 'module React {\n  header "ReactUmbrella.h"\n  export *\n}\n' > "$OUT/React/module.modulemap"
+          printf 'module RCTDeprecation {\n  header "RCTDeprecation.h"\n  export *\n}\n' > "$OUT/RCTDeprecation/module.modulemap"
+          FILES=()
+          for f in *.swift; do [ "$f" = Package.swift ] || FILES+=("$f"); done
+          # An empty or partial list would pass vacuously.
+          printf '%s\n' "${FILES[@]}" | grep -qx OfflineProtocolModule.swift
+          xcrun --sdk iphoneos swiftc -typecheck \
+            -target arm64-apple-ios15.1 \
+            -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
+            -I"$OUT" -Xcc -I"$OUT" \
+            -Xcc -fmodule-map-file=Generated/offline_protocolFFI.modulemap \
+            -Xcc -IGenerated \
+            "${FILES[@]}" \
+            mesh/Mesh.swift ble/MeshConnectionRegistry.swift \
+            ble/BleDiscoveryBootstrapPolicy.swift \
+            Generated/offline_protocol.swift
