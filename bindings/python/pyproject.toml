@@ -41,6 +41,14 @@ dev = [
     "pytest-asyncio>=0.21",
     "pip-audit>=2.7",
 ]
+# LAN discovery for the peer-stream transport (DNS-SD, `PeerStreamManager`).
+# Imported lazily and only when a manager asks to advertise or discover, so
+# the base install's audited dependency set is unchanged. python-zeroconf is
+# LGPL-2.1: it is a runtime dependency the user installs from PyPI, never
+# bundled in the wheel.
+lan = [
+    "zeroconf>=0.140,<0.160",
+]
 
 [project.urls]
 Homepage = "https://github.com/Offline-Protocol/offline-protocol-sdk"

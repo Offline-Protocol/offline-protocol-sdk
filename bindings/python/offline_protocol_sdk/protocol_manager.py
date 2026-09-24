@@ -33,6 +33,7 @@ from .offline_protocol import (
 from .ble_manager import BleManager
 from .ble_peripheral import BlePeripheral
 from .internet_manager import InternetManager
+from .peer_stream_manager import PeerStreamManager
 from .secure_storage import SecureStorage
 from .state_storage import AppStateStorage
 from .storage_namespace import account_storage_namespace
@@ -88,10 +89,18 @@ class _BleTransportCallbackImpl(BleTransportCallback):
 
 
 class _WifiDirectTransportCallbackImpl(WifiDirectTransportCallback):
-    """Stub — WiFi Direct is not implemented on desktop."""
+    """Forwards the peer-stream slot's wake to :class:`PeerStreamManager`.
+
+    The core fires it only for a body queued toward an address a stream has
+    proved, so nothing is scheduled for a manager that holds no stream.
+    """
+
+    def __init__(self, manager: PeerStreamManager | None) -> None:
+        self._manager = manager
 
     def on_messages_available(self) -> None:
-        pass
+        if self._manager is not None:
+            self._manager.on_messages_available()
 
 
 class _NostrTransportCallbackImpl(NostrTransportCallback):
@@ -196,6 +205,14 @@ class ProtocolManager:
         if getattr(config, "ble_enabled", False):
             self.ble_peripheral = BlePeripheral(self._protocol, device_id)
 
+        # The peer-stream transport behind the `wifi_direct` slot: TCP
+        # streams to configured or discovered hosts, each proved by the
+        # preamble exchange. Started by the caller after `start()`, once
+        # this device has an address to prove; stopped here.
+        self.peer_stream: PeerStreamManager | None = None
+        if getattr(config, "wifi_direct_enabled", False):
+            self.peer_stream = PeerStreamManager(self._protocol)
+
         # Processing loop task
         self._process_task: asyncio.Task[None] | None = None
         self._running = False
@@ -233,13 +250,16 @@ class ProtocolManager:
         self._ble_cb = _BleTransportCallbackImpl(self.ble, self.ble_peripheral)
         self._protocol.set_ble_transport_callback(self._ble_cb)
 
-        self._wifi_cb = _WifiDirectTransportCallbackImpl()
-        self._protocol.set_wifi_direct_transport_callback(self._wifi_cb)
+        # Mirror the RN iOS/Android modules: only wire the peer-stream,
+        # nostr and reticulum callbacks when the transport is enabled in
+        # config. Installing a stub unconditionally would silently swallow
+        # `on_messages_available` on desktop apps that enable the transport
+        # but drive it themselves.
+        self._wifi_cb: _WifiDirectTransportCallbackImpl | None = None
+        if self.peer_stream is not None:
+            self._wifi_cb = _WifiDirectTransportCallbackImpl(self.peer_stream)
+            self._protocol.set_wifi_direct_transport_callback(self._wifi_cb)
 
-        # Mirror the RN iOS/Android modules: only wire the nostr/reticulum
-        # callbacks when the transport is enabled in config. Installing a
-        # stub unconditionally would silently swallow `on_messages_available`
-        # on desktop apps that enable the transport but drive it themselves.
         self._nostr_cb: _NostrTransportCallbackImpl | None = None
         if getattr(self._config, "nostr_enabled", False):
             self._nostr_cb = _NostrTransportCallbackImpl()
@@ -256,10 +276,11 @@ class ProtocolManager:
         self._prevent_gc = [
             self._event_cb,
             self._ble_cb,
-            self._wifi_cb,
             self._storage,
             self._state_storage,
         ]
+        if self._wifi_cb is not None:
+            self._prevent_gc.append(self._wifi_cb)
         if self._nostr_cb is not None:
             self._prevent_gc.append(self._nostr_cb)
         if self._reticulum_cb is not None:
@@ -303,6 +324,8 @@ class ProtocolManager:
             await self.ble_peripheral.stop()
         if self.internet is not None:
             await self.internet.stop()
+        if self.peer_stream is not None:
+            await self.peer_stream.stop()
 
         # Give the telemetry pipe its final flush while the process is still
         # ours to block: the pipe would also stop when the protocol is

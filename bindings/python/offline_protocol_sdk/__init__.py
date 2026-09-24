@@ -9,6 +9,7 @@ from .state_storage import AppStateStorage  # noqa: F401
 from .storage_namespace import account_storage_namespace  # noqa: F401
 from .transport_manager import TransportManager, TransportState  # noqa: F401
 from .internet_manager import InternetManager  # noqa: F401
+from .peer_stream_manager import PeerEntry, PeerStreamManager  # noqa: F401
 from .ble_manager import BleManager  # noqa: F401
 from .ble_peripheral import BlePeripheral  # noqa: F401
 from .protocol_manager import ProtocolManager  # noqa: F401
