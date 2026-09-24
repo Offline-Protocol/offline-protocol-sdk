@@ -53,6 +53,11 @@ ADAPTIVE_LOW_DENSITY_THRESHOLD = 10
 ADAPTIVE_HIGH_DENSITY_THRESHOLD = 50
 ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE = 6
 ADAPTIVE_COOLDOWN_PER_PERIPHERAL = 30.0  # seconds
+# Ceiling on the per-peripheral cooldown after repeated identity refusals. A
+# peer that cannot prove its address (an old peripheral, a phone before MLS
+# init) fails the same way every time, and without a backoff each retry spends
+# the global per-minute connection budget that verifiable peers need.
+REFUSAL_BACKOFF_MAX = 600.0  # seconds
 PEER_LOST_TIMEOUT = 30.0  # seconds since last seen
 SCAN_RESTART_INTERVAL = 30.0
 
@@ -92,7 +97,7 @@ class BleManager(TransportManager):
         # Lock protecting shared state accessed from bleak's scanner thread
         # (_on_advertisement) AND the asyncio event loop. Guards: _last_seen,
         # _connection_attempts, _global_attempts, _connecting, _clients,
-        # _peer_device_ids.
+        # _peer_device_ids, _refusals.
         self._lock = threading.Lock()
 
         # Connected peers: address -> BleakClient
@@ -109,6 +114,8 @@ class BleManager(TransportManager):
         self._global_attempts: list[float] = []
         # Addresses currently being connected to (prevent concurrent attempts)
         self._connecting: set[str] = set()
+        # address -> consecutive identity refusals; each doubles the cooldown
+        self._refusals: dict[str, int] = {}
 
         # Metrics
         self._bytes_sent: int = 0
@@ -276,7 +283,7 @@ class BleManager(TransportManager):
         """Adaptive rate-limiting. Caller must hold ``_lock``."""
         # Per-peripheral cooldown
         last_attempt = self._connection_attempts.get(addr, 0)
-        if now - last_attempt < ADAPTIVE_COOLDOWN_PER_PERIPHERAL:
+        if now - last_attempt < self._cooldown_locked(addr):
             return False
 
         # Global rate limiting
@@ -286,6 +293,21 @@ class BleManager(TransportManager):
             return False
 
         return True
+
+    def _cooldown_locked(self, addr: str) -> float:
+        """Per-peripheral cooldown, doubled per consecutive identity refusal
+        and capped at ``REFUSAL_BACKOFF_MAX``. Caller must hold ``_lock``."""
+        refusals = self._refusals.get(addr, 0)
+        if refusals == 0:
+            return ADAPTIVE_COOLDOWN_PER_PERIPHERAL
+        return min(
+            ADAPTIVE_COOLDOWN_PER_PERIPHERAL * (2 ** min(refusals, 16)),
+            REFUSAL_BACKOFF_MAX,
+        )
+
+    def _record_refusal(self, addr: str) -> None:
+        with self._lock:
+            self._refusals[addr] = self._refusals.get(addr, 0) + 1
 
     # -- connection management ------------------------------------------------
 
@@ -318,15 +340,18 @@ class BleManager(TransportManager):
             # proof must name the claim, or the link is dropped unannounced.
             claimed = await self._read_device_id(client)
             if claimed is None:
+                self._record_refusal(addr)
                 await client.disconnect()
                 return
             identity = await self._read_identity(client)
             device_id = self._verify_peer(addr, claimed, identity)
             if device_id is None:
+                self._record_refusal(addr)
                 await client.disconnect()
                 return
 
             with self._lock:
+                self._refusals.pop(addr, None)
                 self._clients[addr] = client
                 self._peer_device_ids[addr] = device_id
                 self._device_id_to_addr[device_id] = addr
@@ -547,6 +572,7 @@ class BleManager(TransportManager):
                     ]
                     for addr in stale:
                         self._last_seen.pop(addr, None)
+                        self._refusals.pop(addr, None)
                         device_id = self._peer_device_ids.pop(addr, None)
                         if device_id is None:
                             continue  # never announced, nothing to report

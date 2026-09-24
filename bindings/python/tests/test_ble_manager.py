@@ -18,6 +18,7 @@ from offline_protocol_sdk.ble_manager import (
     ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE,
     ADAPTIVE_MIN_RSSI,
     DEVICE_ID_CHAR_UUID,
+    REFUSAL_BACKOFF_MAX,
     IDENTITY_CHAR_UUID,
     MESSAGE_CHAR_UUID,
     SERVICE_UUID,
@@ -368,6 +369,52 @@ class TestConnectVerifiesBeforeAnnouncing:
         verifier.assert_not_called()
         mock_protocol.ble_peer_discovered.assert_not_called()
         client.disconnect.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_refused_peer_is_backed_off_and_a_verified_one_resets(
+        self, manager, mock_protocol, monkeypatch
+    ):
+        """A peer that cannot prove its address fails identically every time.
+
+        Each refusal doubles its cooldown, so it stops spending the global
+        per-minute budget verifiable peers need; proving its address clears
+        the count.
+        """
+        verifier = MagicMock(return_value=PEER_ADDRESS)
+        monkeypatch.setattr(ble_manager_module, "verify_identity_assertion", verifier)
+        device = MagicMock()
+        device.address = "AA:BB"
+
+        refusing = self._client({DEVICE_ID_CHAR_UUID: b"coordinator",
+                                 IDENTITY_CHAR_UUID: PEER_ASSERTION})
+        for expected in (1, 2):
+            manager._connecting.add("AA:BB")
+            with patch("offline_protocol_sdk.ble_manager.BleakClient", return_value=refusing):
+                await manager._connect_to_peer(device)
+            assert manager._refusals["AA:BB"] == expected
+
+        with manager._lock:
+            assert manager._cooldown_locked("AA:BB") == ADAPTIVE_COOLDOWN_PER_PERIPHERAL * 4
+            attempted = manager._connection_attempts["AA:BB"]
+            later = attempted + ADAPTIVE_COOLDOWN_PER_PERIPHERAL + 1.0
+            manager._global_attempts.clear()
+            assert not manager._should_connect_locked("AA:BB", later), (
+                "the plain cooldown has passed, but a twice-refused peer waits longer"
+            )
+
+        verified = self._client({DEVICE_ID_CHAR_UUID: PEER_ADDRESS.encode("utf-8"),
+                                 IDENTITY_CHAR_UUID: PEER_ASSERTION})
+        manager._connecting.add("AA:BB")
+        with patch("offline_protocol_sdk.ble_manager.BleakClient", return_value=verified):
+            await manager._connect_to_peer(device)
+        assert "AA:BB" not in manager._refusals
+        with manager._lock:
+            assert manager._cooldown_locked("AA:BB") == ADAPTIVE_COOLDOWN_PER_PERIPHERAL
+
+    def test_the_refusal_backoff_is_capped(self, manager):
+        manager._refusals["AA:BB"] = 1_000
+        with manager._lock:
+            assert manager._cooldown_locked("AA:BB") == REFUSAL_BACKOFF_MAX
 
 
 # ---------------------------------------------------------------------------
