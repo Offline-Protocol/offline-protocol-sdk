@@ -53,18 +53,32 @@ use crate::manager::MlsManager;
 ///
 /// [`MlsError::Deserialization`] for anything under 96 bytes,
 /// [`MlsError::InvalidPublicKey`] for a key that is not on the curve, and
-/// [`MlsError::VerificationFailed`] for a signature that does not verify.
+/// [`MlsError::VerificationFailed`] for a signature that does not verify
+/// under RFC 8032's strict rules, which also refuse a small-order key and a
+/// non-canonical signature.
 /// Every case means the peer is not surfaced at all, never surfaced with a
 /// caveat: what this returns becomes `Message.recipient` on every outbound
 /// frame and the transport-verified peer id the receiving core matches
 /// `Message.sender` against.
 pub fn verify_identity_assertion(bytes: &[u8]) -> Result<Address> {
+    use ed25519_dalek::{Signature, VerifyingKey};
+
     let parts = parse_identity_assertion(bytes)?;
-    if !MlsManager::verify_signature(parts.public_key, parts.signed_data, parts.signature)? {
-        return Err(MlsError::VerificationFailed(
-            "Identity assertion signature does not verify under its public key".to_string(),
-        ));
-    }
+    let key = VerifyingKey::try_from(parts.public_key)
+        .map_err(|e| MlsError::InvalidPublicKey(format!("Invalid Ed25519 public key: {e}")))?;
+    let signature = Signature::try_from(parts.signature)
+        .map_err(|e| MlsError::VerificationFailed(format!("Invalid signature format: {e}")))?;
+    // Strict, not `MlsManager::verify_signature`: the permissive check accepts
+    // a small-order key with a signature anyone can write down, over any
+    // message. That forges nothing a peer could not get by minting a key, but
+    // this is the one verifier for every link that proves an address, and an
+    // assertion no private key ever produced has no business verifying.
+    key.verify_strict(parts.signed_data, &signature)
+        .map_err(|_| {
+            MlsError::VerificationFailed(
+                "Identity assertion signature does not verify under its public key".to_string(),
+            )
+        })?;
     MlsManager::derive_address(parts.public_key)
 }
 
@@ -183,6 +197,31 @@ mod tests {
         let mut bytes = vec![0xffu8; 96];
         bytes[32..].fill(0);
         assert!(verify_identity_assertion(&bytes).is_err());
+    }
+
+    /// The forgery the permissive check admits: the identity point as the
+    /// key, the identity point as `R` and a zero scalar verify over any
+    /// message, with no private key behind them. The permissive
+    /// `verify_signature` is asserted to accept it, so this test fails if the
+    /// verifier is ever routed back through it.
+    #[test]
+    fn a_small_order_key_with_a_trivial_signature_is_refused() {
+        let mut identity_point = [0u8; 32];
+        identity_point[0] = 1;
+        let mut signature = [0u8; 64];
+        signature[..32].copy_from_slice(&identity_point);
+        let data = b"any message at all";
+
+        assert!(
+            MlsManager::verify_signature(&identity_point, data, &signature).expect("parses"),
+            "the permissive check accepts this; if it stops, this test no longer \
+             proves the verifier is strict"
+        );
+        let bytes = encode_identity_assertion(&identity_point, &signature, data).expect("encode");
+        assert!(matches!(
+            verify_identity_assertion(&bytes),
+            Err(MlsError::VerificationFailed(_))
+        ));
     }
 
     /// The instance side: what a manager builds is what the verifier

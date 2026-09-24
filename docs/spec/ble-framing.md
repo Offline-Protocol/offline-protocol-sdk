@@ -158,7 +158,10 @@ Verification runs in this order, and any failure means the peer is not
 surfaced at all rather than surfaced with a caveat:
 
 1. Parse `public_key` as an Ed25519 verifying key.
-2. Verify `signature` over `signed_data` under it.
+2. Verify `signature` over `signed_data` under it, with RFC 8032's strict
+   rules: a small-order key or a non-canonical signature is refused. The
+   permissive check accepts the identity point as a key with a signature
+   anyone can write down, over any message.
 3. Derive an address from `public_key` using the single derivation in
    [identity and addressing](identity.md#address-derivation).
 4. Compare that address to the Device id characteristic's string. The
