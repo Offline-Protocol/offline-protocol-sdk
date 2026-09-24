@@ -26,9 +26,11 @@ the fragment payload is a hop-local encoding, and this layer neither reads nor
 constrains it. What sits below is Bluetooth itself, which this document does
 not restate.
 
-Wi-Fi Direct has no equivalent chapter because it has no equivalent problem: it
-carries a stream, so a whole message crosses in one write and there is nothing
-to fragment.
+A peer stream (Wi-Fi Direct, a LAN socket) has nothing to fragment, so it
+has no equivalent of the codec here. What it lacks instead is the identity
+GATT serves and the message boundary an ATT write gives for free, and
+[peer-stream framing](stream-framing.md) supplies both, reusing the identity
+assertion below unchanged.
 
 ## Invariants
 
@@ -145,9 +147,11 @@ follows the signature, and may be empty.
 
 The layout has one implementation. `offline-protocol-sealed` joins and splits
 it (`encode_identity_assertion`, `parse_identity_assertion`), and the one
-verifier, `verify_identity_assertion`, runs the four steps below and returns
-the derived address; bridges reach it as a namespace-level FFI function and a
-peripheral builds its value with `identity_assertion` on the instance. A
+verifier, `verify_identity_assertion`, runs steps one to three below and
+returns the derived address; step four, the comparison to a claim, is the
+caller's, because the verifier is handed only the assertion. Bridges reach
+it as a namespace-level FFI function, and a peripheral builds its value with
+`identity_assertion` on the instance. A
 binding that splits the 96 bytes itself is a second copy of this chapter, and
 the Python peripheral used to serve a JSON document here for exactly that
 reason. `crates/offline-protocol-sealed/tests/data/identity-assertion-v1.vectors.json`

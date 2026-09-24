@@ -106,7 +106,7 @@ final class MeshController {
             appId: "my-ios-app",
             profile: "user123",
             bleEnabled: true,
-            wifiDirectEnabled: false,   // iOS does not support Wi-Fi Direct
+            wifiDirectEnabled: false,   // the peer-stream slot; Multipeer on iOS
             internetEnabled: true,
             reticulumEnabled: false,
             nostrEnabled: false,
@@ -422,10 +422,15 @@ benign reading.
 
 ## Platform Limitations
 
-iOS does **not** support Wi-Fi Direct. Available transports:
+iOS has no Wi-Fi Direct API. The `wifiDirect` transport slot is the
+[peer-stream](spec/stream-framing.md) slot, and on iOS it is filled by
+MultipeerConnectivity. Until the manager exchanges the identity preamble it
+drops every inbound frame, so leave it disabled. Available transports:
 - Bluetooth Low Energy
 - Internet
-- Wi-Fi Direct (Android only) - Not available
+- Reticulum and Nostr
+- The peer-stream slot through Multipeer (inbound frames dropped until the
+  preamble ships)
 
 ## Performance
 

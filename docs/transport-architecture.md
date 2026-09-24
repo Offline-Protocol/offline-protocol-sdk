@@ -139,19 +139,40 @@ page is an orientation to the implementation.
 4. Receive fragments → Pass to Rust core
 5. `stop()` → Disconnect all peers, stop scanning/advertising
 
-### WiFi Direct
+### Peer stream (the `wifi_direct` slot)
 
-**Status**: Implemented
+**Status**: Specified; the Rust transport exists and is being registered
+behind `wifi_direct_enabled`. The bundled mobile managers drop inbound frames
+until they exchange the preamble.
 
-**Use Case**: Higher bandwidth peer-to-peer communication for larger files or video.
+**Use Case**: A byte stream the platform established to exactly one peer: a
+Wi-Fi Direct group socket, a Multipeer session, a TCP connection over a LAN or
+a routed mesh. Higher bandwidth than BLE, whole messages in one write.
 
 **Files**:
 - iOS: `bindings/react-native/ios/WifiDirectManager.swift`
 - Android: `bindings/react-native/android/.../WifiDirectManager.kt`
+- Rust: `crates/offline-protocol-transport/src/wifi_direct.rs` (queues, peer
+  registry, metrics; the platform owns the sockets)
+
+**The contract**: [Peer-stream framing](spec/stream-framing.md) is the
+authority. The first frame in each direction is the identity assertion the
+BLE Identity characteristic serves (built with `identity_assertion`, checked
+with `verify_identity_assertion`); every frame is `u32` big-endian length plus
+body, capped at the 1 MiB message ceiling; a peer is announced to the core
+(`wifi_direct_peer_connected`) only under the address its preamble proved.
+The slot's name is historical: to the engine every such stream is the same
+transport.
 
 **Platform Notes**:
-- Android: Uses `WifiP2pManager` API
-- iOS: Uses `MultipeerConnectivity` framework
+- Android: `WifiP2pManager` for the group, a plain socket for the stream. The
+  reader refuses a body of exactly 1 MiB and keeps reading after a refused
+  length; both are recorded in the chapter and fixed with the preamble.
+- iOS: `MultipeerConnectivity`, which fills this slot on iOS. It sends bare
+  messages over the session and advertises `offline-proto`; adopting the
+  chapter wraps each message as one frame and advertises `offlineprotocol`.
+- Hosts: any TCP socket; DNS-SD `_offlineprotocol._tcp` with `addr=` is the
+  LAN discovery hint the chapter specifies
 
 ### Internet (Relay Server)
 

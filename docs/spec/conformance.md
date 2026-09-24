@@ -118,13 +118,14 @@ are computed independently of that code.
 | `crates/offline-protocol-sealed/tests/data/identity-assertion-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md#the-identity-assertion) | Both |
 | `crates/offline-protocol/tests/data/data-sync-v1.vectors.json` | [Document replication](data-sync.md) | Both |
 | `crates/offline-protocol-transport/tests/data/ble-framing-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md) | Both |
+| `crates/offline-protocol-transport/tests/data/stream-framing-v1.vectors.json` | [Peer-stream framing](stream-framing.md) | Both |
 
 ### How they are computed
 
 `tools/spec-vectors/generate.py` is a second implementation of these encodings,
 written from the chapters and forbidden from importing, linking against or
 shelling out to the Rust crates it pins. Running it with `--check` regenerates
-the eight files it owns (every row above except document replication and the
+the nine files it owns (every row above except document replication and the
 Bluetooth LE fragment framing) and fails on any difference, which is what CI
 does.
 
