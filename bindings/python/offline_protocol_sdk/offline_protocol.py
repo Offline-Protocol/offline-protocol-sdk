@@ -515,6 +515,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() != 20699:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion() != 63230:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new() != 36671:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage() != 2283:
@@ -708,6 +710,8 @@ def _uniffi_check_api_checksums(lib):
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness() != 53848:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 498:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion() != 8644:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 23277:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1388,6 +1392,11 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance.argtyp
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion.argtypes = (
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_new.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2006,6 +2015,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package.restype = ctypes.c_int8
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_identity_assertion.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_identity_assertion.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls.argtypes = (
     ctypes.c_uint64,
     ctypes.c_uint64,
@@ -2731,6 +2746,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_parse_invite.restype = c
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new.restype = ctypes.c_uint16
@@ -3022,6 +3040,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls.restype = ctypes.c_uint16
@@ -9962,6 +9983,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def has_pending_key_package(self, peer_id: str) -> bool:
         raise NotImplementedError
+    def identity_assertion(self, signed_data: typing.List[int]) -> typing.List[int]:
+        raise NotImplementedError
     def initialize_mls(self, secure_storage: MlsStorageProvider,protocol_state_storage: ProtocolStateStorageProvider) -> None:
         raise NotImplementedError
     def internet_address_declaration_refused(self, reason: str) -> None:
@@ -11057,6 +11080,21 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def identity_assertion(self, signed_data: typing.List[int]) -> typing.List[int]:
+        
+        _UniffiFfiConverterSequenceUInt8.check_lower(signed_data)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterSequenceUInt8.lower(signed_data),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterSequenceUInt8.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_identity_assertion,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -12928,6 +12966,20 @@ def run_storage_conformance(storage: ProtocolStateStorageProvider) -> str:
         *_uniffi_lowered_args,
     )
     return _uniffi_lift_return(_uniffi_ffi_result)
+def verify_identity_assertion(assertion: typing.List[int]) -> str:
+    
+    _UniffiFfiConverterSequenceUInt8.check_lower(assertion)
+    _uniffi_lowered_args = (
+        _UniffiFfiConverterSequenceUInt8.lower(assertion),
+    )
+    _uniffi_lift_return = _UniffiFfiConverterString.lift
+    _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+    _uniffi_ffi_result = _uniffi_rust_call_with_error(
+        _uniffi_error_converter,
+        _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion,
+        *_uniffi_lowered_args,
+    )
+    return _uniffi_lift_return(_uniffi_ffi_result)
 
 __all__ = [
     "InternalError",
@@ -12991,6 +13043,7 @@ __all__ = [
     "derive_address",
     "parse_invite",
     "run_storage_conformance",
+    "verify_identity_assertion",
     "DataStore",
     "DataStoreProtocol",
     "MeshServices",

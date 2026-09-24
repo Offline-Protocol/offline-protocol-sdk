@@ -35,6 +35,7 @@
 pub mod discovery;
 pub mod error;
 pub mod group;
+pub mod identity_assertion;
 pub mod invite;
 pub mod manager;
 pub mod provider;
@@ -47,6 +48,7 @@ pub mod types;
 // a public variant: matching on `LeafAddressMismatch { context, .. }` should not
 // need a deeper path than the error it came out of.
 pub use error::{LeafSource, MlsError, Result};
+pub use identity_assertion::verify_identity_assertion;
 pub use manager::{is_mls_framed, MlsManager, PushKeyPackage, MAX_PUSH_KEY_PACKAGES};
 pub use storage::{MlsStorage, StorageError};
 pub use types::{

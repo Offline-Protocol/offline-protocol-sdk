@@ -33,6 +33,25 @@ namespace offline_protocol {
     [Throws=ProtocolError]
     InviteInfo parse_invite(string blob);
 
+    // Verify a peer's identity assertion, the fixed layout
+    // publicKey(32) || signature(64) || signedData that a Bluetooth LE
+    // peripheral serves from its Identity characteristic and a peer-stream
+    // transport sends as its first frame. Returns the "off1..." address the
+    // key derives to, after the signature has verified under that key.
+    //
+    // Instance-less for the same reason derive_address is: it needs no
+    // protocol state, and it is the ONE verifier of this layout. A bridge
+    // splits nothing itself; it hands the bytes it read here and announces
+    // the returned address, never the string the peer claimed elsewhere.
+    // Comparing the two, where a claim exists (the Device id characteristic),
+    // is the caller's step and the comparison is exact.
+    //
+    // Throws for anything under 96 bytes, a key that is not on the curve, or
+    // a signature that does not verify. Every case means the peer is not
+    // surfaced at all, never surfaced with a caveat.
+    [Throws=ProtocolError]
+    string verify_identity_assertion(sequence<u8> assertion);
+
     // Run the storage adapter conformance suite against a provider and return
     // the report as JSON: {"passed":[...],"failures":[{"check","detail"}]}.
     //
@@ -1640,6 +1659,15 @@ interface OfflineProtocol {
     // Returns the signature as raw bytes (64 bytes).
     [Throws=ProtocolError]
     sequence<u8> sign_data(sequence<u8> data);
+
+    // This identity's assertion over signed_data: the whole
+    // publicKey(32) || signature(64) || signedData layout, built in the
+    // core so no bridge assembles it. A Bluetooth LE peripheral serves it
+    // from the Identity characteristic; a peer-stream transport sends it
+    // first. signed_data means nothing to a verifier and may be empty.
+    // Throws MlsNotInitialized when there is no identity to sign with.
+    [Throws=ProtocolError]
+    sequence<u8> identity_assertion(sequence<u8> signed_data);
 
     // The signed proof this device presents to attach to a gateway. Give it
     // the 32-byte challenge the gateway minted for this connection; it
