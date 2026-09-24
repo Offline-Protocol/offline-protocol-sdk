@@ -125,6 +125,33 @@ Porting the adaptive shape to Swift and Kotlin is intended eventually. Until
 then the latency profiles differ by design: a warm Python round trip is
 milliseconds, while the mobile bridges pay up to one tick per direction.
 
+## P8. The BLE roles serve and verify the identity the core proves
+
+The Python peripheral serves two values a phone reads before it will talk to
+it: the Device id characteristic carries this device's `off1…` address, and
+the Identity characteristic carries the identity assertion the core builds
+over that address's key (`identity_assertion`, the whole
+`public_key(32) ‖ signature(64) ‖ signed_data` layout). The binding assembles
+nothing. Before this the peripheral served the profile label as its id and a
+JSON document as its identity, which every conforming central refuses, so no
+phone could ever pair with a Python node. `start()` now refuses to advertise
+until MLS has minted an address, because advertising an unverifiable peer only
+costs the phones a connect-read-refuse cycle each.
+
+The Python central holds the other half: it reads both characteristics, hands
+the identity bytes to `verify_identity_assertion` (the one verifier of the
+layout, instance-less like `derive_address`), compares the returned address to
+the Device id string exactly, and only then announces the peer, under the
+derived address. A link that fails any step is disconnected and never
+announced, not even under its Bluetooth address, which it used to be. See
+[the identity assertion](../spec/ble-framing.md#the-identity-assertion) for
+the four steps and what a verified assertion does not prove.
+
+`test_identity_assertion.py` pins both halves against the real library and
+the RFC 8032 vectors; `test_ble_peripheral.py` and `test_ble_manager.py` pin
+what each role does with the answer. The JSON form is gone, and a test asserts
+the constructor no longer accepts it.
+
 ## Testing
 
 ```bash

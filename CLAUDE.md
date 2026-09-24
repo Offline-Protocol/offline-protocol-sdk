@@ -22,7 +22,7 @@ that are versioned, reviewable, and readable by people who are not an agent.
 | Acknowledgement, retry, session, group or transport behaviour | [docs/state-machines/](docs/state-machines/README.md) |
 | A decision that looks odd or over-engineered | [docs/adr/](docs/adr/README.md) |
 | `offline-protocol-core`: adding an import, a dependency, or a constructor | ADR [0020](docs/adr/0020-core-compiles-without-std.md) (it is dual std/no_std) |
-| `offline-protocol-sealed`: the envelope codec, `derive_address`, canonical signing payloads, ratchet constants, the 1:1 control-frame prefixes, `KeyPackagePayload` | ADR [0022](docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md) (also dual std/no_std, and the one home for each) |
+| `offline-protocol-sealed`: the envelope codec, `derive_address`, canonical signing payloads, ratchet constants, the 1:1 control-frame prefixes, `KeyPackagePayload`, the identity assertion codec | ADR [0022](docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md) (also dual std/no_std, and the one home for each) |
 | `offline-protocol-leaf`: anything a device does at pairing, on a frame, or with its store | ADR [0021](docs/adr/0021-a-leaf-node-speaks-mls.md) and [docs/spec/leaf-provisioning.md](docs/spec/leaf-provisioning.md) (a time source, real entropy, durable-before-emit and authorization are obligations, not suggestions) |
 | Replicated documents: the store, sync frames, attachments | [docs/spec/data-sync.md](docs/spec/data-sync.md), [the replication state machine](docs/state-machines/data-replication.md), ADR [0018](docs/adr/0018-data-layer-engine-and-storage-seams.md) and [0019](docs/adr/0019-remote-document-imports-are-contained-not-trusted.md) |
 | Any binding: Swift, Kotlin, Python, TypeScript | [docs/bridges/](docs/bridges/README.md) |
@@ -109,7 +109,8 @@ offline-protocol-core          Message, UserId, Address, AppId, TTL, HopCount, w
     |
 offline-protocol-sealed        EncryptedMessage + compact codec, derive_address, canonical
                                signing payloads, ratchet constants, 1:1 control-frame
-                               prefixes, KeyPackagePayload (dual std/no_std)
+                               prefixes, KeyPackagePayload, identity assertion codec
+                               (dual std/no_std)
     |
 offline-protocol-transport     Transport trait + BLE/WiFi Direct/Internet impls, metrics
 offline-protocol-reliability   AckManager, RetryQueue, Deduplicator, AckOptimizer
@@ -194,8 +195,8 @@ These fail silently if broken. Each is documented in full where it is linked.
   `use std::`), gated by the same `embedded-core` CI job
   ([ADR 0022](docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md)).
 - **Never write a second envelope codec, address derivation, canonical signing
-  payload, ratchet constant, 1:1 control-frame prefix literal or key package
-  payload.** Each exists once, in `offline-protocol-sealed`;
+  payload, ratchet constant, 1:1 control-frame prefix literal, key package
+  payload or identity assertion split.** Each exists once, in `offline-protocol-sealed`;
   everything else re-exports or delegates. The tempting route is a harness or
   fixture writing three lines rather than taking the dependency, which is
   exactly what `tools/mls-interop` did before this crate existed, and what
