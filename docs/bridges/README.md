@@ -100,6 +100,20 @@ drives nothing.
 
 See [ADR 0014](../adr/0014-dedicated-ffi-entry-points.md).
 
+**A frame a bridge rebuilds and injects into the receive path names this
+device as its recipient**: its `local_address()` once MLS has minted one, and
+the profile only before that. This covers the relay answers a bridge
+synthesizes from the relay's typed notifications and the legacy plain-text
+messages it rebuilds into a full `Message`. The core forwards rather than
+processes a frame addressed to anyone else, and after `initialize_mls` the
+profile is not this device's id, so a frame named for the profile is handed
+to the mesh forwarder and never reaches the app. Nothing reports it. The rule
+has one home per bridge: `LegacyRelayMessage` on iOS and Android, which take
+both identities and choose, and the Python internet manager's frame builder.
+The address is resolved per frame, never captured, because a manager can be
+built before MLS runs. `react_native_relay_frames_are_addressed_to_a_live_local_address`
+in the uniffi crate pins the mobile call sites, which no CI job executes.
+
 ## C5. Hand-mirrored constants must be pinned in every language
 
 Some constants exist in several places no single compiler sees together. Ten

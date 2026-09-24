@@ -19,7 +19,8 @@ class LegacyRelayMessageTest {
     fun everyFieldRequiredByTheRustDeserializerIsPresent() {
         val json = LegacyRelayMessage.buildJson(
             senderId = "alice",
-            recipientId = "bob",
+            localAddress = null,
+            profile = "bob",
             content = "hello",
             timestampMs = 1_700_000_000_000L
         )
@@ -40,7 +41,8 @@ class LegacyRelayMessageTest {
     fun priorityIsTheCanonicalLowercaseVariant() {
         val json = LegacyRelayMessage.buildJson(
             senderId = "alice",
-            recipientId = "bob",
+            localAddress = null,
+            profile = "bob",
             content = "hello",
             timestampMs = 1_700_000_000_000L
         )
@@ -52,7 +54,8 @@ class LegacyRelayMessageTest {
     fun idFallsBackToAUuidWhenAbsentAndPassesThroughWhenGiven() {
         val generated = LegacyRelayMessage.buildJson(
             senderId = "alice",
-            recipientId = "bob",
+            localAddress = null,
+            profile = "bob",
             content = "hello",
             timestampMs = 1_700_000_000_000L,
             messageId = ""
@@ -62,7 +65,8 @@ class LegacyRelayMessageTest {
 
         val given = LegacyRelayMessage.buildJson(
             senderId = "alice",
-            recipientId = "bob",
+            localAddress = null,
+            profile = "bob",
             content = "hello",
             timestampMs = 1_700_000_000_000L,
             messageId = "6dd7f6f0-9d2c-4b6a-8f3e-2a1b0c9d8e7f"
@@ -74,7 +78,8 @@ class LegacyRelayMessageTest {
     fun replyToMsgIncludedOnlyWhenNonEmpty() {
         val without = LegacyRelayMessage.buildJson(
             senderId = "alice",
-            recipientId = "bob",
+            localAddress = null,
+            profile = "bob",
             content = "hello",
             timestampMs = 1_700_000_000_000L,
             replyToMsg = ""
@@ -83,7 +88,8 @@ class LegacyRelayMessageTest {
 
         val with = LegacyRelayMessage.buildJson(
             senderId = "alice",
-            recipientId = "bob",
+            localAddress = null,
+            profile = "bob",
             content = "hello",
             timestampMs = 1_700_000_000_000L,
             replyToMsg = "7ee8f6f0-9d2c-4b6a-8f3e-2a1b0c9d8e7f"
@@ -95,7 +101,8 @@ class LegacyRelayMessageTest {
     fun scalarFieldsCarryTheWireValues() {
         val json = LegacyRelayMessage.buildJson(
             senderId = "alice",
-            recipientId = "bob",
+            localAddress = null,
+            profile = "bob",
             content = "hello",
             timestampMs = 1_700_000_000_000L
         )
@@ -120,7 +127,8 @@ class LegacyRelayMessageTest {
     fun requiresAckIsOptOutForSynthesizedFrames() {
         val json = LegacyRelayMessage.buildJson(
             senderId = "relay",
-            recipientId = "bob",
+            localAddress = null,
+            profile = "bob",
             content = "__GROUP_CREATED__{}",
             timestampMs = 1_700_000_000_000L,
             requiresAck = false
@@ -132,6 +140,44 @@ class LegacyRelayMessageTest {
             "priority", "ttl", "hop_count", "requires_ack", "timestamp"
         )) {
             assertTrue("required field '$key' missing", json.has(key))
+        }
+    }
+
+    /**
+     * The core forwards rather than processes a frame addressed to anyone
+     * but this device, and once MLS has run this device is its address, not
+     * its profile. Regression pin for the bug where every rebuilt relay frame
+     * named the profile, so on an MLS-initialized phone relay group answers
+     * and legacy plain-text DMs were handed to the mesh forwarder and lost.
+     */
+    @Test
+    fun recipientIsTheLocalAddressOnceMlsHasMintedOne() {
+        val json = LegacyRelayMessage.buildJson(
+            senderId = "relay",
+            localAddress = "off1abc",
+            profile = "bob",
+            content = "__GROUP_CREATED__{}",
+            timestampMs = 1_700_000_000_000L,
+            requiresAck = false
+        )
+        assertEquals("off1abc", json.getString("recipient"))
+    }
+
+    /**
+     * Before `initialize_mls` the profile is this device's id in the core,
+     * so frames built then must stay exactly as they were.
+     */
+    @Test
+    fun recipientFallsBackToTheProfileBeforeMlsInit() {
+        for (address in listOf(null, "")) {
+            val json = LegacyRelayMessage.buildJson(
+                senderId = "alice",
+                localAddress = address,
+                profile = "bob",
+                content = "hello",
+                timestampMs = 1_700_000_000_000L
+            )
+            assertEquals("bob", json.getString("recipient"))
         }
     }
 }

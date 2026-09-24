@@ -213,6 +213,30 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **Relay group notifications reach an iOS or Android member.** The React
+  Native bridges rebuild some relay traffic into a full `Message` before
+  handing it to the core: the relay's answers about groups (`GroupCreated`, a
+  relay-broadcast `GroupMessageReceived`, member added and removed, group
+  errors, group info and the user's group list) and plain-text messages from
+  pre-SDK relay senders. They addressed every one of those frames to the
+  profile name. Since the release that derived the wire identity from the
+  identity key, a device's id is its address once `initialize_mls` has run,
+  and the core forwards rather than processes a frame addressed to anyone
+  else. So on every phone with encryption on, all of them were handed to the
+  mesh forwarder and lost silently.
+
+  The loss was hidden rather than harmless. `GroupCreated` is the relay's
+  registration acknowledgement and the only thing that lets a group use the
+  relay's one-frame broadcast, so phones never took that path and fell back to
+  sending one copy per member, which still arrived. A group message another
+  member broadcast through the relay never arrived on a phone, and a relay
+  group error never revoked the registration. A phone with encryption off was
+  unaffected.
+
+  The frame builder on both platforms now takes the device's address and its
+  profile and addresses the frame to the address, falling back to the profile
+  only before initialization, which keeps those frames byte-identical. No wire
+  format changed.
 - **A group message broadcast through the relay reaches a Python member.** A
   phone whose group is registered with the relay sends one frame, the relay
   fans it out to every member as `GroupMessageReceived`, and counts the socket

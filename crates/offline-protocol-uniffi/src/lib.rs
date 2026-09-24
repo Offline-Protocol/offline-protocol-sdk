@@ -9181,6 +9181,87 @@ mod tests {
         );
     }
 
+    /// The recipient rule the platform bridges' frame builders are measured
+    /// against: once `initialize_mls` has run, a synthesized relay answer is
+    /// processed only when it names this device's address.
+    ///
+    /// Regression (mobile relay answers forwarded, not processed): the iOS
+    /// and Android bridges addressed every frame they rebuild to the
+    /// `profile`. Before MLS init that is `local_id`, which is why the pre-MLS
+    /// tests above pass; after it `local_id` is the derived address, and the
+    /// receive loop hands any frame for someone else to the mesh forwarder
+    /// first. So every relay group answer (the registration acknowledgement
+    /// that alone sets `relay_synced`, relay-broadcast group messages, member
+    /// changes, errors) and every legacy plain-text DM was lost silently on an
+    /// MLS-initialized phone. The bridges now pick the address in
+    /// `LegacyRelayMessage`, pinned by
+    /// `react_native_relay_frames_are_addressed_to_a_live_local_address`.
+    #[test]
+    fn test_synthesized_relay_frame_must_name_the_local_address_after_mls_init() {
+        let receiver = OfflineProtocol::new(ProtocolConfig {
+            profile: "receiver-user".to_string(),
+            ..create_test_config()
+        })
+        .unwrap();
+        // Before start(): initializing MLS afterwards is refused.
+        receiver
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::default()),
+                Box::new(TestMlsStorageProvider::default()),
+            )
+            .unwrap();
+        let address = receiver.local_address().expect("address after init");
+        assert_ne!(address, "receiver-user");
+        receiver.start().unwrap();
+        receiver.internet_status_changed(true).unwrap();
+        drained_events(&receiver);
+        while receiver.internet_get_next_message().is_some() {}
+
+        let frame = |id: &str, recipient: &str| {
+            serde_json::json!({
+                "id": id,
+                "sender": "relay",
+                "recipient": recipient,
+                "content": "__GROUP_CREATED__{\"group_id\":\"group-1\",\"name\":\"Test Group\"}",
+                "app_id": "test-app",
+                "priority": "medium",
+                "ttl": 8,
+                "hop_count": 0,
+                "requires_ack": false,
+                "timestamp": 1_700_000_000_000_i64,
+            })
+            .to_string()
+            .into_bytes()
+        };
+
+        receiver
+            .internet_message_received(
+                String::new(),
+                frame("6dd7f6f0-9d2c-4b6a-8f3e-2a1b0c9d8e7f", "receiver-user"),
+            )
+            .unwrap();
+        assert!(
+            !drained_events(&receiver)
+                .iter()
+                .any(|e| e.contains("group_created")),
+            "after MLS init the profile is not this device: a frame naming it is forwarded, \
+             not processed. If this starts passing, the bridges' recipient rule is moot"
+        );
+
+        receiver
+            .internet_message_received(
+                String::new(),
+                frame("7ee8f6f0-9d2c-4b6a-8f3e-2a1b0c9d8e7f", &address),
+            )
+            .unwrap();
+        assert!(
+            drained_events(&receiver)
+                .iter()
+                .any(|e| e.contains("group_created")),
+            "a synthesized relay answer naming this device's address must be processed"
+        );
+    }
+
     #[test]
     fn test_wifi_direct_message_received_marks_neighbor_reachable() {
         let data = serialized_message_from("sender-user", "receiver-user");
@@ -12994,6 +13075,78 @@ mod tests {
                  sessions while being unable to start new ones, and only the SDK can tell the \
                  app that"
             );
+        }
+    }
+
+    /// Every frame a React Native bridge rebuilds and injects into the receive
+    /// path names this device, resolved live.
+    ///
+    /// `LegacyRelayMessage` on each platform picks the recipient from the
+    /// address and the profile, and that choice is unit-tested there. What no
+    /// platform test can see is that `InternetManager` hands it a *live*
+    /// `localAddress()` at every call: `InternetManager.swift` is on
+    /// `Package.swift`'s `exclude:` list and `InternetManager.kt` needs a live
+    /// OkHttp socket, so neither is executed by any CI job. A captured or
+    /// omitted address silently restores the bug that
+    /// `test_synthesized_relay_frame_must_name_the_local_address_after_mls_init`
+    /// describes: relay answers forwarded to the mesh instead of processed.
+    #[test]
+    fn react_native_relay_frames_are_addressed_to_a_live_local_address() {
+        let swift = rn_source_code_only("ios/InternetManager.swift");
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/InternetManager.kt");
+
+        let swift_builds = swift.matches("LegacyRelayMessage.buildDict(").count();
+        let swift_live = swift
+            .matches("localAddress: self.protocolInstance.localAddress(),")
+            .count()
+            + swift
+                .matches("localAddress: protocolInstance.localAddress(),")
+                .count();
+        assert!(
+            swift_builds >= 2,
+            "InternetManager.swift must still rebuild relay frames"
+        );
+        assert_eq!(
+            swift_builds, swift_live,
+            "every LegacyRelayMessage.buildDict call in InternetManager.swift must pass a live \
+             protocolInstance.localAddress(): a frame named for the profile is forwarded, not \
+             processed, on an MLS-initialized device"
+        );
+
+        let kotlin_builds = kotlin.matches("LegacyRelayMessage.buildJson(").count();
+        let kotlin_live = kotlin
+            .matches("localAddress = protocol.localAddress(),")
+            .count();
+        assert!(
+            kotlin_builds >= 3,
+            "InternetManager.kt must still rebuild relay frames"
+        );
+        assert_eq!(
+            kotlin_builds, kotlin_live,
+            "every LegacyRelayMessage.buildJson call in InternetManager.kt must pass a live \
+             protocol.localAddress(); same reason as the Swift half above"
+        );
+
+        for (label, code, shapes) in [
+            (
+                "InternetManager.swift",
+                &swift,
+                &["recipientId: deviceId", "recipientId: self.deviceId"][..],
+            ),
+            (
+                "InternetManager.kt",
+                &kotlin,
+                &["recipientId = deviceId"][..],
+            ),
+        ] {
+            for shape in shapes {
+                assert!(
+                    !code.contains(shape),
+                    "{label} must not address a rebuilt frame to the profile ({shape}): that \
+                     is the pre-fix shape this guard exists to prevent"
+                );
+            }
         }
     }
 
