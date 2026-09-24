@@ -335,6 +335,17 @@ def _set_keepalive(writer: asyncio.StreamWriter) -> None:
             pass
 
 
+def _write_paused(writer: asyncio.StreamWriter) -> bool:
+    """Whether ``drain()`` will wait: the transport's buffer is over its
+    high-water mark, which is when asyncio pauses the writer. Assumed paused
+    when the transport cannot say."""
+    try:
+        transport = writer.transport
+        return transport.get_write_buffer_size() > transport.get_write_buffer_limits()[1]
+    except Exception:
+        return True
+
+
 def _discard_socket(writer: asyncio.StreamWriter) -> None:
     """Close a stream's socket now, whatever is still buffered.
 
@@ -980,7 +991,11 @@ class PeerStreamManager(TransportManager):
                 data = await stream.outbound_queue.get()
                 stream.queued_bytes -= len(data)
                 stream.writer.write(data)
-                stream.write_blocked = True
+                # Marked only when drain() will actually wait. Before 3.12,
+                # wait_for wraps even an immediate drain() in a task, so a
+                # flag set unconditionally reads as blocked for a loop
+                # iteration or two after every write.
+                stream.write_blocked = _write_paused(stream.writer)
                 try:
                     await self._drain_while_moving(stream)
                 finally:
