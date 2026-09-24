@@ -149,8 +149,13 @@ one, read off the prefix instead of measured after the fact.
 
 The prefix is big-endian because the one shipped implementation of this
 framing already was: Android's `DataOutputStream.writeInt` writes network
-order, and the stream managers on both mobile platforms were written against
-it. Stating it matters because the mistake it prevents is invisible to a
+order, and the Android manager was written against it. A carrier that is
+already message-oriented, such as a Multipeer session, delivers whole messages
+and needs no prefix to find a boundary; it still wraps each message as one
+frame, so that one receive path serves every carrier and the ceiling is read
+off the same four bytes everywhere. The shipped iOS manager sends bare
+messages over its session today, so adopting this chapter is a framing change
+there, not only a preamble. Stating the byte order matters because the mistake it prevents is invisible to a
 round-trip test: an implementation that writes the prefix little-endian reads
 its own frames perfectly and reads every conforming peer's first frame as a
 length in the hundreds of millions, which the ceiling then refuses. The
@@ -164,6 +169,16 @@ either a broken sender or a probe.
 The floor on the preamble body is 96 bytes, the assertion's own floor. A
 receiver MAY refuse a preamble frame on its prefix alone when the length is
 under 96, without reading the body.
+
+The ceiling is inclusive: a body of exactly 1,048,576 bytes is a valid frame.
+Two faults in the shipped Android reader are recorded here because both are
+invisible until a conforming peer exists. It refuses a length of exactly the
+ceiling (`length < 1024 * 1024`), so the largest message a conforming sender
+may send is dropped. And on a refused length it does not close the stream: it
+reads the next four bytes, which are the start of the body it skipped, as the
+next length, so every frame after the first refusal is read from the wrong
+offset. The manager pays both when it adopts the preamble; a receiver that
+refuses a length and keeps reading has no defined state to resume from.
 
 ## What a receiver owes
 
@@ -202,6 +217,15 @@ host and port is complete as specified. Where a LAN offers DNS-SD
 allows) and a TXT record whose first entry is `txtvers=1` and which carries
 `addr=<off1…>`, the advertiser's canonical address.
 
+A framework that publishes DNS-SD on the implementation's behalf is bound by
+the same rule. A Multipeer advertiser MUST use the service type
+`offlineprotocol`, which the framework publishes as `_offlineprotocol._tcp`
+and which fits its fifteen-character limit, and SHOULD carry `addr` in the
+discovery dictionary it advertises. The shipped iOS manager advertises
+`offline-proto`, which is debt: an app's `NSBonjourServices` entry must name
+the service type the manager actually publishes, or iOS local-network privacy
+blocks discovery without an error.
+
 The `addr` entry is a hint the preamble proves. It tells a browser which
 device it is about to connect to, so the derived address of the preamble can
 be compared to it (step four above) and a device advertising an address it
@@ -231,8 +255,13 @@ and a routed-mesh socket are the same thing to the engine, a stream to one
 peer whose identity the platform proved, and renaming the slot is a separate
 breaking change with an alias period.
 
-The transport selector treats the slot as a high-bandwidth, high-power,
-bandwidth-weighted link. A peer stream carries whole messages in one write,
+Every stream carries the same replay exposure as the Bluetooth LE Identity
+characteristic, reachable from further away: anything that can open a stream
+to a receiver can present a copied preamble. The threat model records it as
+[R16](../security/threat-model.md#r16-the-identity-assertion-is-static-and-replayable-on-every-carrier).
+
+The transport selector treats the slot as a bandwidth-weighted link: its
+scoring profile weights bandwidth most heavily and does not score energy. A peer stream carries whole messages in one write,
 so nothing here interacts with the fragment bounds of the Bluetooth LE chapter
 or with the message-count budgets of the relay carriers.
 
@@ -244,8 +273,9 @@ a preamble frame whose body is RFC 8032 section 7.1 test vector 1 (the same
 assertion the identity assertion vectors pin, so a verifier already checked
 against those verifies this preamble), one framed message whose body is a
 binary v1 frame from the wire vectors, an ordered exchange showing the
-preamble first and the message second, and refusals: a zero length, a length
-one over the ceiling, a preamble one byte under the floor, and a message
+preamble first and the message second, a prefix of exactly the ceiling that
+a receiver must accept, and refusals: a zero length, a length one over the
+ceiling, a preamble one byte under the floor, and a message
 frame arriving before any preamble.
 
 The refusals for the length bounds carry only the four-byte prefix, because a

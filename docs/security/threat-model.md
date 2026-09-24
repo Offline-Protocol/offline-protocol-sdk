@@ -650,6 +650,35 @@ still authenticated above this layer. The tag is a digest of the application
 id, so an observer learns which applications a phone runs only for ids it
 already knows. It is stable and linkable, like the address beside it.
 
+### R16. The identity assertion is static and replayable on every carrier
+
+A peer proves its address with one fixed value: the Bluetooth LE Identity
+characteristic, and the preamble that opens every peer stream
+([BLE framing](../spec/ble-framing.md#the-identity-assertion),
+[peer-stream framing](../spec/stream-framing.md#the-preamble)). Nothing in it
+is challenged or timestamped. Anyone who has read a peer's assertion once can
+present it again and have their own link or stream labelled with that peer's
+address. On Bluetooth LE that takes radio range (A1). On a peer stream it
+takes only the ability to open a connection to the receiver, which on a LAN
+or a routed mesh is A2.
+
+**Why it stands:** a challenge would need a round trip before the first frame
+on a carrier where both sides speak first by design, and it would still prove
+only possession of the key, which every frame the address sends proves anyway.
+
+**What bounds it:** the replayer holds a link it cannot use. It cannot produce
+a frame the address must sign, so every message it sends under the borrowed
+label is refused above this layer, and what it gains is at most a slot in the
+receiver's neighbour table and the frames addressed to that peer over that
+link, which are sealed to the real holder. A receiver MUST NOT read a verified
+assertion as evidence that the peer is live, recent, or the only holder of the
+address. Two things that look like they would close the gap do not, and the
+stream chapter says so normatively: link encryption (TLS, a framework's
+session encryption, a mesh's mutual TLS) authenticates the hop and never the
+address, and a DNS-SD `addr` entry is a hint the preamble proves, never an
+identity. An advertisement on a LAN exposes the address to every device on it,
+which is the same exposure as a Bluetooth LE advertisement.
+
 ## Network egress
 
 Until 0.26 the Rust crates opened no socket: every byte that left a device

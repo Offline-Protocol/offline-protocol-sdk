@@ -40,8 +40,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   proved. It also names the DNS-SD service type and TXT record a LAN
   advertiser uses, with the address there a hint the preamble proves. The
   vectors are generated: a preamble, a framed message, the ordered exchange,
-  and four refusals. Nothing ships in this entry but the contract; the
-  registration and the managers follow it.
+  a prefix of exactly the ceiling that must be accepted, and four refusals.
+  The chapter also records what the bundled managers still owe: iOS sends
+  bare messages over its Multipeer session and advertises another service
+  type, and the Android reader refuses a body of exactly 1 MiB and keeps
+  reading after a refused length. The threat model gains R16, the replayable
+  identity assertion on every carrier. Nothing ships in this entry but the
+  contract; the registration and the managers follow it.
 
 - **Attachment bytes move inside a group.** `DataStore.fetchAttachmentFrom(space, peer, hash)`
   asks one member for the bytes behind a reference, and they come back as

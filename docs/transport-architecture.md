@@ -165,8 +165,12 @@ The slot's name is historical: to the engine every such stream is the same
 transport.
 
 **Platform Notes**:
-- Android: `WifiP2pManager` for the group, a plain socket for the stream
-- iOS: `MultipeerConnectivity`
+- Android: `WifiP2pManager` for the group, a plain socket for the stream. The
+  reader refuses a body of exactly 1 MiB and keeps reading after a refused
+  length; both are recorded in the chapter and fixed with the preamble.
+- iOS: `MultipeerConnectivity`, which fills this slot on iOS. It sends bare
+  messages over the session and advertises `offline-proto`; adopting the
+  chapter wraps each message as one frame and advertises `offlineprotocol`.
 - Hosts: any TCP socket; DNS-SD `_offlineprotocol._tcp` with `addr=` is the
   LAN discovery hint the chapter specifies
 

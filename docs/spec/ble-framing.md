@@ -147,9 +147,11 @@ follows the signature, and may be empty.
 
 The layout has one implementation. `offline-protocol-sealed` joins and splits
 it (`encode_identity_assertion`, `parse_identity_assertion`), and the one
-verifier, `verify_identity_assertion`, runs the four steps below and returns
-the derived address; bridges reach it as a namespace-level FFI function and a
-peripheral builds its value with `identity_assertion` on the instance. A
+verifier, `verify_identity_assertion`, runs steps one to three below and
+returns the derived address; step four, the comparison to a claim, is the
+caller's, because the verifier is handed only the assertion. Bridges reach
+it as a namespace-level FFI function, and a peripheral builds its value with
+`identity_assertion` on the instance. A
 binding that splits the 96 bytes itself is a second copy of this chapter, and
 the Python peripheral used to serve a JSON document here for exactly that
 reason. `crates/offline-protocol-sealed/tests/data/identity-assertion-v1.vectors.json`
