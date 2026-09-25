@@ -22,6 +22,17 @@ IOS_XCFRAMEWORK="$RN_DIR/$IOS_XCFRAMEWORK_REL"
 IOS_DEVICE_SLICE="$IOS_XCFRAMEWORK/ios-arm64/liboffline_protocol_uniffi.a"
 IOS_SIM_SLICE="$IOS_XCFRAMEWORK/ios-arm64_x86_64-simulator/liboffline_protocol_uniffi.a"
 
+# `lipo` exists only on macOS. The release job packs on a Linux runner, where
+# the architecture line printed "lipo: command not found" on every publish. It
+# is informational, so it is skipped there rather than made a requirement.
+slice_archs() {
+  if command -v lipo >/dev/null 2>&1; then
+    lipo -info "$1" | sed 's/.*: //'
+  else
+    echo "(lipo unavailable on this host, not checked)"
+  fi
+}
+
 if [ -f "$IOS_XCFRAMEWORK/Info.plist" ]; then
   echo "✅ iOS XCFramework found: $IOS_XCFRAMEWORK"
   echo "   Size: $(du -sh "$IOS_XCFRAMEWORK" | cut -f1)"
@@ -33,7 +44,7 @@ fi
 
 if [ -f "$IOS_DEVICE_SLICE" ]; then
   echo "✅ iOS device slice found"
-  echo "   Architectures: $(lipo -info "$IOS_DEVICE_SLICE" | sed 's/.*: //')"
+  echo "   Architectures: $(slice_archs "$IOS_DEVICE_SLICE")"
 else
   echo "❌ iOS device slice missing: $IOS_DEVICE_SLICE"
   echo "   Run: npm run build:ios"
@@ -42,7 +53,7 @@ fi
 
 if [ -f "$IOS_SIM_SLICE" ]; then
   echo "✅ iOS simulator slice found"
-  echo "   Architectures: $(lipo -info "$IOS_SIM_SLICE" | sed 's/.*: //')"
+  echo "   Architectures: $(slice_archs "$IOS_SIM_SLICE")"
 else
   echo "❌ iOS simulator slice missing: $IOS_SIM_SLICE"
   echo "   Run: npm run build:ios"
