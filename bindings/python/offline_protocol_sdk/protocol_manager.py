@@ -170,7 +170,7 @@ class ProtocolManager:
         self._event_handler = event_handler
 
         profile = config.profile  # type: ignore[union-attr]
-        app_id = getattr(config, "app_id", "offline-messenger")
+        app_id = config.app_id  # type: ignore[union-attr]
         storage_namespace = account_storage_namespace(app_id, profile)
         self._storage = (
             storage

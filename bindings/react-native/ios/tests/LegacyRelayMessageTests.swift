@@ -20,6 +20,7 @@ final class LegacyRelayMessageTests: XCTestCase {
             senderId: "alice",
             localAddress: nil,
             profile: "bob",
+            appId: "test-app",
             content: "hello",
             timestampMs: 1_700_000_000_000
         )
@@ -41,6 +42,7 @@ final class LegacyRelayMessageTests: XCTestCase {
             senderId: "alice",
             localAddress: nil,
             profile: "bob",
+            appId: "test-app",
             content: "hello",
             timestampMs: 1_700_000_000_000
         )
@@ -53,6 +55,7 @@ final class LegacyRelayMessageTests: XCTestCase {
             senderId: "alice",
             localAddress: nil,
             profile: "bob",
+            appId: "test-app",
             content: "hello",
             timestampMs: 1_700_000_000_000,
             messageId: ""
@@ -64,6 +67,7 @@ final class LegacyRelayMessageTests: XCTestCase {
             senderId: "alice",
             localAddress: nil,
             profile: "bob",
+            appId: "test-app",
             content: "hello",
             timestampMs: 1_700_000_000_000,
             messageId: "6dd7f6f0-9d2c-4b6a-8f3e-2a1b0c9d8e7f"
@@ -76,6 +80,7 @@ final class LegacyRelayMessageTests: XCTestCase {
             senderId: "alice",
             localAddress: nil,
             profile: "bob",
+            appId: "test-app",
             content: "hello",
             timestampMs: 1_700_000_000_000,
             replyToMsg: ""
@@ -86,6 +91,7 @@ final class LegacyRelayMessageTests: XCTestCase {
             senderId: "alice",
             localAddress: nil,
             profile: "bob",
+            appId: "test-app",
             content: "hello",
             timestampMs: 1_700_000_000_000,
             replyToMsg: "7ee8f6f0-9d2c-4b6a-8f3e-2a1b0c9d8e7f"
@@ -98,6 +104,7 @@ final class LegacyRelayMessageTests: XCTestCase {
             senderId: "alice",
             localAddress: nil,
             profile: "bob",
+            appId: "test-app",
             content: "hello",
             timestampMs: 1_700_000_000_000
         )
@@ -121,6 +128,7 @@ final class LegacyRelayMessageTests: XCTestCase {
             senderId: "relay",
             localAddress: nil,
             profile: "bob",
+            appId: "test-app",
             content: "__GROUP_CREATED__{}",
             timestampMs: 1_700_000_000_000,
             requiresAck: false
@@ -145,6 +153,7 @@ final class LegacyRelayMessageTests: XCTestCase {
             senderId: "relay",
             localAddress: "off1abc",
             profile: "bob",
+            appId: "test-app",
             content: "__GROUP_CREATED__{}",
             timestampMs: 1_700_000_000_000,
             requiresAck: false
@@ -154,12 +163,28 @@ final class LegacyRelayMessageTests: XCTestCase {
 
     /// Before `initialize_mls` the profile is this device's id in the core,
     /// so frames built then must stay exactly as they were.
+    /// The configured id, never a fixed literal: a receiving instance routes
+    /// the frame by it, and every synthesized relay answer and legacy DM
+    /// used to carry "offline-messenger" whatever the app had configured.
+    func testAppIdIsTheConfiguredOne() {
+        let dict = LegacyRelayMessage.buildDict(
+            senderId: "alice",
+            localAddress: nil,
+            profile: "bob",
+            appId: "com.example.chat",
+            content: "hello",
+            timestampMs: 1_700_000_000_000
+        )
+        XCTAssertEqual(dict["app_id"] as? String, "com.example.chat")
+    }
+
     func testRecipientFallsBackToTheProfileBeforeMlsInit() {
         for address in [nil, ""] as [String?] {
             let dict = LegacyRelayMessage.buildDict(
                 senderId: "alice",
                 localAddress: address,
                 profile: "bob",
+                appId: "test-app",
                 content: "hello",
                 timestampMs: 1_700_000_000_000
             )

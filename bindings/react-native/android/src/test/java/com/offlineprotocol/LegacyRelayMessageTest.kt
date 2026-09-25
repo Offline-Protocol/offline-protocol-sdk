@@ -21,6 +21,7 @@ class LegacyRelayMessageTest {
             senderId = "alice",
             localAddress = null,
             profile = "bob",
+            appId = "test-app",
             content = "hello",
             timestampMs = 1_700_000_000_000L
         )
@@ -43,6 +44,7 @@ class LegacyRelayMessageTest {
             senderId = "alice",
             localAddress = null,
             profile = "bob",
+            appId = "test-app",
             content = "hello",
             timestampMs = 1_700_000_000_000L
         )
@@ -56,6 +58,7 @@ class LegacyRelayMessageTest {
             senderId = "alice",
             localAddress = null,
             profile = "bob",
+            appId = "test-app",
             content = "hello",
             timestampMs = 1_700_000_000_000L,
             messageId = ""
@@ -67,6 +70,7 @@ class LegacyRelayMessageTest {
             senderId = "alice",
             localAddress = null,
             profile = "bob",
+            appId = "test-app",
             content = "hello",
             timestampMs = 1_700_000_000_000L,
             messageId = "6dd7f6f0-9d2c-4b6a-8f3e-2a1b0c9d8e7f"
@@ -80,6 +84,7 @@ class LegacyRelayMessageTest {
             senderId = "alice",
             localAddress = null,
             profile = "bob",
+            appId = "test-app",
             content = "hello",
             timestampMs = 1_700_000_000_000L,
             replyToMsg = ""
@@ -90,6 +95,7 @@ class LegacyRelayMessageTest {
             senderId = "alice",
             localAddress = null,
             profile = "bob",
+            appId = "test-app",
             content = "hello",
             timestampMs = 1_700_000_000_000L,
             replyToMsg = "7ee8f6f0-9d2c-4b6a-8f3e-2a1b0c9d8e7f"
@@ -103,6 +109,7 @@ class LegacyRelayMessageTest {
             senderId = "alice",
             localAddress = null,
             profile = "bob",
+            appId = "test-app",
             content = "hello",
             timestampMs = 1_700_000_000_000L
         )
@@ -129,6 +136,7 @@ class LegacyRelayMessageTest {
             senderId = "relay",
             localAddress = null,
             profile = "bob",
+            appId = "test-app",
             content = "__GROUP_CREATED__{}",
             timestampMs = 1_700_000_000_000L,
             requiresAck = false
@@ -156,6 +164,7 @@ class LegacyRelayMessageTest {
             senderId = "relay",
             localAddress = "off1abc",
             profile = "bob",
+            appId = "test-app",
             content = "__GROUP_CREATED__{}",
             timestampMs = 1_700_000_000_000L,
             requiresAck = false
@@ -167,6 +176,24 @@ class LegacyRelayMessageTest {
      * Before `initialize_mls` the profile is this device's id in the core,
      * so frames built then must stay exactly as they were.
      */
+    /**
+     * The configured id, never a fixed literal: a receiving instance routes
+     * the frame by it, and every synthesized relay answer and legacy DM used
+     * to carry "offline-messenger" whatever the app had configured.
+     */
+    @Test
+    fun appIdIsTheConfiguredOne() {
+        val json = LegacyRelayMessage.buildJson(
+            senderId = "alice",
+            localAddress = null,
+            profile = "bob",
+            appId = "com.example.chat",
+            content = "hello",
+            timestampMs = 1_700_000_000_000L
+        )
+        assertEquals("com.example.chat", json.getString("app_id"))
+    }
+
     @Test
     fun recipientFallsBackToTheProfileBeforeMlsInit() {
         for (address in listOf(null, "")) {
@@ -174,6 +201,7 @@ class LegacyRelayMessageTest {
                 senderId = "alice",
                 localAddress = address,
                 profile = "bob",
+                appId = "test-app",
                 content = "hello",
                 timestampMs = 1_700_000_000_000L
             )

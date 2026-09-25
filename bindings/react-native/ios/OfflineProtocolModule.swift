@@ -913,7 +913,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             
             // Initialize Internet manager if internet is enabled
             if config.internetEnabled {
-                internetManager = InternetManager(protocol: proto, deviceId: config.profile)
+                internetManager = InternetManager(protocol: proto, deviceId: config.profile, appId: config.appId)
                 internetManager?.delegate = self
                 internetManager?.serverMessageEmitter = { [weak self] rawJson in
                     self?.emitServerMessageEvent(rawJson)
@@ -2693,12 +2693,12 @@ class OfflineProtocolModule: RCTEventEmitter {
                     // and gates LeaveGroup on it, so a placeholder would
                     // silently corrupt relay group state. Mirrors the
                     // Android module's guard.
-                    guard let userId = currentConfig?.profile else {
+                    guard let userId = currentConfig?.profile, let appId = currentConfig?.appId else {
                         throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [
                             NSLocalizedDescriptionKey: "Cannot enable Internet transport before initialize(config)"
                         ])
                     }
-                    let newManager = InternetManager(protocol: proto, deviceId: userId)
+                    let newManager = InternetManager(protocol: proto, deviceId: userId, appId: appId)
                     newManager.delegate = self
                     newManager.serverMessageEmitter = { [weak self] rawJson in
                         self?.emitServerMessageEvent(rawJson)

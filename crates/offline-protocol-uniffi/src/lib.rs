@@ -16649,6 +16649,82 @@ mod tests {
         }
     }
 
+    /// Frames a bridge synthesizes for the core carry the configured app id.
+    ///
+    /// Every relay answer, relay group frame and legacy plain-text DM is
+    /// rebuilt by a bridge as a full core `Message`, and `app_id` is one of
+    /// its required fields. All three bridges used to fill it with the literal
+    /// `"offline-messenger"`, so on an app configured with any other id each
+    /// of those frames carried a foreign one; a receiving instance that routes
+    /// by app id would hand them to the wrong application. The builders now
+    /// take the configured id as a required argument, which is what this
+    /// pins: the literal is gone from every file that builds such a frame,
+    /// and the builders have no parameter it could hide behind as a default.
+    /// The BLE app tag tests still use the literal as a digest vector; they
+    /// are deliberately not read here.
+    #[test]
+    fn bridges_stamp_the_configured_app_id_on_synthesized_frames() {
+        const LITERAL: &str = "offline-messenger";
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let read_python = |rel: &str| -> String {
+            let path = manifest.join("../../bindings/python").join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+
+        let swift = rn_source_code_only("ios/LegacyRelayMessage.swift");
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/LegacyRelayMessage.kt");
+        let python = read_python("offline_protocol_sdk/internet_manager.py");
+        for (label, code) in [
+            ("ios/LegacyRelayMessage.swift", swift.clone()),
+            ("android/.../LegacyRelayMessage.kt", kotlin.clone()),
+            (
+                "ios/InternetManager.swift",
+                rn_source_code_only("ios/InternetManager.swift"),
+            ),
+            (
+                "android/.../InternetManager.kt",
+                rn_source_code_only("android/src/main/java/com/offlineprotocol/InternetManager.kt"),
+            ),
+            ("python internet_manager.py", python.clone()),
+            (
+                "python protocol_manager.py",
+                read_python("offline_protocol_sdk/protocol_manager.py"),
+            ),
+        ] {
+            assert!(
+                !code.contains(LITERAL),
+                "{label} names `{LITERAL}`: a synthesized frame must carry the configured \
+                 app id, never a fixed one"
+            );
+        }
+
+        for (label, code, parameter) in [
+            (
+                "Swift LegacyRelayMessage.buildDict",
+                &swift,
+                "profile: String, appId: String, content: String,",
+            ),
+            (
+                "Kotlin LegacyRelayMessage.buildJson",
+                &kotlin,
+                "profile: String, appId: String, content: String,",
+            ),
+            (
+                "Python InternetManager.__init__",
+                &python,
+                "*,\n        app_id: str,\n    ) -> None:",
+            ),
+        ] {
+            assert!(
+                code.contains(parameter),
+                "{label} must take the app id as a required argument (`{parameter}`); \
+                 a default is how the fixed literal got in"
+            );
+        }
+    }
+
     /// The one transport for which the post-identity rebuild is load-bearing.
     ///
     /// `NostrTransport` computes its routing tag from the id it is constructed
