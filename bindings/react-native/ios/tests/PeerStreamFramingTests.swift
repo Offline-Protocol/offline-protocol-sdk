@@ -256,6 +256,18 @@ final class PeerStreamFramingTests: XCTestCase {
         XCTAssertNil(links.remove("s1"))
     }
 
+    func testASecondAnnouncementForOneStreamIsANoOp() {
+        let links = PeerStreamLinks<String>()
+        _ = links.announce("s1", address: a)
+        XCTAssertEqual(links.announce("s1", address: a), .init(firstForAddress: false, superseded: nil))
+        // Another address is refused the same way, and the first stays held.
+        XCTAssertEqual(links.announce("s1", address: b), .init(firstForAddress: false, superseded: nil))
+        XCTAssertEqual(links.handle(for: a), "s1")
+        XCTAssertNil(links.handle(for: b))
+        XCTAssertEqual(links.remove("s1"), a)
+        XCTAssertTrue(links.isEmpty)
+    }
+
     func testAddressesAreIndependent() {
         let links = PeerStreamLinks<String>()
         _ = links.announce("s1", address: a)

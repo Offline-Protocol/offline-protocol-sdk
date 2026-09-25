@@ -176,10 +176,12 @@ final class PeerStreamLinks<Handle: Hashable> {
 
     func announce(_ handle: Handle, address: String) -> Announcement {
         lock.lock(); defer { lock.unlock() }
-        if let held = byHandle[handle] {
-            // A stream proves one address, once. Re-announcing the same one is
-            // a caller bug answered as a no-op, which keeps the count right.
-            precondition(held == address, "a stream cannot prove two addresses")
+        if byHandle[handle] != nil {
+            // A stream proves one address, once. A second announcement, for
+            // the same address or another, is a caller bug answered as a
+            // no-op: the count stays right and the first address stays held.
+            // Not a precondition, because this runs inside the host app and a
+            // trap here would take the app down for a bookkeeping mistake.
             return Announcement(firstForAddress: false, superseded: nil)
         }
         let older = byAddress.updateValue(handle, forKey: address)

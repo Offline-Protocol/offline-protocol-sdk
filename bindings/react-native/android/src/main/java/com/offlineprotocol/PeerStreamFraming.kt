@@ -175,10 +175,12 @@ class PeerStreamLinks<H : Any> {
 
     @Synchronized
     fun announce(handle: H, address: String): Announcement<H> {
-        byHandle[handle]?.let { held ->
-            // A stream proves one address, once. Re-announcing the same one is
-            // a caller bug answered as a no-op, which keeps the count right.
-            check(held == address) { "a stream cannot prove two addresses" }
+        if (byHandle.containsKey(handle)) {
+            // A stream proves one address, once. A second announcement, for
+            // the same address or another, is a caller bug answered as a
+            // no-op: the count stays right and the first address stays held.
+            // Not a check(), so the Swift copy, where a trap would take the
+            // host app down, and this one behave the same.
             return Announcement(firstForAddress = false, superseded = null)
         }
         val older = byAddress.put(address, handle)

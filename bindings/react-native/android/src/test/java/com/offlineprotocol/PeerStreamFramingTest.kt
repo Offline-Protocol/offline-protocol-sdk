@@ -295,5 +295,11 @@ class PeerStreamFramingTest {
         links.announce("s1", a)
         assertEquals(PeerStreamLinks.Announcement<String>(false, null), links.announce("s1", a))
         assertEquals("s1", links.handleFor(a))
+        // Another address is refused the same way, and the first stays held.
+        assertEquals(PeerStreamLinks.Announcement<String>(false, null), links.announce("s1", b))
+        assertEquals("s1", links.handleFor(a))
+        assertNull(links.handleFor(b))
+        assertEquals(a, links.remove("s1"))
+        assertTrue(links.isEmpty())
     }
 }
