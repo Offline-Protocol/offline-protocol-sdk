@@ -351,6 +351,8 @@ pub struct SendMessageOptions {
     pub reply_context: Option<ReplyContext>,   // sealed-only
     pub media_metadata: Option<MediaMetadata>, // sealed-only (incl. encryption_key/iv secrets)
     pub forward_info: Option<ForwardInfo>,     // sealed-only
+    pub via_transport: Option<TransportType>,  // bypass DORS selection
+    pub app_id: Option<String>,                // per-send application id (cleartext)
 }
 ```
 
@@ -366,6 +368,16 @@ and rich extras exceeding 32 KiB serialized, both as `InvalidArgument`.
 UniFFI exposes this as `send_message_rich(recipient, content, options)`; React
 Native routes `sendMessage` to it automatically when rich params are present
 (see the [React Native guide](react-native-integration.md)).
+
+`app_id` stamps this message with another application's id in place of
+`ProtocolConfig::app_id`, for one instance serving several local applications
+behind one identity. The receiver reports it as `MessageReceived.app_id`. It
+changes the stamp on this one frame, never the storage namespace, the MLS
+session or the BLE app tag, and the acknowledgement for it carries the
+configured id. It is cleartext and unsigned on the wire, so it is routing
+metadata and never an authorization input
+([R17](security/threat-model.md#r17-the-application-id-on-every-frame-is-cleartext-and-unsigned)).
+An invalid id fails the call with `InvalidArgument` before anything is queued.
 
 ```rust
 pub fn send_media_with(
@@ -384,12 +396,16 @@ pub struct MediaSendOptions {
     pub reply_context: Option<ReplyContext>,   // sealed-only
     pub forward_info: Option<ForwardInfo>,     // sealed-only
     pub file_id: Option<String>,               // caller-supplied id (resends)
+    pub app_id: Option<String>,                // per-send application id, every chunk
 }
 ```
 
 Media-transfer counterpart (UniFFI: `send_media_rich`): the rich extras ride
 sealed with the transfer's chunk 0. A caller-supplied `file_id` is how an app
-answers `media_resend_required` after a restart.
+answers `media_resend_required` after a restart, and that event names the
+transfer's per-send `app_id` when it had one, so an instance serving several
+applications knows which one to ask. The receiver reports the id as
+`FileReceived.app_id`.
 
 ```rust
 pub fn send_group_message_with(
@@ -596,12 +612,22 @@ MessageReceived {
     recipient: String,
     content: String,
     hop_count: u8,
-    transport: String,
+    transport: String,          // "delayed" when a held message decrypts later
     timestamp: i64,
+    lamport_clock: u64,
+    reply_to_msg: Option<String>,
+    reply_context: Option<Box<ReplyContextEvent>>,
+    content_type: String,
+    media_metadata: Option<MediaMetadata>,
+    forward_info: Option<ForwardInfoEvent>,
+    encrypted: bool,
+    app_id: String,             // the sender's stamp; route on it, never authorize
 }
 ```
 
-Emitted when a message is received.
+Emitted when a message is received. `app_id` is the id the sender stamped:
+its configured one, or the per-send id of a rich send. The engine delivers the
+message whatever it says.
 
 #### MessageDelivered
 

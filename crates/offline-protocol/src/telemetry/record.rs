@@ -263,6 +263,7 @@ pub(crate) mod tests {
             media_metadata: None,
             forward_info: None,
             encrypted: false,
+            app_id: String::new(),
         };
         assert_eq!(
             TelemetryRecord::Protocol(Box::new(event)).name(),
@@ -417,6 +418,7 @@ pub(crate) mod tests {
                 media_metadata: None,
                 forward_info: None,
                 encrypted: false,
+                app_id: String::new(),
             },
             Event::MessageDelivered {
                 message_id: String::new(),
@@ -483,6 +485,7 @@ pub(crate) mod tests {
                 reply_to_msg: None,
                 reply_context: None,
                 forward_info: None,
+                app_id: None,
             },
             Event::FileReceiveFailed {
                 file_id: String::new(),
@@ -524,6 +527,7 @@ pub(crate) mod tests {
                 recipient: String::new(),
                 file_name: String::new(),
                 file_size: 0,
+                app_id: None,
             },
             Event::AckEvicted {
                 message_id: String::new(),

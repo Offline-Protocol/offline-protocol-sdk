@@ -115,6 +115,9 @@ impl OfflineProtocol {
         let content_str: String = content.into();
         let priority = options.priority.unwrap_or(MessagePriority::Medium);
         Self::validate_outbound_recipient(&recipient_str)?;
+        // Parsed first, before anything can queue the send or tick the
+        // Lamport clock: a bad id must leave no durable trace.
+        let app_id = Self::parse_send_app_id(options.app_id.as_deref())?;
 
         // Prevent sending messages to blocked users. Blocking is bidirectional:
         // we neither receive from nor send to a blocked peer.
@@ -173,6 +176,7 @@ impl OfflineProtocol {
             options.content_type.unwrap_or_default(),
             None,
             Some(&rich),
+            app_id.as_ref(),
             None,
             "send_message_session_pending",
         )? {
@@ -185,11 +189,12 @@ impl OfflineProtocol {
         // inside the sealed body by now or dropped; only the coarse
         // content_type rendering hint rides outer.
         let reseal_reply_to = reply_to_msg_id.clone();
-        let mut message = self.create_message(
+        let mut message = self.create_message_for_app(
             &recipient_str,
             final_content,
             Some(priority),
             reply_to_msg_id,
+            app_id,
         )?;
         if let Some(content_type) = options.content_type {
             message.content_type = content_type;
@@ -320,6 +325,7 @@ impl OfflineProtocol {
             original_message.content_type,
             original_message.media_metadata.clone(),
             Some(&rich),
+            None,
             None,
             "forward_message_session_pending",
         )? {
@@ -722,7 +728,13 @@ impl OfflineProtocol {
             .map_err(|error| Error::InvalidArgument(format!("Invalid recipient user ID: {error}")))
     }
 
-    /// Creates a new message from the given parameters.
+    /// Creates a new message stamped with the configured app id.
+    ///
+    /// Every engine-originated frame goes through here: control traffic,
+    /// key packages, Welcomes, data-sync frames and forwards. Those belong
+    /// to the engine, not to an application, so they always carry
+    /// [`crate::ProtocolConfig::app_id`]. Only an application's own send
+    /// can name another id, through [`Self::create_message_for_app`].
     pub(super) fn create_message(
         &mut self,
         recipient: impl Into<String>,
@@ -730,9 +742,37 @@ impl OfflineProtocol {
         priority: Option<MessagePriority>,
         reply_to_msg: Option<MessageId>,
     ) -> Result<Message> {
+        self.create_message_for_app(recipient, content, priority, reply_to_msg, None)
+    }
+
+    /// Validates a per-send app id from the rich send surface.
+    ///
+    /// Same rules as the configured id and the wire decoder (`AppId::new`),
+    /// reported as `InvalidArgument` because it is a call argument, not
+    /// configuration.
+    pub(super) fn parse_send_app_id(app_id: Option<&str>) -> Result<Option<AppId>> {
+        app_id
+            .map(AppId::new)
+            .transpose()
+            .map_err(|e| Error::InvalidArgument(format!("Invalid app_id: {e}")))
+    }
+
+    /// Like [`Self::create_message`], stamping `app_id` when given and the
+    /// configured id otherwise.
+    pub(super) fn create_message_for_app(
+        &mut self,
+        recipient: impl Into<String>,
+        content: impl Into<String>,
+        priority: Option<MessagePriority>,
+        reply_to_msg: Option<MessageId>,
+        app_id: Option<AppId>,
+    ) -> Result<Message> {
         let sender = UserId::new(&self.local_id)?;
         let recipient = UserId::new(recipient)?;
-        let app_id = AppId::new(&self.config.app_id)?;
+        let app_id = match app_id {
+            Some(app_id) => app_id,
+            None => AppId::new(&self.config.app_id)?,
+        };
 
         let clock_value = self.lamport_clock.tick();
         self.persist_lamport_clock();
@@ -1523,6 +1563,7 @@ impl OfflineProtocol {
         content_type: ContentType,
         media_metadata: Option<MediaMetadata>,
         rich: Option<&RichSendExtras>,
+        app_id: Option<&AppId>,
         provenance: Option<PendingProvenance>,
         reconciliation_reason: &'static str,
     ) -> Result<OutboundSendPreparation> {
@@ -1610,6 +1651,7 @@ impl OfflineProtocol {
                             content_type,
                             media_metadata,
                             rich_extras.cloned(),
+                            app_id,
                             provenance,
                             reconciliation_reason,
                         )?;
@@ -1635,6 +1677,7 @@ impl OfflineProtocol {
                         content_type,
                         media_metadata,
                         rich_extras.cloned(),
+                        app_id,
                         provenance,
                         reconciliation_reason,
                     )?;
@@ -1711,6 +1754,7 @@ impl OfflineProtocol {
         content_type: ContentType,
         media_metadata: Option<MediaMetadata>,
         rich: Option<RichSendExtras>,
+        app_id: Option<&AppId>,
         provenance: Option<PendingProvenance>,
         reconciliation_reason: &'static str,
     ) -> Result<MessageId> {
@@ -1740,6 +1784,7 @@ impl OfflineProtocol {
             content_type,
             media_metadata,
             rich,
+            app_id.map(|id| id.as_str().to_string()),
             first_queued_at.unwrap_or_else(Utc::now),
         );
         self.kick_pending_session_reconciliation(reconciliation_reason);
@@ -1789,6 +1834,7 @@ impl OfflineProtocol {
             content_type,
             media_metadata,
             rich,
+            None,
             Utc::now(),
         );
     }
@@ -1819,6 +1865,7 @@ impl OfflineProtocol {
         content_type: ContentType,
         media_metadata: Option<MediaMetadata>,
         rich: Option<RichSendExtras>,
+        app_id: Option<String>,
         queued_at: DateTime<Utc>,
     ) {
         let message_id_str = message_id.as_str().to_string();
@@ -1831,6 +1878,7 @@ impl OfflineProtocol {
             content_type,
             media_metadata,
             rich,
+            app_id,
             queued_at,
             serialized_bytes: 0,
         };
@@ -2149,6 +2197,17 @@ impl OfflineProtocol {
                     continue;
                 }
 
+                // Validated at admission and sealed at rest, so a failure
+                // here means a corrupted record. Sending under the configured
+                // id beats re-queueing an entry that can never flush.
+                let flush_app_id = match Self::parse_send_app_id(msg.app_id.as_deref()) {
+                    Ok(app_id) => app_id,
+                    Err(e) => {
+                        warn!(message_id = %msg.message_id, error = %e, "Pending message app id unreadable, using the configured id");
+                        None
+                    }
+                };
+
                 let final_content = match self.prepare_outbound_content(
                     recipient,
                     &msg.content,
@@ -2158,6 +2217,7 @@ impl OfflineProtocol {
                     msg.content_type,
                     msg.media_metadata.clone(),
                     msg.rich.as_ref(),
+                    flush_app_id.as_ref(),
                     Some(PendingProvenance::requeued(&msg)),
                     "flush_pending",
                 ) {
@@ -2175,11 +2235,12 @@ impl OfflineProtocol {
                     }
                 };
 
-                let message = match self.create_message(
+                let message = match self.create_message_for_app(
                     recipient,
                     final_content,
                     Some(msg.priority),
                     msg.reply_to_msg.clone(),
+                    flush_app_id,
                 ) {
                     Ok(mut message) => {
                         // Restore outer fields: forward attribution and its
@@ -2442,6 +2503,8 @@ impl OfflineProtocol {
         let file_name_str: String = file_name.into();
         let media_metadata = options.media_metadata;
         Self::validate_outbound_recipient(&recipient_str)?;
+        // Before any transfer state exists, like the recipient check.
+        let app_id = Self::parse_send_app_id(options.app_id.as_deref())?;
 
         // Validate the reply id like send_message_with does — a malformed id
         // fails the call instead of riding sealed to the receiver.
@@ -2680,6 +2743,7 @@ impl OfflineProtocol {
                 media_metadata: media_metadata.clone(),
                 rich_extras: rich_extras.clone(),
                 data_purpose: data_purpose.clone(),
+                app_id: app_id.clone(),
             },
         );
 
@@ -2697,6 +2761,7 @@ impl OfflineProtocol {
                 content_type,
                 queued_at: Utc::now(),
                 data_purpose: data_purpose.clone(),
+                app_id: app_id.as_ref().map(|id| id.as_str().to_string()),
             };
             self.restored_media_descriptors.remove(&file_id);
             self.persist_media_descriptor(&descriptor);
@@ -2726,6 +2791,7 @@ impl OfflineProtocol {
             media_metadata.as_ref(),
             rich_extras.as_ref(),
             data_purpose.as_ref(),
+            app_id.as_ref(),
         )?;
 
         Ok(file_id)
@@ -2743,6 +2809,7 @@ impl OfflineProtocol {
         media_metadata: Option<&MediaMetadata>,
         rich_extras: Option<&MediaRichExtras>,
         data_purpose: Option<&crate::media_envelope::DataPurpose>,
+        app_id: Option<&AppId>,
     ) -> Result<()> {
         for chunk in chunks {
             let chunk_index = chunk.chunk_index;
@@ -2811,6 +2878,7 @@ impl OfflineProtocol {
                 String::new(),
                 ContentType::FileChunk,
                 wire_metadata,
+                app_id.cloned(),
             )?;
             message.binary_content = Some(binary_payload);
 
@@ -2898,6 +2966,7 @@ impl OfflineProtocol {
                 transfer.media_metadata.as_ref(),
                 transfer.rich_extras.as_ref(),
                 transfer.data_purpose.as_ref(),
+                transfer.app_id.as_ref(),
             ) {
                 warn!(
                     file_id = %file_id,
@@ -2918,12 +2987,16 @@ impl OfflineProtocol {
         content: impl Into<String>,
         content_type: ContentType,
         media_metadata: Option<MediaMetadata>,
+        app_id: Option<AppId>,
     ) -> Result<Message> {
         use crate::constants::{TRANSPORT_PREFERENCE_INTERNET, TRANSPORT_PREFERENCE_KEY};
 
         let sender = UserId::new(&self.local_id)?;
         let recipient = UserId::new(recipient)?;
-        let app_id = AppId::new(&self.config.app_id)?;
+        let app_id = match app_id {
+            Some(app_id) => app_id,
+            None => AppId::new(&self.config.app_id)?,
+        };
 
         let clock_value = self.lamport_clock.tick();
         self.persist_lamport_clock();
@@ -3150,6 +3223,7 @@ impl OfflineProtocol {
             reseal.content_type,
             reseal.media_metadata.clone(),
             reseal.rich.as_ref(),
+            Some(&message.app_id),
             Some(PendingProvenance::for_id(message.id.clone())),
             "resend_reseal",
         ) {

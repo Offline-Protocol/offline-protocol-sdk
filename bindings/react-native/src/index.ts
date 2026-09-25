@@ -1226,14 +1226,19 @@ export class OfflineProtocol {
     // Rich params route to the rich native method; the plain path is left
     // untouched. Rich fields only ever travel inside the MLS-sealed rich
     // payload (recipients that support it), or are dropped — never cleartext.
+    // `appId` is on this list because only the rich native method carries
+    // it: an appId-only send on the plain path would go out under the
+    // configured id without a word.
     const hasRichOptions =
       params.replyContext !== undefined ||
       params.mediaMetadata !== undefined ||
       params.forwardInfo !== undefined ||
-      params.contentType !== undefined;
+      params.contentType !== undefined ||
+      params.appId !== undefined;
     if (hasRichOptions) {
       const meta = params.mediaMetadata;
       const options = {
+        app_id: params.appId ?? null,
         content_type: params.contentType ?? null,
         reply_context: params.replyContext
           ? {
@@ -1546,10 +1551,12 @@ export class OfflineProtocol {
       params.replyContext !== undefined ||
       params.forwardInfo !== undefined ||
       params.fileId !== undefined ||
+      params.appId !== undefined ||
       hasExtendedMetadata;
 
     if (hasRichOptions) {
       const options = {
+        app_id: params.appId ?? null,
         media_metadata: meta
           ? {
               mime_type: meta.mimeType,

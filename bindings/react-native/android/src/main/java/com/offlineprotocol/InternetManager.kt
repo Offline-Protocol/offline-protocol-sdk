@@ -15,6 +15,8 @@ class InternetManager(
     private val context: android.content.Context,
     private val protocol: OfflineProtocol,
     private val deviceId: String,
+    /** Configured application id, stamped on every frame this manager synthesizes. */
+    private val appId: String,
     private val diagnosticEmitter: ((String, String, Map<String, Any?>) -> Unit)? = null
 ) : TransportManager {
 
@@ -1444,6 +1446,7 @@ class InternetManager(
                                 senderId = senderId,
                                 localAddress = protocol.localAddress(),
                                 profile = deviceId,
+                                appId = appId,
                                 content = content,
                                 timestampMs = parseTimestampToMs(timestamp),
                                 messageId = messageId,
@@ -1457,6 +1460,7 @@ class InternetManager(
                             senderId = senderId,
                             localAddress = protocol.localAddress(),
                             profile = deviceId,
+                            appId = appId,
                             content = content,
                             timestampMs = parseTimestampToMs(timestamp),
                             messageId = messageId,
@@ -1834,6 +1838,7 @@ class InternetManager(
             // when this manager was built. See LegacyRelayMessage's INVARIANT.
             localAddress = protocol.localAddress(),
             profile = deviceId,
+            appId = appId,
             content = content,
             timestampMs = System.currentTimeMillis(),
             // Nothing transmitted this frame, so no sender is awaiting a

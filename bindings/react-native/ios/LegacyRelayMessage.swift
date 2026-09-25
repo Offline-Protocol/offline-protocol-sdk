@@ -41,10 +41,16 @@ enum LegacyRelayMessage {
     /// crossed a wire, so nobody awaits an ACK, and the core would otherwise
     /// address that ACK to the frame's `sender`, which for a relay answer is
     /// a placeholder, not a reachable peer.
+    ///
+    /// `appId` is this instance's configured application id, the same value
+    /// the core stamps on every frame it originates. It has no default: a
+    /// literal here once stamped every synthesized frame with one fixed id
+    /// whatever the app had configured.
     static func buildDict(
         senderId: String,
         localAddress: String?,
         profile: String,
+        appId: String,
         content: String,
         timestampMs: Int64,
         messageId: String? = nil,
@@ -56,7 +62,7 @@ enum LegacyRelayMessage {
             "sender": senderId,
             "recipient": recipient(localAddress: localAddress, profile: profile),
             "content": content,
-            "app_id": "offline-messenger", // Default app ID
+            "app_id": appId,
             // The SDK's canonical lowercase variant. The core also accepts
             // the capitalized alias; any other spelling fails
             // deserialization and the frame is silently dropped.

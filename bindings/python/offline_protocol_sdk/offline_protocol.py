@@ -4666,7 +4666,7 @@ class _UniffiFfiConverterOptionalTypeForwardInfo(_UniffiConverterRustBuffer):
 
 @dataclass
 class MediaSendOptions:
-    def __init__(self, *, media_metadata:typing.Optional[MediaMetadata] = _DEFAULT, caption:typing.Optional[str] = _DEFAULT, reply_to_msg:typing.Optional[str] = _DEFAULT, reply_context:typing.Optional[ReplyContext] = _DEFAULT, forward_info:typing.Optional[ForwardInfo] = _DEFAULT, file_id:typing.Optional[str] = _DEFAULT):
+    def __init__(self, *, media_metadata:typing.Optional[MediaMetadata] = _DEFAULT, caption:typing.Optional[str] = _DEFAULT, reply_to_msg:typing.Optional[str] = _DEFAULT, reply_context:typing.Optional[ReplyContext] = _DEFAULT, forward_info:typing.Optional[ForwardInfo] = _DEFAULT, file_id:typing.Optional[str] = _DEFAULT, app_id:typing.Optional[str] = _DEFAULT):
         if media_metadata is _DEFAULT:
             self.media_metadata = None
         else:
@@ -4691,12 +4691,16 @@ class MediaSendOptions:
             self.file_id = None
         else:
             self.file_id = file_id
+        if app_id is _DEFAULT:
+            self.app_id = None
+        else:
+            self.app_id = app_id
         
         
 
     
     def __str__(self):
-        return "MediaSendOptions(media_metadata={}, caption={}, reply_to_msg={}, reply_context={}, forward_info={}, file_id={})".format(self.media_metadata, self.caption, self.reply_to_msg, self.reply_context, self.forward_info, self.file_id)
+        return "MediaSendOptions(media_metadata={}, caption={}, reply_to_msg={}, reply_context={}, forward_info={}, file_id={}, app_id={})".format(self.media_metadata, self.caption, self.reply_to_msg, self.reply_context, self.forward_info, self.file_id, self.app_id)
     def __eq__(self, other):
         if self.media_metadata != other.media_metadata:
             return False
@@ -4710,6 +4714,8 @@ class MediaSendOptions:
             return False
         if self.file_id != other.file_id:
             return False
+        if self.app_id != other.app_id:
+            return False
         return True
 
 class _UniffiFfiConverterTypeMediaSendOptions(_UniffiConverterRustBuffer):
@@ -4722,6 +4728,7 @@ class _UniffiFfiConverterTypeMediaSendOptions(_UniffiConverterRustBuffer):
             reply_context=_UniffiFfiConverterOptionalTypeReplyContext.read(buf),
             forward_info=_UniffiFfiConverterOptionalTypeForwardInfo.read(buf),
             file_id=_UniffiFfiConverterOptionalString.read(buf),
+            app_id=_UniffiFfiConverterOptionalString.read(buf),
         )
 
     @staticmethod
@@ -4732,6 +4739,7 @@ class _UniffiFfiConverterTypeMediaSendOptions(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeReplyContext.check_lower(value.reply_context)
         _UniffiFfiConverterOptionalTypeForwardInfo.check_lower(value.forward_info)
         _UniffiFfiConverterOptionalString.check_lower(value.file_id)
+        _UniffiFfiConverterOptionalString.check_lower(value.app_id)
 
     @staticmethod
     def write(value, buf):
@@ -4741,6 +4749,7 @@ class _UniffiFfiConverterTypeMediaSendOptions(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeReplyContext.write(value.reply_context, buf)
         _UniffiFfiConverterOptionalTypeForwardInfo.write(value.forward_info, buf)
         _UniffiFfiConverterOptionalString.write(value.file_id, buf)
+        _UniffiFfiConverterOptionalString.write(value.app_id, buf)
 
 class _UniffiFfiConverterOptionalUInt8(_UniffiConverterRustBuffer):
     @classmethod
@@ -6624,7 +6633,7 @@ class _UniffiFfiConverterOptionalTypeContentType(_UniffiConverterRustBuffer):
 
 @dataclass
 class SendMessageOptions:
-    def __init__(self, *, priority:typing.Optional[MessagePriority] = _DEFAULT, reply_to_msg:typing.Optional[str] = _DEFAULT, content_type:typing.Optional[ContentType] = _DEFAULT, reply_context:typing.Optional[ReplyContext] = _DEFAULT, media_metadata:typing.Optional[MediaMetadata] = _DEFAULT, forward_info:typing.Optional[ForwardInfo] = _DEFAULT):
+    def __init__(self, *, priority:typing.Optional[MessagePriority] = _DEFAULT, reply_to_msg:typing.Optional[str] = _DEFAULT, content_type:typing.Optional[ContentType] = _DEFAULT, reply_context:typing.Optional[ReplyContext] = _DEFAULT, media_metadata:typing.Optional[MediaMetadata] = _DEFAULT, forward_info:typing.Optional[ForwardInfo] = _DEFAULT, app_id:typing.Optional[str] = _DEFAULT):
         if priority is _DEFAULT:
             self.priority = None
         else:
@@ -6649,12 +6658,16 @@ class SendMessageOptions:
             self.forward_info = None
         else:
             self.forward_info = forward_info
+        if app_id is _DEFAULT:
+            self.app_id = None
+        else:
+            self.app_id = app_id
         
         
 
     
     def __str__(self):
-        return "SendMessageOptions(priority={}, reply_to_msg={}, content_type={}, reply_context={}, media_metadata={}, forward_info={})".format(self.priority, self.reply_to_msg, self.content_type, self.reply_context, self.media_metadata, self.forward_info)
+        return "SendMessageOptions(priority={}, reply_to_msg={}, content_type={}, reply_context={}, media_metadata={}, forward_info={}, app_id={})".format(self.priority, self.reply_to_msg, self.content_type, self.reply_context, self.media_metadata, self.forward_info, self.app_id)
     def __eq__(self, other):
         if self.priority != other.priority:
             return False
@@ -6668,6 +6681,8 @@ class SendMessageOptions:
             return False
         if self.forward_info != other.forward_info:
             return False
+        if self.app_id != other.app_id:
+            return False
         return True
 
 class _UniffiFfiConverterTypeSendMessageOptions(_UniffiConverterRustBuffer):
@@ -6680,6 +6695,7 @@ class _UniffiFfiConverterTypeSendMessageOptions(_UniffiConverterRustBuffer):
             reply_context=_UniffiFfiConverterOptionalTypeReplyContext.read(buf),
             media_metadata=_UniffiFfiConverterOptionalTypeMediaMetadata.read(buf),
             forward_info=_UniffiFfiConverterOptionalTypeForwardInfo.read(buf),
+            app_id=_UniffiFfiConverterOptionalString.read(buf),
         )
 
     @staticmethod
@@ -6690,6 +6706,7 @@ class _UniffiFfiConverterTypeSendMessageOptions(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeReplyContext.check_lower(value.reply_context)
         _UniffiFfiConverterOptionalTypeMediaMetadata.check_lower(value.media_metadata)
         _UniffiFfiConverterOptionalTypeForwardInfo.check_lower(value.forward_info)
+        _UniffiFfiConverterOptionalString.check_lower(value.app_id)
 
     @staticmethod
     def write(value, buf):
@@ -6699,6 +6716,7 @@ class _UniffiFfiConverterTypeSendMessageOptions(_UniffiConverterRustBuffer):
         _UniffiFfiConverterOptionalTypeReplyContext.write(value.reply_context, buf)
         _UniffiFfiConverterOptionalTypeMediaMetadata.write(value.media_metadata, buf)
         _UniffiFfiConverterOptionalTypeForwardInfo.write(value.forward_info, buf)
+        _UniffiFfiConverterOptionalString.write(value.app_id, buf)
 
 
 

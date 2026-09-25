@@ -4091,16 +4091,18 @@ public struct MediaSendOptions: Equatable, Hashable {
     public var replyContext: ReplyContext?
     public var forwardInfo: ForwardInfo?
     public var fileId: String?
+    public var appId: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(mediaMetadata: MediaMetadata? = nil, caption: String? = nil, replyToMsg: String? = nil, replyContext: ReplyContext? = nil, forwardInfo: ForwardInfo? = nil, fileId: String? = nil) {
+    public init(mediaMetadata: MediaMetadata? = nil, caption: String? = nil, replyToMsg: String? = nil, replyContext: ReplyContext? = nil, forwardInfo: ForwardInfo? = nil, fileId: String? = nil, appId: String? = nil) {
         self.mediaMetadata = mediaMetadata
         self.caption = caption
         self.replyToMsg = replyToMsg
         self.replyContext = replyContext
         self.forwardInfo = forwardInfo
         self.fileId = fileId
+        self.appId = appId
     }
 
     
@@ -4122,7 +4124,8 @@ public struct FfiConverterTypeMediaSendOptions: FfiConverterRustBuffer {
                 replyToMsg: FfiConverterOptionString.read(from: &buf), 
                 replyContext: FfiConverterOptionTypeReplyContext.read(from: &buf), 
                 forwardInfo: FfiConverterOptionTypeForwardInfo.read(from: &buf), 
-                fileId: FfiConverterOptionString.read(from: &buf)
+                fileId: FfiConverterOptionString.read(from: &buf), 
+                appId: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -4133,6 +4136,7 @@ public struct FfiConverterTypeMediaSendOptions: FfiConverterRustBuffer {
         FfiConverterOptionTypeReplyContext.write(value.replyContext, into: &buf)
         FfiConverterOptionTypeForwardInfo.write(value.forwardInfo, into: &buf)
         FfiConverterOptionString.write(value.fileId, into: &buf)
+        FfiConverterOptionString.write(value.appId, into: &buf)
     }
 }
 
@@ -5811,16 +5815,18 @@ public struct SendMessageOptions: Equatable, Hashable {
     public var replyContext: ReplyContext?
     public var mediaMetadata: MediaMetadata?
     public var forwardInfo: ForwardInfo?
+    public var appId: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(priority: MessagePriority? = nil, replyToMsg: String? = nil, contentType: ContentType? = nil, replyContext: ReplyContext? = nil, mediaMetadata: MediaMetadata? = nil, forwardInfo: ForwardInfo? = nil) {
+    public init(priority: MessagePriority? = nil, replyToMsg: String? = nil, contentType: ContentType? = nil, replyContext: ReplyContext? = nil, mediaMetadata: MediaMetadata? = nil, forwardInfo: ForwardInfo? = nil, appId: String? = nil) {
         self.priority = priority
         self.replyToMsg = replyToMsg
         self.contentType = contentType
         self.replyContext = replyContext
         self.mediaMetadata = mediaMetadata
         self.forwardInfo = forwardInfo
+        self.appId = appId
     }
 
     
@@ -5842,7 +5848,8 @@ public struct FfiConverterTypeSendMessageOptions: FfiConverterRustBuffer {
                 contentType: FfiConverterOptionTypeContentType.read(from: &buf), 
                 replyContext: FfiConverterOptionTypeReplyContext.read(from: &buf), 
                 mediaMetadata: FfiConverterOptionTypeMediaMetadata.read(from: &buf), 
-                forwardInfo: FfiConverterOptionTypeForwardInfo.read(from: &buf)
+                forwardInfo: FfiConverterOptionTypeForwardInfo.read(from: &buf), 
+                appId: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -5853,6 +5860,7 @@ public struct FfiConverterTypeSendMessageOptions: FfiConverterRustBuffer {
         FfiConverterOptionTypeReplyContext.write(value.replyContext, into: &buf)
         FfiConverterOptionTypeMediaMetadata.write(value.mediaMetadata, into: &buf)
         FfiConverterOptionTypeForwardInfo.write(value.forwardInfo, into: &buf)
+        FfiConverterOptionString.write(value.appId, into: &buf)
     }
 }
 

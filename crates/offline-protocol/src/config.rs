@@ -694,6 +694,22 @@ impl std::fmt::Debug for DataConfig {
 #[derive(Debug, Clone)]
 pub struct ProtocolConfig {
     /// Application identifier (required).
+    ///
+    /// Two jobs. It is one of the two inputs to the storage namespace, with
+    /// [`Self::profile`], so changing it selects fresh storage and a fresh
+    /// identity. And it is the id stamped on every frame this instance
+    /// originates: messages, media chunks, acknowledgements and control
+    /// traffic. A rich send may name another id for its own frame
+    /// ([`crate::SendMessageOptions::app_id`]), which is how one instance
+    /// serves several local applications behind one identity; the
+    /// acknowledgements and control frames the engine sends always carry
+    /// this one. The bindings also derive the BLE app tag from it.
+    ///
+    /// It is cleartext on the wire and covered by no signature, so every
+    /// carrier and hop can read it and rewrite it (threat model R17). It
+    /// names an application, so it is not secret, but treat it as routing
+    /// metadata only: the receive path delivers a message whatever id it
+    /// carries.
     pub app_id: String,
 
     /// Local profile selector (required).

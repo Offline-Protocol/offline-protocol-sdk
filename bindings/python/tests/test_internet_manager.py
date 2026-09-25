@@ -29,41 +29,41 @@ def mock_protocol() -> MagicMock:
 
 class TestInternetManagerSetup:
     def test_initial_state(self, mock_protocol: MagicMock) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         assert mgr.state == TransportState.STOPPED
         assert not mgr.is_available()
 
     def test_is_available_after_configure(self, mock_protocol: MagicMock) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         mgr.configure(server_url="ws://localhost:8080")
         assert mgr.is_available()
 
     def test_configure_sets_url(self, mock_protocol: MagicMock) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://a.com")
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://a.com", app_id="test-app")
         assert mgr.is_available()
         assert mgr._server_url == "ws://a.com"
 
     @pytest.mark.asyncio
     async def test_start_without_url_raises(self, mock_protocol: MagicMock) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         with pytest.raises(TransportError, match="Server URL not configured"):
             await mgr.start()
 
     def test_get_metrics_defaults(self, mock_protocol: MagicMock) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         m = mgr.get_metrics()
         assert m["bytes_sent"] == 0
         assert m["is_connected"] is False
 
     def test_auth_token(self, mock_protocol: MagicMock) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         mgr.set_auth_token("my-token")
         assert mgr._auth_token == "my-token"
 
 
 class TestInternetManagerMessageProcessing:
     def test_handle_incoming_message(self, mock_protocol: MagicMock) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         msg = {
             "type": "MessageReceived",
             "sender": "peer-1",
@@ -76,7 +76,7 @@ class TestInternetManagerMessageProcessing:
         assert call_args.kwargs["sender_id"] == "peer-1"
 
     def test_handle_connection_request(self, mock_protocol: MagicMock) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         msg = {
             "type": "ConnectionRequestReceived",
             "sender": "peer-2",
@@ -86,7 +86,7 @@ class TestInternetManagerMessageProcessing:
         mock_protocol.internet_message_received.assert_called_once()
 
     def test_handle_connection_accepted(self, mock_protocol: MagicMock) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         msg = {
             "type": "ConnectionAccepted",
             "accepted_by": "peer-2",
@@ -96,7 +96,7 @@ class TestInternetManagerMessageProcessing:
         mock_protocol.internet_message_received.assert_called_once()
 
     def test_handle_connection_rejected(self, mock_protocol: MagicMock) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         msg = {
             "type": "ConnectionRejected",
             "rejected_by": "peer-3",
@@ -105,21 +105,23 @@ class TestInternetManagerMessageProcessing:
         mock_protocol.internet_message_received.assert_called_once()
 
     def test_handle_unknown_type_no_crash(self, mock_protocol: MagicMock) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         msg = {"type": "SomeFutureMessageType", "data": "test"}
         mgr._process_received(json.dumps(msg).encode())
         mock_protocol.internet_message_received.assert_not_called()
 
     def test_handle_invalid_json(self, mock_protocol: MagicMock) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         mgr._process_received(b"not json at all")
         mock_protocol.internet_message_received.assert_not_called()
 
 
 class TestInternetManagerAppId:
-    def test_default_app_id(self, mock_protocol: MagicMock) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
-        assert mgr._app_id == "offline-messenger"
+    def test_app_id_is_required(self, mock_protocol: MagicMock) -> None:
+        # It once defaulted to "offline-messenger", which stamped a foreign id
+        # on every synthesized frame of an app configured with another one.
+        with pytest.raises(TypeError, match="app_id"):
+            InternetManager(mock_protocol, "dev-1")  # type: ignore[call-arg]
 
     def test_custom_app_id(self, mock_protocol: MagicMock) -> None:
         mgr = InternetManager(mock_protocol, "dev-1", app_id="my-app")
@@ -278,7 +280,7 @@ class TestInternetManagerConnectionClosedGuard:
         self, mock_protocol: MagicMock
     ) -> None:
         """Second call to _handle_connection_closed returns immediately."""
-        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com", app_id="test-app")
         mgr._connected = True
         mgr._authenticated = True
         mgr._state = TransportState.RUNNING
@@ -298,7 +300,7 @@ class TestInternetManagerConnectionClosedGuard:
         self, mock_protocol: MagicMock
     ) -> None:
         """Calling on a fresh (never-connected) manager is a no-op."""
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         await mgr._handle_connection_closed(RuntimeError("test"))
         mock_protocol.internet_status_changed.assert_not_called()
 
@@ -311,6 +313,7 @@ class TestInternetManagerConnectionClosedGuard:
             mock_protocol, "dev-1",
             server_url="ws://x.com",
             auto_reconnect=True,
+            app_id="test-app",
         )
         mgr._loop = asyncio.get_running_loop()
         # Simulate state after start() calls _connect() which sets STARTING
@@ -342,7 +345,7 @@ class TestInternetManagerLifecycle:
     async def test_handle_connection_closed_closes_ws(
         self, mock_protocol: MagicMock
     ) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com", app_id="test-app")
         mgr._connected = True
         mgr._authenticated = True
         mgr._state = TransportState.RUNNING
@@ -360,7 +363,7 @@ class TestInternetManagerLifecycle:
     async def test_handle_connection_closed_cancels_recv_task(
         self, mock_protocol: MagicMock
     ) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com", app_id="test-app")
         mgr._connected = True
         mgr._authenticated = True
         mgr._state = TransportState.RUNNING
@@ -396,7 +399,7 @@ class TestInternetManagerLifecycle:
         self, mock_protocol: MagicMock
     ) -> None:
         """When called from inside _recv_task, we must not cancel ourselves."""
-        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com", app_id="test-app")
         mgr._connected = True
         mgr._authenticated = True
         mgr._state = TransportState.RUNNING
@@ -432,6 +435,7 @@ class TestInternetManagerLifecycle:
             mock_protocol, "dev-1",
             server_url="ws://x.com",
             auto_reconnect=True,
+            app_id="test-app",
         )
         mgr._loop = asyncio.get_running_loop()
         mgr._state = TransportState.RUNNING
@@ -476,7 +480,7 @@ class TestInternetManagerLifecycle:
         self, mock_protocol: MagicMock
     ) -> None:
         """AuthError / Authenticated dispatch must keep strong refs to tasks."""
-        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com", app_id="test-app")
 
         async def noop(*args, **kwargs) -> None:
             await asyncio.sleep(0)
@@ -511,6 +515,7 @@ class TestInternetManagerLifecycle:
             mock_protocol, "dev-1",
             server_url="ws://x.com",
             auto_reconnect=True,
+            app_id="test-app",
         )
         mgr._loop = asyncio.get_running_loop()
         mgr._state = TransportState.RUNNING
@@ -566,6 +571,7 @@ class TestInternetManagerLifecycle:
             mock_protocol, "dev-1",
             server_url="ws://x.com",
             auto_reconnect=True,
+            app_id="test-app",
         )
         mgr._loop = asyncio.get_running_loop()
         mgr._state = TransportState.STARTING
@@ -604,7 +610,7 @@ class TestInternetManagerPollAndSend:
     async def test_poll_and_send_dispatches(
         self, mock_protocol: MagicMock
     ) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com", app_id="test-app")
         msg = self._make_outgoing("msg-1", "peer-1", b"hello")
         mock_protocol.internet_get_next_message = MagicMock(
             side_effect=[msg, None]
@@ -626,7 +632,7 @@ class TestInternetManagerPollAndSend:
     async def test_poll_and_send_stops_at_none(
         self, mock_protocol: MagicMock
     ) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com", app_id="test-app")
         mock_protocol.internet_get_next_message = MagicMock(return_value=None)
 
         async def fake_send(mid: str, rcpt: str, data: bytes) -> None:
@@ -642,7 +648,7 @@ class TestInternetManagerPollAndSend:
     ) -> None:
         from offline_protocol_sdk.internet_manager import _MAX_CONCURRENT_SENDS
 
-        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com", app_id="test-app")
 
         # Pre-fill _send_tasks to the cap with a never-completing task.
         async def _stuck() -> None:
@@ -679,7 +685,7 @@ class TestInternetManagerSendFrame:
         """Pins the relay SendMessage frame contract, message_id included —
         the id is what lets a message_id-aware relay dedup push
         notifications across retries of one logical message."""
-        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com", app_id="test-app")
         mgr._connected = True
         ws = MagicMock()
         ws.send = AsyncMock()
@@ -710,7 +716,7 @@ class TestInternetManagerSendFrame:
         exact id resolves rather than best-effort popping a different still-
         stuck one. Mirrors the iOS/Android record-before-write ordering.
         """
-        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com", app_id="test-app")
         mgr._connected = True
         seen_at_write: list[str] = []
 
@@ -737,7 +743,7 @@ class TestInternetManagerSendFrame:
         """If `await ws.send` raises, the frame never went out, so its
         optimistic in-flight entry must be taken back — otherwise a later
         recipient-keyed DeliveryError would false-fail a message never sent."""
-        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com", app_id="test-app")
         mgr._connected = True
         ws = MagicMock()
         ws.send = AsyncMock(side_effect=RuntimeError("socket broke"))
@@ -762,7 +768,7 @@ class TestInternetManagerSendFrame:
         FFI call raising) must NOT unrecord the entry: the frame is genuinely on
         the wire and a later relay DeliveryError needs it to fast-fail. unrecord
         fires only when the wire write itself never landed."""
-        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com", app_id="test-app")
         mgr._connected = True
         ws = MagicMock()
         ws.send = AsyncMock()  # the write SUCCEEDS
@@ -782,7 +788,7 @@ class TestInternetManagerSendMessageTOCTOU:
         self, mock_protocol: MagicMock
     ) -> None:
         """If ws becomes None after initial check, send reports failure."""
-        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com")
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com", app_id="test-app")
         mgr._connected = True
         mgr._ws = MagicMock()
 
@@ -836,7 +842,7 @@ class TestAddressDeclaration:
 
     @staticmethod
     def _manager(proto: MagicMock) -> tuple[InternetManager, AsyncMock]:
-        mgr = InternetManager(proto, "dev-1", server_url="ws://x.com")
+        mgr = InternetManager(proto, "dev-1", server_url="ws://x.com", app_id="test-app")
         ws = AsyncMock()
         mgr._ws = ws
         return mgr, ws
@@ -1167,7 +1173,7 @@ class TestDeliveryErrorRecipientKeyed:
     def test_delivery_error_fails_all_in_flight_for_recipient(
         self, mock_protocol: MagicMock
     ) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         # two frames in flight to the same recipient
         mgr._inflight.record_sent("offX", "id-1", mgr._now_ms())
         mgr._inflight.record_sent("offX", "id-2", mgr._now_ms())
@@ -1195,7 +1201,7 @@ class TestDeliveryErrorRecipientKeyed:
     def test_message_sent_prevents_false_fail_of_delivered(
         self, mock_protocol: MagicMock
     ) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         mgr._inflight.record_sent("offY", "delivered", mgr._now_ms())
         mgr._inflight.record_sent("offY", "stuck", mgr._now_ms())
         # relay confirms 'delivered' was forwarded
@@ -1243,7 +1249,7 @@ class TestMessageSentPushed:
     def test_pushed_frame_is_reported_under_the_exact_token(
         self, mock_protocol: MagicMock
     ) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         mgr._inflight.record_sent("offZ", "pushed-id", mgr._now_ms())
         mgr._process_received(self._pushed("offZ", "pushed-id"))
         mock_protocol.internet_send_failed_with_reason.assert_called_once_with(
@@ -1256,7 +1262,7 @@ class TestMessageSentPushed:
     def test_push_leaves_the_recipients_other_frames_in_flight(
         self, mock_protocol: MagicMock
     ) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         now = mgr._now_ms()
         mgr._inflight.record_sent("offZ", "pushed-id", now)
         mgr._inflight.record_sent("offZ", "still-flying", now)
@@ -1273,14 +1279,14 @@ class TestMessageSentPushed:
     def test_a_frame_the_relay_did_not_push_is_not_parked(
         self, mock_protocol: MagicMock, extra: dict[str, object]
     ) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         msg = {"type": "MessageSent", "recipient": "offZ", "message_id": "sent-id", **extra}
         mgr._process_received(json.dumps(msg).encode())
         mock_protocol.internet_send_failed_with_reason.assert_not_called()
         mock_protocol.internet_peer_presence.assert_not_called()
 
     def test_a_push_without_an_id_parks_nothing(self, mock_protocol: MagicMock) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         mgr._process_received(self._pushed("offZ", None))
         mock_protocol.internet_send_failed_with_reason.assert_not_called()
 
@@ -1290,7 +1296,7 @@ class TestMessageSentPushed:
         # `stored: true` means the relay will re-send the frame itself on the
         # recipient's next connection, so the core parks it without a
         # reachability probe. Same park otherwise.
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         mgr._inflight.record_sent("offZ", "held-id", mgr._now_ms())
         msg = {
             "type": "MessageSent",
@@ -1313,7 +1319,7 @@ class TestMessageSentPushed:
         # make and no probe to drop — so the whole park is gated on `pushed`,
         # and a relay that sets only `stored` here must not move the frame out
         # of its pending ACK.
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         mgr._inflight.record_sent("offZ", "live-id", mgr._now_ms())
         msg = {
             "type": "MessageSent",
@@ -1350,7 +1356,7 @@ class TestDeliveryErrorStored:
         return json.dumps(msg).encode()
 
     def test_the_held_id_takes_the_stored_token(self, mock_protocol: MagicMock) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         mgr._inflight.record_sent("offZ", "held-id", mgr._now_ms())
         mgr._process_received(self._error("offZ", "held-id", stored=True))
         mock_protocol.internet_send_failed_with_reason.assert_called_once_with(
@@ -1360,7 +1366,7 @@ class TestDeliveryErrorStored:
     def test_the_recipients_other_frames_keep_the_unreachable_prefix(
         self, mock_protocol: MagicMock
     ) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         now = mgr._now_ms()
         mgr._inflight.record_sent("offZ", "held-id", now)
         mgr._inflight.record_sent("offZ", "other-id", now)
@@ -1379,7 +1385,7 @@ class TestDeliveryErrorStored:
         # An older relay sends no message_id at all. Nothing is held then, and
         # the fallback drain must not borrow the flag for ids the relay never
         # named.
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         mgr._inflight.record_sent("offZ", "guessed-id", mgr._now_ms())
         mgr._process_received(self._error("offZ", None, stored=stored))
         reasons = [
@@ -1402,7 +1408,7 @@ class TestDeliveryErrorStored:
         # ``react_native_relay_parks_a_stored_delivery_error``, and the core
         # retires the already-scheduled probe in
         # ``test_relay_stored_verdict_drops_an_existing_probe``.
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         now = mgr._now_ms()
         mgr._inflight.record_sent("offZ", "first-id", now)
         mgr._inflight.record_sent("offZ", "second-id", now)
@@ -1439,7 +1445,7 @@ from offline_protocol_sdk.internet_manager import (
 class TestAdaptiveSendLoop:
     @pytest.mark.asyncio
     async def test_poll_returns_drained_count(self, mock_protocol: MagicMock) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         mgr._send_message = AsyncMock()  # type: ignore[method-assign]
         msgs = [MagicMock(message_id=f"m{i}", recipient_id="r", data=b"x") for i in range(3)]
         mock_protocol.internet_get_next_message = MagicMock(side_effect=[*msgs, None])
@@ -1448,7 +1454,7 @@ class TestAdaptiveSendLoop:
 
     @pytest.mark.asyncio
     async def test_poll_empty_queue_returns_zero(self, mock_protocol: MagicMock) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         mgr._send_message = AsyncMock()  # type: ignore[method-assign]
         mock_protocol.internet_get_next_message = MagicMock(return_value=None)
         assert mgr._poll_and_send_messages() == 0, "empty queue drains nothing (loop then relaxes)"
@@ -1459,7 +1465,7 @@ class TestAdaptiveSendLoop:
         # With every concurrency slot occupied the drain must not call into
         # the core at all: the loop's backoff then paces the retry, so
         # saturation cannot become a busy-spin against the FFI.
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         mgr._send_tasks = {MagicMock() for _ in range(_MAX_CONCURRENT_SENDS)}
         assert mgr._poll_and_send_messages() == 0
         mock_protocol.internet_get_next_message.assert_not_called()
@@ -1485,7 +1491,7 @@ class TestAdaptiveSendLoop:
     async def test_a_burst_redrains_immediately_then_ramps_down(
         self, mock_protocol: MagicMock
     ) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         mgr._connected = True
         mgr._authenticated = True
         waits: list[float] = []
@@ -1514,7 +1520,7 @@ class TestAdaptiveSendLoop:
     async def test_a_wake_resets_the_ramp_and_quiet_stays_at_idle(
         self, mock_protocol: MagicMock
     ) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
         mgr._connected = True
         mgr._authenticated = True
         waits: list[float] = []
@@ -1537,7 +1543,7 @@ class TestAdaptiveSendLoop:
     async def test_an_inbound_frame_wakes_the_send_loop(
         self, mock_protocol: MagicMock
     ) -> None:
-        mgr = InternetManager(mock_protocol, "dev-1")
+        mgr = InternetManager(mock_protocol, "dev-1", app_id="test-app")
 
         class _OneFrameWS:
             def __init__(self) -> None:

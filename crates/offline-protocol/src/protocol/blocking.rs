@@ -801,6 +801,7 @@ mod tests {
                 sender: "bob".to_string(),
                 rich_extras: None,
                 timestamp_ms: 0,
+                app_id: "test-app".to_string(),
             },
         );
 

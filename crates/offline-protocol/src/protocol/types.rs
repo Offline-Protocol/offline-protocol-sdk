@@ -7,7 +7,8 @@ use crate::telemetry::{
 use crate::Error;
 use chrono::{DateTime, Utc};
 use offline_protocol_core::{
-    ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority, ReplyContext,
+    AppId, ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority,
+    ReplyContext,
 };
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
@@ -1006,6 +1007,22 @@ pub struct SendMessageOptions {
     /// Send via this specific transport (bypassing DORS selection), like
     /// `send_message_via_transport`.
     pub via_transport: Option<TransportType>,
+    /// Application id stamped on this message, in place of the configured
+    /// [`crate::ProtocolConfig::app_id`].
+    ///
+    /// For an instance that serves several local applications behind one
+    /// identity: the receiver's `MessageReceived.app_id` reports it, so the
+    /// receiving instance can route the message to the right client. It
+    /// changes the stamp on this one frame only, never the storage
+    /// namespace, the MLS session, the BLE app tag, or the id on the
+    /// acknowledgements and control frames the engine sends for it.
+    ///
+    /// It travels in the clear, outside the sealed body and outside every
+    /// signature, so any carrier can read and rewrite it (threat model
+    /// R17). Treat it as routing metadata, never as an authorization input.
+    /// Held to the same rules as the configured id; an invalid value fails
+    /// the call with `InvalidArgument` before anything is queued.
+    pub app_id: Option<String>,
 }
 
 /// Options for `OfflineProtocol::send_media_with`: the chunk-0 media
@@ -1035,6 +1052,10 @@ pub struct MediaSendOptions {
     /// not collide with an active outbound transfer; bounded to the wire
     /// `file_id` field limit.
     pub file_id: Option<String>,
+    /// Application id stamped on every chunk of this transfer, in place of
+    /// the configured one. Same meaning, same limits and the same cleartext
+    /// caveat as [`SendMessageOptions::app_id`].
+    pub app_id: Option<String>,
 }
 
 /// The sealed rich body: what `__RICH_V1__` + JSON carries inside the MLS
@@ -1683,6 +1704,17 @@ pub(crate) struct PendingMessage {
     /// flush inside the sealed rich body or be dropped — never cleartext.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) rich: Option<RichSendExtras>,
+    /// Per-send application id from the rich send surface, `None` for the
+    /// configured one.
+    ///
+    /// Kept on the entry because the flush rebuilds the outer message from
+    /// this record: without it, a send parked while the session was not
+    /// ready would go out under the configured id and be routed to the
+    /// wrong application on the receiving instance. Serde-defaulted, so a
+    /// record queued before the field existed restores as `None`, which is
+    /// the id it was queued with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) app_id: Option<String>,
     /// When the message *first* entered the pending queue.
     ///
     /// Drives `pending_message_max_lifetime_ms`, and is deliberately preserved
@@ -2329,6 +2361,10 @@ pub(crate) struct PendingMediaMetadataEntry {
     /// The chunk-0 outer `Message` timestamp (wall-clock ms) — the sender's
     /// send time, surfaced on `FileReceived` for display ordering.
     pub(crate) timestamp_ms: i64,
+    /// The chunk-0 outer `Message` app id, surfaced on `FileReceived` so an
+    /// instance serving several applications can route the file. Without
+    /// it a per-send media app id would reach the wire and stop there.
+    pub(crate) app_id: String,
     /// Set when the sealed chunk-0 plaintext said this transfer belongs to
     /// the replicated-document layer. Its presence is what keeps every
     /// file-facing event of this transfer from firing: progress, completion
@@ -2359,6 +2395,12 @@ pub(crate) struct OutboundMediaTransfer {
     ///
     /// No public send surface can produce one.
     pub(crate) data_purpose: Option<crate::media_envelope::DataPurpose>,
+    /// Per-send application id, `None` for the configured one. Kept here
+    /// for the same reason as the extras: `pump_media_transfers` builds
+    /// later chunks from the transfer alone, and a chunk stamped with the
+    /// configured id would be routed to a different application than
+    /// chunk 0 on the receiving instance.
+    pub(crate) app_id: Option<AppId>,
 }
 
 /// Crash-scoped descriptor of an in-flight outbound media transfer.
@@ -2398,6 +2440,12 @@ pub(crate) struct MediaTransferDescriptor {
     /// still parses and reads as an ordinary transfer, which is what it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) data_purpose: Option<crate::media_envelope::DataPurpose>,
+    /// Per-send application id of the interrupted transfer, `None` for the
+    /// configured one. Persisted so `MediaResendRequired` can name the
+    /// application that must re-supply the bytes; an instance serving
+    /// several has no other way to know. Serde-defaulted like the purpose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) app_id: Option<String>,
 }
 
 pub(crate) enum OutboundSendPreparation {

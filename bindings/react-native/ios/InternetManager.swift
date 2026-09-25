@@ -50,6 +50,9 @@ public class InternetManager: NSObject, TransportManager {
     
     private let protocolInstance: OfflineProtocol
     private let deviceId: String
+    /// The configured application id, stamped on every frame this manager
+    /// synthesizes for the core. See LegacyRelayMessage.buildDict.
+    private let appId: String
 
     // Connection/configuration state. Kotlin marks the equivalents
     // AtomicBoolean/@Volatile; Swift has no volatile, and an unsynchronized
@@ -415,9 +418,10 @@ public class InternetManager: NSObject, TransportManager {
 
     // MARK: - Initialization
     
-    public init(protocol protocolInstance: OfflineProtocol, deviceId: String, serverUrl: String? = nil) {
+    public init(protocol protocolInstance: OfflineProtocol, deviceId: String, appId: String, serverUrl: String? = nil) {
         self.protocolInstance = protocolInstance
         self.deviceId = deviceId
+        self.appId = appId
         // Two identities, deliberately: `deviceId` is the profile (the relay
         // username by convention) and matches relay-fed answers, while the
         // closure resolves the derived address that core-fed roster payloads
@@ -1746,6 +1750,7 @@ public class InternetManager: NSObject, TransportManager {
                             senderId: senderId,
                             localAddress: self.protocolInstance.localAddress(),
                             profile: self.deviceId,
+                            appId: self.appId,
                             content: content,
                             timestampMs: self.parseTimestampToMs(timestampStr),
                             messageId: messageId,
@@ -2057,6 +2062,7 @@ public class InternetManager: NSObject, TransportManager {
             // when this manager was built. See LegacyRelayMessage's INVARIANT.
             localAddress: protocolInstance.localAddress(),
             profile: deviceId,
+            appId: appId,
             content: content,
             timestampMs: Int64(Date().timeIntervalSince1970 * 1000),
             // Nothing transmitted this frame, so no sender is awaiting a

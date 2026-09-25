@@ -831,8 +831,20 @@ interface MessageReceivedEvent {
   hop_count: number;
   transport: string;
   timestamp: number;
+  lamport_clock: number;
+  encrypted?: boolean;
+  reply_to_msg?: string;
+  reply_context?: ReplyContext;
+  content_type?: string;
+  media_metadata?: MediaMetadataEvent;
+  forward_info?: ForwardInfo;
+  app_id: string; // the sender's application id; route on it, never authorize
 }
 ```
+
+`app_id` is the id the sender stamped: its configured `appId`, or the `appId`
+passed to a rich `sendMessage`. It is cleartext on the wire, so any carrier
+could have rewritten it.
 
 #### message_delivered
 

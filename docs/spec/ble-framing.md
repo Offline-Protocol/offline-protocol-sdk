@@ -100,6 +100,11 @@ because a peripheral attributes an inbound write to its sender by the link it
 arrived on. A second identity on the same link would have its hop-0 control
 frames refused by the receiving core's transport-sender check.
 
+One engine instance is one identity and one tag. An instance that serves
+several local applications does so behind its configured application id: a
+per-send application id changes the `app_id` stamped on that one frame, never
+the tag this service advertises and never the storage the identity lives in.
+
 So a central that finds more than one instance MUST choose one before it reads
 Device id or Identity, and MUST then read, subscribe and write on that instance
 only. Among the instances that expose both Device id and Identity, it takes:

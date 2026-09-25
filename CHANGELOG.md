@@ -11,6 +11,42 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+## [Unreleased]
+
+### Added
+
+- **A send can name the application it is for.** `SendMessageOptions` and
+  `MediaSendOptions` take an optional `app_id` (React Native: `appId` on
+  `sendMessage` and `sendMedia`), stamped on that message or on every chunk of
+  that transfer in place of the configured one. It is for one instance
+  serving several local applications behind one identity. It changes the
+  stamp on that frame only, never the storage namespace, the MLS session or
+  the BLE app tag, and the acknowledgement for it keeps the configured id. The
+  id survives the pending queue, the media pump and a restart, and an invalid
+  one fails the call with `InvalidArgument` before anything is queued.
+- **Received events say which application a message was for.**
+  `message_received` carries `app_id` on both the live and the delayed-decrypt
+  path, `file_received` carries it from the transfer's first chunk, and
+  `media_resend_required` names the per-send id of an interrupted transfer so
+  the right application is asked for the bytes. The id is cleartext and
+  unsigned on the wire, so route on it and never authorize on it; the
+  threat model records this as residual risk R17.
+
+### Fixed
+
+- **Frames a bridge builds for the core carried a fixed application id.** The
+  iOS, Android and Python bridges stamped `"offline-messenger"` on every relay
+  answer, relay group frame and legacy plain-text DM they rebuilt for the
+  core, whatever `appId` the app had configured. They now stamp the
+  configured id.
+
+### Changed
+
+- **Python: `InternetManager` requires `app_id`.** It is now a keyword-only
+  argument with no default, because the default was the fixed id above.
+  `ProtocolManager` already passes it, so only code that builds an
+  `InternetManager` directly needs `app_id=`.
+
 ## [0.27.0] — 2026-09-25
 
 > **Replicated documents can be removed, narrowed, and carry their bytes

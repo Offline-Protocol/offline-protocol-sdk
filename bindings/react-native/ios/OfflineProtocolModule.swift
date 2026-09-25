@@ -913,7 +913,7 @@ class OfflineProtocolModule: RCTEventEmitter {
             
             // Initialize Internet manager if internet is enabled
             if config.internetEnabled {
-                internetManager = InternetManager(protocol: proto, deviceId: config.profile)
+                internetManager = InternetManager(protocol: proto, deviceId: config.profile, appId: config.appId)
                 internetManager?.delegate = self
                 internetManager?.serverMessageEmitter = { [weak self] rawJson in
                     self?.emitServerMessageEvent(rawJson)
@@ -1629,7 +1629,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                 contentType: (dict["content_type"] as? String).map(parseContentType),
                 replyContext: parseReplyContext(dict["reply_context"] as? [String: Any]),
                 mediaMetadata: parseRichMediaMetadata(dict["media_metadata"] as? [String: Any]),
-                forwardInfo: parseForwardInfo(dict["forward_info"] as? [String: Any])
+                forwardInfo: parseForwardInfo(dict["forward_info"] as? [String: Any]),
+                appId: dict["app_id"] as? String
             )
 
             let messageId = try proto.sendMessageRich(recipient: recipient, content: content, options: sendOptions)
@@ -2692,12 +2693,12 @@ class OfflineProtocolModule: RCTEventEmitter {
                     // and gates LeaveGroup on it, so a placeholder would
                     // silently corrupt relay group state. Mirrors the
                     // Android module's guard.
-                    guard let userId = currentConfig?.profile else {
+                    guard let userId = currentConfig?.profile, let appId = currentConfig?.appId else {
                         throw NSError(domain: "OfflineProtocol", code: -1, userInfo: [
                             NSLocalizedDescriptionKey: "Cannot enable Internet transport before initialize(config)"
                         ])
                     }
-                    let newManager = InternetManager(protocol: proto, deviceId: userId)
+                    let newManager = InternetManager(protocol: proto, deviceId: userId, appId: appId)
                     newManager.delegate = self
                     newManager.serverMessageEmitter = { [weak self] rawJson in
                         self?.emitServerMessageEvent(rawJson)
@@ -3113,7 +3114,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                 replyToMsg: dict?["reply_to_msg"] as? String,
                 replyContext: parseReplyContext(dict?["reply_context"] as? [String: Any]),
                 forwardInfo: parseForwardInfo(dict?["forward_info"] as? [String: Any]),
-                fileId: dict?["file_id"] as? String
+                fileId: dict?["file_id"] as? String,
+                appId: dict?["app_id"] as? String
             )
             let fileId = try proto.sendMediaRich(recipient: recipient, fileData: Array(data), fileName: fileName, contentType: ct, options: sendOptions)
             resolver(fileId)

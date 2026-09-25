@@ -385,6 +385,7 @@ impl OfflineProtocol {
                         media_metadata: message.media_metadata.clone(),
                         forward_info,
                         encrypted: was_decrypted,
+                        app_id: message.app_id.as_str().to_string(),
                     };
 
                     let Ok(state) = lock_shared_state(&self.shared_state) else {
@@ -937,6 +938,7 @@ impl OfflineProtocol {
                             sender: sender.clone(),
                             rich_extras,
                             timestamp_ms: message.timestamp.as_millis(),
+                            app_id: message.app_id.as_str().to_string(),
                             data_purpose,
                         },
                     );
@@ -1084,16 +1086,17 @@ impl OfflineProtocol {
                 self.route_data_media_payload(&sender, &purpose, file_data);
                 return ChunkOutcome::Handled;
             }
-            let (content_type, media_metadata, rich_extras, timestamp_ms) = metadata_entry
+            let (content_type, media_metadata, rich_extras, timestamp_ms, app_id) = metadata_entry
                 .map(|entry| {
                     (
                         entry.content_type,
                         entry.media_metadata,
                         entry.rich_extras,
                         Some(entry.timestamp_ms),
+                        Some(entry.app_id),
                     )
                 })
-                .unwrap_or((ContentType::File, None, None, None));
+                .unwrap_or((ContentType::File, None, None, None, None));
             let rich_extras = rich_extras.unwrap_or_default();
 
             if let Ok(state) = lock_shared_state(&self.shared_state) {
@@ -1110,6 +1113,7 @@ impl OfflineProtocol {
                     rich_extras.reply_to_msg,
                     rich_extras.reply_context.as_ref(),
                     rich_extras.forward_info.as_ref(),
+                    app_id,
                 ));
             }
         }
