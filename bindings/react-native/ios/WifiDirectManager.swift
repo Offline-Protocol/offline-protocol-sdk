@@ -443,6 +443,11 @@ extension WifiDirectManager: MCSessionDelegate {
                 self.peers.connected(peerID)
 
             case .notConnected:
+                // Scoped to the current session like the other two callbacks.
+                // stop() already reported the old session's peers through
+                // endAll(), and a late disconnect from it would otherwise end
+                // the same MCPeerID's live link in the new session.
+                guard self.session === session else { return }
                 self.peers.ended(peerID)
 
             case .connecting:

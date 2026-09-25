@@ -16434,8 +16434,15 @@ mod tests {
                     ),
                 ],
                 &[
+                    // Our preamble before the announcement: announcing makes
+                    // the core send at once, on another queue.
                     "case .announce(let address): \
+                     guard sendPreambleIfNeeded(handle, link) else { return } \
                      let announcement = links.announce(handle, address: address)",
+                    // A late disconnect from a replaced session must not end
+                    // the same MCPeerID's link in the new one.
+                    "case .notConnected: guard self.session === session else { return } \
+                     self.peers.ended(peerID)",
                     "if announcement.firstForAddress { host.peerStreamConnected(address) }",
                     "case .deliver(let address, let payload): \
                      host.peerStreamReceived(address, payload)",

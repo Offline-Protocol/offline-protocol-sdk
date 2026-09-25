@@ -14,7 +14,8 @@
 //
 // The rules, each of which a test pins:
 // - Our preamble goes to a peer as soon as it connects, without waiting for
-//   theirs, and theirs must verify within `preambleTimeout`.
+//   theirs, and always before the peer is announced; theirs must verify
+//   within `preambleTimeout`.
 // - The host is told only the address the preamble proved: `peerConnected`
 //   once per address, each body attributed to it, and `peerDisconnected` once,
 //   if and only if the peer still held the address when it ended.
@@ -118,25 +119,7 @@ final class PeerStreamSession<Handle: Hashable> {
     /// A peer connected: send our preamble and start its deadline.
     func connected(_ handle: Handle) {
         let link = state(for: handle)
-        guard !link.refused else { return }
-
-        if !link.sentPreamble {
-            // Ours goes first and without waiting for theirs, so neither side
-            // can hold the other half-open by staying silent.
-            do {
-                guard let host = host else { return }
-                let assertion = try host.peerStreamIdentityAssertion()
-                guard let frame = PeerStreamFraming.frame(assertion) else {
-                    refuse(handle, link, reason: "our assertion is outside the frame bounds")
-                    return
-                }
-                try send(frame, handle)
-                link.sentPreamble = true
-            } catch {
-                refuse(handle, link, reason: "no preamble sent: \(error)")
-                return
-            }
-        }
+        guard !link.refused, sendPreambleIfNeeded(handle, link) else { return }
 
         if link.preamble.awaitingPreamble, !link.deadlineArmed {
             link.deadlineArmed = true
@@ -152,7 +135,7 @@ final class PeerStreamSession<Handle: Hashable> {
     /// otherwise a body for the host attributed to the address it proved.
     func received(_ message: Data, from handle: Handle) {
         // A message can arrive before the connect event; the state is created
-        // here then, and our preamble goes out when the connect arrives.
+        // here then, and our preamble goes out before the peer is announced.
         let link = state(for: handle)
         guard !link.refused, let host = host else { return }
 
@@ -169,6 +152,12 @@ final class PeerStreamSession<Handle: Hashable> {
         case .refuse(let reason):
             refuse(handle, link, reason: reason)
         case .announce(let address):
+            // Ours before the announcement, when the peer's preamble beat our
+            // connect event. Announcing makes the core send at once (the
+            // outbox flush and the key package run inside the call), and
+            // those go out on another queue; a message that reached the peer
+            // ahead of our assertion would be refused and the peer lost.
+            guard sendPreambleIfNeeded(handle, link) else { return }
             let announcement = links.announce(handle, address: address)
             if let older = announcement.superseded {
                 // Disconnected without a loss report: `links` already moved
@@ -214,6 +203,27 @@ final class PeerStreamSession<Handle: Hashable> {
     }
 
     // MARK: - Private
+
+    /// Sends our preamble once. Ours goes first and without waiting for
+    /// theirs, so neither side can hold the other half-open by staying
+    /// silent. False when it could not be sent, and the peer was refused.
+    private func sendPreambleIfNeeded(_ handle: Handle, _ link: Link) -> Bool {
+        if link.sentPreamble { return true }
+        do {
+            guard let host = host else { return false }
+            let assertion = try host.peerStreamIdentityAssertion()
+            guard let frame = PeerStreamFraming.frame(assertion) else {
+                refuse(handle, link, reason: "our assertion is outside the frame bounds")
+                return false
+            }
+            try send(frame, handle)
+            link.sentPreamble = true
+            return true
+        } catch {
+            refuse(handle, link, reason: "no preamble sent: \(error)")
+            return false
+        }
+    }
 
     private func state(for handle: Handle) -> Link {
         if let link = linkStates[handle] { return link }

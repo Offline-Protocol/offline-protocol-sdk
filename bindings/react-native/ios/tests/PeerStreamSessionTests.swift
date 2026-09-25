@@ -26,6 +26,7 @@ final class PeerStreamSessionTests: XCTestCase {
         var events: [String] = []
         var bodies: [Data] = []
         var failAssertion = false
+        var onConnected: (() -> Void)?
 
         init(_ me: String) { self.me = me }
 
@@ -42,7 +43,10 @@ final class PeerStreamSessionTests: XCTestCase {
                   assertion.dropFirst(name.count).allSatisfy({ $0 == 0 }) else { throw Refused() }
             return address
         }
-        func peerStreamConnected(_ address: String) { events.append("connected:\(address)") }
+        func peerStreamConnected(_ address: String) {
+            onConnected?()
+            events.append("connected:\(address)")
+        }
         func peerStreamReceived(_ address: String, _ body: Data) {
             events.append("message:\(address):\(body.count)")
             bodies.append(body)
@@ -127,12 +131,25 @@ final class PeerStreamSessionTests: XCTestCase {
 
     func testAMessageBeforeTheConnectEventIsStillThePreamble() {
         // The carrier may deliver the peer's first message before our connect
-        // callback runs; the preamble is accepted and ours still goes out.
+        // callback runs; the preamble is accepted and ours still goes out,
+        // before the announcement, because announcing makes the core send.
+        host.onConnected = { [unowned self] in
+            XCTAssertEqual(self.sent.count, 1, "our preamble must precede the announcement")
+        }
         session.received(frame(Self.assertion("peer-b")), from: "h1")
         XCTAssertEqual(host.events, ["connected:peer-b"])
+        XCTAssertEqual(sent.map { $0.frame }, [frame(Self.assertion("peer-a"))])
         session.connected("h1")
-        XCTAssertEqual(sent.count, 1)
+        XCTAssertEqual(sent.count, 1, "the connect event does not send it twice")
         XCTAssertTrue(timers.isEmpty, "a proved peer needs no deadline")
+    }
+
+    func testAFailedPreambleSendBeforeTheConnectEventAnnouncesNothing() {
+        failSend = true
+        session.received(frame(Self.assertion("peer-b")), from: "h1")
+        XCTAssertEqual(disconnected, ["h1"])
+        XCTAssertTrue(host.events.isEmpty)
+        XCTAssertTrue(session.isEmpty)
     }
 
     func testABodyOfExactlyTheCeilingIsDelivered() {
