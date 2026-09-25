@@ -719,26 +719,40 @@ class WifiDirectManager(
     }
 
     /**
-     * Reconnects a client whose stream to the group owner ended while the
-     * group is still up. CONNECTION_CHANGED fires only when the group changes,
-     * so without this a client whose socket dropped (the owner's app
-     * restarted, a write deadline fired) stays unreachable for as long as the
-     * group lasts. The delay doubles after an attempt that proved no peer, so
-     * an owner that refuses us is not dialled in a loop, and resets after one
-     * that did.
+     * Dials the group owner again after this client's stream to [ended]
+     * closed; see [GroupOwnerRedial] for the decision.
+     *
+     * The owner dialled is the one the group has now, not [ended]. On a group
+     * switch the new owner's [connectToGroupOwner] runs while the old stream
+     * is still winding down, loses [outboundOpen] to it, and returns; this is
+     * then the only dial left, so a check that the owner is still [ended]
+     * would leave the client with no stream for the whole of the new group.
      */
-    private fun scheduleReconnect(address: String, proved: Boolean) {
-        if (proved) reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)
-        if (state != TransportState.RUNNING || isGroupOwner || groupOwnerAddress != address) return
-        val delay = reconnectDelayMs.get()
-        reconnectDelayMs.set(minOf(delay * 2, RECONNECT_MAX_DELAY_MS))
+    private fun scheduleReconnect(ended: String, proved: Boolean) {
+        val plan = GroupOwnerRedial.next(
+            ended = ended,
+            proved = proved,
+            running = state == TransportState.RUNNING,
+            isGroupOwner = isGroupOwner,
+            owner = groupOwnerAddress,
+            currentDelayMs = reconnectDelayMs.get(),
+            initialDelayMs = RECONNECT_INITIAL_DELAY_MS,
+            maxDelayMs = RECONNECT_MAX_DELAY_MS,
+        )
+        if (plan == null) {
+            if (proved) reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)
+            return
+        }
+        reconnectDelayMs.set(plan.nextDelayMs)
         transportHandler.postDelayed({
             // Not gated on pause: a paused transport keeps its open streams,
-            // so it keeps reconnecting one that dropped.
-            if (state == TransportState.RUNNING && !isGroupOwner && groupOwnerAddress == address) {
-                connectToGroupOwner(address)
+            // so it keeps reconnecting one that dropped. Re-read, because the
+            // group can change again inside the delay.
+            val owner = groupOwnerAddress
+            if (state == TransportState.RUNNING && !isGroupOwner && owner != null) {
+                connectToGroupOwner(owner)
             }
-        }, delay)
+        }, plan.delayMs)
     }
 
     /**
@@ -893,3 +907,33 @@ class WifiDirectManager(
     }
 }
 
+/**
+ * When a group client dials its owner again after its stream ended, and after
+ * how long. Pure, so [GroupOwnerRedialTest] pins it without a group.
+ *
+ * CONNECTION_CHANGED fires only when the group changes, so without a redial a
+ * client whose stream dropped (the owner's app restarted, a write deadline
+ * fired) stays unreachable for as long as the group lasts. The delay doubles
+ * after an attempt toward the same owner that proved no peer, so an owner
+ * that refuses us is not dialled in a loop. It starts over after an attempt
+ * that proved one, and for an owner other than the one that ended: a group
+ * switch is a new owner, not a retry.
+ */
+internal object GroupOwnerRedial {
+    data class Plan(val owner: String, val delayMs: Long, val nextDelayMs: Long)
+
+    fun next(
+        ended: String,
+        proved: Boolean,
+        running: Boolean,
+        isGroupOwner: Boolean,
+        owner: String?,
+        currentDelayMs: Long,
+        initialDelayMs: Long,
+        maxDelayMs: Long,
+    ): Plan? {
+        if (!running || isGroupOwner || owner == null) return null
+        val delay = if (proved || owner != ended) initialDelayMs else currentDelayMs
+        return Plan(owner, delay, minOf(delay * 2, maxDelayMs))
+    }
+}

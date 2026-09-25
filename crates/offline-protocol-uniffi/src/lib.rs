@@ -16550,6 +16550,22 @@ mod tests {
             1,
             "PeerStreamSession.swift must unframe in exactly one place, received(_:from:)"
         );
+
+        // A group client redials the owner the group has NOW. On a group
+        // switch the new owner's dial loses the one-outbound-socket flag to
+        // the old stream winding down, and a redial that insisted on the old
+        // owner left the client with no stream for the whole new group.
+        for needed in [
+            "val plan = GroupOwnerRedial.next(",
+            "val owner = groupOwnerAddress if (state == TransportState.RUNNING && \
+             !isGroupOwner && owner != null) { connectToGroupOwner(owner) }",
+        ] {
+            assert!(
+                kotlin.contains(needed),
+                "WifiDirectManager.kt must redial the current group owner. Expected to find:\n  \
+                 {needed}"
+            );
+        }
         for call in ["host.peerStreamConnected(", "host.peerStreamReceived("] {
             assert_eq!(
                 swift.matches(call).count(),

@@ -135,7 +135,9 @@ Local policy differs from P9 on purpose. The newer of two streams for one
 address supersedes the older, because only the client dials its group owner,
 so the two-dialler tie that the lower-address rule settles cannot occur. A
 client whose stream ends while the group is up reconnects on a doubling
-delay. The manager does not form a group; it joins one the system formed.
+delay, always to the owner the group has at that moment: on a group switch
+the new owner's first dial can lose to the old stream still closing, and the
+redial is then the only one left. The manager does not form a group; it joins one the system formed.
 
 `PeerStreamSocketsTest` and `PeerStreamFramingTest` pin it, the latter
 replaying the chapter's vectors. The group handling itself is not covered in
