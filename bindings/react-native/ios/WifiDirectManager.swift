@@ -89,7 +89,6 @@ public class WifiDirectManager: NSObject, TransportManager {
     
     private let protocolInstance: OfflineProtocol
     private let deviceId: String
-    private let peerId: MCPeerID
     
     // MultipeerConnectivity components
     private var advertiser: MCNearbyServiceAdvertiser?
@@ -169,7 +168,6 @@ public class WifiDirectManager: NSObject, TransportManager {
     public init(protocol protocolInstance: OfflineProtocol, deviceId: String) {
         self.protocolInstance = protocolInstance
         self.deviceId = deviceId
-        self.peerId = MCPeerID(displayName: deviceId)
         super.init()
         linkQueue.setSpecific(key: Self.linkQueueKey, value: true)
         peers = PeerStreamSession<MCPeerID>(
@@ -216,6 +214,15 @@ public class WifiDirectManager: NSObject, TransportManager {
         updateState(.starting)
         transportStartAt = Date()
         
+        // A fresh MCPeerID per start, never one per manager. PeerStreamSession
+        // keys each peer's state by its MCPeerID, and a remote that stopped
+        // and started again under the same one could have its new connect
+        // land before the old session's disconnect: the connect would find a
+        // preamble already sent and an address already proved, send nothing,
+        // and the remote would refuse us at its deadline. A new id makes every
+        // restart a new peer, which the supersede rule already handles.
+        let peerId = MCPeerID(displayName: deviceId)
+
         // Create session
         session = MCSession(
             peer: peerId,
@@ -530,9 +537,6 @@ extension WifiDirectManager: MCNearbyServiceBrowserDelegate {
             "discoveryInfo": info ?? [:]
         ])
         
-        // Don't invite ourselves
-        guard peerID != peerId else { return }
-
         // One snapshot for the whole decision. This read used to happen three
         // separate times and end in `session!`, so a stop() landing between
         // the guard and the invite crashed on the force-unwrap — the exact
@@ -540,6 +544,10 @@ extension WifiDirectManager: MCNearbyServiceBrowserDelegate {
         // still reached around them. A nil session means the transport is
         // down, which is nothing to invite anyone to.
         guard let session = session else { return }
+
+        // Don't invite ourselves. Read off the session: the id is minted per
+        // start(), and the session is the one this browser belongs to.
+        guard peerID != session.myPeerID else { return }
 
         // Don't invite if already connected
         guard !session.connectedPeers.contains(peerID) else { return }

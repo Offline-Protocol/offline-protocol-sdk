@@ -222,7 +222,11 @@ messages onto another queue, which allowed both.
 Local policy differs from Python's P9 on purpose. When a second peer proves
 an address already announced, the newer supersedes the older, which is
 disconnected with no loss report: Multipeer peers do not both dial, and the
-duplicate is almost always the same device back under a new `MCPeerID`.
+duplicate is almost always the same device back under a new `MCPeerID`. The
+manager mints its `MCPeerID` in every `start()` so that holds for a clean
+stop and start too: the session's per-peer state is keyed by that id, and a
+reused one could meet a new connect with state that says our preamble was
+already sent.
 There is no write queue or deadline here, because the session queues and
 retries its own reliable sends. Each message is one whole frame, and one
 whose prefix disagrees with its length is refused, since there is no stream

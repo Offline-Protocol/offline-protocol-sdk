@@ -16551,6 +16551,25 @@ mod tests {
             "PeerStreamSession.swift must unframe in exactly one place, received(_:from:)"
         );
 
+        // The iOS MCPeerID is minted per start(). `PeerStreamSession` keys a
+        // peer's state by it, and one id for the manager's lifetime let a
+        // remote's clean stop/start reconnect under a handle that still said
+        // its preamble was sent: no preamble went out, and the remote refused
+        // us at its deadline.
+        assert!(
+            swift.contains("let peerId = MCPeerID(displayName: deviceId) session = MCSession("),
+            "ios/WifiDirectManager.swift: start() must mint the MCPeerID it builds the session on"
+        );
+        assert!(
+            !swift.contains("private let peerId: MCPeerID")
+                && !swift.contains("private var peerId: MCPeerID"),
+            "ios/WifiDirectManager.swift: the MCPeerID must not outlive one start()"
+        );
+        assert!(
+            swift.contains("guard peerID != session.myPeerID else { return }"),
+            "ios/WifiDirectManager.swift: the browser must skip itself by the session's own id"
+        );
+
         // A group client redials the owner the group has NOW. On a group
         // switch the new owner's dial loses the one-outbound-socket flag to
         // the old stream winding down, and a redial that insisted on the old
