@@ -117,7 +117,7 @@ in the uniffi crate pins the mobile call sites, which no CI job executes.
 ## C5. Hand-mirrored constants must be pinned in every language
 
 Some constants exist in several places no single compiler sees together.
-Twelve sets do today, and they are pinned by **two different** mechanisms, so
+Thirteen sets do today, and they are pinned by **two different** mechanisms, so
 knowing which one you are touching matters.
 
 **The relay-answer prefix exemption list** is the canonical example: the core,
@@ -148,6 +148,15 @@ it must name all five transports, and the two entry points that take a name
 (`getTransportMetrics`, `forceTransport`) must go through it. Each of those
 used to carry its own three-name copy that defaulted the rest to BLE, so
 forcing a transport the copy did not know silently forced the radio.
+
+The per-send application id is pinned the same way, by
+`react_native_rich_sends_carry_the_app_id_end_to_end`. It is optional at every
+layer, so a layer that omits it compiles and drops it: the TypeScript params
+and event types, the rich-path predicate and options map in `index.ts` (only
+the rich native methods carry `app_id`, so an `appId`-only call that takes the
+plain path goes out under the configured id), and the `app_id` read in both
+bridges' `sendMessageRich` and `sendMediaRich`. The behaviour of the predicate
+is also pinned at runtime by `js-ci-harness/rich-send-app-id.test.js`.
 
 **The relay address-proof signing domain** is the fifth, and it is the one set
 pinned by both mechanisms at once. The Swift and Kotlin

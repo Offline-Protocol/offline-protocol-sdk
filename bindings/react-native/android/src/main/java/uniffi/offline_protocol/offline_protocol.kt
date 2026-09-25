@@ -7645,6 +7645,8 @@ data class MediaSendOptions (
     var `forwardInfo`: ForwardInfo? = null 
     , 
     var `fileId`: kotlin.String? = null 
+    , 
+    var `appId`: kotlin.String? = null 
     
 ){
     
@@ -7665,6 +7667,7 @@ public object FfiConverterTypeMediaSendOptions: FfiConverterRustBuffer<MediaSend
             FfiConverterOptionalTypeReplyContext.read(buf),
             FfiConverterOptionalTypeForwardInfo.read(buf),
             FfiConverterOptionalString.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -7674,7 +7677,8 @@ public object FfiConverterTypeMediaSendOptions: FfiConverterRustBuffer<MediaSend
             FfiConverterOptionalString.allocationSize(value.`replyToMsg`) +
             FfiConverterOptionalTypeReplyContext.allocationSize(value.`replyContext`) +
             FfiConverterOptionalTypeForwardInfo.allocationSize(value.`forwardInfo`) +
-            FfiConverterOptionalString.allocationSize(value.`fileId`)
+            FfiConverterOptionalString.allocationSize(value.`fileId`) +
+            FfiConverterOptionalString.allocationSize(value.`appId`)
     )
 
     override fun write(value: MediaSendOptions, buf: ByteBuffer) {
@@ -7684,6 +7688,7 @@ public object FfiConverterTypeMediaSendOptions: FfiConverterRustBuffer<MediaSend
             FfiConverterOptionalTypeReplyContext.write(value.`replyContext`, buf)
             FfiConverterOptionalTypeForwardInfo.write(value.`forwardInfo`, buf)
             FfiConverterOptionalString.write(value.`fileId`, buf)
+            FfiConverterOptionalString.write(value.`appId`, buf)
     }
 }
 
@@ -9099,6 +9104,8 @@ data class SendMessageOptions (
     var `mediaMetadata`: MediaMetadata? = null 
     , 
     var `forwardInfo`: ForwardInfo? = null 
+    , 
+    var `appId`: kotlin.String? = null 
     
 ){
     
@@ -9119,6 +9126,7 @@ public object FfiConverterTypeSendMessageOptions: FfiConverterRustBuffer<SendMes
             FfiConverterOptionalTypeReplyContext.read(buf),
             FfiConverterOptionalTypeMediaMetadata.read(buf),
             FfiConverterOptionalTypeForwardInfo.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -9128,7 +9136,8 @@ public object FfiConverterTypeSendMessageOptions: FfiConverterRustBuffer<SendMes
             FfiConverterOptionalTypeContentType.allocationSize(value.`contentType`) +
             FfiConverterOptionalTypeReplyContext.allocationSize(value.`replyContext`) +
             FfiConverterOptionalTypeMediaMetadata.allocationSize(value.`mediaMetadata`) +
-            FfiConverterOptionalTypeForwardInfo.allocationSize(value.`forwardInfo`)
+            FfiConverterOptionalTypeForwardInfo.allocationSize(value.`forwardInfo`) +
+            FfiConverterOptionalString.allocationSize(value.`appId`)
     )
 
     override fun write(value: SendMessageOptions, buf: ByteBuffer) {
@@ -9138,6 +9147,7 @@ public object FfiConverterTypeSendMessageOptions: FfiConverterRustBuffer<SendMes
             FfiConverterOptionalTypeReplyContext.write(value.`replyContext`, buf)
             FfiConverterOptionalTypeMediaMetadata.write(value.`mediaMetadata`, buf)
             FfiConverterOptionalTypeForwardInfo.write(value.`forwardInfo`, buf)
+            FfiConverterOptionalString.write(value.`appId`, buf)
     }
 }
 

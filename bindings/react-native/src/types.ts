@@ -974,6 +974,15 @@ export interface SendMessageParams {
   mediaMetadata?: MediaMetadata;
   /** Forward attribution (optional). Sealed-only, like `replyContext`. */
   forwardInfo?: ForwardInfo;
+  /**
+   * Application id to stamp on this message instead of the configured
+   * `appId` (optional). For one instance serving several applications
+   * behind one identity; a single-app caller never sets it. It changes the
+   * stamp on this message only, never the storage namespace or the BLE app tag.
+   * Cleartext and unsigned on the wire, so it is routing metadata, never
+   * an authorization input. An invalid id is rejected as InvalidArgument.
+   */
+  appId?: string;
 }
 
 /**
@@ -1053,6 +1062,15 @@ export interface SendMediaParams {
    * collide with an active outbound transfer; max 4096 bytes.
    */
   fileId?: string;
+  /**
+   * Application id to stamp on every chunk of this transfer instead of the configured
+   * `appId` (optional). For one instance serving several applications
+   * behind one identity; a single-app caller never sets it. It changes the
+   * stamp on every chunk of this transfer only, never the storage namespace or the BLE app tag.
+   * Cleartext and unsigned on the wire, so it is routing metadata, never
+   * an authorization input. An invalid id is rejected as InvalidArgument.
+   */
+  appId?: string;
 }
 
 /**
@@ -1129,6 +1147,13 @@ export interface MessageReceivedEvent extends BaseEvent {
   media_metadata?: MediaMetadataEvent;
   /** Forwarding attribution (present when this is a forwarded message). */
   forward_info?: ForwardInfo;
+  /**
+   * Application id the sender stamped on this message: its configured id,
+   * or the per-send `appId` of a rich send. Routes a message to the right
+   * application on an instance serving several. Cleartext and unsigned on
+   * the wire, so route on it, never authorize on it.
+   */
+  app_id: string;
 }
 
 /**
@@ -1322,6 +1347,12 @@ export interface FileReceivedEvent extends BaseEvent {
   reply_context?: ReplyContext;
   /** Forwarding attribution (sealed chunk-0 extras). */
   forward_info?: ForwardInfo;
+  /**
+   * Application id the sender stamped on the transfer, like
+   * `MessageReceivedEvent.app_id`. Absent only if the chunk-0 record was
+   * evicted before completion.
+   */
+  app_id?: string;
 }
 
 /**
@@ -2275,6 +2306,11 @@ export interface MediaResendRequiredEvent extends BaseEvent {
   recipient: string;
   file_name: string;
   file_size: number;
+  /**
+   * The per-send `appId` the transfer was started with, absent when it
+   * used the configured one: the application to ask for the bytes.
+   */
+  app_id?: string;
 }
 
 // ============================================================================

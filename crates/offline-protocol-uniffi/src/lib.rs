@@ -1377,6 +1377,7 @@ pub struct SendMessageOptions {
     pub reply_context: Option<ReplyContext>,
     pub media_metadata: Option<MediaMetadata>,
     pub forward_info: Option<ForwardInfo>,
+    pub app_id: Option<String>,
 }
 
 /// Options for `send_media_rich`, mirroring the core `MediaSendOptions`.
@@ -1388,6 +1389,7 @@ pub struct MediaSendOptions {
     pub reply_context: Option<ReplyContext>,
     pub forward_info: Option<ForwardInfo>,
     pub file_id: Option<String>,
+    pub app_id: Option<String>,
 }
 
 /// File transfer progress
@@ -3409,7 +3411,7 @@ impl OfflineProtocol {
             media_metadata: options.media_metadata.map(CoreMediaMetadata::from),
             forward_info,
             via_transport,
-            app_id: None,
+            app_id: options.app_id,
         };
 
         let message_id = protocol
@@ -5607,7 +5609,7 @@ impl OfflineProtocol {
             reply_context,
             forward_info,
             file_id: options.file_id,
-            app_id: None,
+            app_id: options.app_id,
         };
 
         let mut protocol = self.lock_inner()?;
@@ -8524,6 +8526,54 @@ mod tests {
 
         // Queue should now be empty
         assert!(protocol.reticulum_get_next_message().is_none());
+    }
+
+    #[test]
+    fn send_message_rich_stamps_the_per_send_app_id_and_refuses_an_invalid_one() {
+        let protocol = OfflineProtocol::new(create_reticulum_config()).unwrap();
+        protocol.start().unwrap();
+        protocol.reticulum_status_changed(true).unwrap();
+        protocol.force_transport(TransportType::Reticulum).unwrap();
+
+        let options = |app_id: &str| SendMessageOptions {
+            priority: None,
+            reply_to_msg: None,
+            content_type: None,
+            reply_context: None,
+            media_metadata: None,
+            forward_info: None,
+            app_id: Some(app_id.to_string()),
+        };
+
+        let refused = protocol.send_message_rich(
+            "recipient-peer".to_string(),
+            "hello".to_string(),
+            options("bad/app"),
+        );
+        assert!(
+            matches!(refused, Err(ProtocolError::InvalidArgument(ref m)) if m.contains("app_id")),
+            "an invalid per-send app id is the caller's defect, got {refused:?}"
+        );
+        assert!(protocol.reticulum_get_next_message().is_none());
+
+        protocol
+            .send_message_rich(
+                "recipient-peer".to_string(),
+                "hello".to_string(),
+                options("other-app"),
+            )
+            .unwrap();
+        let outgoing = protocol
+            .reticulum_get_next_message()
+            .expect("the send reaches the carrier");
+        let frame = offline_protocol_core::Message::from_wire_v1_bytes(&outgoing.data)
+            .or_else(|_| offline_protocol_core::Message::from_bytes(&outgoing.data))
+            .expect("an outgoing frame decodes");
+        assert_eq!(
+            frame.app_id.as_str(),
+            "other-app",
+            "the FFI must hand the per-send id to the core"
+        );
     }
 
     #[test]
@@ -16489,6 +16539,113 @@ mod tests {
                     "{label}: an entry point carries its own name switch again"
                 );
             }
+        }
+    }
+
+    /// The per-send application id crosses every hand-written layer of the
+    /// React Native binding under one spelling.
+    ///
+    /// The field is optional everywhere, so each layer that forgets it
+    /// compiles and drops it silently: the message then goes out under the
+    /// configured id and the receiving instance routes it to the wrong
+    /// application. The TypeScript param names it `appId`; `index.ts` must
+    /// list it in the rich-path predicate (only the rich native methods carry
+    /// it) and put it in the options map as `app_id`; each native bridge
+    /// must read `app_id` from that map into the generated `appId` field; and
+    /// the received-event types must declare what the core now emits.
+    #[test]
+    fn react_native_rich_sends_carry_the_app_id_end_to_end() {
+        let region = |label: &str, code: &str, from: &str, to: &str| -> String {
+            let start = code
+                .find(from)
+                .unwrap_or_else(|| panic!("{label}: `{from}` is gone; it moved or was renamed"));
+            let end = code[start..]
+                .find(to)
+                .map(|i| start + i)
+                .unwrap_or_else(|| panic!("{label}: `{to}` no longer follows `{from}`"));
+            code[start..end].to_string()
+        };
+        let assert_has = |label: &str, code: &str, needle: &str| {
+            assert!(
+                code.contains(needle),
+                "{label} must contain `{needle}`: the field is optional at every \
+                 layer, so a layer that omits it loses the per-send app id silently"
+            );
+        };
+
+        let types = rn_source_code_only("src/types.ts");
+        for (interface, field) in [
+            ("export interface SendMessageParams {", "appId?: string;"),
+            ("export interface SendMediaParams {", "appId?: string;"),
+            (
+                "export interface MessageReceivedEvent extends BaseEvent {",
+                "app_id: string;",
+            ),
+            (
+                "export interface FileReceivedEvent extends BaseEvent {",
+                "app_id?: string;",
+            ),
+            (
+                "export interface MediaResendRequiredEvent extends BaseEvent {",
+                "app_id?: string;",
+            ),
+        ] {
+            assert_has(interface, &region(interface, &types, interface, "}"), field);
+        }
+
+        let index = rn_source_code_only("src/index.ts");
+        for (label, from, to) in [
+            (
+                "index.ts sendMessage",
+                "async sendMessage(params: SendMessageParams)",
+                "OfflineProtocolNativeModule.sendMessageRich(",
+            ),
+            (
+                "index.ts sendMedia",
+                "async sendMedia(params: SendMediaParams)",
+                "OfflineProtocolNativeModule.sendMediaRich(",
+            ),
+        ] {
+            let code = region(label, &index, from, to);
+            assert_has(label, &code, "params.appId !== undefined");
+            assert_has(label, &code, "app_id: params.appId ?? null");
+        }
+
+        let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+        );
+        for (label, code, from, to, read) in [
+            (
+                "Swift sendMessageRich",
+                &swift,
+                "func sendMessageRich(",
+                "proto.sendMessageRich(",
+                "appId: dict[\"app_id\"] as? String",
+            ),
+            (
+                "Swift sendMediaRich",
+                &swift,
+                "func sendMediaRich(",
+                "proto.sendMediaRich(",
+                "appId: dict?[\"app_id\"] as? String",
+            ),
+            (
+                "Kotlin sendMessageRich",
+                &kotlin,
+                "fun sendMessageRich(",
+                "proto.sendMessageRich(",
+                "appId = options?.getString(\"app_id\")",
+            ),
+            (
+                "Kotlin sendMediaRich",
+                &kotlin,
+                "fun sendMediaRich(",
+                "proto.sendMediaRich(",
+                "appId = options?.getString(\"app_id\")",
+            ),
+        ] {
+            assert_has(label, &region(label, code, from, to), read);
         }
     }
 

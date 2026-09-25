@@ -1678,7 +1678,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 contentType = options?.getString("content_type")?.let { parseContentType(it) },
                 replyContext = parseReplyContext(options?.getMap("reply_context")),
                 mediaMetadata = parseRichMediaMetadata(options?.getMap("media_metadata")),
-                forwardInfo = parseForwardInfo(options?.getMap("forward_info"))
+                forwardInfo = parseForwardInfo(options?.getMap("forward_info")),
+                appId = options?.getString("app_id")
             )
             val messageId = proto.sendMessageRich(recipient, content, sendOptions)
             promise.resolve(messageId)
@@ -3025,7 +3026,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 replyToMsg = options?.getString("reply_to_msg"),
                 replyContext = parseReplyContext(options?.getMap("reply_context")),
                 forwardInfo = parseForwardInfo(options?.getMap("forward_info")),
-                fileId = options?.getString("file_id")
+                fileId = options?.getString("file_id"),
+                appId = options?.getString("app_id")
             )
             val id = proto.sendMediaRich(recipient, bytes.map { it.toUByte() }, fileName, ct, sendOptions)
             promise.resolve(id)

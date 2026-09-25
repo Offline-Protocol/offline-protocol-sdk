@@ -395,6 +395,9 @@ dictionary ForwardInfo {
 // never sent cleartext. All fields defaulted so callers can pass only what
 // they need. content_type must not be FileChunk (internal transport type),
 // and rich extras over 32 KiB serialized are rejected — both InvalidArgument.
+// app_id stamps this message with another application's id instead of the
+// configured one (one instance serving several applications); it is
+// cleartext and unsigned on the wire, and an invalid id is InvalidArgument.
 dictionary SendMessageOptions {
     MessagePriority? priority = null;
     string? reply_to_msg = null;
@@ -402,6 +405,7 @@ dictionary SendMessageOptions {
     ReplyContext? reply_context = null;
     MediaMetadata? media_metadata = null;
     ForwardInfo? forward_info = null;
+    string? app_id = null;
 };
 
 // Options for send_media_rich. The rich fields (caption, reply_to_msg,
@@ -412,7 +416,8 @@ dictionary SendMessageOptions {
 // cleartext. All fields defaulted so callers can pass only what they need.
 // An unparsable reply_to_msg, rich extras over 32 KiB serialized, or a
 // file_id that is empty, over 4096 bytes, or already carried by an active
-// outbound transfer are rejected — all InvalidArgument.
+// outbound transfer are rejected — all InvalidArgument. app_id stamps
+// every chunk, with the meaning and limits of SendMessageOptions.app_id.
 dictionary MediaSendOptions {
     MediaMetadata? media_metadata = null;
     string? caption = null;
@@ -420,6 +425,7 @@ dictionary MediaSendOptions {
     ReplyContext? reply_context = null;
     ForwardInfo? forward_info = null;
     string? file_id = null;
+    string? app_id = null;
 };
 
 // File transfer progress information

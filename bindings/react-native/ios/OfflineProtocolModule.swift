@@ -1629,7 +1629,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                 contentType: (dict["content_type"] as? String).map(parseContentType),
                 replyContext: parseReplyContext(dict["reply_context"] as? [String: Any]),
                 mediaMetadata: parseRichMediaMetadata(dict["media_metadata"] as? [String: Any]),
-                forwardInfo: parseForwardInfo(dict["forward_info"] as? [String: Any])
+                forwardInfo: parseForwardInfo(dict["forward_info"] as? [String: Any]),
+                appId: dict["app_id"] as? String
             )
 
             let messageId = try proto.sendMessageRich(recipient: recipient, content: content, options: sendOptions)
@@ -3113,7 +3114,8 @@ class OfflineProtocolModule: RCTEventEmitter {
                 replyToMsg: dict?["reply_to_msg"] as? String,
                 replyContext: parseReplyContext(dict?["reply_context"] as? [String: Any]),
                 forwardInfo: parseForwardInfo(dict?["forward_info"] as? [String: Any]),
-                fileId: dict?["file_id"] as? String
+                fileId: dict?["file_id"] as? String,
+                appId: dict?["app_id"] as? String
             )
             let fileId = try proto.sendMediaRich(recipient: recipient, fileData: Array(data), fileName: fileName, contentType: ct, options: sendOptions)
             resolver(fileId)
