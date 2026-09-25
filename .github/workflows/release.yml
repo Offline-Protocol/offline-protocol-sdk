@@ -1038,12 +1038,47 @@ jobs:
       #   - Publishing from this workflow rather than a reusable one. npm
       #     validates the *calling* workflow's name, so factoring this step out
       #     into a `workflow_call` file breaks it for the same reason.
+      #
+      # A re-run of this job must not turn a shipped release red. The registry
+      # stages a large upload (0.27.0 was 157 MB) and makes it readable only
+      # minutes after `npm publish` returns, and every later publish of that
+      # version is refused: E409 "previously staged" while it is staging, E403
+      # "previously published" once it is live. Re-running failed jobs therefore
+      # always failed here, for a version that had shipped. So a version already
+      # on the registry is not published again, and those two refusals hand over
+      # to the verification step below instead of failing. Any other error still
+      # fails the step.
       - name: Publish to npm
         if: inputs.dry_run != true
         working-directory: bindings/react-native
-        run: npm publish --access public --tag "$NPM_TAG"
         env:
           NPM_TAG: ${{ steps.version.outputs.NPM_TAG }}
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          set -uo pipefail
+          PKG="@offline-protocol/mesh-sdk@$VERSION"
+
+          if [ "$(npm view "$PKG" version 2>/dev/null || true)" = "$VERSION" ]; then
+            echo "::notice title=Already on npm::$PKG is already on the registry, so it is \
+          not published again. The next step still verifies its provenance."
+            exit 0
+          fi
+
+          set +e
+          npm publish --access public --tag "$NPM_TAG" 2>&1 | tee publish.log
+          NPM_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$NPM_STATUS" -eq 0 ]; then
+            exit 0
+          fi
+          if grep -qiE 'previously staged|previously published' publish.log; then
+            echo "::notice title=Already published::npm refused $PKG as already staged or \
+          published by an earlier attempt. Not treated as a failure: the next step waits \
+          for the version and verifies it."
+            exit 0
+          fi
+          exit "$NPM_STATUS"
 
       # Verified from the registry rather than from a green step. The publish
       # succeeding proves the tarball uploaded; it does not prove the upload
@@ -1052,25 +1087,60 @@ jobs:
       # the only direct evidence either way.
       #
       # This necessarily runs after the upload, so it cannot prevent a
-      # provenance-less publish -- it makes one loud instead of invisible. The
-      # version is immutable by now, so a red run here means "shipped, without
-      # provenance", never "did not ship".
+      # provenance-less publish -- it makes one loud instead of invisible.
+      #
+      # Two separate questions, asked in order, because conflating them is what
+      # turned the 0.27.0 run red. `npm view <pkg>@<ver> <field>` prints nothing
+      # both for a version that lacks the field and for a version that does not
+      # exist yet, and a staged publish does not exist yet for several minutes
+      # (0.27.0 went live about eight minutes after `npm publish` returned). The
+      # old check polled for 50 seconds and then reported "no provenance" for a
+      # version that did carry it. So: first wait, for minutes, until the
+      # version itself is readable; only then ask whether it has attestations.
+      # Neither failure means "did not ship" once the publish step is green. A
+      # re-run is safe after the publish step change above, but it fixes
+      # neither; the error texts say what to check instead.
       - name: Verify the published version carries provenance
         if: inputs.dry_run != true
+        timeout-minutes: 30
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
+          # 40 polls, 30 seconds apart: 20 minutes for a staged publish to land.
+          VISIBLE_POLLS: 40
+          POLL_SECONDS: 30
         run: |
           set -euo pipefail
           PKG="@offline-protocol/mesh-sdk@$VERSION"
 
-          # A just-published version can take a few seconds to become readable.
-          for attempt in 1 2 3 4 5; do
+          visible=false
+          for attempt in $(seq 1 "$VISIBLE_POLLS"); do
+            if [ "$(npm view "$PKG" version 2>/dev/null || true)" = "$VERSION" ]; then
+              visible=true
+              echo "$PKG is readable on the registry (poll $attempt of $VISIBLE_POLLS)."
+              break
+            fi
+            echo "$PKG not readable yet, probably still staging (poll $attempt of $VISIBLE_POLLS)."
+            sleep "$POLL_SECONDS"
+          done
+
+          if [ "$visible" != true ]; then
+            echo "::error title=Published version not visible::$PKG was accepted by the \
+          publish step but is still not readable after $((VISIBLE_POLLS * POLL_SECONDS)) \
+          seconds. The registry stages large uploads and can take this long; check \
+          'npm view $PKG dist.attestations' by hand before doing anything else. A re-run \
+          is safe (the publish step skips a version that is already there) but only \
+          waits again."
+            exit 1
+          fi
+
+          # The attestation is part of the same publish, so once the version is
+          # readable it should be too. A short grace covers registry replicas.
+          for attempt in 1 2 3; do
             ATTESTATIONS="$(npm view "$PKG" dist.attestations.url 2>/dev/null || true)"
             if [ -n "$ATTESTATIONS" ]; then
               echo "$PKG published with provenance: $ATTESTATIONS"
               exit 0
             fi
-            echo "No provenance visible for $PKG yet (attempt $attempt of 5); retrying."
             sleep 10
           done
 
