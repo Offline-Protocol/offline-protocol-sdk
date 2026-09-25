@@ -39,8 +39,44 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   answer, relay group frame and legacy plain-text DM they rebuilt for the
   core, whatever `appId` the app had configured. They now stamp the
   configured id.
+- **The mobile peer-stream managers carry traffic.** Android's Wi-Fi Direct
+  manager and iOS's Multipeer manager used to drop every inbound frame and
+  announce no peer, because nothing on the wire said who a peer was. Both now
+  exchange the identity preamble from
+  [the stream chapter](docs/spec/stream-framing.md): each side sends its
+  assertion first, checks the peer's with `verifyIdentityAssertion`, and
+  announces the peer only under the address it proved. A peer that sends
+  anything else first, or nothing for ten seconds, is disconnected unannounced.
+  One peer is announced per address, and a newer connection for the same
+  address replaces the older one without a loss event. A peer is reported
+  lost exactly once, and no message is delivered after that report.
+- **Android Wi-Fi Direct framing faults.** The reader refused a message of
+  exactly 1 MiB, and after refusing a length it read the skipped body as the
+  next length, so every later frame on that socket was misread. It now
+  accepts the ceiling and closes the socket on any refused frame. Two writes
+  to one socket could also run at once and interleave. Each socket now has
+  one ordered writer, so a peer that stops reading stalls only itself.
+- **Android Wi-Fi Direct no longer broadcasts a direct message.** A message
+  for a peer with no open socket went to every socket in the group. It is now
+  dropped, and the core's acknowledgement and retry cover it. A client also
+  opened another socket to its group owner on every group change; it now
+  keeps one and reconnects it while the group lasts.
+- **The Bluetooth LE centrals use the strict verifier.** iOS and Android
+  checked a peer's identity with the permissive `verifySignature`, which
+  accepts some forged assertions the strict check refuses. They now call
+  `verifyIdentityAssertion`, the same check the Python central and both
+  peer-stream managers use.
 
 ### Changed
+
+- **iOS: the Multipeer service type is `offlineprotocol`.** It was
+  `offline-proto`. An app that enables the `wifiDirect` transport on iOS must
+  list both `_offlineprotocol._tcp` and `_offlineprotocol._udp` under
+  `NSBonjourServices` in its `Info.plist`, or iOS blocks discovery with no
+  error. Its discovery info now carries `txtvers` and `addr` instead of the
+  app's `profile`. An iPhone on this release and one on an earlier release do
+  not see each other over Multipeer. Neither carried traffic before, so no
+  working path is lost.
 
 - **Python: `InternetManager` requires `app_id`.** It is now a keyword-only
   argument with no default, because the default was the fixed id above.

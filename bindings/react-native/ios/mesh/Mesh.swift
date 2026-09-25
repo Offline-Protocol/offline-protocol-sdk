@@ -35,21 +35,12 @@ struct SignedIdentityData {
         return buffer
     }
     
-    /// Decodes signed identity data from GATT transmission.
-    static func decode(_ data: Data?) -> SignedIdentityData? {
-        guard let data = data, data.count >= headerSize else { return nil }
-        
-        let publicKey = data[0..<publicKeySize]
-        let signature = data[publicKeySize..<headerSize]
-        let advertisementData = data[headerSize...]
-        
-        return SignedIdentityData(
-            publicKey: Data(publicKey),
-            signature: Data(signature),
-            advertisementData: Data(advertisementData)
-        )
-    }
-
+    // There is no decoder. A peer's assertion is parsed, checked and derived
+    // in one call to `verifyIdentityAssertion`, the verifier every platform
+    // and carrier shares; the split this type used to undo on receipt had a
+    // second home here, and the permissive signature check it fed accepted
+    // assertions the strict core verifier refuses.
+    //
     // The peer's address is NOT derived here. Address derivation lives in Rust
     // (`deriveAddress`) so every platform produces the same string for the same
     // key; the hand-rolled Swift and Kotlin copies this file used to carry were

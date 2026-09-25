@@ -104,6 +104,45 @@ exemption list, pinned in `RelayAnswerPrefixesTest.kt`.
 
 See [C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language).
 
+## K8. A Wi-Fi Direct socket's verdict is its preamble, not its connect
+
+`WifiDirectManager` fills the peer-stream slot with Wi-Fi Direct group
+sockets, framed as [the chapter](../spec/stream-framing.md) specifies. A
+socket's peer is announced to the core only under the address
+`verifyIdentityAssertion` derived from its first frame: never on connect, and
+never under the socket endpoint or `"go:<ip>"`, which is what this manager
+once passed and which put strings into the core's bounded `known_peers`.
+
+Everything between the socket and the core lives in `PeerStreamSockets`,
+behind a small host interface, so it runs in CI on loopback sockets. It owes
+the shapes P9 describes for Python, with the reasons given there: one
+deadline over the whole preamble frame, a per-stream ordered writer (a shared
+pool could write two frames to one socket at once and splice them), a write
+deadline on progress rather than per frame, and a queue bound that drops only
+while the writer is stalled on the peer. It also owes one thing Python gets
+from asyncio's single thread: a stream's announcement, deliveries and loss
+report run under that stream's lock, so no body reaches the core after its
+loss report.
+
+One limit is stated rather than fixed. A client that vanishes without a
+FIN stays announced until the stream notices: Java cannot set the keepalive
+interval, so `SO_KEEPALIVE` runs on the platform default (commonly two
+hours), and the write deadline sees no stall until both kernel buffers are
+full. The core's acknowledgements are the real signal that a peer is gone,
+as P9 says for the same reason.
+
+Local policy differs from P9 on purpose. The newer of two streams for one
+address supersedes the older, because only the client dials its group owner,
+so the two-dialler tie that the lower-address rule settles cannot occur. A
+client whose stream ends while the group is up reconnects on a doubling
+delay, always to the owner the group has at that moment: on a group switch
+the new owner's first dial can lose to the old stream still closing, and the
+redial is then the only one left. The manager does not form a group; it joins one the system formed.
+
+`PeerStreamSocketsTest` and `PeerStreamFramingTest` pin it, the latter
+replaying the chapter's vectors. The group handling itself is not covered in
+CI (C9).
+
 ## Testing
 
 Unit tests live in

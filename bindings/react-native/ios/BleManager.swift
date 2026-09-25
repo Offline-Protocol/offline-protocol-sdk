@@ -141,8 +141,6 @@ public class BleManager: NSObject, TransportManager {
         return cachedLocalAddress
     }
 
-    /// Verified peer identities (peripheral UUID -> SignedIdentityData)
-    private var verifiedPeerIdentities: [UUID: SignedIdentityData] = [:]
 
     /// Half-finished handshakes: what a peripheral advertised in `DEVICE_ID`,
     /// before its `IDENTITY` has been read and verified.
@@ -3089,7 +3087,6 @@ extension BleManager: CBCentralManagerDelegate {
         // suppressed by `announcedPeripherals` after a re-pair.
         advertisedDeviceIds.removeValue(forKey: peripheral.identifier)
         verifiedPeerAddresses.removeValue(forKey: peripheral.identifier)
-        verifiedPeerIdentities.removeValue(forKey: peripheral.identifier)
         announcedPeripherals.remove(peripheral.identifier)
         clearServiceInstanceSelection(for: peripheral.identifier)
         if logThrottler.shouldLog(key: "disconnect_\(peripheral.identifier.uuidString)", interval: 10) {
@@ -3609,7 +3606,6 @@ extension BleManager: CBPeripheralDelegate {
         // pairing a stale device id with a newly read identity.
         advertisedDeviceIds.removeValue(forKey: peripheral.identifier)
         verifiedPeerAddresses.removeValue(forKey: peripheral.identifier)
-        verifiedPeerIdentities.removeValue(forKey: peripheral.identifier)
         retireServiceInstanceSelection(for: peripheral.identifier)
 
         print("[BleManager] ⚠️ Refusing peer \(peripheral.identifier): \(reason) (\(detail))")
@@ -3831,68 +3827,35 @@ extension BleManager: CBPeripheralDelegate {
     /// is what makes the binding refuse the peer — so an unverifiable identity
     /// and an absent one are the same thing to the gate, deliberately.
     private func handleReceivedIdentity(_ data: Data, for peripheral: CBPeripheral) {
-        guard let signedIdentity = SignedIdentityData.decode(data) else {
-            print("[BleManager] Failed to decode identity data from \(peripheral.identifier)")
+        // One call does the parse, the signature check and the derivation, in
+        // the core, with the strict check every carrier shares. It replaced a
+        // local split plus the permissive `verifySignature`, which accepted
+        // assertions the peer-stream managers' verifier refuses.
+        let derivedAddress: String
+        do {
+            derivedAddress = try verifyIdentityAssertion(assertion: [UInt8](data))
+        } catch {
+            print("[BleManager] ⚠️ Identity assertion did not verify for \(peripheral.identifier): \(error)")
             rejectPeerHandshake(
                 for: peripheral,
                 reason: PeerIdentityBinding.Reason.unverifiedIdentity,
-                detail: "identity blob did not decode"
+                detail: "identity assertion did not verify: \(error.localizedDescription)"
             )
             return
         }
 
-        // Verify the signature
-        do {
-            let isValid = try protocolInstance.verifySignature(
-                publicKey: [UInt8](signedIdentity.publicKey),
-                data: [UInt8](signedIdentity.advertisementData),
-                signature: [UInt8](signedIdentity.signature)
-            )
+        print("[BleManager] ✅ Verified peer identity: \(derivedAddress) for \(peripheral.identifier)")
+        emitDiagnostic("info", "Verified peer identity", context: [
+            "peripheral": peripheral.identifier.uuidString,
+            "derivedAddress": derivedAddress
+        ])
 
-            if isValid {
-                // Store the verified identity
-                verifiedPeerIdentities[peripheral.identifier] = signedIdentity
-
-                // Derive the peer's address in Rust — the single implementation
-                // shared by every platform. `decode` already guarantees a
-                // 32-byte key, so the throw is unreachable here.
-                guard let derivedAddress = try? deriveAddress(publicKey: [UInt8](signedIdentity.publicKey)) else {
-                    print("[BleManager] Failed to derive address for \(peripheral.identifier)")
-                    rejectPeerHandshake(
-                        for: peripheral,
-                        reason: PeerIdentityBinding.Reason.unverifiedIdentity,
-                        detail: "address derivation failed"
-                    )
-                    return
-                }
-                print("[BleManager] ✅ Verified peer identity: \(derivedAddress) for \(peripheral.identifier)")
-                emitDiagnostic("info", "Verified peer identity", context: [
-                    "peripheral": peripheral.identifier.uuidString,
-                    "derivedAddress": derivedAddress
-                ])
-
-                // Record the proof and join it against the advertised id. The
-                // route is seeded there rather than here: learning a route to
-                // a peer the protocol layer has not been told about put an
-                // address in the routing table that `peers` had no entry for.
-                verifiedPeerAddresses[peripheral.identifier] = derivedAddress
-                completePeerHandshake(for: peripheral)
-            } else {
-                print("[BleManager] ⚠️ Invalid signature for peer \(peripheral.identifier)")
-                rejectPeerHandshake(
-                    for: peripheral,
-                    reason: PeerIdentityBinding.Reason.unverifiedIdentity,
-                    detail: "identity signature did not verify"
-                )
-            }
-        } catch {
-            print("[BleManager] Failed to verify signature: \(error)")
-            rejectPeerHandshake(
-                for: peripheral,
-                reason: PeerIdentityBinding.Reason.unverifiedIdentity,
-                detail: "signature verification threw: \(error.localizedDescription)"
-            )
-        }
+        // Record the proof and join it against the advertised id. The route
+        // is seeded there rather than here: learning a route to a peer the
+        // protocol layer has not been told about put an address in the
+        // routing table that `peers` had no entry for.
+        verifiedPeerAddresses[peripheral.identifier] = derivedAddress
+        completePeerHandshake(for: peripheral)
     }
     
     public func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {

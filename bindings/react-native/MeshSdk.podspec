@@ -54,6 +54,8 @@ Pod::Spec.new do |s|
     "ios/SupersededLatchPolicy.swift",
     "ios/WriteStallWatchdog.swift",
     "ios/WifiDirectManager.swift",
+    "ios/PeerStreamFraming.swift",
+    "ios/PeerStreamSession.swift",
     "ios/NostrManager.swift",
     "ios/NostrQueryTracker.swift",
     "ios/ReticulumManager.swift",

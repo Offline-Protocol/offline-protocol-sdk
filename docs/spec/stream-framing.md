@@ -16,9 +16,9 @@ chapter fragments nothing. What a stream lacks that GATT supplies is **who the
 peer is** (the Identity characteristic) and **where one message ends** (an ATT
 write has a boundary; a stream does not). Without the first, no frame can be
 attributed and the receiving core refuses all of them, which is why the
-shipped Wi-Fi Direct managers still drop every inbound frame: this chapter is
-what they were missing. Without the second, two implementations that agree on every message
-still cannot read each other's bytes.
+mobile Wi-Fi Direct managers dropped every inbound frame until they adopted
+this chapter. Without the second, two implementations that agree on every
+message still cannot read each other's bytes.
 
 Two layers are specified here:
 
@@ -153,9 +153,10 @@ order, and the Android manager was written against it. A carrier that is
 already message-oriented, such as a Multipeer session, delivers whole messages
 and needs no prefix to find a boundary; it still wraps each message as one
 frame, so that one receive path serves every carrier and the ceiling is read
-off the same four bytes everywhere. The shipped iOS manager sends bare
-messages over its session today, so adopting this chapter is a framing change
-there, not only a preamble. Stating the byte order matters because the mistake it prevents is invisible to a
+off the same four bytes everywhere, and a message whose prefix disagrees
+with the rest of it is refused, since there is no stream position to
+resynchronise on. Stating the byte order matters because the mistake it
+prevents is invisible to a
 round-trip test: an implementation that writes the prefix little-endian reads
 its own frames perfectly and reads every conforming peer's first frame as a
 length in the hundreds of millions, which the ceiling then refuses. The
@@ -171,14 +172,14 @@ receiver MAY refuse a preamble frame on its prefix alone when the length is
 under 96, without reading the body.
 
 The ceiling is inclusive: a body of exactly 1,048,576 bytes is a valid frame.
-Two faults in the shipped Android reader are recorded here because both are
-invisible until a conforming peer exists. It refuses a length of exactly the
-ceiling (`length < 1024 * 1024`), so the largest message a conforming sender
-may send is dropped. And on a refused length it does not close the stream: it
-reads the next four bytes, which are the start of the body it skipped, as the
-next length, so every frame after the first refusal is read from the wrong
-offset. The manager pays both when it adopts the preamble; a receiver that
-refuses a length and keeps reading has no defined state to resume from.
+Two faults in an earlier Android reader are recorded here because both are
+invisible until a conforming peer exists, and both are easy to write again. It
+refused a length of exactly the ceiling (`length < 1024 * 1024`), so the
+largest message a conforming sender may send was dropped. And on a refused
+length it did not close the stream: it read the next four bytes, which were
+the start of the body it skipped, as the next length, so every frame after the
+first refusal was read from the wrong offset. A receiver that refuses a length
+and keeps reading has no defined state to resume from.
 
 ## What a receiver owes
 
@@ -219,8 +220,15 @@ The bounds this gives a receiver are the ones that matter. Memory per stream
 is at most one body in flight, `DEFAULT_MAX_MESSAGE_SIZE + 4` bytes, because a
 frame is read whole before the next prefix. The number of streams a receiver
 accepts, and the preamble deadline, are local policy, and a conforming
-implementation chooses its own. The shipped managers exchange no preamble
-yet, so they have no deadline to inherit.
+implementation chooses its own. The mobile managers use ten seconds and, on
+Android, sixteen open sockets; the Python manager's choices are in its bridge
+rules. Which of two streams for one address to keep is policy too, and the
+implementations differ for a reason: the Python manager keeps the stream
+opened by the lower address, because two hosts that each list the other dial
+at once and must agree without talking, while the mobile managers keep the
+newer, because on a phone the duplicate is almost always the same peer
+reconnecting past a half-open stream, and neither Wi-Fi Direct nor Multipeer
+has both ends dial.
 
 ## Finding a peer on a LAN
 
@@ -235,10 +243,11 @@ A framework that publishes DNS-SD on the implementation's behalf is bound by
 the same rule. A Multipeer advertiser MUST use the service type
 `offlineprotocol`, which the framework publishes as `_offlineprotocol._tcp`
 and which fits its fifteen-character limit, and SHOULD carry `addr` in the
-discovery dictionary it advertises. The shipped iOS manager advertises
-`offline-proto`, which is debt: an app's `NSBonjourServices` entry must name
-the service type the manager actually publishes, or iOS local-network privacy
-blocks discovery without an error.
+discovery dictionary it advertises. Multipeer publishes the type over both
+TCP and UDP, so an app's `NSBonjourServices` must list
+`_offlineprotocol._tcp` and `_offlineprotocol._udp`, or iOS local-network
+privacy blocks discovery without an error. The iOS manager once advertised
+`offline-proto`, which no documented entry named.
 
 The `addr` entry is a hint the preamble proves. It tells a browser which
 device it is about to connect to, so the derived address of the preamble can
@@ -285,8 +294,8 @@ carrier. And its transport queues a message toward an address only while a
 stream has proved that address, refusing any other recipient as not
 reachable on this carrier, which the selector treats as "try the next one".
 Both are what make the invariants above safe to register. A stream layer
-that is up but has exchanged no preamble (the shipped mobile managers today)
-would otherwise win the selection on bandwidth and hold every direct message
+that is up but has exchanged no preamble (the mobile managers, before they
+adopted this chapter) would otherwise win the selection on bandwidth and hold every direct message
 in a queue the platform has no proved stream to write to, and would be
 chosen for a file transfer whose chunks it then refuses one by one. For the
 same reason a file transfer is pinned to the slot only when a stream has
@@ -320,6 +329,8 @@ the events it yields. `tests/stream_framing_vectors.rs` in that crate is the
 consumer that checks it against this file, with the one real verifier behind
 it. The platform managers implement the same chapter in their own language;
 bodies cross the FFI whole, so nothing below the FFI reads a prefix for them.
+Each replays this file in its own suite: `PeerStreamFramingTest` on Android,
+`PeerStreamFramingTests` on iOS, and `test_peer_stream_manager.py` in Python.
 
 A vector that fails means the framing moved, which needs a versioned preamble
 and a new file. Editing an expected value to make a test pass converts a

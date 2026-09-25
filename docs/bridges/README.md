@@ -117,7 +117,7 @@ in the uniffi crate pins the mobile call sites, which no CI job executes.
 ## C5. Hand-mirrored constants must be pinned in every language
 
 Some constants exist in several places no single compiler sees together.
-Thirteen sets do today, and they are pinned by **two different** mechanisms, so
+Fourteen sets do today, and they are pinned by **two different** mechanisms, so
 knowing which one you are touching matters.
 
 **The relay-answer prefix exemption list** is the canonical example: the core,
@@ -256,13 +256,30 @@ so no phone could verify a Python peripheral. The layout now has one home,
 and one verifier, the namespace-level `verify_identity_assertion`. Python
 holds no copy: its peripheral serves the bytes `identity_assertion` returns
 and its central hands what it read to the verifier, and `pytest` pins both
-against the real library and the RFC 8032 vectors. The Swift and Kotlin
-`SignedIdentityData` decoders are the remaining copies; they never derive or
-verify (both call the core for that) but they still split, and
-`react_native_ble_identity_decoders_split_at_the_sealed_offsets` reads both
-files for the two sizes, because neither BLE callback chain runs in CI. A
-sealed guard refuses a second `fn parse_identity_assertion` anywhere in the
-workspace.
+against the real library and the RFC 8032 vectors. No phone splits one
+either: the Bluetooth LE centrals and both peer-stream managers hand what
+they read to the same verifier. The mobile decoders that used to split it fed
+the permissive `verifySignature`, a second verifier that accepted what the
+strict one refuses, and they are gone. What remains is each bridge's
+`SignedIdentityData` encoder for what its own peripheral serves, and
+`react_native_ble_identity_encoders_split_at_the_sealed_offsets` reads both
+files for the two sizes and refuses a decoder coming back, because neither
+BLE callback chain runs in CI. A sealed guard refuses a second
+`fn parse_identity_assertion` anywhere in the workspace.
+
+**The peer-stream framing sizes** are the fourteenth: the four-byte prefix,
+the inclusive 1 MiB ceiling and the 96-byte preamble floor of
+[the stream chapter](../spec/stream-framing.md), written once in each of
+`PeerStreamFraming.swift`, `PeerStreamFraming.kt` and the Python
+`peer_stream_manager.py`, beside the transport crate's constants. Every
+language pins them the per-language way, as literals in a suite CI executes,
+and each suite also replays the chapter's vector file, so a drift on one side
+fails that side's tests. The Multipeer service type `offlineprotocol` is the
+one piece pinned by a Rust guard instead,
+`react_native_wifi_direct_announces_only_proved_addresses`, because the iOS
+manager that holds it is excluded from the SwiftPM harness. A drifted
+ceiling reads in the field as the largest messages vanishing; a drifted
+service type reads as two iPhones that never find each other.
 
 ## C6. Config parsers must not default to literals
 
@@ -484,8 +501,8 @@ never told the pipe it backgrounded, or a main-thread watchdog kill on
 
 | Binding | Owes |
 |---------|------|
-| Swift | The manual Objective-C bridge kept in step with every `@objc` method; secure storage backed by Keychain; a live-instance check before emitting; the telemetry session boundary inside a background task (C12) |
-| Kotlin | Secure storage backed by Keystore; no blocking work on the main looper; awareness that platform callbacks arrive on binder threads; the telemetry session boundary from an `Application.ActivityLifecycleCallbacks` watcher, never `onHostPause` (C12) |
+| Swift | The manual Objective-C bridge kept in step with every `@objc` method; secure storage backed by Keychain; a live-instance check before emitting; the telemetry session boundary inside a background task (C12); a Multipeer manager that announces a peer only under the address its preamble proved, one per address (S8) |
+| Kotlin | Secure storage backed by Keystore; no blocking work on the main looper; awareness that platform callbacks arrive on binder threads; the telemetry session boundary from an `Application.ActivityLifecycleCallbacks` watcher, never `onHostPause` (C12); a Wi-Fi Direct manager that announces a peer only under the address its preamble proved, one per address (K8) |
 | Python | Nothing platform-specific; it is the thinnest binding and therefore the best place to smoke-test an ABI change; the host platform for telemetry from `platform`; a BLE peripheral that serves the address and the core-built identity assertion, and a central that verifies before it announces (P8); a peer-stream manager that announces a host only under the address its preamble proved, and keeps one announced stream per address (P9) |
 | TypeScript | Config normalization, event typing kept in step with the core, no assumption that a native method exists in an older binary, and no telemetry lifecycle code of its own |
 

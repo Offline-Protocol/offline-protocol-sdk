@@ -14,52 +14,46 @@ import android.os.Handler
 import android.util.Log
 import androidx.core.content.ContextCompat
 import uniffi.offline_protocol.OfflineProtocol
+import uniffi.offline_protocol.verifyIdentityAssertion
 import java.io.*
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * WiFi Direct Manager implementing TransportManager for WiFi P2P communication
  *
- * ## wifiDirectPeerIdIsUnavailable — why nothing here reaches the protocol layer
+ * ## Every socket proves its peer before it carries anything
  *
- * This manager used to pass `socket.remoteSocketAddress.toString()` (and
- * `"go:<ip>"` for the group-owner link) to `wifiDirectPeerConnected`,
- * `wifiDirectMessageReceived` and `wifiDirectPeerDisconnected`. Those
- * parameters are documented as the peer's **user-level id** — the value the
- * core keys `connected_links` by and matches against `Message.sender` — and a
- * TCP endpoint is not one. The mismatch was survivable while ids were opaque
- * nicknames; under derived addresses it is not.
+ * The engine registers this transport as its peer-stream slot, and
+ * `docs/spec/stream-framing.md` is the contract. Each socket, accepted by the
+ * group owner or opened by a client toward it, sends this device's identity
+ * assertion as its first frame and reads the peer's. The peer's assertion is
+ * checked by `verifyIdentityAssertion`, the one verifier every platform uses,
+ * and the address it derives is the only id this manager ever hands the core:
+ * to `wifiDirectPeerConnected`, as the `senderId` of each body, and to
+ * `wifiDirectPeerDisconnected`. A socket endpoint, a device name or a MAC
+ * never reaches the core. They did once, and a TCP endpoint in `known_peers`
+ * evicted real neighbours and started key exchanges toward a string.
  *
- * There is no correct value to pass instead. Unlike BLE, which carries a
- * DEVICE_ID and a signed IDENTITY characteristic, this transport has no
- * handshake at all: the socket protocol is a bare `writeInt(len) + bytes`
- * stream, discovery yields only a device name and a MAC, and no service
- * record advertises anything. The only identity on the wire is
- * `Message.sender` *inside* the frame, which is precisely the value the
- * transport peer id exists to cross-check and therefore cannot supply.
+ * What the chapter asks of a receiver lives in [PeerStreamSockets], which
+ * this manager hands each socket and each outbound body: the preamble under
+ * one deadline, the frame bounds (the ceiling is inclusive, and a refused
+ * length closes the socket rather than reading on; the reader this replaced
+ * got both wrong), one announced stream per address with the newer
+ * superseding, a per-stream writer, and the ordering that keeps a delivery
+ * from landing after a loss report. It is framework-free and tested on real
+ * loopback sockets. What stays here is the group: the listener, the one
+ * outbound socket a client opens to its owner, and reconnecting that socket
+ * while the group lasts.
  *
- * So the announcements are gone rather than wrong. Nothing is lost by that:
- * the transport behind the `wifi_direct` slot is registered, but it queues
- * only for a recipient a stream has proved, and this manager proves none, so
- * `wifiDirectGetNextMessage` is always empty here and inbound frames are
- * dropped below.
- * What the announcements *did* do was reach `notify_neighbor_reachable` →
- * `on_neighbor_discovered`, which entered the socket string into `known_peers`
- * and started an auto key exchange toward it — burning a slot in a
- * capacity-bounded map that evicts genuine neighbors, and emitting a
- * `neighbor_discovered` whose `peer_id` the public API promises is an `off1…`
- * address usable as a `recipient`.
- *
- * Restoring delivery here means exchanging the preamble that
- * `docs/spec/stream-framing.md` specifies: the identity assertion as the first
- * frame in each direction, verified with `verifyIdentityAssertion`, the peer
- * announced under the derived address. That chapter also records what this
- * reader owes when it does: an inclusive 1 MiB ceiling, and closing the
- * socket on a refused length instead of reading on. Out of scope here.
+ * What this manager does not do: form a group. Nothing here calls
+ * `WifiP2pManager.connect`, so a group comes from the system's Wi-Fi Direct
+ * settings or from another app, and this manager joins the socket layer when
+ * `WIFI_P2P_CONNECTION_CHANGED_ACTION` says one exists.
  */
 class WifiDirectManager(
     private val context: Context,
@@ -98,6 +92,11 @@ class WifiDirectManager(
         // reposts itself when it spends the budget with the queue non-empty.
         private const val MAX_DRAIN_BATCH = 32
         private const val SOCKET_TIMEOUT_MS = 5000
+        // Reconnect delays for a client whose stream to the group owner ended
+        // while the group is still up. Doubled after an attempt that proved
+        // no peer, reset by one that did.
+        private const val RECONNECT_INITIAL_DELAY_MS = 1_000L
+        private const val RECONNECT_MAX_DELAY_MS = 60_000L
     }
 
     // MARK: - Properties
@@ -131,13 +130,42 @@ class WifiDirectManager(
     @Volatile private var serverSocket: ServerSocket? = null
     private var serverRunning = AtomicBoolean(false)
     
-    // Connected peers
-    private val connectedPeers = ConcurrentHashMap<String, Socket>()
+    // Every socket from its first byte to its end: the preamble, the framing,
+    // one announced stream per address, the writers. This manager owns the
+    // group and the connect; see [PeerStreamSockets] for the rest.
+    private val sockets = PeerStreamSockets(object : PeerStreamSockets.Host {
+        override fun identityAssertion(): ByteArray =
+            protocol.identityAssertion(emptyList()).map { it.toByte() }.toByteArray()
+
+        override fun localAddress(): String? = protocol.localAddress()
+
+        override fun verify(assertion: ByteArray): String =
+            verifyIdentityAssertion(assertion.map { it.toUByte() })
+
+        override fun peerConnected(address: String) =
+            protocol.wifiDirectPeerConnected(address)
+
+        override fun messageReceived(address: String, body: ByteArray) =
+            protocol.wifiDirectMessageReceived(address, body.map { it.toUByte() })
+
+        override fun peerDisconnected(address: String) =
+            protocol.wifiDirectPeerDisconnected(address)
+
+        override fun diagnostic(level: String, message: String, context: Map<String, Any?>) =
+            emitDiagnostic(level, message, context)
+    })
+    // True while this device's one outbound socket (a client's, toward the
+    // group owner) is connecting or open, so a repeated CONNECTION_CHANGED
+    // does not open a second one to the same owner.
+    private val outboundOpen = AtomicBoolean(false)
     private val discoveredPeers = ConcurrentHashMap<String, WifiP2pDevice>()
     
-    // State tracking
-    private var isGroupOwner = false
-    private var groupOwnerAddress: String? = null
+    // State tracking. Volatile: written on the transport thread, read by the
+    // socket thread that decides whether a client reconnects.
+    @Volatile private var isGroupOwner = false
+    @Volatile private var groupOwnerAddress: String? = null
+    // The client's next reconnect delay; see [RECONNECT_INITIAL_DELAY_MS].
+    private val reconnectDelayMs = AtomicLong(RECONNECT_INITIAL_DELAY_MS)
 
     // True between pause() and resume(). Mirrors InternetManager's flag of the
     // same name, and exists for the same reason: stopping the poll timer is not
@@ -323,6 +351,11 @@ class WifiDirectManager(
 
         // Close all connections
         closeAllConnections()
+        // Forget the group, so a reconnect already posted finds nothing to
+        // dial and a later start() waits for its own CONNECTION_CHANGED.
+        isGroupOwner = false
+        groupOwnerAddress = null
+        reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)
 
         // Unregister receiver
         try {
@@ -497,6 +530,11 @@ class WifiDirectManager(
             // Re-read inside, because a stop() fits in the gap the post opens.
             transportHandler.post {
                 if (state != TransportState.RUNNING) return@post
+                // Streams first, so each announced peer is reported lost
+                // while the core still holds its link. A stream left open
+                // across the flip would keep delivering, and every body
+                // re-adds a neighbour the flip just cleared.
+                closeAllConnections()
                 try {
                     protocol.wifiDirectStatusChanged(false)
                 } catch (e: Exception) {
@@ -563,7 +601,10 @@ class WifiDirectManager(
         } else {
             isGroupOwner = false
             groupOwnerAddress = null
-            closeAllConnections()
+            // Posted: this is the broadcast receiver's onReceive, and ending
+            // an announced stream is an FFI call. Same reasoning as the post
+            // in [handleWifiP2pStateChanged].
+            transportHandler.post { closeAllConnections() }
         }
     }
 
@@ -640,118 +681,87 @@ class WifiDirectManager(
 
     private fun handleClientConnection(socket: Socket) {
         socketExecutor.execute {
-            val clientAddress = socket.remoteSocketAddress.toString()
-            
-            emitDiagnostic("info", "Client connected", mapOf(
-                "address" to clientAddress
-            ))
-            
-            connectedPeers[clientAddress] = socket
-
-            // NOT announced to the protocol layer — see [wifiDirectPeerIdIsUnavailable].
-            // `clientAddress` is a TCP endpoint ("/192.168.49.1:8988"), not a
-            // protocol id, and this transport has no handshake that would
-            // yield one.
-            emitDiagnostic("warning", "Wi-Fi Direct peer not announced: no protocol id available", mapOf(
-                "socket" to clientAddress
-            ))
-
-            // Handle incoming messages
-            try {
-                val inputStream = DataInputStream(socket.getInputStream())
-                
-                while (socket.isConnected && !socket.isClosed) {
-                    try {
-                        // Read message length
-                        val length = inputStream.readInt()
-                        if (length > 0 && length < 1024 * 1024) { // Max 1MB
-                            // Read message data
-                            val data = ByteArray(length)
-                            inputStream.readFully(data)
-
-                            // Dropped, not ingested — see
-                            // [wifiDirectPeerIdIsUnavailable]. Handing this to
-                            // `wifiDirectMessageReceived` would attribute the
-                            // frame to a socket string, which the core would
-                            // then compare against `Message.sender` and reject.
-                            transportHandler.post {
-                                try {
-                                    emitDiagnostic("warning", "Wi-Fi Direct frame dropped: sender cannot be identified", mapOf(
-                                        "socket" to clientAddress,
-                                        "size" to length
-                                    ))
-                                } catch (e: Exception) {
-                                    emitDiagnostic("error", "Error processing message", mapOf(
-                                        "error" to (e.message ?: "unknown")
-                                    ))
-                                }
-                            }
-                        }
-                    } catch (e: java.io.EOFException) {
-                        break
-                    }
-                }
-            } catch (e: Exception) {
-                if (!socket.isClosed) {
-                    emitDiagnostic("error", "Error reading from socket", mapOf(
-                        "error" to (e.message ?: "unknown")
-                    ))
-                }
-            } finally {
-                // Cleanup
-                connectedPeers.remove(clientAddress)
-                try {
-                    socket.close()
-                } catch (e: Exception) {
-                    // Ignore
-                }
-                
-                // No disconnect notification either: nothing was announced, so
-                // there is no neighbor for the core to lose.
-                emitDiagnostic("info", "Wi-Fi Direct socket closed", mapOf(
-                    "socket" to clientAddress
-                ))
-            }
+            sockets.run(socket, outbound = false) { state == TransportState.RUNNING }
         }
     }
 
     private fun connectToGroupOwner(address: String) {
+        // One outbound socket at a time. CONNECTION_CHANGED fires for every
+        // change to the group, not only for our joining it, and each used to
+        // open another socket to the same owner.
+        if (!outboundOpen.compareAndSet(false, true)) return
         socketExecutor.execute {
+            var proved = false
             try {
                 val socket = Socket()
-                socket.connect(InetSocketAddress(address, SERVER_PORT), CONNECTION_TIMEOUT_MS.toInt())
-                
-                val peerAddress = "go:$address"
-                connectedPeers[peerAddress] = socket
-                
+                try {
+                    socket.connect(InetSocketAddress(address, SERVER_PORT), CONNECTION_TIMEOUT_MS.toInt())
+                } catch (e: Exception) {
+                    try { socket.close() } catch (_: Exception) {}
+                    emitDiagnostic("error", "Failed to connect to group owner", mapOf(
+                        "address" to address,
+                        "error" to (e.message ?: "unknown")
+                    ))
+                    return@execute
+                }
                 emitDiagnostic("info", "Connected to group owner", mapOf(
                     "address" to address
                 ))
-
-                // Not announced — see [wifiDirectPeerIdIsUnavailable]. "go:<ip>"
-                // is no more a protocol id than the socket string is.
-
-                // Handle incoming messages
-                handleClientConnection(socket)
-                
-            } catch (e: Exception) {
-                emitDiagnostic("error", "Failed to connect to group owner", mapOf(
-                    "address" to address,
-                    "error" to (e.message ?: "unknown")
-                ))
+                // No claim to compare against: the owner's IP says nothing
+                // about who it is, so the address its preamble derives is its
+                // id (stream-framing.md, "The preamble").
+                proved = sockets.run(socket, outbound = true) { state == TransportState.RUNNING } != null
+            } finally {
+                outboundOpen.set(false)
+                scheduleReconnect(address, proved)
             }
         }
     }
 
-    private fun closeAllConnections() {
-        for ((_, socket) in connectedPeers) {
-            try {
-                socket.close()
-            } catch (e: Exception) {
-                // Ignore
-            }
+    /**
+     * Dials the group owner again after this client's stream to [ended]
+     * closed; see [GroupOwnerRedial] for the decision.
+     *
+     * The owner dialled is the one the group has now, not [ended]. On a group
+     * switch the new owner's [connectToGroupOwner] runs while the old stream
+     * is still winding down, loses [outboundOpen] to it, and returns; this is
+     * then the only dial left, so a check that the owner is still [ended]
+     * would leave the client with no stream for the whole of the new group.
+     */
+    private fun scheduleReconnect(ended: String, proved: Boolean) {
+        val plan = GroupOwnerRedial.next(
+            ended = ended,
+            proved = proved,
+            running = state == TransportState.RUNNING,
+            isGroupOwner = isGroupOwner,
+            owner = groupOwnerAddress,
+            currentDelayMs = reconnectDelayMs.get(),
+            initialDelayMs = RECONNECT_INITIAL_DELAY_MS,
+            maxDelayMs = RECONNECT_MAX_DELAY_MS,
+        )
+        if (plan == null) {
+            if (proved) reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)
+            return
         }
-        connectedPeers.clear()
+        reconnectDelayMs.set(plan.nextDelayMs)
+        transportHandler.postDelayed({
+            // Not gated on pause: a paused transport keeps its open streams,
+            // so it keeps reconnecting one that dropped. Re-read, because the
+            // group can change again inside the delay.
+            val owner = groupOwnerAddress
+            if (state == TransportState.RUNNING && !isGroupOwner && owner != null) {
+                connectToGroupOwner(owner)
+            }
+        }, plan.delayMs)
+    }
+
+    /**
+     * Ends every stream, reporting each announced one lost. Runs on the
+     * transport thread and makes FFI calls, so a broadcast receiver posts it
+     * rather than calling it inline (see [handleWifiP2pStateChanged]).
+     */
+    private fun closeAllConnections() {
+        sockets.closeAll()
     }
 
     // MARK: - Message Handling (Event-Driven)
@@ -826,7 +836,7 @@ class WifiDirectManager(
         // removeCallbacks can reach. Clearing the flag above first is what
         // keeps a pause from wedging the callback path: the pass exits with
         // drainContinuationQueued false, so resume()'s drain is not suppressed.
-        if (isPaused || state != TransportState.RUNNING || connectedPeers.isEmpty()) return
+        if (isPaused || state != TransportState.RUNNING || sockets.isEmpty()) return
 
         try {
             var sent = 0
@@ -847,7 +857,7 @@ class WifiDirectManager(
     }
 
     private fun pollAndSendMessages() {
-        if (state != TransportState.RUNNING || connectedPeers.isEmpty()) return
+        if (state != TransportState.RUNNING || sockets.isEmpty()) return
 
         try {
             val message = protocol.wifiDirectGetNextMessage()
@@ -861,41 +871,18 @@ class WifiDirectManager(
         }
     }
 
+    /** Queues one body on the stream that proved [recipientId]; see [PeerStreamSockets.send]. */
     private fun sendMessage(recipientId: String, data: ByteArray) {
-        socketExecutor.execute {
-            // Find target socket
-            val targetSocket = connectedPeers[recipientId]
-            
-            val socketsToSend = if (targetSocket != null) {
-                listOf(targetSocket)
-            } else {
-                // Broadcast to all
-                connectedPeers.values.toList()
-            }
-            
-            if (socketsToSend.isEmpty()) {
-                emitDiagnostic("warning", "No peers to send message to")
-                return@execute
-            }
-            
-            for (socket in socketsToSend) {
-                try {
-                    val outputStream = DataOutputStream(socket.getOutputStream())
-                    outputStream.writeInt(data.size)
-                    outputStream.write(data)
-                    outputStream.flush()
-
-                    emitDiagnostic("debug", "Message sent", mapOf(
-                        "to" to (if (targetSocket != null) recipientId else "broadcast"),
-                        "size" to data.size
-                    ))
-                } catch (e: Exception) {
-                    emitDiagnostic("error", "Failed to send message", mapOf(
-                        "error" to (e.message ?: "unknown")
-                    ))
-                }
-            }
+        val reason = when (sockets.send(recipientId, data)) {
+            PeerStreamSockets.SendResult.QUEUED -> return
+            PeerStreamSockets.SendResult.NO_STREAM -> "no stream holds the recipient"
+            PeerStreamSockets.SendResult.OUT_OF_BOUNDS -> "outside the frame bounds"
+            PeerStreamSockets.SendResult.QUEUE_FULL -> "the peer is stalled and its queue is full"
         }
+        emitDiagnostic("warning", "Wi-Fi Direct body dropped: $reason", mapOf(
+            "to" to recipientId,
+            "size" to data.size
+        ))
     }
 
     // MARK: - Utility
@@ -920,3 +907,33 @@ class WifiDirectManager(
     }
 }
 
+/**
+ * When a group client dials its owner again after its stream ended, and after
+ * how long. Pure, so [GroupOwnerRedialTest] pins it without a group.
+ *
+ * CONNECTION_CHANGED fires only when the group changes, so without a redial a
+ * client whose stream dropped (the owner's app restarted, a write deadline
+ * fired) stays unreachable for as long as the group lasts. The delay doubles
+ * after an attempt toward the same owner that proved no peer, so an owner
+ * that refuses us is not dialled in a loop. It starts over after an attempt
+ * that proved one, and for an owner other than the one that ended: a group
+ * switch is a new owner, not a retry.
+ */
+internal object GroupOwnerRedial {
+    data class Plan(val owner: String, val delayMs: Long, val nextDelayMs: Long)
+
+    fun next(
+        ended: String,
+        proved: Boolean,
+        running: Boolean,
+        isGroupOwner: Boolean,
+        owner: String?,
+        currentDelayMs: Long,
+        initialDelayMs: Long,
+        maxDelayMs: Long,
+    ): Plan? {
+        if (!running || isGroupOwner || owner == null) return null
+        val delay = if (proved || owner != ended) initialDelayMs else currentDelayMs
+        return Plan(owner, delay, minOf(delay * 2, maxDelayMs))
+    }
+}
