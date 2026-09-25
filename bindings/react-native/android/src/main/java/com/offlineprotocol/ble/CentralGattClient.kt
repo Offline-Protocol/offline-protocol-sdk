@@ -16,9 +16,8 @@ import android.util.Log
 import com.offlineprotocol.BleServiceInstanceSelection
 import com.offlineprotocol.PeerIdentityBinding
 import com.offlineprotocol.mesh.MeshController
-import com.offlineprotocol.mesh.SignedIdentityData
 import uniffi.offline_protocol.OfflineProtocol
-import uniffi.offline_protocol.deriveAddress
+import uniffi.offline_protocol.verifyIdentityAssertion
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -1332,39 +1331,30 @@ internal class CentralGattClient(
      * the signature would prove nothing at all: anyone can copy a public key.
      */
     private fun verifyIdentityAndDerive(data: ByteArray?, address: String): String? {
-        val signedIdentity = SignedIdentityData.decode(data)
-        if (signedIdentity == null) {
-            Log.w(TAG, "Failed to decode identity data from $address")
+        if (data == null) {
+            Log.w(TAG, "No identity data from $address")
             diagnosticEmitter("warning", "Failed to decode peer identity", mapOf("address" to address))
             return null
         }
 
+        // One call does the parse, the signature check and the derivation, in
+        // the core, with the strict check every carrier shares. It replaced a
+        // local split plus the permissive `verifySignature`, which accepted
+        // assertions the peer-stream managers' verifier refuses.
         return try {
-            val isValid = host.protocol.verifySignature(
-                signedIdentity.publicKey.map { it.toUByte() },
-                signedIdentity.advertisementData.map { it.toUByte() },
-                signedIdentity.signature.map { it.toUByte() },
-            )
-
-            if (isValid) {
-                // Derived in Rust — the single implementation shared by every
-                // platform. `decode` already guarantees a 32-byte key, so this
-                // cannot throw here; a throw would land in the catch below.
-                val derivedAddress = deriveAddress(signedIdentity.publicKey.map { it.toUByte() })
-                Log.i(TAG, "Verified peer identity: $derivedAddress for $address")
-                diagnosticEmitter("info", "Verified peer identity", mapOf(
-                    "address" to address,
-                    "derivedAddress" to derivedAddress,
-                ))
-                derivedAddress
-            } else {
-                Log.w(TAG, "Invalid signature for peer $address")
-                diagnosticEmitter("warning", "Invalid peer signature", mapOf("address" to address))
-                null
-            }
+            val derivedAddress = verifyIdentityAssertion(data.map { it.toUByte() })
+            Log.i(TAG, "Verified peer identity: $derivedAddress for $address")
+            diagnosticEmitter("info", "Verified peer identity", mapOf(
+                "address" to address,
+                "derivedAddress" to derivedAddress,
+            ))
+            derivedAddress
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to verify signature: ${e.message}", e)
-            diagnosticEmitter("error", "Signature verification failed", mapOf("error" to (e.message ?: "unknown")))
+            Log.w(TAG, "Identity assertion did not verify for $address: ${e.message}")
+            diagnosticEmitter("warning", "Invalid peer signature", mapOf(
+                "address" to address,
+                "error" to (e.message ?: "unknown"),
+            ))
             null
         }
     }

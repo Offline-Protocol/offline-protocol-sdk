@@ -64,19 +64,12 @@ data class SignedIdentityData(
         const val PUBLIC_KEY_SIZE = 32
         const val SIGNATURE_SIZE = 64
         const val HEADER_SIZE = PUBLIC_KEY_SIZE + SIGNATURE_SIZE
-        
-        /**
-         * Decodes signed identity data from GATT transmission.
-         */
-        fun decode(bytes: ByteArray?): SignedIdentityData? {
-            if (bytes == null || bytes.size < HEADER_SIZE) return null
-            
-            val publicKey = bytes.copyOfRange(0, PUBLIC_KEY_SIZE)
-            val signature = bytes.copyOfRange(PUBLIC_KEY_SIZE, HEADER_SIZE)
-            val advertisementData = bytes.copyOfRange(HEADER_SIZE, bytes.size)
-            
-            return SignedIdentityData(publicKey, signature, advertisementData)
-        }
+
+        // There is no decoder. A peer's assertion is parsed, checked and
+        // derived in one call to `verifyIdentityAssertion`, the verifier every
+        // platform and carrier shares; the split this type used to undo on
+        // receipt had a second home here, and the permissive signature check
+        // it fed accepted assertions the strict core verifier refuses.
     }
 }
 

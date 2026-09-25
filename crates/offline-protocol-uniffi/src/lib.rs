@@ -13637,16 +13637,23 @@ mod tests {
         }
     }
 
-    /// The two mobile `SignedIdentityData` decoders are the last copies of
-    /// the identity assertion's split. They verify and derive through the
-    /// core already; what they still own is the 32/64 boundary, and neither
-    /// BLE callback chain runs in CI, so a boundary that drifted from
-    /// `offline-protocol-sealed` would read a peer's key as its signature and
-    /// refuse every peer with no test going red. The sizes are asserted as
-    /// literals for the C5 reason: a test that read them from the sealed
-    /// constants would agree with any edit made to both.
+    /// The two mobile `SignedIdentityData` encoders are the last copies of
+    /// the identity assertion's layout, and nothing on a phone decodes one.
+    ///
+    /// A peer's assertion is parsed, checked and derived by one core call,
+    /// `verifyIdentityAssertion`, on the Bluetooth LE centrals and on both
+    /// peer-stream managers. The decoders that used to split it locally fed
+    /// the permissive `verifySignature`, a second verifier that accepted what
+    /// the strict one refuses, so a decoder coming back is the drift ADR 0022
+    /// exists to prevent and is refused here. What the encoders still own is
+    /// the 32/64 boundary of what this device serves, and neither BLE
+    /// callback chain runs in CI, so a boundary that drifted from
+    /// `offline-protocol-sealed` would serve a key where a signature belongs
+    /// and be refused by every peer with no test going red. The sizes are
+    /// asserted as literals for the C5 reason: a test that read them from the
+    /// sealed constants would agree with any edit made to both.
     #[test]
-    fn react_native_ble_identity_decoders_split_at_the_sealed_offsets() {
+    fn react_native_ble_identity_encoders_split_at_the_sealed_offsets() {
         let swift = rn_source_code_only("ios/mesh/Mesh.swift");
         let kotlin = rn_source_code_only("android/src/main/java/com/offlineprotocol/mesh/Mesh.kt");
 
@@ -13695,10 +13702,17 @@ mod tests {
                 "{label}: SignedIdentityData must split at 32 and 64, the offsets \
                  offline-protocol-sealed's identity assertion codec defines"
             );
-            // The decoders never derive or verify: that is the core's, through
-            // `deriveAddress` and `verifySignature`, and a local SHA-256 here
+            // Nothing here derives, verifies or decodes: that is the core's,
+            // through `verifyIdentityAssertion`, and a local SHA-256 or split
             // is the drift ADR 0022 exists to prevent.
-            for banned in ["SHA256", "sha256", "MessageDigest", "bech32"] {
+            for banned in [
+                "SHA256",
+                "sha256",
+                "MessageDigest",
+                "bech32",
+                "func decode(",
+                "fun decode(",
+            ] {
                 assert!(
                     !code.contains(banned),
                     "{label}: `{banned}` in the identity decoder means a local derivation"
