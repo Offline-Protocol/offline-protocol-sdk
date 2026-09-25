@@ -124,6 +124,13 @@ from asyncio's single thread: a stream's announcement, deliveries and loss
 report run under that stream's lock, so no body reaches the core after its
 loss report.
 
+One limit is stated rather than fixed. A client that vanishes without a
+FIN stays announced until the stream notices: Java cannot set the keepalive
+interval, so `SO_KEEPALIVE` runs on the platform default (commonly two
+hours), and the write deadline sees no stall until both kernel buffers are
+full. The core's acknowledgements are the real signal that a peer is gone,
+as P9 says for the same reason.
+
 Local policy differs from P9 on purpose. The newer of two streams for one
 address supersedes the older, because only the client dials its group owner,
 so the two-dialler tie that the lower-address rule settles cannot occur. A

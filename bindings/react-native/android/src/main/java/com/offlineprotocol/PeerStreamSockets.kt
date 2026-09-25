@@ -9,6 +9,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
@@ -100,11 +101,13 @@ internal class PeerStreamSockets(
     private val links = PeerStreamLinks<Stream>()
 
     // Daemon, like the stream threads, so an instance dropped without
-    // closeAll() does not pin the process.
+    // closeAll() does not pin the process. Remove-on-cancel because every
+    // 64 KiB piece a writer sends schedules a deadline and cancels it; without
+    // it each cancelled one sits in the queue for the whole write timeout.
     private val deadlines: ScheduledExecutorService =
-        Executors.newSingleThreadScheduledExecutor { r ->
+        ScheduledThreadPoolExecutor(1) { r ->
             Thread(r, "offline-peerstream-deadline").apply { isDaemon = true }
-        }
+        }.apply { removeOnCancelPolicy = true }
 
     /** Whether any stream has proved a peer: nothing is sendable otherwise. */
     fun isEmpty(): Boolean = links.isEmpty()
