@@ -25,7 +25,7 @@ upstream source on each crate's page) — the exact versions are listed below.
 
 | License | Crates |
 |---------|--------|
-| MIT License | 268 |
+| MIT License | 269 |
 | Mozilla Public License 2.0 | 12 |
 | GNU Affero General Public License v3.0 only | 11 |
 | Apache License 2.0 | 11 |
@@ -4921,7 +4921,7 @@ Used by:
 
 - [append-only-bytes 0.1.12](https://github.com/zxch3n/append-only-bytes)
 - [arref 0.1.0](https://github.com/zxch3n/arref)
-- [chrono 0.4.42](https://github.com/chronotope/chrono)
+- [chrono 0.4.45](https://github.com/chronotope/chrono)
 - [generic-btree 0.10.7](https://github.com/loro-dev/generic-btree)
 - [loro-internal 1.13.9](https://github.com/loro-dev/loro/)
 - [md5 0.7.0](https://github.com/stainless-steel/md5)
@@ -5166,17 +5166,18 @@ Used by:
 - [quote 1.0.41](https://github.com/dtolnay/quote)
 - [rustix 1.1.2](https://github.com/bytecodealliance/rustix)
 - [semver 1.0.27](https://github.com/dtolnay/semver)
-- [serde 1.0.228](https://github.com/serde-rs/serde)
+- [serde 1.0.229](https://github.com/serde-rs/serde)
 - [serde_bytes 0.11.19](https://github.com/serde-rs/bytes)
-- [serde_core 1.0.228](https://github.com/serde-rs/serde)
-- [serde_derive 1.0.228](https://github.com/serde-rs/serde)
+- [serde_core 1.0.229](https://github.com/serde-rs/serde)
+- [serde_derive 1.0.229](https://github.com/serde-rs/serde)
 - [serde_json 1.0.145](https://github.com/serde-rs/json)
 - [syn 1.0.109](https://github.com/dtolnay/syn)
 - [syn 2.0.108](https://github.com/dtolnay/syn)
+- [syn 3.0.3](https://github.com/dtolnay/syn)
 - [thiserror-impl 1.0.69](https://github.com/dtolnay/thiserror)
-- [thiserror-impl 2.0.17](https://github.com/dtolnay/thiserror)
+- [thiserror-impl 2.0.20](https://github.com/dtolnay/thiserror)
 - [thiserror 1.0.69](https://github.com/dtolnay/thiserror)
-- [thiserror 2.0.17](https://github.com/dtolnay/thiserror)
+- [thiserror 2.0.20](https://github.com/dtolnay/thiserror)
 - [unicode-ident 1.0.22](https://github.com/dtolnay/unicode-ident)
 - [utf8-zero 0.8.1](https://github.com/algesten/utf8-zero)
 - [wasi 0.11.1+wasi-snapshot-preview1](https://github.com/bytecodealliance/wasi)
