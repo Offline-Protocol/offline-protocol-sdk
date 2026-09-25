@@ -362,6 +362,7 @@ impl OfflineProtocol {
                                     .as_ref()
                                     .map(crate::events::ForwardInfoEvent::from),
                                 encrypted: true,
+                                app_id: decrypted_msg.app_id.as_str().to_string(),
                             };
                             state.emit_event(event);
                         }

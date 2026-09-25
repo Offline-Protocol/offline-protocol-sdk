@@ -77,6 +77,7 @@ fn a_dropped_protocol_event_allocates_nothing_and_a_forwarded_one_at_most_twice(
         media_metadata: None,
         forward_info: None,
         encrypted: true,
+        app_id: String::new(),
     };
     let forwarded = Event::MessageFailed {
         message_id: "m".into(),

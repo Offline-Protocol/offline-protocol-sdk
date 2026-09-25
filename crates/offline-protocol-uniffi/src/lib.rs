@@ -3409,6 +3409,7 @@ impl OfflineProtocol {
             media_metadata: options.media_metadata.map(CoreMediaMetadata::from),
             forward_info,
             via_transport,
+            app_id: None,
         };
 
         let message_id = protocol
@@ -3422,7 +3423,7 @@ impl OfflineProtocol {
     /// `original_message_json` must be the core-serde message shape. The
     /// JSON returned by `receive_message` round-trips here directly. The
     /// `message_received` event does NOT (different field names, no
-    /// `app_id`/`ttl`) — apps forwarding from event data must build the
+    /// `ttl`), so apps forwarding from event data must build the
     /// core shape themselves: `id`, `sender`, `recipient`, `app_id`,
     /// `priority` (lowercase or capitalized), `ttl`, `hop_count`,
     /// `timestamp` (epoch millis), `content`, plus the optional rich
@@ -5606,6 +5607,7 @@ impl OfflineProtocol {
             reply_context,
             forward_info,
             file_id: options.file_id,
+            app_id: None,
         };
 
         let mut protocol = self.lock_inner()?;

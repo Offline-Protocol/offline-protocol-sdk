@@ -4,6 +4,7 @@ mod data_layer;
 mod data_sync;
 mod data_sync_group;
 mod leaf_pairing;
+mod per_send_app_id;
 
 use super::*;
 use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY};
@@ -6233,6 +6234,7 @@ fn pending_queue_byte_budgets_admit_any_boundary_legal_message() {
         rich: None,
         queued_at: Utc::now(),
         serialized_bytes: 0,
+        app_id: None,
     };
     worst_case.measure();
 
@@ -7006,6 +7008,7 @@ fn pending_record(content: &str) -> (MessageId, Vec<u8>) {
         rich: None,
         queued_at: Utc::now(),
         serialized_bytes: 0,
+        app_id: None,
     };
     pending.measure();
     (message_id, serde_json::to_vec(&vec![pending]).unwrap())
@@ -29956,6 +29959,7 @@ fn sample_media_rich_options(reply_to: &str) -> MediaSendOptions {
             forward_count: 2,
         }),
         file_id: None,
+        app_id: None,
     }
 }
 
@@ -30432,6 +30436,7 @@ fn test_media_resend_required_after_restart_with_checksum_validation() {
                 recipient,
                 file_name,
                 file_size,
+                app_id: _,
             } => Some((
                 fid.clone(),
                 recipient.clone(),
@@ -30568,6 +30573,7 @@ fn test_media_descriptor_restore_prunes_expired() {
         content_type: ContentType::File,
         queued_at: chrono::Utc::now() - ChronoDuration::days(8),
         data_purpose: None,
+        app_id: None,
     };
     alice.persist_media_descriptor(&stale);
 
@@ -34211,6 +34217,7 @@ fn test_restore_settlements_survive_an_initialization_rollback() {
         rich: None,
         queued_at: Utc::now(),
         serialized_bytes: 0,
+        app_id: None,
     }];
     let sealed = cipher
         .seal(
@@ -34293,6 +34300,7 @@ fn test_restore_stops_admitting_pending_entries_at_the_entry_bound() {
                 rich: None,
                 queued_at: Utc::now(),
                 serialized_bytes: 0,
+                app_id: None,
             })
             .collect();
         let sealed = cipher
@@ -34376,6 +34384,7 @@ fn test_pending_tail_the_restore_walk_never_reached_survives_runtime_writes() {
                 rich: None,
                 queued_at: Utc::now(),
                 serialized_bytes: 0,
+                app_id: None,
             })
             .collect();
         let sealed = cipher
@@ -34581,6 +34590,7 @@ fn legacy_pending_queue(count: usize, base: DateTime<Utc>) -> (Vec<MessageId>, V
             rich: None,
             queued_at: base + ChronoDuration::seconds(index as i64),
             serialized_bytes: 0,
+            app_id: None,
         };
         pending.measure();
         entries.push(pending);
@@ -34787,6 +34797,7 @@ fn test_unreadable_pending_record_settles_the_exact_message_id() {
         rich: None,
         queued_at: Utc::now(),
         serialized_bytes: 0,
+        app_id: None,
     };
     readable.measure();
     let record = serde_json::to_vec(&PendingMessageRecord {
@@ -35054,6 +35065,7 @@ fn test_pending_record_that_does_not_name_its_own_key_is_dropped() {
         rich: None,
         queued_at: Utc::now(),
         serialized_bytes: 0,
+        app_id: None,
     };
     message.measure();
     let record = serde_json::to_vec(&PendingMessageRecord {
@@ -35196,6 +35208,7 @@ fn test_pending_expiry_is_bounded_per_pass() {
                 None,
                 None,
                 ContentType::Text,
+                None,
                 None,
                 None,
                 long_expired,
@@ -35627,6 +35640,7 @@ fn test_flush_does_not_dispatch_entries_past_their_absolute_lifetime() {
         None,
         None,
         ContentType::Text,
+        None,
         None,
         None,
         Utc::now() - ChronoDuration::milliseconds(lifetime_ms as i64) - ChronoDuration::hours(1),

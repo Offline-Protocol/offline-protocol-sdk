@@ -70,6 +70,12 @@
 //!   [`Event::DorsScoreUpdated::scores`] fall here too (they're transport
 //!   names, not peer IDs).
 //!
+//! - **`app_id` is left raw.** It names an application, the way
+//!   `content_type` names a rendering, not a party: every device running
+//!   that application stamps the same value, so it cannot profile anyone
+//!   across events. The sink already learns the embedding application from
+//!   its own configuration.
+//!
 //! # Out of scope for `scrub_ids`
 //!
 //! Two classes of data are *deliberately* not touched by this scrubber and
@@ -259,6 +265,7 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             content_type: _,
             media_metadata: _,
             encrypted: _,
+            app_id: _,
         } => {
             hash_string(sender, scrubber);
             hash_string(recipient, scrubber);
@@ -342,6 +349,7 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             timestamp: _,
             caption: _,
             reply_to_msg: _,
+            app_id: _,
         } => {
             hash_string(sender, scrubber);
             if let Some(fi) = forward_info {
@@ -405,6 +413,7 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             recipient,
             file_name: _,
             file_size: _,
+            app_id: _,
         } => {
             hash_string(recipient, scrubber);
         }
@@ -1037,6 +1046,7 @@ mod tests {
                 reply_content_type: None,
             })),
             forward_info: None,
+            app_id: None,
         }
     }
 
@@ -1103,6 +1113,7 @@ mod tests {
             media_metadata: Some(secret_media_metadata()),
             forward_info: None,
             encrypted: true,
+            app_id: String::new(),
         };
         let scrubbed = scrub_event(&event, &scrubber_disabled()).into_owned();
         match scrubbed {
@@ -1180,6 +1191,7 @@ mod tests {
                 forward_count: 1,
             }),
             encrypted: false,
+            app_id: String::new(),
         };
         let scrubbed = scrub_event(&event, &scrubber_enabled()).into_owned();
         match scrubbed {

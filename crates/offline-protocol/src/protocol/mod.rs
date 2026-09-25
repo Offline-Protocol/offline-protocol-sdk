@@ -2066,6 +2066,7 @@ impl OfflineProtocol {
                 descriptor.recipient.clone(),
                 descriptor.file_name.clone(),
                 descriptor.file_size,
+                descriptor.app_id.clone(),
             ));
         }
 

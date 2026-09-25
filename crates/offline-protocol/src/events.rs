@@ -654,6 +654,16 @@ pub enum Event {
         /// `require_encryption = false` opt-out.
         #[serde(default)]
         encrypted: bool,
+        /// Application id the sender stamped on this message: its configured
+        /// id, or the per-send id of a rich send.
+        ///
+        /// For an instance serving several local applications, this is what
+        /// routes the message to the right client. It is cleartext and
+        /// unsigned on the wire, so any carrier could have rewritten it
+        /// (threat model R17): route on it, never authorize on it. The
+        /// engine delivers every message whatever this says.
+        #[serde(default)]
+        app_id: String,
     },
 
     /// A message was successfully delivered (ACK received).
@@ -821,6 +831,12 @@ pub enum Event {
         /// Forwarding attribution (sealed chunk-0 extras).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         forward_info: Option<ForwardInfoEvent>,
+        /// Application id the sender stamped on the transfer (chunk-0 outer
+        /// message), with the meaning and the cleartext caveat of
+        /// `MessageReceived.app_id`. Absent only if the chunk-0 record was
+        /// evicted before completion, like `timestamp`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app_id: Option<String>,
     },
 
     /// An inbound file transfer was dropped before completion — the receiver
@@ -958,6 +974,11 @@ pub enum Event {
         file_name: String,
         /// Total file size in bytes.
         file_size: u64,
+        /// Per-send application id the transfer was started with, absent
+        /// when it used the configured one. An instance serving several
+        /// applications asks this one for the bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        app_id: Option<String>,
     },
 
     /// A pending ACK was evicted due to capacity constraints.
@@ -2081,6 +2102,7 @@ impl Event {
         reply_to_msg: Option<String>,
         reply_context: Option<&offline_protocol_core::ReplyContext>,
         forward_info: Option<&offline_protocol_core::ForwardInfo>,
+        app_id: Option<String>,
     ) -> Self {
         use base64::{engine::general_purpose::STANDARD, Engine};
         Self::FileReceived {
@@ -2096,6 +2118,7 @@ impl Event {
             reply_to_msg,
             reply_context: reply_context.map(|rc| Box::new(ReplyContextEvent::from(rc))),
             forward_info: forward_info.map(ForwardInfoEvent::from),
+            app_id,
         }
     }
 
@@ -2185,12 +2208,14 @@ impl Event {
         recipient: String,
         file_name: String,
         file_size: u64,
+        app_id: Option<String>,
     ) -> Self {
         Self::MediaResendRequired {
             file_id,
             recipient,
             file_name,
             file_size,
+            app_id,
         }
     }
 
@@ -3013,6 +3038,7 @@ impl fmt::Debug for Event {
                 media_metadata: _,
                 forward_info,
                 encrypted,
+                app_id,
             } => f
                 .debug_struct("MessageReceived")
                 .field("message_id", message_id)
@@ -3028,6 +3054,7 @@ impl fmt::Debug for Event {
                 .field("content_type", content_type)
                 .field("forward_info", &forward_info.is_some())
                 .field("encrypted", encrypted)
+                .field("app_id", app_id)
                 .finish(),
             Self::MessageDelivered {
                 message_id,
@@ -3138,6 +3165,7 @@ impl fmt::Debug for Event {
                 reply_to_msg: _,
                 reply_context,
                 forward_info,
+                app_id,
             } => f
                 .debug_struct("FileReceived")
                 .field("file_id", file_id)
@@ -3151,6 +3179,7 @@ impl fmt::Debug for Event {
                 .field("reply_to_msg", &"[REDACTED]")
                 .field("reply_context", &reply_context.is_some())
                 .field("forward_info", &forward_info.is_some())
+                .field("app_id", app_id)
                 .finish(),
             Self::FileReceiveFailed {
                 file_id,
@@ -3227,12 +3256,14 @@ impl fmt::Debug for Event {
                 recipient: _,
                 file_name,
                 file_size,
+                app_id,
             } => f
                 .debug_struct("MediaResendRequired")
                 .field("file_id", file_id)
                 .field("recipient", &"[REDACTED]")
                 .field("file_name", file_name)
                 .field("file_size", file_size)
+                .field("app_id", app_id)
                 .finish(),
             Self::AckEvicted {
                 message_id,
@@ -4062,6 +4093,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         match event {
@@ -4098,6 +4130,7 @@ mod tests {
             ContentType::File,
             None,
             vec![1, 2, 3, 4],
+            None,
             None,
             None,
             None,
@@ -4145,6 +4178,7 @@ mod tests {
             Some("0192aaaa-bbbb-cccc-dddd-eeeeffff0000".to_string()),
             Some(&rc),
             Some(&fwd),
+            None,
         );
         let json = serde_json::to_string(&event).unwrap();
         let parsed: Event = serde_json::from_str(&json).unwrap();
