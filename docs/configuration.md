@@ -262,7 +262,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `transports.ble.enabled` | boolean | true | Enable BLE mesh |
-| `transports.wifiDirect.enabled` | boolean | true | Enable the [peer-stream](spec/stream-framing.md) slot: Wi-Fi Direct on Android, Multipeer on iOS |
+| `transports.wifiDirect.enabled` | boolean | false | Enable the [peer-stream](spec/stream-framing.md) slot: Wi-Fi Direct on Android, Multipeer on iOS (which needs both `_offlineprotocol` entries in `NSBonjourServices`, see the [iOS guide](ios-integration.md#platform-limitations)) |
 | `transports.internet.enabled` | boolean | true | Enable Internet |
 | `transports.reticulum.enabled` | boolean | false | Enable Reticulum mesh (requires a gateway daemon speaking [contract v1](spec/gateway-contract.md#gateway-daemon-contract-v1)) |
 | `transports.reticulum.daemonAddress` | string | `localhost:4242` | Host and port of the gateway daemon |

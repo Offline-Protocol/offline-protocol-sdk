@@ -201,6 +201,38 @@ exemption list. It is pinned against literals in `RelayAnswerPrefixesTests.swift
 
 See [C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language).
 
+## S8. A Multipeer peer's verdict is its preamble, not its connect
+
+`WifiDirectManager` fills the peer-stream slot with MultipeerConnectivity,
+framed as [the chapter](../spec/stream-framing.md) specifies. A connected
+peer is announced to the core only under the address
+`verifyIdentityAssertion` derived from its first message, and only then:
+never on connect, never under `MCPeerID.displayName` (the remote's profile,
+commonly a shared constant), and never from the `addr` in its discovery info,
+which is only a claim the preamble must match.
+
+The rules live in `PeerStreamSession`, Foundation-only and generic over the
+peer handle, and the manager forwards every per-peer event to it on one serial
+queue. That queue is the invariant, for two reasons. A peer's first message
+can arrive before this side's connect callback, and a message must never be
+delivered after the peer's loss report, because the core re-adds a neighbour
+on any inbound body. The manager used to hop state changes onto main and
+messages onto another queue, which allowed both.
+
+Local policy differs from Python's P9 on purpose. When a second peer proves
+an address already announced, the newer supersedes the older, which is
+disconnected with no loss report: Multipeer peers do not both dial, and the
+duplicate is almost always the same device back under a new `MCPeerID`.
+There is no write queue or deadline here, because the session queues and
+retries its own reliable sends. Each message is one whole frame, and one
+whose prefix disagrees with its length is refused, since there is no stream
+position to resynchronise on.
+
+`PeerStreamSessionTests` drives it with string handles, a fake session and a
+manual clock, and `PeerStreamFramingTests` replays the chapter's vectors. The
+manager's session handling (advertise, browse, invite) is not covered in CI
+(C9).
+
 ## Testing
 
 ```bash

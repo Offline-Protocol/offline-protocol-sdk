@@ -143,11 +143,9 @@ page is an orientation to the implementation.
 
 **Status**: Registered behind `wifi_direct_enabled`. The slot counts as an
 available carrier only while a stream has proved a peer, and it queues a
-message only toward an address a stream has proved, so the bundled mobile
-managers, which report the stream layer up at start but exchange no preamble
-yet, announce no peer, are never selected, and drain nothing; until they
-adopt the chapter the slot carries traffic only for a host that runs the
-framing itself.
+message only toward an address a stream has proved. Every bundled manager
+(Android, iOS and Python) exchanges the preamble, so a peer becomes reachable
+on this slot once its stream proves the address, and never before.
 
 **Use Case**: A byte stream the platform established to exactly one peer: a
 Wi-Fi Direct group socket, a Multipeer session, a TCP connection over a LAN or
@@ -171,12 +169,16 @@ The slot's name is historical: to the engine every such stream is the same
 transport.
 
 **Platform Notes**:
-- Android: `WifiP2pManager` for the group, a plain socket for the stream. The
-  reader refuses a body of exactly 1 MiB and keeps reading after a refused
-  length; both are recorded in the chapter and fixed with the preamble.
-- iOS: `MultipeerConnectivity`, which fills this slot on iOS. It sends bare
-  messages over the session and advertises `offline-proto`; adopting the
-  chapter wraps each message as one frame and advertises `offlineprotocol`.
+- Android: `WifiP2pManager` for the group, a plain socket for the stream,
+  and `PeerStreamSockets` for everything the chapter asks of that socket.
+  The manager does not form a group itself: one formed from the system's
+  Wi-Fi Direct settings (or by another app) is joined when
+  `WIFI_P2P_CONNECTION_CHANGED_ACTION` reports it, and a client reconnects
+  to its group owner while the group lasts.
+- iOS: `MultipeerConnectivity`, which fills this slot on iOS, with
+  `PeerStreamSession` for the per-peer rules. Each message is one frame, and
+  the service type is `offlineprotocol`, so an app lists
+  `_offlineprotocol._tcp` and `_offlineprotocol._udp` in `NSBonjourServices`.
 - Hosts: any TCP socket; DNS-SD `_offlineprotocol._tcp` with `addr=` is the
   LAN discovery hint the chapter specifies. The Python binding ships one:
   `PeerStreamManager` (`bindings/python/offline_protocol_sdk/peer_stream_manager.py`),

@@ -424,13 +424,26 @@ benign reading.
 
 iOS has no Wi-Fi Direct API. The `wifiDirect` transport slot is the
 [peer-stream](spec/stream-framing.md) slot, and on iOS it is filled by
-MultipeerConnectivity. Until the manager exchanges the identity preamble it
-drops every inbound frame, so leave it disabled. Available transports:
+MultipeerConnectivity. Each peer proves its address with the identity
+preamble before anything it sends reaches the protocol, and a peer that does
+not prove one is disconnected. To enable it, list both Multipeer service
+types in `Info.plist`, or iOS local-network privacy blocks discovery with no
+error:
+
+```xml
+<key>NSBonjourServices</key>
+<array>
+    <string>_offlineprotocol._tcp</string>
+    <string>_offlineprotocol._udp</string>
+</array>
+```
+
+Multipeer peers are other iOS devices only; it does not interoperate with
+Android's Wi-Fi Direct. Available transports:
 - Bluetooth Low Energy
 - Internet
 - Reticulum and Nostr
-- The peer-stream slot through Multipeer (inbound frames dropped until the
-  preamble ships)
+- The peer-stream slot through Multipeer
 
 ## Performance
 
