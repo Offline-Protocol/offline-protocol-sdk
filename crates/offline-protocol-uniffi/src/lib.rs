@@ -15609,7 +15609,7 @@ mod tests {
             rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
         let pinned = "private fun drainAndSendMessages() { drainContinuationQueued = false \
                       if (isPaused || state != TransportState.RUNNING || \
-                      connectedPeers.isEmpty()) return";
+                      sockets.isEmpty()) return";
         assert!(
             code.contains(pinned),
             "WifiDirectManager.kt must clear drainContinuationQueued as the first statement of \
@@ -16233,35 +16233,11 @@ mod tests {
                  defer { stateLock.unlock() }; _session = newValue } }",
             ),
             (
+                // The proved peers moved to `PeerStreamLinks`, whose own lock
+                // is held to the same rule by
+                // `react_native_peer_stream_links_never_call_the_core`.
                 "hasConnectedPeers",
-                "private var hasConnectedPeers: Bool { stateLock.lock(); \
-                 defer { stateLock.unlock() } return !_connectedPeers.isEmpty }",
-            ),
-            (
-                "deviceId(forPeer:)",
-                "private func deviceId(forPeer peerID: MCPeerID) -> String? { stateLock.lock(); \
-                 defer { stateLock.unlock() } return _connectedPeers[peerID] }",
-            ),
-            (
-                "peers(matching:)",
-                "private func peers(matching recipientId: String) -> [MCPeerID] { \
-                 stateLock.lock(); defer { stateLock.unlock() } \
-                 return _connectedPeers.filter { $0.value == recipientId }.map { $0.key } }",
-            ),
-            (
-                "setPeer",
-                "private func setPeer(_ peerID: MCPeerID, deviceId: String) { stateLock.lock(); \
-                 defer { stateLock.unlock() } _connectedPeers[peerID] = deviceId }",
-            ),
-            (
-                "removePeer",
-                "private func removePeer(_ peerID: MCPeerID) -> String? { stateLock.lock(); \
-                 defer { stateLock.unlock() } return _connectedPeers.removeValue(forKey: peerID) }",
-            ),
-            (
-                "removeAllPeers",
-                "private func removeAllPeers() { stateLock.lock(); \
-                 defer { stateLock.unlock() } _connectedPeers.removeAll() }",
+                "private var hasConnectedPeers: Bool { return !peers.isEmpty }",
             ),
             (
                 "the isPaused accessor",
@@ -16281,8 +16257,8 @@ mod tests {
 
         let acquisitions = code.matches("stateLock.lock()").count();
         assert_eq!(
-            acquisitions, 12,
-            "ios/WifiDirectManager.swift: expected the 12 pinned stateLock acquisitions; found \
+            acquisitions, 6,
+            "ios/WifiDirectManager.swift: expected the 6 pinned stateLock acquisitions; found \
              {acquisitions}. A new one is not wrong, but it is unreviewed — pin its body above \
              so it cannot grow a call into the core unnoticed."
         );
@@ -16377,45 +16353,253 @@ mod tests {
         );
     }
 
-    /// Wi-Fi Direct announces nothing, because it can name nobody.
+    /// Wi-Fi Direct hands the core only an address a preamble proved.
     ///
-    /// Both managers used to pass a transport-level string — a TCP endpoint on
-    /// Android, the remote's profile on iOS — to the `wifi_direct_*` entry
-    /// points, whose parameters are documented as the peer's user-level id.
-    /// Neither is one, and neither manager exchanges the preamble that would
-    /// supply one. The frames were already going nowhere (the transport was
-    /// not registered then; it is now, and it refuses a recipient no stream
-    /// proved), but the announcements still reached `on_neighbor_discovered`,
-    /// which entered the bogus id into the capacity-bounded `known_peers`,
-    /// evicting real neighbours, and started an auto key exchange toward it.
-    /// The calls return when the managers exchange the preamble
-    /// (`docs/spec/stream-framing.md`), and only then.
+    /// Both managers used to pass a transport-level string, a TCP endpoint on
+    /// Android and the remote's profile on iOS, to the `wifi_direct_*` entry
+    /// points, whose parameters are the peer's proved address. The
+    /// announcements reached `on_neighbor_discovered`, which entered the bogus
+    /// id into the capacity-bounded `known_peers`, evicting real neighbours,
+    /// and started a key exchange toward it. The calls were removed until the
+    /// managers exchanged the preamble (`docs/spec/stream-framing.md`); they
+    /// do now, and this pins the shape that makes the calls safe.
+    ///
+    /// Neither manager runs in CI (the Android one needs a Wi-Fi Direct group,
+    /// the iOS one is on `Package.swift`'s exclude list), and their framing and
+    /// preamble rules are unit-tested only as the extracted
+    /// `PeerStreamFraming` pieces. What no test can see is that the manager
+    /// routes every byte through those pieces and every id from their
+    /// outcome, so that is pinned here:
+    /// - each entry point is called exactly once, with the proved `address`;
+    /// - the address is the one the preamble outcome carried;
+    /// - the manager sends its own assertion and checks the peer's with the
+    ///   one verifier;
+    /// - no read bypasses the framing, which is where the inclusive ceiling
+    ///   and the close-on-refusal live (Android's reader once refused exactly
+    ///   1 MiB and, on a refused length, read the skipped body as the next
+    ///   prefix).
     #[test]
-    fn react_native_wifi_direct_announces_no_unproven_peer_ids() {
-        for (label, code) in [
+    fn react_native_wifi_direct_announces_only_proved_addresses() {
+        // Each manager hands its per-peer events to an extracted engine
+        // (`PeerStreamSession` on iOS, `PeerStreamSockets` on Android), which
+        // owns the preamble and calls back through a host adapter in the
+        // manager; the adapter is where the FFI calls are. One string per
+        // platform, so a call moved between the two files is still counted
+        // once.
+        let swift = format!(
+            "{} {}",
+            rn_source_code_only("ios/WifiDirectManager.swift"),
+            rn_source_code_only("ios/PeerStreamSession.swift"),
+        );
+        let kotlin = format!(
+            "{} {}",
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt"),
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/PeerStreamSockets.kt"),
+        );
+
+        for (label, code, calls, origins, must) in [
             (
-                "ios/WifiDirectManager.swift",
-                rn_source_code_only("ios/WifiDirectManager.swift"),
+                "ios/WifiDirectManager.swift + PeerStreamSession.swift",
+                &swift,
+                [
+                    (
+                        "wifiDirectPeerConnected(",
+                        "func peerStreamConnected(_ address: String) { do { \
+                         try protocolInstance.wifiDirectPeerConnected(peerId: address)",
+                    ),
+                    (
+                        "wifiDirectMessageReceived(",
+                        "func peerStreamReceived(_ address: String, _ body: Data) { do { \
+                         try protocolInstance.wifiDirectMessageReceived(senderId: address, \
+                         data: [UInt8](body))",
+                    ),
+                    (
+                        "wifiDirectPeerDisconnected(",
+                        "func peerStreamLost(_ address: String) { do { \
+                         try protocolInstance.wifiDirectPeerDisconnected(peerId: address)",
+                    ),
+                ],
+                &[
+                    "case .announce(let address): \
+                     let announcement = links.announce(handle, address: address)",
+                    "if announcement.firstForAddress { host.peerStreamConnected(address) }",
+                    "case .deliver(let address, let payload): \
+                     host.peerStreamReceived(address, payload)",
+                    "linkStates[older]?.refused = true disconnect(older)",
+                    "if let address = links.remove(handle) { host?.peerStreamLost(address) }",
+                ][..],
+                &[
+                    "return try verifyIdentityAssertion(assertion: [UInt8](assertion))",
+                    "return Data(try protocolInstance.identityAssertion(signedData: []))",
+                    "switch PeerStreamFraming.unframe(message, \
+                     preamble: link.preamble.awaitingPreamble)",
+                    "private let SERVICE_TYPE = \"offlineprotocol\"",
+                ][..],
             ),
             (
-                "android/.../WifiDirectManager.kt",
-                rn_source_code_only(
-                    "android/src/main/java/com/offlineprotocol/WifiDirectManager.kt",
-                ),
+                "android/.../WifiDirectManager.kt + PeerStreamSockets.kt",
+                &kotlin,
+                [
+                    (
+                        "wifiDirectPeerConnected(",
+                        "override fun peerConnected(address: String) = \
+                         protocol.wifiDirectPeerConnected(address)",
+                    ),
+                    (
+                        "wifiDirectMessageReceived(",
+                        "override fun messageReceived(address: String, body: ByteArray) = \
+                         protocol.wifiDirectMessageReceived(address, body.map { it.toUByte() })",
+                    ),
+                    (
+                        "wifiDirectPeerDisconnected(",
+                        "override fun peerDisconnected(address: String) = \
+                         protocol.wifiDirectPeerDisconnected(address)",
+                    ),
+                ],
+                &[
+                    "is PeerStreamPreamble.Outcome.Announce -> outcome.address",
+                    "if (!announce(stream, address)) {",
+                    "if (!deliver(stream, address, body)) {",
+                    "links.remove(stream)?.let { address -> try { host.peerDisconnected(address)",
+                    "if (announcement.firstForAddress) { try { host.peerConnected(address)",
+                    "if (stream.closed || links.addressOf(stream) == null) return false \
+                     try { host.messageReceived(address, body)",
+                ][..],
+                &[
+                    "verifyIdentityAssertion(assertion.map { it.toUByte() })",
+                    "protocol.identityAssertion(emptyList())",
+                    "PeerStreamFraming.readBody(input, preamble = true)",
+                    "PeerStreamFraming.readBody(input, preamble = false)",
+                ][..],
             ),
         ] {
-            for entry_point in [
-                "wifiDirectPeerConnected(",
-                "wifiDirectPeerDisconnected(",
-                "wifiDirectMessageReceived(",
+            for (entry_point, call) in calls {
+                let count = code.matches(entry_point).count();
+                assert_eq!(
+                    count, 1,
+                    "{label}: expected exactly one call to {entry_point}, found {count}. Every \
+                     id handed to the core must be the address a preamble proved; a second \
+                     call site is one this guard has not reviewed"
+                );
+                assert!(
+                    code.contains(call),
+                    "{label}: {entry_point} must be called with the proved address and nothing \
+                     else. Expected to find:\n  {call}"
+                );
+            }
+            for origin in origins {
+                assert!(
+                    code.contains(origin),
+                    "{label}: the address handed to the core must come from the preamble's \
+                     outcome or from the one-link-per-address registry. Expected to find:\n  \
+                     {origin}"
+                );
+            }
+            for needed in must {
+                assert!(
+                    code.contains(needed),
+                    "{label}: the manager must exchange the preamble through the shared \
+                     verifier and the extracted framing. Expected to find:\n  {needed}"
+                );
+            }
+        }
+
+        // Every inbound byte goes through the framing. A raw readInt in the
+        // manager is the reader that refused the ceiling and read on after a
+        // refusal; a raw `didReceive` handler that skipped `unframe` would
+        // accept a message that disagrees with its prefix.
+        assert!(
+            !kotlin.contains("readInt("),
+            "WifiDirectManager.kt and PeerStreamSockets.kt must read frames only through \
+             PeerStreamFraming.readBody"
+        );
+        for call in [
+            "host.peerConnected(",
+            "host.messageReceived(",
+            "host.peerDisconnected(",
+        ] {
+            assert_eq!(
+                kotlin.matches(call).count(),
+                1,
+                "PeerStreamSockets.kt: expected exactly one {call}, the reviewed one"
+            );
+        }
+        assert_eq!(
+            swift.matches("PeerStreamFraming.unframe(").count(),
+            1,
+            "PeerStreamSession.swift must unframe in exactly one place, received(_:from:)"
+        );
+        for call in ["host.peerStreamConnected(", "host.peerStreamReceived("] {
+            assert_eq!(
+                swift.matches(call).count(),
+                1,
+                "PeerStreamSession.swift: expected exactly one {call}, the reviewed one"
+            );
+        }
+    }
+
+    /// The one-link-per-address registry never calls the core.
+    ///
+    /// Both managers read `PeerStreamLinks` from the send path, and on iOS
+    /// that path runs inline on whichever thread the core calls
+    /// `onMessagesAvailable` from, holding its global protocol mutex. The
+    /// registry's lock is therefore under the rule `stateLock` is under
+    /// (`react_native_ios_wifi_direct_state_lock_never_calls_the_core`): no
+    /// holder may call back into the core, or the two locks acquire in
+    /// opposite orders on two threads. The registry keeps that rule by not
+    /// knowing the core exists, which is what this pins; the verifier the
+    /// preamble step uses is injected, never called by name.
+    #[test]
+    fn react_native_peer_stream_links_never_call_the_core() {
+        for rel in [
+            "ios/PeerStreamFraming.swift",
+            "android/src/main/java/com/offlineprotocol/PeerStreamFraming.kt",
+        ] {
+            let code = rn_source_code_only(rel);
+            assert!(
+                code.contains("class PeerStreamLinks<"),
+                "{rel}: the registry moved; this guard reads the file it lives in"
+            );
+            for banned in [
+                "OfflineProtocol",
+                "protocolInstance",
+                "uniffi",
+                "wifiDirect",
+                "verifyIdentityAssertion",
+                "identityAssertion",
             ] {
                 assert!(
-                    !code.contains(entry_point),
-                    "{label} must not call {entry_point}: the only ids it holds are a socket \
-                     endpoint or an app-chosen profile, and the core treats that value as the \
-                     peer's user-level id — matching it against Message.sender and entering it \
-                     into known_peers. Restoring these calls requires an identity exchange \
-                     first (see wifiDirectPeerIdIsUnavailable on the type)"
+                    !code.contains(banned),
+                    "{rel}: `{banned}` means the framing file reaches the core. The send path \
+                     holds the registry's lock while the core may hold its global mutex, so \
+                     nothing here may call the core"
+                );
+            }
+        }
+
+        // The per-peer engines reach the core only through the host adapter
+        // the manager supplies. Naming the core directly would make them
+        // untestable without the native library (their suites are the only
+        // CI coverage the peer-stream path has) and would put an FFI call
+        // somewhere `react_native_wifi_direct_announces_only_proved_addresses`
+        // does not look.
+        for rel in [
+            "ios/PeerStreamSession.swift",
+            "android/src/main/java/com/offlineprotocol/PeerStreamSockets.kt",
+        ] {
+            let code = rn_source_code_only(rel);
+            for banned in [
+                "OfflineProtocol",
+                "protocolInstance",
+                "protocol.",
+                "uniffi",
+                "wifiDirect",
+                "verifyIdentityAssertion",
+            ] {
+                assert!(
+                    !code.contains(banned),
+                    "{rel}: `{banned}` means the engine calls the core directly instead of \
+                     through its host"
                 );
             }
         }

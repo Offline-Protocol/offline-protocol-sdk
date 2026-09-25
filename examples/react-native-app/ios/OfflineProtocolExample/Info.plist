@@ -40,6 +40,7 @@
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_offlineprotocol._tcp</string>
+		<string>_offlineprotocol._udp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>This app uses local network to discover and communicate with nearby devices</string>

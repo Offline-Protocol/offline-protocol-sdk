@@ -635,8 +635,8 @@ jobs:
             -Xcc -fmodule-map-file=Generated/offline_protocolFFI.modulemap \
             -Xcc -IGenerated \
             InternetManager.swift NostrManager.swift TransportManager.swift \
-            BleManager.swift WifiDirectManager.swift ReticulumManager.swift \
-            mesh/Mesh.swift ble/MeshConnectionRegistry.swift \
+            BleManager.swift WifiDirectManager.swift PeerStreamFraming.swift \
+            PeerStreamSession.swift ReticulumManager.swift mesh/Mesh.swift ble/MeshConnectionRegistry.swift \
             ble/BleDiscoveryBootstrapPolicy.swift \
             PeripheralRestorationAgeOutPolicy.swift \
             BleMessageNotificationPolicy.swift \
