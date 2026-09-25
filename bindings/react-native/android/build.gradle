@@ -94,5 +94,5 @@ dependencies {
     testImplementation 'androidx.core:core:1.13.1'
     // Real org.json for JVM unit tests (the android.jar org.json is a stub
     // that throws) — needed by RelayControlOpTranslatorTest.
-    testImplementation 'org.json:json:20260719'
+    testImplementation 'org.json:json:20260814'
 }
