@@ -298,6 +298,29 @@ class PeerStreamSocketsTest {
     }
 
     @Test
+    fun `many sockets at once are held to the stream limit, and a slot frees on end`() {
+        // Each accepted socket runs on its own thread, so these reach the
+        // limit check together. The limit is a reservation taken by one
+        // atomic increment; a size read followed by an add let every socket
+        // that read before the others added through.
+        val host = Host("peer-a")
+        val limit = 2
+        val a = PeerStreamSockets(host, fast.copy(maxStreams = limit, preambleTimeoutMs = 5_000))
+        val port = listen(a)
+        val peers = (0 until 12).map { raw(port) }
+        val served = peers.count { peer ->
+            try { peer.readBody(); true } catch (_: IOException) { false }
+        }
+        assertEquals(limit, served)
+        assertEquals(limit, a.openCount)
+
+        // Ending one frees its slot for the next socket.
+        a.closeAll()
+        val later = raw(port)
+        assertArrayEquals(assertion("peer-a"), later.readBody())
+    }
+
+    @Test
     fun `a socket that arrives while stopped is closed unread`() {
         val host = Host("peer-a")
         val port = listen(PeerStreamSockets(host, fast)) { false }

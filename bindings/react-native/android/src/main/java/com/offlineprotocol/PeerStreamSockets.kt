@@ -11,6 +11,7 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -98,6 +99,11 @@ internal class PeerStreamSockets(
     enum class SendResult { QUEUED, NO_STREAM, OUT_OF_BOUNDS, QUEUE_FULL }
 
     private val openStreams: MutableSet<Stream> = ConcurrentHashMap.newKeySet()
+    // Slots taken against [Limits.maxStreams]. Reserved by an increment that
+    // decides, not by reading the set's size and adding afterwards: two
+    // sockets accepted at once both read a size under the limit, and both
+    // got in.
+    private val reserved = AtomicInteger(0)
     private val links = PeerStreamLinks<Stream>()
 
     // Daemon, like the stream threads, so an instance dropped without
@@ -124,15 +130,24 @@ internal class PeerStreamSockets(
      */
     fun run(socket: Socket, outbound: Boolean, accepting: () -> Boolean): String? {
         val endpoint = socket.remoteSocketAddress?.toString() ?: "unknown"
-        if (!accepting() || openStreams.size >= limits.maxStreams) {
+        val refusal = when {
+            !accepting() -> "not running"
+            reserved.incrementAndGet() > limits.maxStreams -> {
+                reserved.decrementAndGet()
+                "at stream limit"
+            }
+            else -> null
+        }
+        if (refusal != null) {
             // Diagnostics may carry the endpoint; the host is never told it.
             host.diagnostic("warning", "Peer stream refused", mapOf(
                 "socket" to endpoint,
-                "reason" to (if (!accepting()) "not running" else "at stream limit"),
+                "reason" to refusal,
             ))
             closeQuietly(socket)
             return null
         }
+        // The slot is released by endStream, which runs once per stream.
         val stream = Stream(socket)
         openStreams.add(stream)
         // Re-checked after the add: a closeAll() that snapshotted the set just
@@ -302,6 +317,7 @@ internal class PeerStreamSockets(
         synchronized(stream.lock) {
             if (stream.closed) return
             stream.closed = true
+            reserved.decrementAndGet()
             links.remove(stream)?.let { address ->
                 try {
                     host.peerDisconnected(address)
