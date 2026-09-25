@@ -10,7 +10,7 @@ message is the same regardless of which encoding carries it.
 | `id` | 128-bit UUID | Identity for deduplication, acknowledgement, and outbox tracking |
 | `sender` | user identifier | Canonically an address; see [Identity](identity.md) |
 | `recipient` | user identifier | Canonically an address |
-| `app_id` | string | Namespaces traffic between applications sharing a mesh |
+| `app_id` | string | Names the application the frame belongs to; routing metadata, cleartext and unsigned (see below) |
 | `priority` | enum | `Low`, `Medium`, `High`, `Critical` |
 | `ttl` | unsigned | Hops remaining; a message with 1 or fewer is not forwarded |
 | `hop_count` | unsigned | Hops traversed so far |
@@ -130,6 +130,15 @@ claim about ordering, not a structural error: a frame carrying `u64::MAX` is
 well formed, and refusing it would let any peer make its own messages
 undeliverable. Clamping bounds the damage instead, which matters because an
 unclamped peer clock parks every later message behind it permanently.
+
+`app_id` travels in the clear on both codecs, outside the sealed envelope, and
+no control-frame signature covers it, so any carrier can read or rewrite it
+([R17](../security/threat-model.md#r17-the-application-id-on-every-frame-is-cleartext-and-unsigned)). A sender stamps its
+configured application id on every frame, except that an application's own
+message or media transfer may name another; acknowledgements and control
+frames always carry the configured one. A receiver MUST NOT drop or
+authorize a frame by its `app_id`: it reports the id with the delivered
+message and leaves routing to whoever serves the applications.
 
 ### Binary wire v1
 

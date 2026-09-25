@@ -648,7 +648,8 @@ therefore bound under its own identity, never the one it displaced; what it
 costs is that phone's link to the displaced application, and every frame is
 still authenticated above this layer. The tag is a digest of the application
 id, so an observer learns which applications a phone runs only for ids it
-already knows. It is stable and linkable, like the address beside it.
+already knows. It is stable and linkable, like the address beside it. The id
+itself also rides every frame in the clear ([R17](#r17-the-application-id-on-every-frame-is-cleartext-and-unsigned)).
 
 ### R16. The identity assertion is static and replayable on every carrier
 
@@ -683,6 +684,40 @@ session encryption, a mesh's mutual TLS) authenticates the hop and never the
 address, and a DNS-SD `addr` entry is a hint the preamble proves, never an
 identity. An advertisement on a LAN exposes the address to every device on it,
 which is the same exposure as a Bluetooth LE advertisement.
+
+### R17. The application id on every frame is cleartext and unsigned
+
+Every frame names the application it belongs to in its `app_id` field
+([wire format](../spec/wire-format.md#the-abstract-message)). One instance can
+serve several local applications behind one identity by stamping a per-send id
+on an application's own messages and reporting the stamped id on
+`message_received` and `file_received`. The field sits outside the sealed body
+and outside every signature: the control-frame canonical payload covers the
+sender, id, recipient, content and timestamp, and nothing else. Every carrier
+and every hop (A1, A3) reads it, and any of them can rewrite it without
+breaking decryption or verification.
+
+**Why it stands:** a carrier has to see some envelope to forward a frame, and
+the application id was designed as envelope metadata, never as an access
+control. Moving it inside the sealed body would hide it from relays that have
+no use for it, but every hop still learns which application a frame is for
+from its size and timing, and the id names an application, which is the same
+for every device running it.
+
+**What bounds it:** the receive path never filters on the id; sessions and
+groups are keyed on addresses, so a rewritten id cannot make a frame decrypt,
+verify or reach a peer it would not otherwise reach. What a rewrite can do is
+route a delivered message to the wrong application on an instance serving
+several. So an instance MUST treat the id as routing metadata and MUST NOT use
+it to authorize anything. Acknowledgements and control frames always carry
+the instance's configured id, never a per-send one, so the id on a control
+frame says nothing about which application caused it.
+
+**What would close it:** a sealed copy that is authoritative on receive, as
+the rendering hint `content_type` already has
+([encryption envelopes](../spec/encryption-envelopes.md#restore-rules)). That protects the id
+end to end for peers that advertise the sealed rich payload, and is left for
+the local API work that first depends on it.
 
 ## Network egress
 
