@@ -743,6 +743,14 @@ fn the_conformance_suite_catches_a_broken_backend() {
     );
 }
 
+#[test]
+fn the_mls_storage_conformance_suite_is_reachable_from_the_engine() {
+    // The engine re-exports the MLS suite beside the state suite, so a Rust
+    // host verifies both of its backends from one crate.
+    let report = crate::mls_storage_conformance::run(&InMemoryStorage::new());
+    assert!(report.is_green(), "{}", report.summary());
+}
+
 /// A transient read failure on one delta must not become permanent loss.
 ///
 /// The shape that made this necessary: the engine accepts a delta whose
