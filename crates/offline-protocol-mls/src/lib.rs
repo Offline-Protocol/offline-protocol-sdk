@@ -8,6 +8,7 @@
 //!
 //! The crate is designed with a storage-agnostic approach:
 //! - Apps implement the [`MlsStorage`] trait for platform-native secure storage
+//! - [`storage_conformance::run`] is the gate an implementation has to pass
 //! - The [`MlsManager`] handles all MLS operations (key generation, encryption, decryption)
 //! - Groups are used for both 1:1 sessions (2-person groups) and multi-party chats
 //!
@@ -42,6 +43,7 @@ pub mod provider;
 pub mod session;
 pub mod storage;
 mod storage_adapter;
+pub mod storage_conformance;
 pub mod types;
 
 // `LeafSource` rides here with `MlsError` because it is a public field type on
