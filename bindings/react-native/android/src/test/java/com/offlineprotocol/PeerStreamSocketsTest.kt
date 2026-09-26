@@ -434,8 +434,14 @@ class PeerStreamSocketsTest {
         assertEquals("connected:peer-b", host.next())
 
         // Eight ceiling frames in one tick: twice the queue budget. The writer
-        // has not stalled, so none is dropped.
-        val results = (0 until 8).map { a.send("peer-b", ByteArray(1_048_576) { it.toByte() }) }
+        // has not stalled, so none is dropped. The frames are built before the
+        // first send: the writer fills both loopback buffers and blocks while
+        // the peer is not yet reading, so anything slow between two sends (a
+        // cold JIT building a 1 MiB array) lets it pass the stall threshold,
+        // and the fifth send is refused. That is the bound working, not a
+        // burst dropped, and it is not what this test is about.
+        val frames = List(8) { ByteArray(1_048_576) { i -> i.toByte() } }
+        val results = frames.map { a.send("peer-b", it) }
         assertEquals(List(8) { PeerStreamSockets.SendResult.QUEUED }, results)
         repeat(8) { assertEquals(1_048_576, peer.readBody().size) }
     }
