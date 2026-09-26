@@ -390,6 +390,13 @@ class MyCustomMlsStorage : MlsStorageProvider {
 }
 ```
 
+A Rust implementation of `MlsStorage` is verified with
+`offline_protocol::mls_storage_conformance::run`: green is the definition of
+supported, and the report names what to fix. The suite is not exposed over the
+FFI yet, so a Swift, Kotlin or Python provider is held to the same contract by
+reading it; [C11](bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified)
+lists every check.
+
 Do not implement the protocol-state provider with Keychain,
 EncryptedSharedPreferences backed by a surviving Keystore namespace, or any
 other store that can outlive the app container.
@@ -417,10 +424,12 @@ survives indefinitely. See
 built-in wipe covers and in what order, which is the behaviour to mirror.
 
 **Protocol-state values are `ByteArray` / `Data` / `bytes`**, not the
-element-wise sequence `MlsStorageProvider` uses. That interface carries key
-material a few hundred bytes at a time; these records reach megabytes, where a
-boxed-per-element representation costs on the order of a million short-lived
-objects per call on Kotlin. Store and return the bytes verbatim — never inspect,
+element-wise sequence `MlsStorageProvider` uses. That interface mostly carries
+key material of a few hundred bytes, though a group's ratchet tree grows with
+the roster and reaches about 270 KiB at the default 256-member cap;
+protocol-state records reach megabytes, where a boxed-per-element
+representation costs on the order of a million short-lived objects per call on
+Kotlin. Store and return the bytes verbatim: never inspect,
 re-encode, or truncate them, since the sensitive categories arrive sealed.
 
 **Writes must be atomic *and* durable before `store` returns.** The SDK treats a

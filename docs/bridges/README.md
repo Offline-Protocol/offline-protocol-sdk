@@ -412,6 +412,18 @@ delete completeness. Each check exists because that defect is invisible
 until data is missing. The suite writes only under its own probe key types
 and deletes everything it wrote, so it is safe to run against a live store.
 
+The MLS storage trait has a suite of its own,
+`offline_protocol::mls_storage_conformance::run` (`run_json` for the same JSON
+shape), because an `MlsStorage` is held to things a protocol-state store is
+not: `exists` agreeing with `load`, `clear_type` emptying one category and no
+other, key ids with the `:` a session id carries, a group id at its
+4096-byte cap, a record the size of a large group's ratchet tree (270 KiB at
+the default 256-member cap; the suite writes 512 KiB), and overwrites from
+several threads landing whole. Each check has a negative control in the
+suite's own tests, so a check that stopped catching its defect fails CI. It
+is reachable from Rust only; it is not exposed over the FFI, so a Swift,
+Kotlin or Python `MlsStorageProvider` is not held to it today.
+
 **A custom backend brings a logout obligation.** `wipePersistedState()`
 removes the account directory of the *default* provider — deliberately one
 unlink rather than a walk over categories, which is also what makes it pick
