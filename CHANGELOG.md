@@ -44,9 +44,50 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   any delete and stops if it fails, and deletes everything it wrote. Probe a
   new backend on a scratch instance until it is green. Green is not a
   persistence test. Rust only; it is not exposed over the FFI.
+- **Built-in file stores for a host without a platform keystore.**
+  `FileProtocolStateStorage` writes protocol state in the `OPS1` format the
+  iOS, Android and Python providers write, byte for byte, so a state
+  directory opens under any binding for the same account.
+  `SealedFileMlsStorage` keeps MLS material sealed with ChaCha20-Poly1305
+  under keys derived from an operator-supplied store key and the account
+  namespace, with record keys inside the ciphertext and file names under a
+  keyed digest. The store key comes from a `StoreKeyProvider`: `EnvStoreKey`
+  (`OFFLINE_PROTOCOL_STORE_KEY`, hex or base64) or `StaticStoreKey`. A wrong
+  key is refused at open with `FileStoreError::WrongStoreKey` before any
+  record is read, and a lost or damaged key check is rebuilt only when a
+  record proves the key; a damaged check over an empty store fails with
+  `FileStoreError::KeyCheckUnverifiable`, naming the file to remove. The
+  sealed store never deletes a record on a read; a damaged one is reported
+  as `CorruptedData` naming its file, and one the listing skips is logged,
+  once per store, as a warning naming its file. Each store holds an
+  exclusive lock on its directory while open, so a second engine over the
+  same directories fails with `FileStoreError::InUse` instead of silently
+  diverging the MLS state.
+  On Windows the lock file shares read access, so a backup tool that shares
+  write access, as they usually do, can read a live store. A failed
+  directory flush fails the write on Unix rather than acknowledging it, and
+  a store opens over a relative root on its first run.
+  `account_storage_namespace` is the binding-shared namespace
+  derivation. Both stores pass their conformance suites, and an
+  engine restarted over them keeps its address and its sealed documents. The
+  `replicated_notes` example now runs on them. The stores sit behind the
+  default-on `file-store` feature. Rust only; the FFI entry is separate
+  work. The threat model records the store key's exposure on a host without
+  a keystore as residual risk R18.
 
 ### Fixed
 
+- **A protocol-state record key the store reports as corrupt is regenerated.**
+  The engine regenerated a record key of the wrong length but treated a
+  `CorruptedData` error as a failed load, so a store that seals its records
+  and never deletes on a read disabled sensitive persistence on every launch
+  for good. `CorruptedData` is reserved for permanent losses, so it now takes
+  the wrong-length path: a fresh key, and the records sealed under the old
+  one settled as failed on restore. A transient `LoadFailed` still leaves
+  the key alone. The rule is now written on `MlsStorage::load` and on the
+  secure provider in the UDL and the integration guide, not only on the
+  protocol-state provider: a custom secure store that reports a transient
+  fault as `CorruptedData` loses every sealed protocol-state record.
 - **Frames a bridge builds for the core carried a fixed application id.** The
   iOS, Android and Python bridges stamped `"offline-messenger"` on every relay
   answer, relay group frame and legacy plain-text DM they rebuilt for the

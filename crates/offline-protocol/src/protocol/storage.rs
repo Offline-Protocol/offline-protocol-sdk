@@ -22,7 +22,7 @@ use crate::events::DecryptionFailureCode;
 use crate::{Error, Event, ProtocolStateError, ProtocolStateResult, ProtocolStateStorage, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use offline_protocol_core::{LamportClock, Message, MessageId};
-use offline_protocol_mls::{MlsManager, MlsStorage};
+use offline_protocol_mls::{MlsManager, MlsStorage, StorageError};
 use offline_protocol_transport::{NostrKeypair, NostrTransport, TransportType};
 use serde::de::DeserializeOwned;
 use std::collections::{HashMap, HashSet};
@@ -1589,13 +1589,19 @@ impl OfflineProtocol {
     /// worth being explicit about why, because the asymmetry looks like an
     /// oversight and is not.
     ///
-    /// A *failed load* leaves the cipher uninstalled. Sealed records then read
+    /// A *failed load* (the store could not read, as opposed to read something
+    /// that is not a key) leaves the cipher uninstalled. Sealed records then read
     /// as [`StateRecord::Unavailable`]: they stay on disk, nothing is settled,
     /// and a launch that can read the key recovers them. That is the recoverable
     /// case, and it is treated as one.
     ///
-    /// A blob of the *wrong length* is not the key and never will be — no
-    /// process can recover the original from it — so everything sealed under
+    /// A blob of the *wrong length*, or a record the store itself reports as
+    /// [`StorageError::CorruptedData`], is not the key and never will be. The
+    /// storage contract reserves that variant for permanent losses, and a
+    /// store that seals its records (the built-in sealed file store) reports a
+    /// damaged record key only that way: treating it as a failed load would
+    /// disable persistence on every launch for good, since nothing else ever
+    /// rewrites the record. No process can recover the original from either, so everything sealed under
     /// that key is already unrecoverable by the time this function runs.
     /// Regenerating is therefore not what destroys those records; it is what
     /// lets the install seal again. The visible consequence is still large: the
@@ -1615,7 +1621,7 @@ impl OfflineProtocol {
             return;
         };
 
-        let key: Zeroizing<[u8; STATE_RECORD_KEY_BYTES]> = match storage.load(
+        let unrecoverable = match storage.load(
             storage_keys::STATE_RECORD_KEY,
             storage_keys::STATE_RECORD_KEY_ID,
         ) {
@@ -1624,40 +1630,20 @@ impl OfflineProtocol {
                 let mut key = Zeroizing::new([0u8; STATE_RECORD_KEY_BYTES]);
                 key.copy_from_slice(&bytes);
                 debug!("Restored protocol state record key from secure storage");
-                key
+                self.state_record_cipher = Some(StateRecordCipher::new(&key));
+                return;
             }
-            Ok(other) => {
-                // A wrong-length blob is a corrupt write, not a usable key, and
-                // nothing can recover the original from it — so whatever it
-                // sealed is already lost before this runs. Regenerating is what
-                // lets the install seal again; see the note on this function
-                // for why refusing to is worse.
-                if let Some(bytes) = &other {
-                    warn!(
-                        len = bytes.len(),
-                        expected = STATE_RECORD_KEY_BYTES,
-                        "Protocol state record key is not a key and cannot be recovered; \
-                         regenerating. Every record sealed under the old key is \
-                         unrecoverable and will be settled as failed on restore — this is \
-                         not routine key generation"
-                    );
-                }
-                let fresh = StateRecordCipher::generate_key();
-                if let Err(e) = storage.store(
-                    storage_keys::STATE_RECORD_KEY,
-                    storage_keys::STATE_RECORD_KEY_ID,
-                    &*fresh,
-                ) {
-                    warn!(
-                        error = %e,
-                        "Failed to persist protocol state record key; \
-                         sensitive protocol state will not be persisted this session"
-                    );
-                    return;
-                }
-                info!("Generated and persisted per-install protocol state record key");
-                fresh
-            }
+            Ok(None) => None,
+            Ok(Some(bytes)) => Some(format!(
+                "stored key is {} bytes, expected {STATE_RECORD_KEY_BYTES}",
+                bytes.len()
+            )),
+            // The store read the record and it is not the key. The storage
+            // contract (`MlsStorage::load`) reserves `CorruptedData` for
+            // permanent losses (a transient failure is `LoadFailed`), so this
+            // is the wrong-length case reported by the store rather than
+            // found here.
+            Err(StorageError::CorruptedData(reason)) => Some(reason),
             Err(e) => {
                 warn!(
                     error = %e,
@@ -1667,6 +1653,34 @@ impl OfflineProtocol {
                 return;
             }
         };
+
+        // A corrupt record is not a usable key, and nothing can recover the
+        // original from it, so whatever it sealed is already lost before this
+        // runs. Regenerating is what lets the install seal again; see the note
+        // on this function for why refusing to is worse.
+        if let Some(reason) = &unrecoverable {
+            warn!(
+                reason = %reason,
+                "Protocol state record key is not a key and cannot be recovered; \
+                 regenerating. Every record sealed under the old key is \
+                 unrecoverable and will be settled as failed on restore; this is \
+                 not routine key generation"
+            );
+        }
+        let key: Zeroizing<[u8; STATE_RECORD_KEY_BYTES]> = StateRecordCipher::generate_key();
+        if let Err(e) = storage.store(
+            storage_keys::STATE_RECORD_KEY,
+            storage_keys::STATE_RECORD_KEY_ID,
+            &*key,
+        ) {
+            warn!(
+                error = %e,
+                "Failed to persist protocol state record key; \
+                 sensitive protocol state will not be persisted this session"
+            );
+            return;
+        }
+        info!("Generated and persisted per-install protocol state record key");
 
         self.state_record_cipher = Some(StateRecordCipher::new(&key));
     }

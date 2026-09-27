@@ -12,6 +12,8 @@ pub mod config;
 pub mod constants;
 pub mod error;
 pub mod events;
+#[cfg(feature = "file-store")]
+pub mod file_store;
 pub mod file_transfer;
 mod group_mesh;
 mod media_envelope;
@@ -36,6 +38,11 @@ pub use events::{
     DecryptionFailureCode, DocRemovedBy, DorsEscalationPhase, DorsEscalationReasonCode,
     DorsReasonCode, Event, EventCallback, GroupInfoMember, PresenceSource, PresenceStatus,
     UserGroupSummary,
+};
+#[cfg(feature = "file-store")]
+pub use file_store::{
+    account_storage_namespace, EnvStoreKey, FileProtocolStateStorage, FileStoreError,
+    SealedFileMlsStorage, StaticStoreKey, StoreKeyError, StoreKeyProvider,
 };
 pub use group_mesh::{
     GroupRichReadiness, GroupSendOptions, RelaySyncState, MAX_RELAY_CAPABILITIES,

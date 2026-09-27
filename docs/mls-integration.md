@@ -343,10 +343,118 @@ val stateStorage = MyAppContainerStateStorage()
 protocol.initializeMls(secureStorage, stateStorage)
 ```
 
+### Built-in file stores
+
+A Rust host with a filesystem and no platform keystore (a Linux service, a
+gateway, a headless node) does not have to write either provider. The engine
+crate ships one of each:
+
+```rust
+use std::sync::Arc;
+use offline_protocol::{
+    account_storage_namespace, EnvStoreKey, FileProtocolStateStorage, SealedFileMlsStorage,
+};
+
+let namespace = account_storage_namespace("com.example.node", "default");
+// MLS material: may outlive an installation, so a root that survives upgrades.
+let secure = SealedFileMlsStorage::open("/var/lib/example/keys", &namespace, &EnvStoreKey::default())?;
+// Protocol state: scoped to the installation, removed with it.
+let state = FileProtocolStateStorage::open("/var/lib/example/state", &namespace)?;
+protocol.initialize_mls(Arc::new(secure), Arc::new(state))?;
+```
+
+- **`FileProtocolStateStorage`** writes the `OPS1` format described below,
+  byte for byte, with the same directory and file names as the iOS, Android
+  and Python providers. A state directory is portable across bindings for
+  the same account.
+- **`SealedFileMlsStorage`** seals every record with ChaCha20-Poly1305 under
+  a key derived with HKDF from a 32-byte *store key* and the account
+  namespace. The record's key type and id travel inside the ciphertext, and
+  file names are an HMAC under a second derived key, so a copied directory
+  shows how many records it holds and not which peers or groups they belong
+  to.
+- **The store key** comes from a `StoreKeyProvider`. `EnvStoreKey` reads 64
+  hex digits or base64 from `OFFLINE_PROTOCOL_STORE_KEY` (or a variable you
+  name), and `StaticStoreKey` wraps bytes the host already holds. A host with
+  a keystore implements the trait over it. Without one, the key is in the
+  clear wherever the operator put it
+  ([R18](security/threat-model.md#r18-a-host-without-a-platform-keystore-holds-the-store-key-in-the-clear-unless-the-operator-supplies-one)).
+- **The store key must be 32 random bytes.** Generate it once from a
+  cryptographic random source and keep it; never derive it from a password
+  or a host name. HKDF stretches nothing: a guessable key opens every record.
+
+  ```bash
+  openssl rand -hex 32
+  ```
+- **A wrong key is refused at open.** The first open writes a sealed check
+  file, and every later open must open it, so a different key fails with
+  `FileStoreError::WrongStoreKey` before any record is read. The engine never
+  sees an empty store and never mints a new identity over the old one. A
+  check file that is lost or damaged is rebuilt only when an existing record
+  opens under the key offered, which proves it. A check that does not open
+  over a store with no records fails with
+  `FileStoreError::KeyCheckUnverifiable`, which names the check file: the
+  key may be wrong or the check damaged, and an empty store cannot tell.
+  There is nothing sealed to lose, so if the key is right, remove that file.
+- **One store per directory.** Each store holds an exclusive lock on its
+  account directory while it is open, so a second engine over the same
+  directories, in the same process or another, fails with
+  `FileStoreError::InUse`. Two engines over one MLS directory would each
+  advance ratchet state the other never sees. On a filesystem that cannot
+  lock (some network mounts) the store logs that and opens unguarded. The
+  lock is the open handle, not the file, and it dies with the process: a
+  `*.lock` file left by a crash is not stale, and removing one while a store
+  is open lets a second store in beside it. Never delete them.
+- **Release both stores before reopening them.** A store is released when
+  the last reference to it drops, and the engine is not always the last
+  holder: with telemetry enabled, the engine's drop detaches the uploader
+  thread, which keeps the protocol-state store until its final flush ends
+  (up to three seconds). Call `disable_telemetry()` before dropping the
+  engine, and it waits for that flush, so a restart in the same process or
+  a logout that removes the directories finds them free.
+- **The sealed store never deletes on a read.** A record that does not
+  authenticate is reported as `CorruptedData`, naming its file, and left in
+  place, because deleting on a wrong key would destroy the identity. Once the
+  key check has passed, such a record is damaged, and what removing it costs
+  depends on what it held. A damaged protocol-state record key needs nothing:
+  the engine regenerates it, and the protocol-state records sealed under the
+  old one are settled as failed. A damaged identity means a new identity and
+  a new address. A damaged group record loses that group. The
+  protocol-state store drops a record it cannot parse, exactly as the binding
+  providers do, so the engine can settle the message ids the application
+  holds for it.
+- **Both stores pass their conformance suites** and write durably: a
+  temporary file, flushed, renamed into place, then the directory flushed,
+  including every directory a write had to create. Directories are created
+  owner-only on Unix; on Windows they inherit the parent's access list, so
+  put the roots somewhere only the service account can read.
+- **Back up the key directory whole, and never roll a live device back.**
+  MLS state moves forward with every message. Restoring an older copy
+  reinstates spent ratchet secrets and consumed key packages: peers' newer
+  messages then fail to decrypt, and the sessions have to be re-established.
+  A backup protects against losing the identity, not against losing the
+  latest epoch. A backup tool can read the records while the store is open.
+  On Windows the lock file itself opens only for a reader that shares write
+  access, as backup tools usually do; it is empty, so skipping it loses
+  nothing.
+
+The namespace must be the output of `account_storage_namespace`; anything
+else is refused before a directory is created.
+
 ### Implementing the Providers
 
 Implement `MlsStorageProvider` for secure material. Implement
-`ProtocolStateStorageProvider` with the same methods for app-container state:
+`ProtocolStateStorageProvider` with the same methods for app-container state.
+
+**Throw `CorruptedData` from either provider only for a record that no later
+launch can read.** A secure provider is held to the same rule as the
+protocol-state provider below, and the engine acts on it: `CorruptedData` for
+the protocol-state record key makes the engine mint a new key, which leaves
+every protocol-state record sealed under the old one unreadable for good.
+A Keychain that is locked until first unlock, a Keystore that is briefly
+unavailable, or any I/O failure is `LoadFailed`. The engine answers that by
+leaving the key alone and persisting no sensitive state for that session,
+and the next launch recovers.
 
 ```swift
 // iOS Custom Implementation

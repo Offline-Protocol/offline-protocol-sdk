@@ -103,6 +103,21 @@ pub trait MlsStorage: Send + Sync {
     /// Returns `Ok(None)` if the key doesn't exist.
     /// Returns `Err` only for actual failures (corruption, access denied, etc.).
     ///
+    /// # Which error
+    ///
+    /// Reserve [`StorageError::CorruptedData`] for a record that is present
+    /// and can never be read by any later launch: its bytes are damaged, or
+    /// it does not authenticate. A failure that a later launch might not hit
+    /// (a locked keystore, an I/O error, a device not yet unlocked after
+    /// boot) is [`StorageError::LoadFailed`].
+    ///
+    /// The distinction is acted on, not only logged. The engine answers
+    /// `CorruptedData` on the protocol-state record key by minting a new one,
+    /// which makes every protocol-state record sealed under the old key
+    /// unreadable for good; it answers `LoadFailed` by leaving the key alone
+    /// and not persisting sensitive state for that session. A transient fault
+    /// reported as `CorruptedData` therefore destroys recoverable state.
+    ///
     /// # Arguments
     ///
     /// * `key_type` - Category of the data
