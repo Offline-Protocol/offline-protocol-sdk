@@ -343,6 +343,59 @@ val stateStorage = MyAppContainerStateStorage()
 protocol.initializeMls(secureStorage, stateStorage)
 ```
 
+### Built-in file stores
+
+A Rust host with a filesystem and no platform keystore (a Linux service, a
+gateway, a headless node) does not have to write either provider. The engine
+crate ships one of each:
+
+```rust
+use std::sync::Arc;
+use offline_protocol::{
+    account_storage_namespace, EnvStoreKey, FileProtocolStateStorage, SealedFileMlsStorage,
+};
+
+let namespace = account_storage_namespace("com.example.node", "default");
+// MLS material: may outlive an installation, so a root that survives upgrades.
+let secure = SealedFileMlsStorage::open("/var/lib/example/keys", &namespace, &EnvStoreKey::default())?;
+// Protocol state: scoped to the installation, removed with it.
+let state = FileProtocolStateStorage::open("/var/lib/example/state", &namespace)?;
+protocol.initialize_mls(Arc::new(secure), Arc::new(state))?;
+```
+
+- **`FileProtocolStateStorage`** writes the `OPS1` format described below,
+  byte for byte, with the same directory and file names as the iOS, Android
+  and Python providers. A state directory is portable across bindings for
+  the same account.
+- **`SealedFileMlsStorage`** seals every record with ChaCha20-Poly1305 under
+  a key derived with HKDF from a 32-byte *store key* and the account
+  namespace. The record's key type and id travel inside the ciphertext, and
+  file names are an HMAC under a second derived key, so a copied directory
+  shows how many records it holds and not which peers or groups they belong
+  to.
+- **The store key** comes from a `StoreKeyProvider`. `EnvStoreKey` reads 64
+  hex digits or base64 from `OFFLINE_PROTOCOL_STORE_KEY` (or a variable you
+  name), and `StaticStoreKey` wraps bytes the host already holds. A host with
+  a keystore implements the trait over it. Without one, the key is in the
+  clear wherever the operator put it
+  ([R18](security/threat-model.md#r18-a-host-without-a-platform-keystore-holds-the-store-key-in-the-clear-unless-the-operator-supplies-one)).
+- **A wrong key is refused at open.** The first open writes a sealed check
+  file, and every later open must open it, so a different key fails with
+  `FileStoreError::WrongStoreKey` before any record is read. The engine never
+  sees an empty store and never mints a new identity over the old one.
+- **The sealed store never deletes on a read.** A record that does not
+  authenticate is reported as `CorruptedData` and left in place, because
+  deleting on a wrong key would destroy the identity. The protocol-state
+  store drops a record it cannot parse, exactly as the binding providers do,
+  so the engine can settle the message ids the application holds for it.
+- **Both stores pass their conformance suites** and write durably: a
+  temporary file, flushed, renamed into place, then the directory flushed.
+  Directories are created owner-only.
+
+Two engines over one directory are unsupported, as they are with every
+provider. The namespace must be the output of `account_storage_namespace`;
+anything else is refused before a directory is created.
+
 ### Implementing the Providers
 
 Implement `MlsStorageProvider` for secure material. Implement

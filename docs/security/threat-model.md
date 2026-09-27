@@ -102,7 +102,13 @@ See [Bridge contracts](../bridges/README.md).
 ### Boundary 3: process to secure storage
 
 **Enforced by:** the platform (Keychain, Keystore, equivalent), reached through
-a storage interface the application implements.
+a storage interface the application implements. On a host with no platform
+keystore, the second shape is the built-in sealed file store: every record is
+sealed under a key derived from a store key the operator supplies, file names
+are a keyed digest, and a wrong key is refused before any record is read
+([MLS integration](../mls-integration.md#built-in-file-stores)). The store
+moves the secret, it does not remove it: see
+[R18](#r18-a-host-without-a-platform-keystore-holds-the-store-key-in-the-clear-unless-the-operator-supplies-one).
 
 **Assumption:** the platform store is confidential and integral. Sealing is not
 integrity: an implementation that seals records but permits deletion of a state
@@ -726,6 +732,31 @@ the rendering hint `content_type` already has
 ([encryption envelopes](../spec/encryption-envelopes.md#restore-rules)). That protects the id
 end to end for peers that advertise the sealed rich payload, and is left for
 the local API work that first depends on it.
+
+### R18. A host without a platform keystore holds the store key in the clear unless the operator supplies one
+
+The built-in sealed file store protects identity keys, group state and the
+protocol-state record key against a reader of the directory who does not have
+the store key: a copied disk, a backup, another local user. The store key
+itself comes from a `StoreKeyProvider`. The providers the SDK ships take it
+from bytes the host already holds or from an environment variable, and on a
+host with no keystore either one means the key sits in the clear somewhere the
+process can read it: a unit file, an environment, a mounted secret.
+
+**Why it stands:** there is no portable keystore on a general-purpose host,
+and a store key the SDK generated and wrote next to the records would protect
+nothing. Where the host has one (a TPM, a secrets manager, a service manager's
+encrypted credentials), the provider trait is the seam to reach it, and the
+SDK never persists the key.
+
+**What bounds it:** the store asks for the key once, at open, derives its
+working keys per account namespace and keeps nothing else, so a record copied
+into another account's directory does not open under the same store key. An
+attacker who has the key and the directory has the device's identity, exactly
+as one who has a phone's unlocked keystore does (A6). The protocol-state store
+beside it carries only ciphertext for every sensitive category, but its file
+names are an unsalted digest of peer and message ids, shared with the
+bindings' format, so a reader of that directory can confirm a guessed id.
 
 ## Network egress
 

@@ -420,6 +420,14 @@ open instance, so a backend that forgets everything on reopen, or that
 acknowledges a write it has not made durable, can pass. A persistent backend
 proves those with a reopen test of its own.
 
+The built-in Rust file stores, `FileProtocolStateStorage` and
+`SealedFileMlsStorage`, are the worked example: each is green on its suite in
+the engine's tests, and each has a reopen test, including one that restarts an
+engine over both and finds the same address and the same sealed document
+([MLS integration](../mls-integration.md#built-in-file-stores)). No binding
+exposes them yet. A Rust host that uses them owns both directories, which
+includes removing them on logout.
+
 The MLS storage trait has a suite of its own,
 `offline_protocol::mls_storage_conformance::run` (`run_json` for the same JSON
 shape), because an `MlsStorage` is held to things a protocol-state store is

@@ -44,6 +44,23 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   any delete and stops if it fails, and deletes everything it wrote. Probe a
   new backend on a scratch instance until it is green. Green is not a
   persistence test. Rust only; it is not exposed over the FFI.
+- **Built-in file stores for a host without a platform keystore.**
+  `FileProtocolStateStorage` writes protocol state in the `OPS1` format the
+  iOS, Android and Python providers write, byte for byte, so a state
+  directory opens under any binding for the same account.
+  `SealedFileMlsStorage` keeps MLS material sealed with ChaCha20-Poly1305
+  under keys derived from an operator-supplied store key and the account
+  namespace, with record keys inside the ciphertext and file names under a
+  keyed digest. The store key comes from a `StoreKeyProvider`: `EnvStoreKey`
+  (`OFFLINE_PROTOCOL_STORE_KEY`, hex or base64) or `StaticStoreKey`. A wrong
+  key is refused at open with `FileStoreError::WrongStoreKey` before any
+  record is read, and the sealed store never deletes a record on a read.
+  `account_storage_namespace` is the binding-shared namespace derivation.
+  Both stores pass their conformance suites, and an engine restarted over
+  them keeps its address and its sealed documents. The `replicated_notes`
+  example now runs on them. Rust only; the FFI entry is separate work. The
+  threat model records the store key's exposure on a host without a
+  keystore as residual risk R18.
 
 ### Fixed
 
