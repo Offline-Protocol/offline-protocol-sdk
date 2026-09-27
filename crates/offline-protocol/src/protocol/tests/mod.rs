@@ -3,6 +3,7 @@ mod data_layer;
 #[cfg(feature = "data")]
 mod data_sync;
 mod data_sync_group;
+#[cfg(feature = "file-store")]
 mod file_stores;
 mod leaf_pairing;
 mod per_send_app_id;

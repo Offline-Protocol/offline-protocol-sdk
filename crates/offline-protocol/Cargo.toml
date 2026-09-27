@@ -19,7 +19,7 @@ description = "Main protocol engine for the Offline Protocol SDK"
 workspace = true
 
 [features]
-default = ["data", "telemetry-pipe"]
+default = ["data", "telemetry-pipe", "file-store"]
 # Replicated documents. Gates the engine dependency and the store, never the
 # configuration section, the storage categories, or the events: those are
 # inert without the engine and gating them would fork the config surface and
@@ -37,6 +37,13 @@ telemetry-pipe = ["dep:ureq", "dep:offline-protocol-telemetry-wire"]
 # a test in another crate can see every upload without a network. Enabled by
 # dev-dependencies only; a shipped binary never carries it.
 test-utils = []
+# The built-in file stores (`offline_protocol::file_store`): protocol state in
+# the bindings' shared file format, and MLS material sealed under an
+# operator-supplied store key. For a host with a filesystem and no platform
+# keystore. Default on, like `data`, so the FFI entry that exposes them cannot
+# become a checksum mismatch; a mobile build that never calls them opts out
+# with `default-features = false` and drops the HKDF, HMAC and lock code.
+file-store = ["dep:hkdf", "dep:hmac", "dep:rustix"]
 
 [dependencies]
 offline-protocol-core = { workspace = true }
@@ -86,8 +93,8 @@ zeroize = { workspace = true }
 # naming keys from the operator's store key (HKDF) and names its files with a
 # keyed digest (HMAC), so a stolen directory does not confirm which peers and
 # groups it holds. Both are already in the graph through the transport crate.
-hkdf = { workspace = true }
-hmac = { workspace = true }
+hkdf = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
 
 # The built-in file stores hold an exclusive `flock` on their directory for
 # their lifetime, so a second store over it is refused rather than diverging
@@ -95,7 +102,7 @@ hmac = { workspace = true }
 # std's `File::try_lock` needs Rust 1.89, above the 1.87 MSRV. Windows uses
 # std's no-sharing open instead and needs nothing.
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", default-features = false, features = ["fs", "std"] }
+rustix = { version = "1", default-features = false, features = ["fs", "std"], optional = true }
 
 [dev-dependencies]
 offline-protocol-leaf = { workspace = true }
@@ -126,4 +133,4 @@ openmls_traits = { workspace = true }
 # compile a target that cannot exist in that configuration.
 [[example]]
 name = "replicated_notes"
-required-features = ["data"]
+required-features = ["data", "file-store"]

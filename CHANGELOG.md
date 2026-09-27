@@ -67,9 +67,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   acknowledging it. `account_storage_namespace` is the binding-shared
   namespace derivation. Both stores pass their conformance suites, and an
   engine restarted over them keeps its address and its sealed documents. The
-  `replicated_notes` example now runs on them. Rust only; the FFI entry is
-  separate work. The threat model records the store key's exposure on a host
-  without a keystore as residual risk R18.
+  `replicated_notes` example now runs on them. The stores sit behind the
+  default-on `file-store` feature. Rust only; the FFI entry is separate
+  work. The threat model records the store key's exposure on a host without
+  a keystore as residual risk R18.
 
 ### Fixed
 
