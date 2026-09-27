@@ -758,6 +758,14 @@ beside it carries only ciphertext for every sensitive category, but its file
 names are an unsalted digest of peer and message ids, shared with the
 bindings' format, so a reader of that directory can confirm a guessed id.
 
+**What the operator still owns:** the key must be random. HKDF does not
+stretch a weak key, so a store key derived from a password or a host name is
+open to a guessing attack by anyone holding the directory. Owner-only
+directory modes are a Unix property; on Windows the directories inherit the
+parent's access list. And a restored backup of the key directory rolls MLS
+state back: it cannot leak a message, but it reinstates spent ratchet secrets
+on disk and breaks the sessions until they are re-established.
+
 ## Network egress
 
 Until 0.26 the Rust crates opened no socket: every byte that left a device

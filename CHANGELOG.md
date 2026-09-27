@@ -54,7 +54,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   keyed digest. The store key comes from a `StoreKeyProvider`: `EnvStoreKey`
   (`OFFLINE_PROTOCOL_STORE_KEY`, hex or base64) or `StaticStoreKey`. A wrong
   key is refused at open with `FileStoreError::WrongStoreKey` before any
-  record is read, and the sealed store never deletes a record on a read.
+  record is read, and a lost or damaged key check is rebuilt only when a
+  record proves the key. The sealed store never deletes a record on a read;
+  a damaged one is reported as `CorruptedData` naming its file. Each store
+  holds an exclusive lock on its directory while open, so a second engine
+  over the same directories fails with `FileStoreError::InUse` instead of
+  silently diverging the MLS state.
   `account_storage_namespace` is the binding-shared namespace derivation.
   Both stores pass their conformance suites, and an engine restarted over
   them keeps its address and its sealed documents. The `replicated_notes`

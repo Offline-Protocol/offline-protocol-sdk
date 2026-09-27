@@ -42,16 +42,26 @@ pub(super) const MAX_LISTED_ENTRIES: usize = 65_536;
 /// entry prefix, so enumeration never mistakes a half-written record for one.
 pub(super) const TEMP_PREFIX: &str = ".write-";
 
-/// Ceiling on entries one stale-temporary sweep examines.
-const MAX_SWEEP_ENTRIES: usize = 4_096;
+/// Ceiling on temporaries one stale-temporary sweep examines.
+///
+/// Counts temporaries, not directory entries: a cap on entries would let a
+/// directory with more records than the cap hide an orphan behind them for
+/// good, because the enumeration order is the same on every launch.
+const MAX_SWEEP_TEMPORARIES: usize = 4_096;
+
+/// Ceiling on directory entries one sweep reads, so a tampered directory
+/// cannot turn the first write of a session into an unbounded scan. The same
+/// bound enumeration already pays.
+const MAX_SWEEP_SCANNED: usize = MAX_LISTED_ENTRIES;
 
 /// Age past which a temporary is presumed orphaned by a crash.
 ///
 /// The bindings sweep every temporary unconditionally and rely on one lock
-/// ordering every writer in the process. That holds for one process; a second
-/// process over the same directory (unsupported, but a misconfigured service
-/// manager can start one) would have its in-flight write unlinked and fail a
-/// store it should not have. No live write takes this long.
+/// ordering every writer in the process. The built-in stores refuse a second
+/// store over their directory ([`DirectoryLock`]), but on a filesystem that
+/// cannot lock, a second process would have its in-flight write unlinked and
+/// fail a store it should not have. The age keeps that case safe too. No live
+/// write takes this long.
 const STALE_TEMPORARY_AGE: Duration = Duration::from_secs(300);
 
 /// Owner-only mode for every directory a store creates.
@@ -62,22 +72,105 @@ const DIRECTORY_MODE: u32 = 0o700;
 #[cfg(unix)]
 const FILE_MODE: u32 = 0o600;
 
-/// Serialises every store operation in the process.
+/// Serialises one store's operations.
 ///
-/// Process-wide rather than per store, for the reason the bindings give: two
-/// stores over one root are not hypothetical, and a per-instance lock cannot
-/// order them. The operations are short file calls, and the engine already
-/// serialises storage behind its own lock.
-static STORE_LOCK: Mutex<()> = Mutex::new(());
+/// Per store, not per process. The bindings use one process-wide lock because
+/// two of their providers over one directory are possible and an instance
+/// lock cannot order them. Here that case cannot arise: each store holds a
+/// [`DirectoryLock`] on its account directory for its whole lifetime, so a
+/// second store over the same directory is refused at open, and two stores
+/// that do coexist touch disjoint directories. A process-wide lock would only
+/// serialise unrelated accounts behind one another's durable writes, each of
+/// which costs two full flushes.
+#[derive(Default)]
+pub(super) struct StoreLock(Mutex<()>);
 
-/// Takes the process-wide store lock. A panic while it was held cannot have
-/// left a record torn (every write is a rename), so a poisoned lock is still
-/// safe to take.
-pub(super) fn lock() -> MutexGuard<'static, ()> {
-    STORE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+impl StoreLock {
+    /// Takes the lock. A panic while it was held cannot have left a record
+    /// torn (every write is a rename), so a poisoned lock is still safe to
+    /// take.
+    pub(super) fn lock(&self) -> MutexGuard<'_, ()> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
+
+/// An exclusive lock on a store's account directory, held for the store's
+/// lifetime and released when it drops (or when the process dies).
+///
+/// Two stores over one directory, in one process or two, would each write
+/// ratchet state the other never sees, and the MLS state would diverge
+/// without any error. The lock turns that into a refused open. It is
+/// advisory: it orders stores that take it, which every built-in store does.
+#[derive(Debug)]
+pub(super) struct DirectoryLock {
+    _handle: File,
+}
+
+/// Why a [`DirectoryLock`] was not taken.
+#[derive(Debug)]
+pub(super) enum LockError {
+    /// Another store holds the lock.
+    Held,
+    /// The lock file could not be created or opened.
+    Io(io::Error),
+}
+
+impl DirectoryLock {
+    /// Takes the lock file `name` in `directory`, without waiting.
+    ///
+    /// A filesystem that does not support locking at all (some network
+    /// mounts) is not a reason to refuse the store: the lock is logged as
+    /// unavailable and the store opens unguarded, as every binding's store
+    /// does. Only a lock that another store holds is a refusal.
+    pub(super) fn acquire(directory: &Path, name: &str) -> Result<Self, LockError> {
+        let path = directory.join(name);
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(FILE_MODE);
+        }
+        #[cfg(windows)]
+        {
+            // No sharing: a second open of the file fails while this handle
+            // lives, which is the lock. Windows releases it with the handle.
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(0);
+        }
+        let handle = match options.open(&path) {
+            Ok(handle) => handle,
+            #[cfg(windows)]
+            Err(err) if err.raw_os_error() == Some(WINDOWS_SHARING_VIOLATION) => {
+                return Err(LockError::Held)
+            }
+            Err(err) => return Err(LockError::Io(err)),
+        };
+        #[cfg(unix)]
+        {
+            use rustix::fs::{flock, FlockOperation};
+            match flock(&handle, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => {}
+                Err(errno) if errno == rustix::io::Errno::WOULDBLOCK => {
+                    return Err(LockError::Held)
+                }
+                Err(errno) => tracing::warn!(
+                    path = %path.display(),
+                    error = %io::Error::from(errno),
+                    "store directory cannot be locked on this filesystem; \
+                     a second store over it will not be refused"
+                ),
+            }
+        }
+        Ok(Self { _handle: handle })
+    }
+}
+
+/// `ERROR_SHARING_VIOLATION`: the file is open elsewhere without sharing.
+#[cfg(windows)]
+const WINDOWS_SHARING_VIOLATION: i32 = 32;
 
 /// Why a frame could not be built.
 #[derive(Debug)]
@@ -172,7 +265,36 @@ pub(super) fn parse_header(raw: &[u8]) -> Option<Header> {
 /// directory that is already there, so the explicit `set_permissions` is what
 /// makes it deterministic. Best effort on that step: a filesystem without
 /// POSIX permissions refuses it, and there the mode was never a control.
+/// Owner-only is therefore a Unix property; on Windows the directory inherits
+/// its parent's access list.
+///
+/// Every directory this call creates is flushed into its parent. A record's
+/// own flush makes its entry durable in its directory, but a directory that
+/// is itself only staged in its parent can vanish on power loss with every
+/// acknowledged record inside it, which is the first write to every category.
 pub(super) fn private_mkdir(directory: &Path) -> io::Result<()> {
+    let created = missing_ancestors(directory);
+    make_private_directory(directory)?;
+    // Deepest first is not required: every directory in the list exists now,
+    // and each flush makes one entry in one parent durable.
+    for made in &created {
+        if let Some(parent) = made.parent() {
+            sync_directory(parent);
+        }
+    }
+    Ok(())
+}
+
+/// `directory` and each of its ancestors that does not exist yet.
+fn missing_ancestors(directory: &Path) -> Vec<PathBuf> {
+    directory
+        .ancestors()
+        .take_while(|path| !path.as_os_str().is_empty() && !path.exists())
+        .map(Path::to_path_buf)
+        .collect()
+}
+
+fn make_private_directory(directory: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -356,24 +478,35 @@ impl SweepMemo {
                 return;
             }
         }
-        let Ok(entries) = fs::read_dir(directory) else {
-            return;
-        };
-        let now = SystemTime::now();
-        for entry in entries.take(MAX_SWEEP_ENTRIES).flatten() {
-            let name = entry.file_name();
-            if !name.to_str().is_some_and(|n| n.starts_with(TEMP_PREFIX)) {
-                continue;
-            }
-            let stale = entry
-                .metadata()
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|modified| now.duration_since(modified).ok())
-                .is_some_and(|age| age >= STALE_TEMPORARY_AGE);
-            if stale && fs::remove_file(entry.path()).is_ok() {
-                tracing::debug!(name = ?name, "removed stale store temporary");
-            }
+        sweep_directory(directory, MAX_SWEEP_SCANNED, MAX_SWEEP_TEMPORARIES);
+    }
+}
+
+/// Removes stale temporaries in `directory`, reading at most `max_scanned`
+/// entries and examining at most `max_temporaries` temporaries.
+fn sweep_directory(directory: &Path, max_scanned: usize, max_temporaries: usize) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let now = SystemTime::now();
+    let mut temporaries = 0usize;
+    for entry in entries.take(max_scanned).flatten() {
+        if temporaries >= max_temporaries {
+            break;
+        }
+        let name = entry.file_name();
+        if !name.to_str().is_some_and(|n| n.starts_with(TEMP_PREFIX)) {
+            continue;
+        }
+        temporaries += 1;
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= STALE_TEMPORARY_AGE);
+        if stale && fs::remove_file(entry.path()).is_ok() {
+            tracing::debug!(name = ?name, "removed stale store temporary");
         }
     }
 }
@@ -437,6 +570,61 @@ mod tests {
         assert!(fresh.exists(), "an in-flight write must not be unlinked");
         assert!(!old.exists(), "a crashed write's temporary must be removed");
         assert!(entry.exists(), "the sweep must never touch a record");
+    }
+
+    /// Records ahead of an orphan in the listing must not hide it: the cap
+    /// counts temporaries, so a directory larger than the cap still gets its
+    /// orphans swept.
+    #[test]
+    fn records_ahead_of_an_orphan_do_not_hide_it_from_the_sweep() {
+        let root = TempRoot::new("sweep-cap");
+        let long_ago = SystemTime::now() - STALE_TEMPORARY_AGE - Duration::from_secs(60);
+        for i in 0..32 {
+            fs::write(root.path().join(format!("k_{i:02}")), b"x").expect("write");
+        }
+        let old = root.path().join(format!("{TEMP_PREFIX}old"));
+        fs::write(&old, b"x").expect("write");
+        File::options()
+            .write(true)
+            .open(&old)
+            .and_then(|h| h.set_modified(long_ago))
+            .expect("backdate");
+
+        // A temporary cap of one, far below the 33 entries present.
+        sweep_directory(root.path(), 1_000, 1);
+
+        assert!(!old.exists(), "an orphan behind the records was not swept");
+    }
+
+    /// A second lock on one directory is refused while the first lives, in
+    /// the same process as in another, and is free again once it drops.
+    #[test]
+    fn a_directory_lock_is_exclusive_until_dropped() {
+        let root = TempRoot::new("dir-lock");
+        let first = DirectoryLock::acquire(root.path(), "test.lock").expect("first lock");
+        assert!(matches!(
+            DirectoryLock::acquire(root.path(), "test.lock"),
+            Err(LockError::Held)
+        ));
+        // A different lock name in the same directory is a different lock.
+        let _other = DirectoryLock::acquire(root.path(), "other.lock").expect("other lock");
+        drop(first);
+        DirectoryLock::acquire(root.path(), "test.lock").expect("lock after release");
+    }
+
+    /// Every directory the call creates exists afterwards, parents included,
+    /// and the list of what to flush names exactly those.
+    #[test]
+    fn missing_ancestors_names_only_what_did_not_exist() {
+        let root = TempRoot::new("mkdir");
+        let deep = root.path().join("a").join("b");
+        assert_eq!(
+            missing_ancestors(&deep),
+            vec![deep.clone(), root.path().join("a")]
+        );
+        private_mkdir(&deep).expect("mkdir");
+        assert!(deep.is_dir());
+        assert!(missing_ancestors(&deep).is_empty());
     }
 
     #[test]

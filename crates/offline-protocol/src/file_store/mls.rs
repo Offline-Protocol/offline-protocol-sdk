@@ -13,8 +13,8 @@ use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use super::key::{StoreKeyError, StoreKeyProvider, STORE_KEY_BYTES};
-use super::records::{self, BoundedRead, SweepMemo, MAX_FRAME_BYTES};
-use super::{account_directory, FileStoreError};
+use super::records::{self, BoundedRead, DirectoryLock, StoreLock, SweepMemo, MAX_FRAME_BYTES};
+use super::{account_directory, lock_directory, FileStoreError};
 
 /// Magic of a sealed record file. Distinct from the plain frame's `OPS1`, so
 /// neither store mistakes the other's file for its own.
@@ -48,8 +48,12 @@ const KEY_CHECK_FILE: &str = "store-key-check";
 /// What the key check seals.
 const KEY_CHECK_PLAINTEXT: &[u8] = b"offline-protocol sealed file mls store key check v1";
 
-/// Records the key check tries when the check file is missing.
+/// Records the key check tries when the check file is missing or damaged.
 const KEY_CHECK_PROBE_LIMIT: usize = 64;
+
+/// The lock file this store holds in its account directory. Distinct from
+/// the protocol-state store's, so the two can share a root.
+const LOCK_FILE: &str = "mls-store.lock";
 
 /// MLS storage in files, every record sealed under a key derived from the
 /// operator's store key.
@@ -76,15 +80,20 @@ const KEY_CHECK_PROBE_LIMIT: usize = 64;
 /// clear from the operator's configuration (residual risk R18).
 ///
 /// A record that does not authenticate is reported as
-/// [`StorageError::CorruptedData`] and **left in place**. The store never
-/// deletes on a read, because the common cause is a wrong key and deleting on
-/// that would destroy the identity. [`Self::open`] checks the key against a
-/// sealed check file first and refuses a wrong one before any record is read.
+/// [`StorageError::CorruptedData`], naming its file, and **left in place**.
+/// The store never deletes on a read, because the common cause is a wrong key
+/// and deleting on that would destroy the identity. [`Self::open`] checks the
+/// key against a sealed check file first and refuses a wrong one before any
+/// record is read, so a record that fails afterwards is damaged: the error
+/// names the file, and what deleting it costs depends on what it held (the
+/// engine regenerates a damaged protocol-state record key by itself).
 pub struct SealedFileMlsStorage {
     directory: PathBuf,
     cipher: ChaCha20Poly1305,
     name_key: Zeroizing<[u8; 32]>,
+    lock: StoreLock,
     swept: SweepMemo,
+    _directory_lock: DirectoryLock,
 }
 
 impl std::fmt::Debug for SealedFileMlsStorage {
@@ -95,7 +104,7 @@ impl std::fmt::Debug for SealedFileMlsStorage {
     }
 }
 
-/// What the key check found when its file was missing.
+/// What the key check found when its file was missing or did not open.
 enum Probe {
     NoRecords,
     Opened,
@@ -109,6 +118,11 @@ impl SealedFileMlsStorage {
     /// The provider is asked once. The first open writes a sealed check file;
     /// every later open must open it, and a key that does not is refused with
     /// [`FileStoreError::WrongStoreKey`] before any record is read or changed.
+    /// A check file that is missing or damaged is rebuilt only when an
+    /// existing record opens under the key, which proves it.
+    ///
+    /// A second store over the same directory is refused with
+    /// [`FileStoreError::InUse`] while this one lives.
     ///
     /// `root` should be a directory that survives an upgrade: this store holds
     /// the device's identity, and losing it gives the device a new address.
@@ -118,6 +132,7 @@ impl SealedFileMlsStorage {
         provider: &dyn StoreKeyProvider,
     ) -> Result<Self, FileStoreError> {
         let directory = account_directory(root.as_ref(), namespace)?;
+        let directory_lock = lock_directory(&directory, LOCK_FILE)?;
         let store_key = provider.store_key()?;
         let hkdf = Hkdf::<Sha256>::new(Some(HKDF_SALT), store_key.as_slice());
         let seal_key = derive(&hkdf, b"seal", namespace)?;
@@ -126,7 +141,9 @@ impl SealedFileMlsStorage {
             directory,
             cipher: ChaCha20Poly1305::new(Key::from_slice(seal_key.as_slice())),
             name_key,
+            lock: StoreLock::default(),
             swept: SweepMemo::default(),
+            _directory_lock: directory_lock,
         };
         store.verify_store_key()?;
         Ok(store)
@@ -167,6 +184,19 @@ impl SealedFileMlsStorage {
     fn entry_path(&self, key_type: &str, key_id: &str) -> PathBuf {
         self.type_directory(key_type)
             .join(self.entry_name(key_type, key_id))
+    }
+
+    /// The file a record lives in, for tests outside this module that damage
+    /// one on purpose.
+    #[cfg(test)]
+    pub(crate) fn record_path(&self, key_type: &str, key_id: &str) -> PathBuf {
+        self.entry_path(key_type, key_id)
+    }
+
+    /// Reports a record that is present but cannot be read, and leaves it.
+    fn corrupt(path: &Path, reason: &str) -> StorageError {
+        tracing::warn!(path = %path.display(), reason, "sealed MLS record is unreadable; left in place");
+        StorageError::CorruptedData(format!("{reason}: {}; left in place", path.display()))
     }
 
     fn associated_data(name: &str) -> Vec<u8> {
@@ -213,46 +243,68 @@ impl SealedFileMlsStorage {
             .map(Zeroizing::new)
     }
 
-    /// Opens one record file into its `(key_type, key_id, value)`, or `None`
-    /// when it does not authenticate under this key and name.
-    fn open_record(&self, path: &Path, name: &str) -> Option<(String, String, Vec<u8>)> {
+    /// Opens one record file into its `(key_type, key_id)`, or `None` when it
+    /// does not authenticate under this key and name. The value is not
+    /// copied: the only plaintext is the zeroizing buffer, dropped here.
+    fn open_record(&self, path: &Path, name: &str) -> Option<(String, String)> {
         let BoundedRead::Bytes(raw) = records::read_bounded(path, MAX_SEALED_BYTES).ok()? else {
             return None;
         };
         let plain = self.open_sealed(name, &raw)?;
         let header = records::parse_header(&plain)?;
-        let value = plain[header.value_offset..].to_vec();
-        Some((header.key_type, header.key_id, value))
+        Some((header.key_type, header.key_id))
     }
 
     /// Proves the store key against the check file, minting the file on a
-    /// fresh store.
+    /// fresh store and rebuilding it when a record proves the key.
     fn verify_store_key(&self) -> Result<(), FileStoreError> {
-        let _guard = records::lock();
+        let _guard = self.lock.lock();
+        // The check is the one file written into the account directory, so
+        // a crash mid-write orphans its temporary here, where no store write
+        // would ever sweep.
+        self.swept.sweep_once(&self.directory);
         let path = self.directory.join(KEY_CHECK_FILE);
         let io = |source| FileStoreError::Io {
             path: path.clone(),
             source,
         };
-        match records::read_bounded(&path, KEY_CHECK_PLAINTEXT.len() + SEAL_OVERHEAD).map_err(io)? {
-            BoundedRead::Bytes(raw) => {
-                return match self.open_sealed(KEY_CHECK_FILE, &raw) {
-                    Some(plain) if plain.as_slice() == KEY_CHECK_PLAINTEXT => Ok(()),
-                    _ => Err(FileStoreError::WrongStoreKey(self.directory.clone())),
+        let check_present =
+            match records::read_bounded(&path, KEY_CHECK_PLAINTEXT.len() + SEAL_OVERHEAD)
+                .map_err(io)?
+            {
+                BoundedRead::Bytes(raw) => match self.open_sealed(KEY_CHECK_FILE, &raw) {
+                    Some(plain) if plain.as_slice() == KEY_CHECK_PLAINTEXT => return Ok(()),
+                    _ => true,
+                },
+                BoundedRead::Oversized => true,
+                BoundedRead::Absent => false,
+            };
+        // The check is missing, or present and not opening. Records that
+        // open under this key prove it, whatever happened to the check: a
+        // crash before its first write finished, an operator's cleanup, or
+        // damage to the check alone. Records that exist and none of which
+        // opens mean the key is wrong, and minting a check for it would lock
+        // the right key out.
+        //
+        // Rebuilding a damaged check on a record's proof costs nothing: anyone
+        // who can damage the check can delete it, which already reaches this
+        // path. A check that does not open with no records to prove anything
+        // stays a refusal; there is nothing sealed to lose, and the operator
+        // can remove the check file to start the store afresh.
+        match self.probe_existing_records().map_err(io)? {
+            Probe::Opened => {
+                if check_present {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "store key check does not open but a record does; rebuilding the check"
+                    );
                 }
             }
-            BoundedRead::Oversized => {
+            Probe::NoneOpened => return Err(FileStoreError::WrongStoreKey(self.directory.clone())),
+            Probe::NoRecords if check_present => {
                 return Err(FileStoreError::WrongStoreKey(self.directory.clone()))
             }
-            BoundedRead::Absent => {}
-        }
-        // No check file. Either the store is new, or the file was lost (a
-        // crash before its first write finished, or an operator's cleanup).
-        // Records that open under this key prove it; records that exist and
-        // none of which opens mean the key is wrong, and minting a check for
-        // it would lock the right key out.
-        if let Probe::NoneOpened = self.probe_existing_records().map_err(io)? {
-            return Err(FileStoreError::WrongStoreKey(self.directory.clone()));
+            Probe::NoRecords => {}
         }
         let sealed = self
             .seal(KEY_CHECK_FILE, KEY_CHECK_PLAINTEXT)
@@ -329,7 +381,7 @@ impl MlsStorage for SealedFileMlsStorage {
         let sealed = self
             .seal(&name, &framed)
             .ok_or_else(|| StorageError::StoreFailed("sealing the record failed".to_string()))?;
-        let _guard = records::lock();
+        let _guard = self.lock.lock();
         let directory = self.type_directory(key_type);
         records::private_mkdir(&directory)
             .map_err(|err| StorageError::StoreFailed(err.to_string()))?;
@@ -339,7 +391,7 @@ impl MlsStorage for SealedFileMlsStorage {
     }
 
     fn load(&self, key_type: &str, key_id: &str) -> StorageResult<Option<Vec<u8>>> {
-        let _guard = records::lock();
+        let _guard = self.lock.lock();
         let name = self.entry_name(key_type, key_id);
         let path = self.type_directory(key_type).join(&name);
         let raw = match records::read_bounded(&path, MAX_SEALED_BYTES)
@@ -347,16 +399,14 @@ impl MlsStorage for SealedFileMlsStorage {
         {
             BoundedRead::Absent => return Ok(None),
             BoundedRead::Oversized => {
-                return Err(StorageError::CorruptedData(
-                    "sealed record is over the ceiling; left in place".to_string(),
-                ))
+                return Err(Self::corrupt(&path, "sealed record is over the ceiling"))
             }
             BoundedRead::Bytes(raw) => raw,
         };
         let plain = self.open_sealed(&name, &raw).ok_or_else(|| {
-            StorageError::CorruptedData(
-                "sealed record does not authenticate under this store key; left in place"
-                    .to_string(),
+            Self::corrupt(
+                &path,
+                "sealed record does not authenticate under this store key",
             )
         })?;
         // The file name is in the associated data, so a record moved onto
@@ -366,28 +416,26 @@ impl MlsStorage for SealedFileMlsStorage {
             Some(header) if header.key_type == key_type && header.key_id == key_id => {
                 Ok(Some(plain[header.value_offset..].to_vec()))
             }
-            _ => Err(StorageError::CorruptedData(
-                "sealed record names another key; left in place".to_string(),
-            )),
+            _ => Err(Self::corrupt(&path, "sealed record names another key")),
         }
     }
 
     fn delete(&self, key_type: &str, key_id: &str) -> StorageResult<()> {
-        let _guard = records::lock();
+        let _guard = self.lock.lock();
         records::remove(&self.entry_path(key_type, key_id))
             .map(|_| ())
             .map_err(|err| StorageError::DeleteFailed(err.to_string()))
     }
 
     fn list_keys(&self, key_type: &str) -> StorageResult<Vec<String>> {
-        let _guard = records::lock();
+        let _guard = self.lock.lock();
         let mut keys = BTreeSet::new();
         records::for_each_entry(
             &self.type_directory(key_type),
             ENTRY_PREFIX,
             records::MAX_LISTED_ENTRIES,
             |path, name| match self.open_record(path, name) {
-                Some((record_type, record_id, _)) if record_type == key_type => {
+                Some((record_type, record_id)) if record_type == key_type => {
                     keys.insert(record_id);
                 }
                 _ => tracing::debug!(name, "skipping a sealed record that does not open"),
@@ -500,9 +548,47 @@ mod tests {
         );
     }
 
+    /// Damage to the check alone must not lock the right key out of its own
+    /// identity: a record that opens proves the key, and the check is
+    /// rebuilt. A wrong key still proves nothing and is still refused.
     #[test]
-    fn a_tampered_key_check_is_a_wrong_key() {
-        let root = TempRoot::new("mls-tampered-check");
+    fn a_damaged_key_check_is_rebuilt_only_by_the_right_key() {
+        let root = TempRoot::new("mls-damaged-check");
+        let check = {
+            let store = open(&root, 1);
+            store
+                .store("identity", "key_pair", b"identity")
+                .expect("store");
+            store.directory().join(KEY_CHECK_FILE)
+        };
+        let mut bytes = std::fs::read(&check).expect("read");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(&check, &bytes).expect("write");
+        let before = snapshot(root.path());
+
+        assert!(matches!(
+            SealedFileMlsStorage::open(root.path(), &namespace(), &key(2)),
+            Err(FileStoreError::WrongStoreKey(_))
+        ));
+        assert_eq!(snapshot(root.path()), before, "a wrong key changed nothing");
+
+        let store = open(&root, 1);
+        assert_ne!(std::fs::read(&check).expect("read"), bytes, "check rebuilt");
+        assert_eq!(
+            store.load("identity", "key_pair").expect("load"),
+            Some(b"identity".to_vec())
+        );
+        drop(store);
+        // And the rebuilt check is a real one: the next open takes the fast path.
+        open(&root, 1);
+    }
+
+    /// With no record to prove anything, a check that does not open stays a
+    /// refusal, whichever key is offered.
+    #[test]
+    fn a_damaged_key_check_over_an_empty_store_is_refused() {
+        let root = TempRoot::new("mls-damaged-empty");
         let check = open(&root, 1).directory().join(KEY_CHECK_FILE);
         let mut bytes = std::fs::read(&check).expect("read");
         let last = bytes.len() - 1;
@@ -512,6 +598,66 @@ mod tests {
             SealedFileMlsStorage::open(root.path(), &namespace(), &key(1)),
             Err(FileStoreError::WrongStoreKey(_))
         ));
+    }
+
+    /// The probe keeps going past a record that does not open: one damaged
+    /// record must not hide the good one that proves the key.
+    #[test]
+    fn a_lost_key_check_is_rebuilt_past_an_unreadable_record() {
+        let root = TempRoot::new("mls-lost-check-damaged");
+        let (check, damaged) = {
+            let store = open(&root, 1);
+            store.store("group_state", "a", b"one").expect("store");
+            store.store("group_state", "b", b"two").expect("store");
+            (
+                store.directory().join(KEY_CHECK_FILE),
+                store.entry_path("group_state", "a"),
+            )
+        };
+        std::fs::remove_file(&check).expect("remove check");
+        let mut bytes = std::fs::read(&damaged).expect("read");
+        bytes[SEALED_MAGIC.len() + NONCE_BYTES] ^= 1;
+        std::fs::write(&damaged, bytes).expect("write");
+
+        let store = open(&root, 1);
+        assert!(check.exists(), "the good record proved the key");
+        assert_eq!(store.list_keys("group_state").expect("list"), vec!["b"]);
+    }
+
+    /// Nothing to write down in a record's name, so the error must carry the
+    /// path: file names are keyed digests, and an operator cannot find the
+    /// damaged file any other way.
+    #[test]
+    fn a_corrupt_record_error_names_its_file() {
+        let root = TempRoot::new("mls-corrupt-path");
+        let store = open(&root, 1);
+        store.store("identity", "key_pair", b"id").expect("store");
+        let path = store.entry_path("identity", "key_pair");
+        let mut bytes = std::fs::read(&path).expect("read");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(&path, bytes).expect("write");
+
+        match store.load("identity", "key_pair") {
+            Err(StorageError::CorruptedData(message)) => assert!(
+                message.contains(&path.display().to_string()),
+                "{message} does not name {}",
+                path.display()
+            ),
+            other => panic!("expected CorruptedData, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_second_store_over_one_directory_is_refused() {
+        let root = TempRoot::new("mls-in-use");
+        let first = open(&root, 1);
+        assert!(matches!(
+            SealedFileMlsStorage::open(root.path(), &namespace(), &key(1)),
+            Err(FileStoreError::InUse(_))
+        ));
+        drop(first);
+        open(&root, 1);
     }
 
     /// The point of sealing names as well as values: a copied directory must

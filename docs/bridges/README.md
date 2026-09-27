@@ -426,7 +426,8 @@ the engine's tests, and each has a reopen test, including one that restarts an
 engine over both and finds the same address and the same sealed document
 ([MLS integration](../mls-integration.md#built-in-file-stores)). No binding
 exposes them yet. A Rust host that uses them owns both directories, which
-includes removing them on logout.
+includes removing them on logout, after both stores (and the engine holding
+them) are dropped: each store holds a lock on its directory while it is open.
 
 The MLS storage trait has a suite of its own,
 `offline_protocol::mls_storage_conformance::run` (`run_json` for the same JSON

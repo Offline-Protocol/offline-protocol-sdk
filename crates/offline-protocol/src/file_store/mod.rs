@@ -32,19 +32,28 @@
 //!   `group:team` onto one file, and group ids are chosen by peers. A digest
 //!   is lowercase hex whatever the key, so the key is compared byte for byte.
 //! - **The sealed store never deletes on a read.** A record that does not
-//!   authenticate is reported as corrupt and left in place. The common cause
-//!   is the operator supplying the wrong store key, and deleting on that
-//!   would destroy the identity. [`SealedFileMlsStorage::open`] refuses a
-//!   wrong key before any record is read.
+//!   authenticate is reported as corrupt, with its path, and left in place.
+//!   The common cause is the operator supplying the wrong store key, and
+//!   deleting on that would destroy the identity.
+//!   [`SealedFileMlsStorage::open`] refuses a wrong key before any record is
+//!   read, so a record that fails afterwards is damaged, and the error names
+//!   the file so the operator can decide.
+//! - **One store per directory.** Each store holds an exclusive lock on its
+//!   account directory for its lifetime, and a second store over the same
+//!   directory, in this process or another, is refused with
+//!   [`FileStoreError::InUse`]. Two stores over one MLS directory would each
+//!   advance ratchet state the other never sees, and the groups would diverge
+//!   without an error.
 //!
 //! # Layout
 //!
 //! Each store owns `<root>/<namespace>/`, where the namespace is
 //! [`account_storage_namespace`] of the application id and profile, the same
 //! derivation every binding uses. The two stores use different directory
-//! prefixes, so they do not collide if given one root, but they should not
-//! share one: protocol state is scoped to an installation and is meant to be
-//! removed with it, while MLS material may outlive it.
+//! prefixes and different lock files, so they do not collide if given one
+//! root, but they should not share one: protocol state is scoped to an
+//! installation and is meant to be removed with it, while MLS material may
+//! outlive it.
 
 mod key;
 mod mls;
@@ -124,6 +133,15 @@ pub enum FileStoreError {
     /// supplying a different key than the one the store was created with.
     #[error("the store key does not open the store at {0}; nothing was changed")]
     WrongStoreKey(PathBuf),
+    /// Another store already has this directory open, in this process or in
+    /// another one.
+    ///
+    /// Nothing was read or changed. Two stores over one directory would
+    /// diverge the MLS state, so the second is refused rather than guarded.
+    #[error(
+        "the store at {0} is already open elsewhere; two stores over one directory are refused"
+    )]
+    InUse(PathBuf),
 }
 
 fn account_directory(root: &std::path::Path, namespace: &str) -> Result<PathBuf, FileStoreError> {
@@ -136,6 +154,20 @@ fn account_directory(root: &std::path::Path, namespace: &str) -> Result<PathBuf,
         source,
     })?;
     Ok(directory)
+}
+
+/// Takes the store's exclusive lock on `directory`.
+fn lock_directory(
+    directory: &std::path::Path,
+    lock_name: &str,
+) -> Result<records::DirectoryLock, FileStoreError> {
+    records::DirectoryLock::acquire(directory, lock_name).map_err(|err| match err {
+        records::LockError::Held => FileStoreError::InUse(directory.to_path_buf()),
+        records::LockError::Io(source) => FileStoreError::Io {
+            path: directory.join(lock_name),
+            source,
+        },
+    })
 }
 
 #[cfg(test)]

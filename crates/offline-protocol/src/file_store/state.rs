@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::records::{self, BoundedRead, SweepMemo, MAX_FRAME_BYTES, MAX_HEADER_BYTES};
-use super::{account_directory, FileStoreError};
+use super::records::{
+    self, BoundedRead, DirectoryLock, StoreLock, SweepMemo, MAX_FRAME_BYTES, MAX_HEADER_BYTES,
+};
+use super::{account_directory, lock_directory, FileStoreError};
 use crate::protocol_state_storage::{
     ProtocolStateError, ProtocolStateResult, ProtocolStateStorage,
 };
@@ -17,6 +19,10 @@ const TYPE_PREFIX: &str = "t_";
 
 /// Prefix of a record file: `k_` and the digest of the key type and id.
 const ENTRY_PREFIX: &str = "k_";
+
+/// The lock file this store holds in its account directory. Distinct from
+/// the sealed store's, so the two can share a root.
+const LOCK_FILE: &str = "state-store.lock";
 
 /// Protocol-state storage in plain files, in the format the Python, Swift and
 /// Kotlin providers write.
@@ -35,7 +41,9 @@ const ENTRY_PREFIX: &str = "k_";
 /// guessed id. Directories are created owner-only for that reason.
 pub struct FileProtocolStateStorage {
     directory: PathBuf,
+    lock: StoreLock,
     swept: SweepMemo,
+    _directory_lock: DirectoryLock,
 }
 
 impl std::fmt::Debug for FileProtocolStateStorage {
@@ -71,10 +79,17 @@ impl FileProtocolStateStorage {
     /// directory is created. `root` should be a directory the host removes
     /// when the installation is removed: protocol state is scoped to an
     /// installation, and a store that outlives it resends settled work.
+    ///
+    /// A second store over the same directory is refused with
+    /// [`FileStoreError::InUse`] while this one lives.
     pub fn open(root: impl AsRef<Path>, namespace: &str) -> Result<Self, FileStoreError> {
+        let directory = account_directory(root.as_ref(), namespace)?;
+        let directory_lock = lock_directory(&directory, LOCK_FILE)?;
         Ok(Self {
-            directory: account_directory(root.as_ref(), namespace)?,
+            directory,
+            lock: StoreLock::default(),
             swept: SweepMemo::default(),
+            _directory_lock: directory_lock,
         })
     }
 
@@ -109,7 +124,7 @@ impl ProtocolStateStorage for FileProtocolStateStorage {
     fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> ProtocolStateResult<()> {
         let framed = records::frame(key_type, key_id, data)
             .map_err(|err| ProtocolStateError::StoreFailed(err.to_string()))?;
-        let _guard = records::lock();
+        let _guard = self.lock.lock();
         let directory = self.type_directory(key_type);
         records::private_mkdir(&directory)
             .map_err(|err| ProtocolStateError::StoreFailed(err.to_string()))?;
@@ -119,7 +134,7 @@ impl ProtocolStateStorage for FileProtocolStateStorage {
     }
 
     fn load(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<Option<Vec<u8>>> {
-        let _guard = records::lock();
+        let _guard = self.lock.lock();
         let path = self.entry_path(key_type, key_id);
         let raw = match records::read_bounded(&path, MAX_FRAME_BYTES)
             .map_err(|err| ProtocolStateError::LoadFailed(err.to_string()))?
@@ -146,14 +161,14 @@ impl ProtocolStateStorage for FileProtocolStateStorage {
     }
 
     fn delete(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<()> {
-        let _guard = records::lock();
+        let _guard = self.lock.lock();
         records::remove(&self.entry_path(key_type, key_id))
             .map(|_| ())
             .map_err(|err| ProtocolStateError::DeleteFailed(err.to_string()))
     }
 
     fn list_keys(&self, key_type: &str) -> ProtocolStateResult<Vec<String>> {
-        let _guard = records::lock();
+        let _guard = self.lock.lock();
         // Deduped: a planted copy of a record under another name must not
         // make its id appear twice.
         let mut keys = BTreeSet::new();
@@ -350,6 +365,18 @@ mod tests {
             store.list_keys("groups").expect("list"),
             vec!["Team", "team"]
         );
+    }
+
+    #[test]
+    fn a_second_store_over_one_directory_is_refused() {
+        let root = TempRoot::new("state-in-use");
+        let first = open(&root);
+        assert!(matches!(
+            FileProtocolStateStorage::open(root.path(), &namespace()),
+            Err(FileStoreError::InUse(_))
+        ));
+        drop(first);
+        open(&root);
     }
 
     #[cfg(unix)]

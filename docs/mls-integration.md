@@ -379,22 +379,50 @@ protocol.initialize_mls(Arc::new(secure), Arc::new(state))?;
   a keystore implements the trait over it. Without one, the key is in the
   clear wherever the operator put it
   ([R18](security/threat-model.md#r18-a-host-without-a-platform-keystore-holds-the-store-key-in-the-clear-unless-the-operator-supplies-one)).
+- **The store key must be 32 random bytes.** Generate it once from a
+  cryptographic random source and keep it; never derive it from a password
+  or a host name. HKDF stretches nothing: a guessable key opens every record.
+
+  ```bash
+  openssl rand -hex 32
+  ```
 - **A wrong key is refused at open.** The first open writes a sealed check
   file, and every later open must open it, so a different key fails with
   `FileStoreError::WrongStoreKey` before any record is read. The engine never
-  sees an empty store and never mints a new identity over the old one.
+  sees an empty store and never mints a new identity over the old one. A
+  check file that is lost or damaged is rebuilt only when an existing record
+  opens under the key offered, which proves it.
+- **One store per directory.** Each store holds an exclusive lock on its
+  account directory while it is open, so a second engine over the same
+  directories, in the same process or another, fails with
+  `FileStoreError::InUse`. Two engines over one MLS directory would each
+  advance ratchet state the other never sees. On a filesystem that cannot
+  lock (some network mounts) the store logs that and opens unguarded.
 - **The sealed store never deletes on a read.** A record that does not
-  authenticate is reported as `CorruptedData` and left in place, because
-  deleting on a wrong key would destroy the identity. The protocol-state
-  store drops a record it cannot parse, exactly as the binding providers do,
-  so the engine can settle the message ids the application holds for it.
+  authenticate is reported as `CorruptedData`, naming its file, and left in
+  place, because deleting on a wrong key would destroy the identity. Once the
+  key check has passed, such a record is damaged, and what removing it costs
+  depends on what it held. A damaged protocol-state record key needs nothing:
+  the engine regenerates it, and the protocol-state records sealed under the
+  old one are settled as failed. A damaged identity means a new identity and
+  a new address. A damaged group record loses that group. The
+  protocol-state store drops a record it cannot parse, exactly as the binding
+  providers do, so the engine can settle the message ids the application
+  holds for it.
 - **Both stores pass their conformance suites** and write durably: a
-  temporary file, flushed, renamed into place, then the directory flushed.
-  Directories are created owner-only.
+  temporary file, flushed, renamed into place, then the directory flushed,
+  including every directory a write had to create. Directories are created
+  owner-only on Unix; on Windows they inherit the parent's access list, so
+  put the roots somewhere only the service account can read.
+- **Back up the key directory whole, and never roll a live device back.**
+  MLS state moves forward with every message. Restoring an older copy
+  reinstates spent ratchet secrets and consumed key packages: peers' newer
+  messages then fail to decrypt, and the sessions have to be re-established.
+  A backup protects against losing the identity, not against losing the
+  latest epoch.
 
-Two engines over one directory are unsupported, as they are with every
-provider. The namespace must be the output of `account_storage_namespace`;
-anything else is refused before a directory is created.
+The namespace must be the output of `account_storage_namespace`; anything
+else is refused before a directory is created.
 
 ### Implementing the Providers
 

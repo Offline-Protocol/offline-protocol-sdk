@@ -89,6 +89,14 @@ zeroize = { workspace = true }
 hkdf = { workspace = true }
 hmac = { workspace = true }
 
+# The built-in file stores hold an exclusive `flock` on their directory for
+# their lifetime, so a second store over it is refused rather than diverging
+# the MLS state. Already in the graph (and in the notices) through tempfile;
+# std's `File::try_lock` needs Rust 1.89, above the 1.87 MSRV. Windows uses
+# std's no-sharing open instead and needs nothing.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = ["fs", "std"] }
+
 [dev-dependencies]
 offline-protocol-leaf = { workspace = true }
 # A local HTTP server for the uploader's status-matrix tests: every status the

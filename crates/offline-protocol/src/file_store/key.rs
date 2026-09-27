@@ -106,29 +106,36 @@ impl Default for EnvStoreKey {
 
 impl StoreKeyProvider for EnvStoreKey {
     fn store_key(&self) -> Result<Zeroizing<[u8; STORE_KEY_BYTES]>, StoreKeyError> {
-        let raw = match std::env::var(&self.variable) {
-            Ok(raw) => Zeroizing::new(raw),
-            Err(std::env::VarError::NotPresent) => {
-                return Err(StoreKeyError::Missing(format!(
-                    "the environment variable {} is not set",
-                    self.variable
-                )))
-            }
-            Err(std::env::VarError::NotUnicode(_)) => {
-                return Err(StoreKeyError::Malformed(format!(
-                    "the environment variable {} is not valid text",
-                    self.variable
-                )))
-            }
-        };
-        let decoded = decode_key_text(raw.trim()).ok_or_else(|| {
-            StoreKeyError::Malformed(format!(
-                "{} must be {STORE_KEY_BYTES} bytes as 64 hex digits or as base64",
-                self.variable
-            ))
-        })?;
-        StaticStoreKey::from_slice(&decoded)?.store_key()
+        key_from_variable(&self.variable, std::env::var(&self.variable))
     }
+}
+
+/// Turns what the environment holds for `variable` into a key. Separate from
+/// the read so tests exercise it without mutating the process environment,
+/// which is unsound to do while other test threads read it.
+fn key_from_variable(
+    variable: &str,
+    value: Result<String, std::env::VarError>,
+) -> Result<Zeroizing<[u8; STORE_KEY_BYTES]>, StoreKeyError> {
+    let raw = match value {
+        Ok(raw) => Zeroizing::new(raw),
+        Err(std::env::VarError::NotPresent) => {
+            return Err(StoreKeyError::Missing(format!(
+                "the environment variable {variable} is not set"
+            )))
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(StoreKeyError::Malformed(format!(
+                "the environment variable {variable} is not valid text"
+            )))
+        }
+    };
+    let decoded = decode_key_text(raw.trim()).ok_or_else(|| {
+        StoreKeyError::Malformed(format!(
+            "{variable} must be {STORE_KEY_BYTES} bytes as 64 hex digits or as base64"
+        ))
+    })?;
+    StaticStoreKey::from_slice(&decoded)?.store_key()
 }
 
 fn decode_key_text(text: &str) -> Option<Zeroizing<Vec<u8>>> {
@@ -159,13 +166,19 @@ fn refuse_all_zero(key: &[u8; STORE_KEY_BYTES]) -> Result<(), StoreKeyError> {
 mod tests {
     use super::*;
 
-    /// Each test owns its variable: tests share one process environment.
-    fn provider(variable: &str, value: Option<&str>) -> EnvStoreKey {
-        match value {
-            Some(value) => std::env::set_var(variable, value),
-            None => std::env::remove_var(variable),
-        }
-        EnvStoreKey::new(variable)
+    /// What the provider does with `value` found in the environment, without
+    /// touching the environment: `set_var` races every other test thread's
+    /// `getenv`.
+    fn from_env(
+        variable: &str,
+        value: Option<&str>,
+    ) -> Result<Zeroizing<[u8; STORE_KEY_BYTES]>, StoreKeyError> {
+        key_from_variable(
+            variable,
+            value
+                .map(str::to_string)
+                .ok_or(std::env::VarError::NotPresent),
+        )
     }
 
     #[test]
@@ -182,9 +195,8 @@ mod tests {
             ("OP_TEST_STORE_KEY_B64_NOPAD", b64_no_pad),
             ("OP_TEST_STORE_KEY_PADDED", format!("  {hex_text}\n")),
         ] {
-            let got = provider(variable, Some(&text))
-                .store_key()
-                .unwrap_or_else(|err| panic!("{variable}: {err}"));
+            let got =
+                from_env(variable, Some(&text)).unwrap_or_else(|err| panic!("{variable}: {err}"));
             assert_eq!(got.as_slice(), key.as_slice(), "{variable}");
         }
     }
@@ -192,7 +204,7 @@ mod tests {
     #[test]
     fn an_absent_short_long_or_zero_key_is_refused() {
         assert!(matches!(
-            provider("OP_TEST_STORE_KEY_ABSENT", None).store_key(),
+            from_env("OP_TEST_STORE_KEY_ABSENT", None),
             Err(StoreKeyError::Missing(_))
         ));
         for (variable, text) in [
@@ -207,12 +219,21 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    provider(variable, Some(&text)).store_key(),
+                    from_env(variable, Some(&text)),
                     Err(StoreKeyError::Malformed(_))
                 ),
                 "{variable} accepted"
             );
         }
+    }
+
+    /// The one read of the real environment: a variable nobody sets.
+    #[test]
+    fn an_unset_variable_is_missing() {
+        assert!(matches!(
+            EnvStoreKey::new("OFFLINE_PROTOCOL_TEST_STORE_KEY_NEVER_SET").store_key(),
+            Err(StoreKeyError::Missing(_))
+        ));
     }
 
     #[test]

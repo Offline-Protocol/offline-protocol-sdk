@@ -125,3 +125,15 @@ fn a_sealed_document_survives_a_restart_over_the_file_stores() {
         })
     );
 }
+
+#[test]
+fn a_second_engine_over_the_same_stores_is_refused() {
+    let roots = Roots {
+        keys: TempRoot::new("engine-in-use-keys"),
+        state: TempRoot::new("engine-in-use-state"),
+    };
+    let first = engine(&roots, 7).expect("open");
+    assert!(matches!(engine(&roots, 7), Err(FileStoreError::InUse(_))));
+    drop(first);
+    assert!(engine(&roots, 7).is_ok());
+}
