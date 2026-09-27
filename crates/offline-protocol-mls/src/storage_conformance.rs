@@ -10,9 +10,22 @@
 //! truncate a ratchet tree, and the symptom arrives much later as a group
 //! that cannot decrypt.
 //!
-//! Green here is the definition of "this backend is supported". The suite
-//! writes only under its own probe key types and deletes everything it
-//! wrote, so it is safe to run against a live store.
+//! Green here is the definition of "this backend honours the trait
+//! contract". It is not a persistence test: every check runs against one
+//! open instance, so a backend that forgets everything on reopen, or that
+//! acknowledges a write it has not made durable, can still be green. A
+//! persistent backend proves those with a reopen test of its own.
+//!
+//! The suite writes only under its own probe key types and deletes only
+//! what it wrote, provided the backend keeps key types apart. That is why
+//! key-type isolation is checked first, with point writes and point deletes
+//! of ids nothing else uses, and why a failure there ends the run before
+//! any listed delete: on a backend that merges categories, listing a probe
+//! key type names the identity too. One check cannot be made safe in
+//! advance. `clear_type` has to be called to be tested, and a backend that
+//! clears every category takes the real records with it. Probe a new
+//! backend on a scratch instance until it is green; after that it is safe
+//! to run against a live store.
 //!
 //! The report type is shared with the protocol-state suite in the engine
 //! crate, which re-exports it, so the two suites render one JSON shape:
@@ -35,6 +48,15 @@ pub const CONFORMANCE_KEY_TYPE_OTHER: &str = "mls_storage_conformance_probe_othe
 /// A key type the suite never writes, used to prove listing and clearing an
 /// untouched category is empty and not an error.
 const CONFORMANCE_KEY_TYPE_UNUSED: &str = "mls_storage_conformance_probe_unused";
+
+/// The id the isolation check writes under both probe key types. Nothing
+/// else uses it, so a point write or delete of it cannot touch a real
+/// record even on a backend that ignores the key type.
+const ISOLATION_PROBE_ID: &str = "mls_storage_conformance_isolation";
+
+/// The id the isolation check writes under the second probe key type only,
+/// to catch a listing that crosses key types.
+const ISOLATION_LISTING_PROBE_ID: &str = "mls_storage_conformance_isolation_listing";
 
 /// The largest value the suite writes.
 ///
@@ -163,17 +185,33 @@ fn store_and_read_back(
 pub fn run(storage: &dyn MlsStorage) -> ConformanceReport {
     let mut report = ConformanceReport::new();
 
+    // 1. Key types are separate namespaces, checked before anything is
+    // deleted. A group's id keys its state, its metadata and its OpenMLS
+    // records in different categories; a backend that merges them serves
+    // one where another was asked for. It is also the one defect that turns
+    // this suite destructive: every listed delete below trusts that listing
+    // a probe key type names only probe records, and on a backend that
+    // merges categories it names the identity as well. So this check uses
+    // point writes and point deletes of ids nothing else uses, and a
+    // failure ends the run here.
+    let isolation = key_types_are_isolated(storage);
+    let isolated = isolation.is_ok();
+    report.check("key_types_are_separate_namespaces", isolation);
+    if !isolated {
+        return report;
+    }
+
     // Anything left from an interrupted earlier run would make the listing
     // checks report failures that are not the adapter's fault.
     cleanup(storage);
 
-    // 1. The basic contract.
+    // 2. The basic contract.
     report.check(
         "store_then_load",
         store_and_read_back(storage, "basic", b"hello", "a value"),
     );
 
-    // 2. Values are bytes, not text. Every record here is either a key or
+    // 3. Values are bytes, not text. Every record here is either a key or
     // ciphertext; a backend that round-trips through a string type mangles
     // both, and the symptom is a group that will not open.
     let binary: Vec<u8> = (0u8..=255).collect();
@@ -182,13 +220,13 @@ pub fn run(storage: &dyn MlsStorage) -> ConformanceReport {
         store_and_read_back(storage, "binary", &binary, "a binary value"),
     );
 
-    // 3. An empty value is a value, and must not read back as absent.
+    // 4. An empty value is a value, and must not read back as absent.
     report.check(
         "empty_value_is_not_missing",
         store_and_read_back(storage, "empty", b"", "an empty value"),
     );
 
-    // 4. A second store replaces; it does not append or refuse. Every
+    // 5. A second store replaces; it does not append or refuse. Every
     // epoch rewrites a group's secrets under the same id, so a backend
     // that keeps the first write serves last epoch's keys forever.
     let outcome = storage
@@ -198,7 +236,7 @@ pub fn run(storage: &dyn MlsStorage) -> ConformanceReport {
         .and_then(|()| expect_load(storage, CONFORMANCE_KEY_TYPE, "overwrite", b"second"));
     report.check("store_overwrites", outcome);
 
-    // 5. A key that was never written reads as missing, not as an error.
+    // 6. A key that was never written reads as missing, not as an error.
     // The manager probes for a session before creating one; an error here
     // is a failure to send, not "no session yet".
     let outcome = match storage.load(CONFORMANCE_KEY_TYPE, "never_written") {
@@ -211,7 +249,7 @@ pub fn run(storage: &dyn MlsStorage) -> ConformanceReport {
     };
     report.check("absent_key_loads_as_none", outcome);
 
-    // 6. Delete removes, and deleting again is not an error. A consumed key
+    // 7. Delete removes, and deleting again is not an error. A consumed key
     // package is deleted on the path that spent it; a second delete after a
     // crash must not turn a clean recovery into a failure.
     let outcome = storage
@@ -231,24 +269,14 @@ pub fn run(storage: &dyn MlsStorage) -> ConformanceReport {
         );
     report.check("delete_removes_and_is_idempotent", outcome);
 
-    // 7. Key types are separate namespaces. A group's id keys its state,
-    // its metadata and its OpenMLS records in different categories; a
-    // backend that merges them serves one where another was asked for.
-    let outcome = storage
-        .store(CONFORMANCE_KEY_TYPE, "shared_id", b"mine")
-        .and_then(|()| storage.store(CONFORMANCE_KEY_TYPE_OTHER, "shared_id", b"theirs"))
-        .map_err(|err| format!("store failed: {err}"))
-        .and_then(|()| expect_load(storage, CONFORMANCE_KEY_TYPE, "shared_id", b"mine"))
-        .and_then(|()| {
-            expect_load(storage, CONFORMANCE_KEY_TYPE_OTHER, "shared_id", b"theirs")
-                .map_err(|_| "the same key id in two key types collided".to_string())
-        });
-    report.check("key_types_are_separate_namespaces", outcome);
-
     // 8. Listing names what is there, and only within its own key type.
     // Listing is how the manager finds every group on restart and every
     // key package to purge; an omitted id is a group that vanishes.
     let outcome = (|| -> Result<(), String> {
+        storage
+            .store(CONFORMANCE_KEY_TYPE, "shared_id", b"mine")
+            .and_then(|()| storage.store(CONFORMANCE_KEY_TYPE_OTHER, "shared_id", b"theirs"))
+            .map_err(|err| format!("store failed: {err}"))?;
         let keys = storage
             .list_keys(CONFORMANCE_KEY_TYPE)
             .map_err(|err| format!("list_keys failed: {err}"))?;
@@ -282,9 +310,11 @@ pub fn run(storage: &dyn MlsStorage) -> ConformanceReport {
     // 10. Key ids as the SDK actually writes them: a UUID for a key
     // package, a 64-character digest for an OpenMLS record, and a session
     // id, which is `session:<address>:<address>`. The colons are the one
-    // that bites: a backend that composes `type:id` into one string and
-    // splits it back on the first colon returns the wrong id from
-    // `list_keys`, and every 1:1 session is lost on restart.
+    // that bites. A backend that composes `type:id` into one string has to
+    // take everything after the first colon back as the id; one that takes
+    // the second field of a full split, or splits on the last colon,
+    // returns the wrong id from `list_keys`, and every 1:1 session is lost
+    // on restart.
     let session_id = "session:off1qq6k7tx3adkz9gkvwt6c5c4v8lkh5g66ru6jm3s0dm\
                       :off1qq7wtkw2pmld2pcj3zn5fvhhj3kj5sgnlwq0mnh2yg7d";
     let ids = [
@@ -311,7 +341,49 @@ pub fn run(storage: &dyn MlsStorage) -> ConformanceReport {
     })();
     report.check("key_ids_as_the_sdk_writes_them", outcome);
 
-    // 11. The longest key id the SDK can write: a group id at its cap,
+    // 11. Key ids are compared byte for byte. Group ids are chosen by
+    // whoever creates the group, a peer included, and `GroupId` accepts
+    // upper case, any Unicode, and names a filesystem treats specially. A
+    // backend that folds case (a file per record on APFS or NTFS, a NOCASE
+    // column) or normalises Unicode keeps two groups in one record, and
+    // serves one group's secrets for the other's.
+    let exact_ids: [(&str, &[u8]); 7] = [
+        ("group:Team", b"upper case"),
+        ("group:team", b"lower case"),
+        ("group:caf\u{e9}", b"composed"),
+        ("group:cafe\u{301}", b"decomposed"),
+        ("group:CON", b"a reserved device name"),
+        ("group:a*b?", b"wildcards"),
+        ("group:abc.", b"a trailing dot"),
+    ];
+    let outcome = (|| -> Result<(), String> {
+        for (id, _) in exact_ids {
+            if GroupId::new(id).is_err() {
+                return Err(format!("{id:?} is not a valid group id; fix the suite"));
+            }
+        }
+        for (id, value) in exact_ids {
+            storage
+                .store(CONFORMANCE_KEY_TYPE, id, value)
+                .map_err(|err| format!("store of {id:?} failed: {err}"))?;
+        }
+        for (id, value) in exact_ids {
+            expect_load(storage, CONFORMANCE_KEY_TYPE, id, value)
+                .map_err(|detail| format!("{id:?}: {detail}"))?;
+        }
+        let keys = storage
+            .list_keys(CONFORMANCE_KEY_TYPE)
+            .map_err(|err| format!("list_keys failed: {err}"))?;
+        for (id, _) in exact_ids {
+            if !keys.iter().any(|key| key == id) {
+                return Err(format!("list_keys did not return {id:?} verbatim"));
+            }
+        }
+        Ok(())
+    })();
+    report.check("key_ids_are_byte_exact", outcome);
+
+    // 12. The longest key id the SDK can write: a group id at its cap,
     // which is the wire format's string-field cap, because group state is
     // keyed by the id itself. Probing anything shorter lets a backend with
     // a limit in between pass here and fail in production on a group a
@@ -328,7 +400,7 @@ pub fn run(storage: &dyn MlsStorage) -> ConformanceReport {
     })();
     report.check("long_key_ids_round_trip", outcome);
 
-    // 12. A record at the size a large group's ratchet tree reaches. A
+    // 13. A record at the size a large group's ratchet tree reaches. A
     // backend with a value limit in between (a credential store, a
     // preferences string) fails on exactly the record whose loss takes the
     // whole group with it.
@@ -338,9 +410,11 @@ pub fn run(storage: &dyn MlsStorage) -> ConformanceReport {
         store_and_read_back(storage, "large", &large, "a large record"),
     );
 
-    // 13. `exists` agrees with `load`. It has a default over `load`, so
-    // only an override can disagree, and an override that lies makes the
-    // manager mint a second identity over the first.
+    // 14. `exists` agrees with `load`. No SDK path calls it today (the
+    // identity is found with `load`), but it is trait surface a host may
+    // call. It has a default over `load`, so only an override can disagree,
+    // and one that does tells its caller a record is missing when it is
+    // not.
     let outcome = (|| -> Result<(), String> {
         let describe = |err: StorageError| format!("exists failed: {err}");
         if storage
@@ -377,9 +451,12 @@ pub fn run(storage: &dyn MlsStorage) -> ConformanceReport {
     })();
     report.check("exists_agrees_with_load", outcome);
 
-    // 14. `clear_type` empties one category and only that one. It is how
-    // the manager drops every key package at once; a backend that clears
-    // everything takes the identity with them.
+    // 15. `clear_type` empties one category and only that one. No SDK path
+    // calls it today (key packages are dropped one listed id at a time),
+    // but it is trait surface a host may call to reset a category, and a
+    // backend that clears everything takes the identity with it. This is
+    // the check that cannot be made safe before it runs; see the module
+    // documentation.
     let outcome = (|| -> Result<(), String> {
         storage
             .store(CONFORMANCE_KEY_TYPE_OTHER, "survivor", b"kept")
@@ -410,14 +487,14 @@ pub fn run(storage: &dyn MlsStorage) -> ConformanceReport {
     })();
     report.check("clear_type_is_scoped_and_idempotent", outcome);
 
-    // 15. Writes from several threads land whole. The trait requires
+    // 16. Writes from several threads land whole. The trait requires
     // `Send + Sync` and a per-entry atomic commit; the engine takes it at
     // its word and stores from the event thread while the manager reads
     // from a caller's. A backend that copies without a lock hands back a
     // value that is half one epoch and half the next.
     report.check("concurrent_writes_land_whole", concurrent_writes(storage));
 
-    // 16. Everything written can be found and removed. This is the logout
+    // 17. Everything written can be found and removed. This is the logout
     // contract: wiping an account has to actually empty the backend.
     let outcome = (|| -> Result<(), String> {
         cleanup(storage);
@@ -437,6 +514,51 @@ pub fn run(storage: &dyn MlsStorage) -> ConformanceReport {
     report.check("listed_records_can_all_be_deleted", outcome);
 
     report
+}
+
+/// The isolation check: the same id under two key types, and an id under
+/// one key type that must not appear in the other's listing.
+///
+/// Only a collision fails it. A value that comes back wrong in some other
+/// way is the round-trip checks' to report, and a listing that fails is the
+/// listing checks'; neither is evidence that a listed delete would reach
+/// outside the probe key types. The probe records are removed with point
+/// deletes whatever the outcome.
+fn key_types_are_isolated(storage: &dyn MlsStorage) -> Result<(), String> {
+    let outcome = (|| -> Result<(), String> {
+        storage
+            .store(CONFORMANCE_KEY_TYPE_OTHER, ISOLATION_PROBE_ID, b"theirs")
+            .and_then(|()| storage.store(CONFORMANCE_KEY_TYPE, ISOLATION_PROBE_ID, b"mine"))
+            .and_then(|()| {
+                storage.store(CONFORMANCE_KEY_TYPE_OTHER, ISOLATION_LISTING_PROBE_ID, b"x")
+            })
+            .map_err(|err| {
+                format!("store failed, so isolation could not be checked and nothing was deleted: {err}")
+            })?;
+        if let Ok(Some(other)) = storage.load(CONFORMANCE_KEY_TYPE_OTHER, ISOLATION_PROBE_ID) {
+            if other == b"mine" {
+                return Err(
+                    "the same key id in two key types collided: a write under one \
+                            replaced the other"
+                        .to_string(),
+                );
+            }
+        }
+        if let Ok(listed) = storage.list_keys(CONFORMANCE_KEY_TYPE) {
+            if listed.iter().any(|key| key == ISOLATION_LISTING_PROBE_ID) {
+                return Err("list_keys named a record written under another key type".to_string());
+            }
+        }
+        Ok(())
+    })();
+    for (key_type, key_id) in [
+        (CONFORMANCE_KEY_TYPE, ISOLATION_PROBE_ID),
+        (CONFORMANCE_KEY_TYPE_OTHER, ISOLATION_PROBE_ID),
+        (CONFORMANCE_KEY_TYPE_OTHER, ISOLATION_LISTING_PROBE_ID),
+    ] {
+        let _ = storage.delete(key_type, key_id);
+    }
+    outcome
 }
 
 /// The concurrency check: each writer overwrites its own key and one key
@@ -461,7 +583,7 @@ fn concurrent_writes(storage: &dyn MlsStorage) -> Result<(), String> {
             .map(|writer| {
                 let shared_values = &shared_values;
                 let own_value = &own_value;
-                scope.spawn(move || -> Result<(), String> {
+                std::thread::Builder::new().spawn_scoped(scope, move || -> Result<(), String> {
                     let own_key = format!("concurrent_writer_{writer}");
                     for round in 0..WRITES_PER_WRITER {
                         storage
@@ -504,10 +626,11 @@ fn concurrent_writes(storage: &dyn MlsStorage) -> Result<(), String> {
             .collect();
         handles
             .into_iter()
-            .map(|handle| {
-                handle.join().unwrap_or_else(|_| {
+            .map(|spawned| match spawned {
+                Ok(handle) => handle.join().unwrap_or_else(|_| {
                     Err("a writer thread panicked inside the adapter".to_string())
-                })
+                }),
+                Err(err) => Err(format!("could not start a writer thread: {err}")),
             })
             .collect()
     });
@@ -564,7 +687,7 @@ mod tests {
         let storage = InMemoryStorage::new();
         let report = run(&storage);
         assert!(report.is_green(), "{}", report.summary());
-        assert_eq!(report.passed.len(), 16, "{:?}", report.passed);
+        assert_eq!(report.passed.len(), 17, "{:?}", report.passed);
         for key_type in [CONFORMANCE_KEY_TYPE, CONFORMANCE_KEY_TYPE_OTHER] {
             assert!(
                 storage.list_keys(key_type).unwrap().is_empty(),
@@ -590,7 +713,7 @@ mod tests {
     fn the_report_renders_the_documented_json_shape() {
         let json = run_json(&InMemoryStorage::new());
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(parsed["passed"].as_array().is_some_and(|p| p.len() == 16));
+        assert!(parsed["passed"].as_array().is_some_and(|p| p.len() == 17));
         assert!(parsed["failures"].as_array().is_some_and(Vec::is_empty));
 
         let mut report = ConformanceReport::new();
@@ -606,16 +729,23 @@ mod tests {
     #[derive(Debug, Clone, Copy)]
     enum Fault {
         None,
+        CorruptsValues,
+        StringTypedValues,
+        EmptyReadsAsMissing,
         KeepsFirstWrite,
         AbsentIsAnError,
         DeleteOfAbsentFails,
         IgnoresKeyType,
-        SplitsKeyIdOnColon,
+        ListReturnsFirstPageOnly,
+        ListOfUnknownTypeFails,
+        KeepsIdUpToFirstColon,
+        CaseFoldsKeyIds,
         CapsKeyIdAt255,
         TruncatesValuesAt64KiB,
         ExistsAlwaysFalse,
         ClearTypeClearsEverything,
         TearsOverwrites,
+        DeleteIsANoOp,
     }
 
     struct Faulty {
@@ -639,10 +769,11 @@ mod tests {
                 _ => key_type,
             };
             let key_id = match self.fault {
-                Fault::SplitsKeyIdOnColon => key_id.split(':').next().unwrap_or(""),
-                _ => key_id,
+                Fault::KeepsIdUpToFirstColon => key_id.split(':').next().unwrap_or("").to_string(),
+                Fault::CaseFoldsKeyIds => key_id.to_lowercase(),
+                _ => key_id.to_string(),
             };
-            (key_type.to_string(), key_id.to_string())
+            (key_type.to_string(), key_id)
         }
     }
 
@@ -654,6 +785,9 @@ mod tests {
             let mut data = data.to_vec();
             if matches!(self.fault, Fault::TruncatesValuesAt64KiB) {
                 data.truncate(64 * 1024);
+            }
+            if matches!(self.fault, Fault::StringTypedValues) {
+                data = String::from_utf8_lossy(&data).into_owned().into_bytes();
             }
             let key = self.key(key_type, key_id);
             let mut records = self.records.lock().unwrap();
@@ -673,6 +807,11 @@ mod tests {
             match (self.fault, current) {
                 (Fault::AbsentIsAnError, None) => {
                     Err(StorageError::KeyNotFound(key_id.to_string()))
+                }
+                (Fault::EmptyReadsAsMissing, Some(current)) if current.is_empty() => Ok(None),
+                (Fault::CorruptsValues, Some(mut current)) if !current.is_empty() => {
+                    current[0] ^= 0xff;
+                    Ok(Some(current))
                 }
                 (Fault::TearsOverwrites, Some(current)) => {
                     // Half the previous value and half the current one: what
@@ -695,6 +834,9 @@ mod tests {
         }
 
         fn delete(&self, key_type: &str, key_id: &str) -> StorageResult<()> {
+            if matches!(self.fault, Fault::DeleteIsANoOp) {
+                return Ok(());
+            }
             let key = self.key(key_type, key_id);
             let removed = self.records.lock().unwrap().remove(&key);
             if removed.is_none() && matches!(self.fault, Fault::DeleteOfAbsentFails) {
@@ -705,14 +847,24 @@ mod tests {
 
         fn list_keys(&self, key_type: &str) -> StorageResult<Vec<String>> {
             let (key_type, _) = self.key(key_type, "");
-            Ok(self
+            let keys: Vec<String> = self
                 .records
                 .lock()
                 .unwrap()
                 .keys()
                 .filter(|(kt, _)| *kt == key_type)
                 .map(|(_, id)| id.clone())
-                .collect())
+                .collect();
+            match self.fault {
+                // A paginated backend handing back its first page only.
+                Fault::ListReturnsFirstPageOnly => Ok(keys.into_iter().take(4).collect()),
+                // A backend that treats a missing directory or table as
+                // an error rather than as an empty category.
+                Fault::ListOfUnknownTypeFails if keys.is_empty() => Err(StorageError::LoadFailed(
+                    format!("no such key type: {key_type}"),
+                )),
+                _ => Ok(keys),
+            }
         }
 
         fn exists(&self, key_type: &str, key_id: &str) -> StorageResult<bool> {
@@ -746,14 +898,26 @@ mod tests {
         // The negative controls. A suite that passes everything proves
         // nothing, so each check is shown failing the defect it exists for.
         let cases = [
+            (Fault::IgnoresKeyType, "key_types_are_separate_namespaces"),
+            (Fault::CorruptsValues, "store_then_load"),
+            (Fault::StringTypedValues, "binary_values_round_trip"),
+            (Fault::EmptyReadsAsMissing, "empty_value_is_not_missing"),
             (Fault::KeepsFirstWrite, "store_overwrites"),
             (Fault::AbsentIsAnError, "absent_key_loads_as_none"),
             (
                 Fault::DeleteOfAbsentFails,
                 "delete_removes_and_is_idempotent",
             ),
-            (Fault::IgnoresKeyType, "key_types_are_separate_namespaces"),
-            (Fault::SplitsKeyIdOnColon, "key_ids_as_the_sdk_writes_them"),
+            (
+                Fault::ListReturnsFirstPageOnly,
+                "list_keys_is_accurate_and_scoped",
+            ),
+            (Fault::ListOfUnknownTypeFails, "unused_key_type_lists_empty"),
+            (
+                Fault::KeepsIdUpToFirstColon,
+                "key_ids_as_the_sdk_writes_them",
+            ),
+            (Fault::CaseFoldsKeyIds, "key_ids_are_byte_exact"),
             (Fault::CapsKeyIdAt255, "long_key_ids_round_trip"),
             (Fault::TruncatesValuesAt64KiB, "large_records_round_trip"),
             (Fault::ExistsAlwaysFalse, "exists_agrees_with_load"),
@@ -762,7 +926,23 @@ mod tests {
                 "clear_type_is_scoped_and_idempotent",
             ),
             (Fault::TearsOverwrites, "concurrent_writes_land_whole"),
+            (Fault::DeleteIsANoOp, "listed_records_can_all_be_deleted"),
         ];
+        // Every check the suite runs has a control here, so a check added
+        // without one fails this test rather than shipping unproven.
+        let covered: std::collections::BTreeSet<&str> =
+            cases.iter().map(|(_, check)| *check).collect();
+        let checks: std::collections::BTreeSet<String> =
+            run(&InMemoryStorage::new()).passed.into_iter().collect();
+        let uncovered: Vec<&String> = checks
+            .iter()
+            .filter(|check| !covered.contains(check.as_str()))
+            .collect();
+        assert!(
+            uncovered.is_empty(),
+            "checks with no negative control: {uncovered:?}"
+        );
+
         for (fault, expected) in cases {
             let report = run(&Faulty::new(fault));
             assert!(!report.is_green(), "{fault:?} passed the suite");
@@ -783,5 +963,30 @@ mod tests {
             .find(|f| f.check == "absent_key_loads_as_none")
             .expect("the check failed");
         assert!(failure.detail.contains("KeyNotFound"), "{}", failure.detail);
+    }
+    #[test]
+    fn a_backend_that_merges_key_types_stops_the_run_before_any_delete() {
+        // The isolation check runs first because every listed delete after
+        // it trusts that listing a probe key type names only probe records.
+        // On this backend it names the identity too, so a run that got as
+        // far as its cleanup would delete it.
+        let storage = Faulty::new(Fault::IgnoresKeyType);
+        storage.store("identity", "key_pair", b"secret").unwrap();
+        storage.store("group_state", "group:abc", b"state").unwrap();
+        let report = run(&storage);
+        assert!(report.passed.is_empty(), "{:?}", report.passed);
+        assert_eq!(report.failures.len(), 1, "{}", report.summary());
+        assert_eq!(
+            report.failures[0].check,
+            "key_types_are_separate_namespaces"
+        );
+        assert_eq!(
+            storage.load("identity", "key_pair").unwrap(),
+            Some(b"secret".to_vec())
+        );
+        assert_eq!(
+            storage.load("group_state", "group:abc").unwrap(),
+            Some(b"state".to_vec())
+        );
     }
 }
