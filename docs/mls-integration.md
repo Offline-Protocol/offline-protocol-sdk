@@ -433,8 +433,10 @@ protocol.initialize_mls(Arc::new(secure), Arc::new(state))?;
   reinstates spent ratchet secrets and consumed key packages: peers' newer
   messages then fail to decrypt, and the sessions have to be re-established.
   A backup protects against losing the identity, not against losing the
-  latest epoch. A backup tool can read the directory while the store is
-  open, on Windows as elsewhere: the lock file shares read access.
+  latest epoch. A backup tool can read the records while the store is open.
+  On Windows the lock file itself opens only for a reader that shares write
+  access, as backup tools usually do; it is empty, so skipping it loses
+  nothing.
 
 The namespace must be the output of `account_storage_namespace`; anything
 else is refused before a directory is created.

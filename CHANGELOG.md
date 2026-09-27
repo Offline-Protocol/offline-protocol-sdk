@@ -63,10 +63,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   exclusive lock on its directory while open, so a second engine over the
   same directories fails with `FileStoreError::InUse` instead of silently
   diverging the MLS state.
-  The lock file shares read access, so a backup can read a live store on
-  Windows too. A failed directory flush fails the write on Unix rather than
-  acknowledging it, and a store opens over a relative root on its first
-  run. `account_storage_namespace` is the binding-shared namespace
+  On Windows the lock file shares read access, so a backup tool that shares
+  write access, as they usually do, can read a live store. A failed
+  directory flush fails the write on Unix rather than acknowledging it, and
+  a store opens over a relative root on its first run.
+  `account_storage_namespace` is the binding-shared namespace
   derivation. Both stores pass their conformance suites, and an
   engine restarted over them keeps its address and its sealed documents. The
   `replicated_notes` example now runs on them. The stores sit behind the

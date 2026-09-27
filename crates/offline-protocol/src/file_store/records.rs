@@ -142,9 +142,12 @@ impl DirectoryLock {
             // Read sharing only: a second store asks for write access, which
             // this handle does not share, so its open fails while this handle
             // lives, which is the lock. Windows releases it with the handle.
-            // Sharing nothing would also refuse every reader of the file: a
-            // backup of the key directory, which the docs tell operators to
-            // take, would fail on a live store.
+            // Sharing nothing would refuse even a reader that shares
+            // everything. With read sharing, a reader that itself shares
+            // write access (as backup tools usually do) can open the lock
+            // file; one that shares only read access still cannot, because
+            // this handle holds write access. The lock file is empty, so a
+            // backup that skips it loses nothing.
             use std::os::windows::fs::OpenOptionsExt;
             options.share_mode(WINDOWS_FILE_SHARE_READ);
         }
