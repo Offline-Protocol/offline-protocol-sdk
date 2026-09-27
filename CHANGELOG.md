@@ -58,10 +58,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   record proves the key; a damaged check over an empty store fails with
   `FileStoreError::KeyCheckUnverifiable`, naming the file to remove. The
   sealed store never deletes a record on a read; a damaged one is reported
-  as `CorruptedData` naming its file, and one the listing skips is logged as
-  a warning naming its file. Each store holds an exclusive lock on its
-  directory while open, so a second engine over the same directories fails
-  with `FileStoreError::InUse` instead of silently diverging the MLS state.
+  as `CorruptedData` naming its file, and one the listing skips is logged,
+  once per store, as a warning naming its file. Each store holds an
+  exclusive lock on its directory while open, so a second engine over the
+  same directories fails with `FileStoreError::InUse` instead of silently
+  diverging the MLS state.
   The lock file shares read access, so a backup can read a live store on
   Windows too. A failed directory flush fails the write on Unix rather than
   acknowledging it, and a store opens over a relative root on its first

@@ -1,7 +1,8 @@
 //! [`SealedFileMlsStorage`]: MLS material in files, sealed under a store key.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
@@ -93,6 +94,10 @@ pub struct SealedFileMlsStorage {
     name_key: Zeroizing<[u8; 32]>,
     lock: StoreLock,
     swept: SweepMemo,
+    /// Records the listing has already warned about. The engine lists key
+    /// packages and groups often, and a damaged record stays damaged, so one
+    /// warning per file per store says everything without flooding the log.
+    listing_warned: Mutex<HashSet<PathBuf>>,
     _directory_lock: DirectoryLock,
 }
 
@@ -145,6 +150,7 @@ impl SealedFileMlsStorage {
             name_key,
             lock: StoreLock::default(),
             swept: SweepMemo::default(),
+            listing_warned: Mutex::default(),
             _directory_lock: directory_lock,
         };
         store.verify_store_key()?;
@@ -444,11 +450,21 @@ impl MlsStorage for SealedFileMlsStorage {
                 // skipped here is one the engine never learns it had. Same
                 // level and same path as `load` reports: names are keyed
                 // digests, and the path is the only way to find the file.
-                _ => tracing::warn!(
-                    path = %path.display(),
-                    "sealed MLS record does not open under this store key; \
-                     left in place and left out of the listing"
-                ),
+                // Once per file per store: listings are frequent.
+                _ => {
+                    let first = self
+                        .listing_warned
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(path.to_path_buf());
+                    if first {
+                        tracing::warn!(
+                            path = %path.display(),
+                            "sealed MLS record does not open under this store key; \
+                             left in place and left out of the listing"
+                        );
+                    }
+                }
             },
         )
         .map_err(|err| StorageError::LoadFailed(err.to_string()))?;
@@ -627,6 +643,7 @@ mod tests {
     /// record must not hide the good one that proves the key.
     #[test]
     fn a_lost_key_check_is_rebuilt_past_an_unreadable_record() {
+        let _callsite = listing_warning_callsite();
         let root = TempRoot::new("mls-lost-check-damaged");
         let (check, damaged) = {
             let store = open(&root, 1);
@@ -645,6 +662,25 @@ mod tests {
         let store = open(&root, 1);
         assert!(check.exists(), "the good record proved the key");
         assert_eq!(store.list_keys("group_state").expect("list"), vec!["b"]);
+    }
+
+    /// Held by every test that lists a store holding a record that does not
+    /// open, which is every test that reaches the listing's warning.
+    ///
+    /// `tracing` caches whether a callsite is wanted process-wide, and the
+    /// first thread to reach a callsite fills that cache. A test thread with
+    /// no subscriber can compute "never" before the capturing test installs
+    /// its subscriber and store it after, which hides the warning from the
+    /// capture. A test holding this guard has finished any first
+    /// registration before it releases it, so the capturing test's rebuild
+    /// always comes after. Any new test that lists an unopenable record
+    /// takes it too.
+    static LISTING_WARNING_CALLSITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn listing_warning_callsite() -> std::sync::MutexGuard<'static, ()> {
+        LISTING_WARNING_CALLSITE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Captures every warning raised on this thread, with its fields.
@@ -693,18 +729,37 @@ mod tests {
         bytes[SEALED_MAGIC.len() + NONCE_BYTES] ^= 1;
         std::fs::write(&damaged, bytes).expect("write");
 
+        // One subscriber for the whole test, installed while no other test
+        // can be registering the callsite, and the interest cache rebuilt
+        // once it is in place (see `LISTING_WARNING_CALLSITE`).
+        let _callsite = listing_warning_callsite();
         let warnings = Warnings::default();
-        let listed = tracing::subscriber::with_default(warnings.clone(), || {
-            store.list_keys("group_state").expect("list")
-        });
+        let _default = tracing::dispatcher::set_default(&tracing::Dispatch::new(warnings.clone()));
+        tracing::callsite::rebuild_interest_cache();
 
-        assert_eq!(listed, vec!["b"]);
-        let warnings = warnings.0.lock().expect("warnings");
         let path = damaged.display().to_string();
-        assert!(
-            warnings.iter().any(|w| w.contains(&path)),
-            "no warning names {path}: {warnings:?}"
-        );
+        let named = || {
+            warnings
+                .0
+                .lock()
+                .expect("warnings")
+                .iter()
+                .filter(|w| w.contains(&path))
+                .count()
+        };
+
+        assert_eq!(store.list_keys("group_state").expect("list"), vec!["b"]);
+        assert_eq!(named(), 1, "one warning names {path}");
+
+        // Listings are frequent; a record that stays damaged is warned about
+        // once per store, not on every listing.
+        assert_eq!(store.list_keys("group_state").expect("list"), vec!["b"]);
+        assert_eq!(named(), 1, "the second listing warned again");
+        assert!(store
+            .listing_warned
+            .lock()
+            .expect("memo")
+            .contains(&damaged));
     }
 
     /// Nothing to write down in a record's name, so the error must carry the
@@ -776,6 +831,7 @@ mod tests {
 
     #[test]
     fn a_record_moved_onto_another_name_does_not_open_and_is_kept() {
+        let _callsite = listing_warning_callsite();
         let root = TempRoot::new("mls-moved");
         let store = open(&root, 1);
         store.store("group_state", "a", b"one").expect("store");
@@ -797,6 +853,7 @@ mod tests {
 
     #[test]
     fn a_tampered_or_oversized_record_is_corrupt_and_kept() {
+        let _callsite = listing_warning_callsite();
         let root = TempRoot::new("mls-tampered");
         let store = open(&root, 1);
         store
