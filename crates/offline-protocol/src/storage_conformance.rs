@@ -14,8 +14,6 @@
 //! bytes in, the same bytes out, addressed by `(key_type, key_id)`. It
 //! writes only under its own key type, and deletes everything it wrote.
 
-use serde::{Deserialize, Serialize};
-
 use crate::protocol_state_storage::{
     ProtocolStateError, ProtocolStateStorage, MAX_PROTOCOL_STATE_RECORD_TRANSFER_BYTES,
 };
@@ -29,67 +27,9 @@ pub const CONFORMANCE_KEY_TYPE: &str = "storage_conformance_probe";
 /// A second key type, used to prove categories do not bleed into each other.
 pub const CONFORMANCE_KEY_TYPE_OTHER: &str = "storage_conformance_probe_other";
 
-/// One failed check.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConformanceFailure {
-    /// The check that failed.
-    pub check: String,
-    /// What went wrong, in enough detail to fix the adapter.
-    pub detail: String,
-}
-
-/// The result of running the suite against one backend.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConformanceReport {
-    /// Checks that passed, in run order.
-    pub passed: Vec<String>,
-    /// Checks that failed.
-    pub failures: Vec<ConformanceFailure>,
-}
-
-impl ConformanceReport {
-    /// Whether the backend is supported.
-    pub fn is_green(&self) -> bool {
-        self.failures.is_empty()
-    }
-
-    /// A one-line summary suitable for a test assertion message.
-    pub fn summary(&self) -> String {
-        if self.is_green() {
-            format!("{} checks passed", self.passed.len())
-        } else {
-            let names: Vec<&str> = self
-                .failures
-                .iter()
-                .map(|failure| failure.check.as_str())
-                .collect();
-            format!(
-                "{} of {} checks failed: {}",
-                self.failures.len(),
-                self.passed.len() + self.failures.len(),
-                names.join(", ")
-            )
-        }
-    }
-
-    fn pass(&mut self, check: &str) {
-        self.passed.push(check.to_string());
-    }
-
-    fn fail(&mut self, check: &str, detail: impl Into<String>) {
-        self.failures.push(ConformanceFailure {
-            check: check.to_string(),
-            detail: detail.into(),
-        });
-    }
-
-    fn check(&mut self, name: &str, outcome: std::result::Result<(), String>) {
-        match outcome {
-            Ok(()) => self.pass(name),
-            Err(detail) => self.fail(name, detail),
-        }
-    }
-}
+/// The report types are the MLS suite's, re-exported, so the two suites
+/// render one JSON shape and one reader serves both.
+pub use offline_protocol_mls::storage_conformance::{ConformanceFailure, ConformanceReport};
 
 fn expect_load(
     storage: &dyn ProtocolStateStorage,
@@ -114,10 +54,7 @@ fn expect_load(
 /// because the whole point is to hand an adapter author a list of what to
 /// fix rather than a stack trace.
 pub fn run(storage: &dyn ProtocolStateStorage) -> ConformanceReport {
-    let mut report = ConformanceReport {
-        passed: Vec::new(),
-        failures: Vec::new(),
-    };
+    let mut report = ConformanceReport::new();
 
     // Anything left from an interrupted earlier run would make the listing
     // checks report failures that are not the adapter's fault.

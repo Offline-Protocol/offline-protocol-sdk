@@ -176,9 +176,11 @@ These fail silently if broken. Each is documented in full where it is linked.
   drives injection prevention
   ([spec](docs/spec/control-messages.md#reserved-prefix-registry)).
 - **A storage adapter must pass the conformance suite**
-  (`offline_protocol::storage_conformance::run`). Swappable storage is the
-  data layer's ranked-first property, and an adapter that returns `Ok` from
-  every method can still lose overwrites or merge categories
+  (`offline_protocol::storage_conformance::run` for protocol state,
+  `offline_protocol::mls_storage_conformance::run` for MLS material).
+  Swappable storage is the data layer's ranked-first property, and an adapter
+  that returns `Ok` from every method can still lose overwrites, merge
+  categories or tear a concurrent overwrite
   ([C11](docs/bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified)).
 - **Never hand the CRDT engine bytes that did not come out of a sealed
   record.** Malformed imports can panic upstream, and `minisize` is

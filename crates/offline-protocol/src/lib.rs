@@ -20,6 +20,9 @@ pub mod mls_observability;
 pub mod protocol;
 pub mod protocol_state_storage;
 pub mod storage_conformance;
+/// The conformance suite for [`mls::MlsStorage`] implementations, beside
+/// the protocol-state one, so a Rust host verifies both backends from here.
+pub use offline_protocol_mls::storage_conformance as mls_storage_conformance;
 pub mod telemetry;
 pub mod transport_manager;
 pub mod visualization;

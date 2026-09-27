@@ -31,6 +31,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   the right application is asked for the bytes. The id is cleartext and
   unsigned on the wire, so route on it and never authorize on it; the
   threat model records this as residual risk R17.
+- **The MLS storage trait has a conformance suite.**
+  `offline_protocol::mls_storage_conformance::run` (and `run_json`) holds an
+  `MlsStorage` implementation to the contract the engine relies on, in the
+  same report shape as the protocol-state suite: the round trip, overwrite,
+  absent-key and delete semantics, key-type isolation, listing, `exists` and
+  `clear_type`, key ids as the SDK writes them including the `:` in a session
+  id, key ids compared byte for byte (group ids are peer-chosen, so a
+  case-folding backend merges two groups), a group id at its 4096-byte cap, a
+  512 KiB record, and overwrites from several threads landing whole. It
+  writes only under its own probe key types, checks key-type isolation before
+  any delete and stops if it fails, and deletes everything it wrote. Probe a
+  new backend on a scratch instance until it is green. Green is not a
+  persistence test. Rust only; it is not exposed over the FFI.
 
 ### Fixed
 
