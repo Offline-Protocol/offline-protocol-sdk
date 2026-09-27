@@ -410,19 +410,38 @@ binary and empty values, overwrite semantics, delete idempotence, key-type
 isolation, listing accuracy, composed and long key ids, large records, and
 delete completeness. Each check exists because that defect is invisible
 until data is missing. The suite writes only under its own probe key types
-and deletes everything it wrote, so it is safe to run against a live store.
+and deletes everything it wrote, which keeps a live store intact only if the
+backend keeps key types apart: on one that merges them, listing a probe key
+type names real records too, and the suite's cleanup deletes what it lists.
+Probe a new backend on a scratch instance until it is green.
+
+Green on either suite is not a persistence test. Every check runs against one
+open instance, so a backend that forgets everything on reopen, or that
+acknowledges a write it has not made durable, can pass. A persistent backend
+proves those with a reopen test of its own.
 
 The MLS storage trait has a suite of its own,
 `offline_protocol::mls_storage_conformance::run` (`run_json` for the same JSON
 shape), because an `MlsStorage` is held to things a protocol-state store is
 not: `exists` agreeing with `load`, `clear_type` emptying one category and no
-other, key ids with the `:` a session id carries, a group id at its
-4096-byte cap, a record the size of a large group's ratchet tree (270 KiB at
-the default 256-member cap; the suite writes 512 KiB), and overwrites from
-several threads landing whole. Each check has a negative control in the
-suite's own tests, so a check that stopped catching its defect fails CI. It
-is reachable from Rust only; it is not exposed over the FFI, so a Swift,
-Kotlin or Python `MlsStorageProvider` is not held to it today.
+other, key ids with the `:` a session id carries, key ids compared byte for
+byte, a group id at its 4096-byte cap, a record the size of a large group's
+ratchet tree (270 KiB at the default 256-member cap; the suite writes
+512 KiB), and overwrites from several threads landing whole. Byte-exact ids
+matter because group ids are chosen by whoever creates the group, a peer
+included: a backend that folds case (a file per record on APFS or NTFS) or
+normalises Unicode keeps two groups in one record.
+
+Each check has a negative control in the suite's own tests, so a check that
+stopped catching its defect fails CI, and so does a check added without one.
+Key-type isolation is checked first and a failure there ends the run before
+any listed delete, so a backend that merges categories cannot lose its
+identity to the suite. `clear_type` cannot be protected that way: it has to
+be called to be tested, and a backend that clears every category takes the
+real records with it. Probe a new backend on a scratch instance until it is
+green; after that the suite is safe against a live store. It is reachable
+from Rust only; it is not exposed over the FFI, so a Swift, Kotlin or Python
+`MlsStorageProvider` is not held to it today.
 
 **A custom backend brings a logout obligation.** `wipePersistedState()`
 removes the account directory of the *default* provider — deliberately one

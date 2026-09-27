@@ -392,9 +392,13 @@ class MyCustomMlsStorage : MlsStorageProvider {
 
 A Rust implementation of `MlsStorage` is verified with
 `offline_protocol::mls_storage_conformance::run`: green is the definition of
-supported, and the report names what to fix. The suite is not exposed over the
-FFI yet, so a Swift, Kotlin or Python provider is held to the same contract by
-reading it; [C11](bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified)
+honouring the trait contract, and the report names what to fix. Run it on a
+scratch instance until it is green, because a backend whose `clear_type`
+clears every category loses the real records to the suite. Green is not a
+persistence test: it runs against one open instance, so test reopen and
+durability separately. The suite is not exposed over the FFI yet, so a
+Swift, Kotlin or Python provider is held to the same contract by reading it;
+[C11](bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified)
 lists every check.
 
 Do not implement the protocol-state provider with Keychain,
