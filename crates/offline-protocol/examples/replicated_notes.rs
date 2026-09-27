@@ -16,71 +16,71 @@
 //! makes replication safe is a separate example that needs none of those:
 //! `cargo run --package offline-protocol-data --example offline_merge`.
 //!
-//! The backend below is an in-memory `ProtocolStateStorage`, written out in
-//! full because it is also the shape of the bring-your-own-storage seam: an
-//! application swaps SQLite, files, or its own encrypted store in at exactly
-//! this point, and sealing sits above it, so what `store` receives here is
-//! already ciphertext.
+//! The two stores are the built-in file stores a headless host uses: MLS
+//! material sealed under a store key, and protocol state in the format every
+//! binding writes. They live under a directory given as the first argument
+//! (a fresh temporary directory otherwise). The store key comes from
+//! `OFFLINE_PROTOCOL_STORE_KEY` (64 hex digits or base64) when it is set; the
+//! example otherwise mints one for the run, which is enough for the reopen
+//! below but not for a second run over the same directory.
+//!
+//! An application that brings its own storage (SQLite, its own encrypted
+//! store) swaps it in at exactly the `initialize_mls` call, and sealing sits
+//! above it, so what the protocol-state store receives is already ciphertext.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use offline_protocol::{
-    DataValue, OfflineProtocol, ProtocolConfig, ProtocolStateResult, ProtocolStateStorage,
+    account_storage_namespace, DataValue, EnvStoreKey, FileProtocolStateStorage, OfflineProtocol,
+    ProtocolConfig, SealedFileMlsStorage, StaticStoreKey, StoreKeyProvider,
 };
-use offline_protocol_mls::storage::InMemoryStorage;
+use rand_core::{OsRng, RngCore};
 
-/// A protocol-state backend that keeps records in a map.
-///
-/// Four methods over `(key_type, key_id, bytes)`. The rules a real adapter
-/// has to honour are the ones the conformance suite checks: bytes are stored
-/// verbatim, a second write to one key replaces the first, and a key that was
-/// never written loads as `None` rather than as an error.
-#[derive(Default)]
-struct MemoryStateStorage {
-    records: Mutex<HashMap<(String, String), Vec<u8>>>,
-}
+const APP_ID: &str = "com.example.notes";
+const PROFILE: &str = "default";
 
-impl ProtocolStateStorage for MemoryStateStorage {
-    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> ProtocolStateResult<()> {
-        let mut records = self.records.lock().expect("storage mutex");
-        records.insert((key_type.to_string(), key_id.to_string()), data.to_vec());
-        Ok(())
-    }
-
-    fn load(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<Option<Vec<u8>>> {
-        let records = self.records.lock().expect("storage mutex");
-        Ok(records
-            .get(&(key_type.to_string(), key_id.to_string()))
-            .cloned())
-    }
-
-    fn delete(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<()> {
-        let mut records = self.records.lock().expect("storage mutex");
-        records.remove(&(key_type.to_string(), key_id.to_string()));
-        Ok(())
-    }
-
-    fn list_keys(&self, key_type: &str) -> ProtocolStateResult<Vec<String>> {
-        let records = self.records.lock().expect("storage mutex");
-        Ok(records
-            .keys()
-            .filter(|(stored_type, _)| stored_type == key_type)
-            .map(|(_, key_id)| key_id.clone())
-            .collect())
-    }
+/// Opens the two stores for this account under `root`.
+fn open_stores(
+    root: &std::path::Path,
+    key: &dyn StoreKeyProvider,
+) -> Result<(Arc<SealedFileMlsStorage>, Arc<FileProtocolStateStorage>), Box<dyn std::error::Error>>
+{
+    let namespace = account_storage_namespace(APP_ID, PROFILE);
+    // Two roots: MLS material may outlive an installation, protocol state
+    // must not.
+    let secure = SealedFileMlsStorage::open(root.join("keys"), &namespace, key)?;
+    let records = FileProtocolStateStorage::open(root.join("state"), &namespace)?;
+    Ok((Arc::new(secure), Arc::new(records)))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Both stores outlive the engine below, which is what makes the reopen at
-    // the end a reopen rather than a fresh start. The secure store matters as
-    // much as the record store: documents are sealed with a key that lives in
-    // it, so dropping only that half looks exactly like data loss.
-    let secure = Arc::new(InMemoryStorage::default());
-    let records = Arc::new(MemoryStateStorage::default());
+    let root = match std::env::args_os().nth(1) {
+        Some(root) => PathBuf::from(root),
+        None => {
+            let mut suffix = [0u8; 8];
+            OsRng.fill_bytes(&mut suffix);
+            std::env::temp_dir().join(format!("replicated-notes-{}", hex::encode(suffix)))
+        }
+    };
+    let key: Box<dyn StoreKeyProvider> =
+        if std::env::var_os(EnvStoreKey::DEFAULT_VARIABLE).is_some() {
+            Box::new(EnvStoreKey::default())
+        } else {
+            let mut key = [0u8; 32];
+            OsRng.fill_bytes(&mut key);
+            Box::new(StaticStoreKey::new(key))
+        };
+    println!("stores:    {}", root.display());
+
+    // Both stores are on disk, which is what makes the reopen at the end a
+    // reopen rather than a fresh start. The secure store matters as much as
+    // the record store: documents are sealed with a key that lives in it, so
+    // losing only that half looks exactly like data loss.
+    let (secure, records) = open_stores(&root, key.as_ref())?;
 
     // `data.enabled` defaults to true, so nothing here switches the layer on.
-    let config = ProtocolConfig::builder("com.example.notes", "default").build()?;
+    let config = ProtocolConfig::builder(APP_ID, PROFILE).build()?;
     let mut protocol = OfflineProtocol::new(config)?;
 
     // Documents are sealed at rest and the record key is minted here, so this
@@ -144,11 +144,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // JSON of the current state, `data_export_raw` the engine-native history.
     // An application can always take its data and leave.
 
-    // Reopen: a new engine over the same two stores. The records were sealed
-    // by the first one and are read back by the second, which is the property
-    // an application depends on across a restart.
+    // Reopen: a new engine over the same two directories, opened afresh as a
+    // restarted process would. The records were sealed by the first engine
+    // and are read back by the second, which is the property an application
+    // depends on across a restart.
     drop(protocol);
-    let config = ProtocolConfig::builder("com.example.notes", "default").build()?;
+    drop((secure, records));
+    let (secure, records) = open_stores(&root, key.as_ref())?;
+    let config = ProtocolConfig::builder(APP_ID, PROFILE).build()?;
     let mut reopened = OfflineProtocol::new(config)?;
     reopened.initialize_mls(secure, records)?;
 

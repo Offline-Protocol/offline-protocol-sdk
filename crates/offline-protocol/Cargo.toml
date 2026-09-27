@@ -82,6 +82,12 @@ sha2 = "0.10"
 chacha20poly1305 = { workspace = true }
 rand_core = { workspace = true }
 zeroize = { workspace = true }
+# The built-in sealed file store for MLS material derives its sealing and
+# naming keys from the operator's store key (HKDF) and names its files with a
+# keyed digest (HMAC), so a stolen directory does not confirm which peers and
+# groups it holds. Both are already in the graph through the transport crate.
+hkdf = { workspace = true }
+hmac = { workspace = true }
 
 [dev-dependencies]
 offline-protocol-leaf = { workspace = true }

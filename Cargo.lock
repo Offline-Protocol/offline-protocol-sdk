@@ -2300,6 +2300,8 @@ dependencies = [
  "chrono",
  "ed25519-dalek 3.0.0",
  "hex",
+ "hkdf",
+ "hmac",
  "offline-protocol-core",
  "offline-protocol-data",
  "offline-protocol-leaf",
