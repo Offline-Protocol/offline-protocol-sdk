@@ -119,7 +119,9 @@ impl SealedFileMlsStorage {
     /// every later open must open it, and a key that does not is refused with
     /// [`FileStoreError::WrongStoreKey`] before any record is read or changed.
     /// A check file that is missing or damaged is rebuilt only when an
-    /// existing record opens under the key, which proves it.
+    /// existing record opens under the key, which proves it. A check that
+    /// does not open over a store with no records is refused with
+    /// [`FileStoreError::KeyCheckUnverifiable`], which names the check file.
     ///
     /// A second store over the same directory is refused with
     /// [`FileStoreError::InUse`] while this one lives.
@@ -302,7 +304,7 @@ impl SealedFileMlsStorage {
             }
             Probe::NoneOpened => return Err(FileStoreError::WrongStoreKey(self.directory.clone())),
             Probe::NoRecords if check_present => {
-                return Err(FileStoreError::WrongStoreKey(self.directory.clone()))
+                return Err(FileStoreError::KeyCheckUnverifiable(path.clone()))
             }
             Probe::NoRecords => {}
         }
@@ -438,7 +440,15 @@ impl MlsStorage for SealedFileMlsStorage {
                 Some((record_type, record_id)) if record_type == key_type => {
                     keys.insert(record_id);
                 }
-                _ => tracing::debug!(name, "skipping a sealed record that does not open"),
+                // The listing is how the engine finds its groups, so a record
+                // skipped here is one the engine never learns it had. Same
+                // level and same path as `load` reports: names are keyed
+                // digests, and the path is the only way to find the file.
+                _ => tracing::warn!(
+                    path = %path.display(),
+                    "sealed MLS record does not open under this store key; \
+                     left in place and left out of the listing"
+                ),
             },
         )
         .map_err(|err| StorageError::LoadFailed(err.to_string()))?;
@@ -585,7 +595,9 @@ mod tests {
     }
 
     /// With no record to prove anything, a check that does not open stays a
-    /// refusal, whichever key is offered.
+    /// refusal, whichever key is offered. The error is not `WrongStoreKey`,
+    /// because the key may be right, and it names the check file, because
+    /// removing that file is the remedy when it is.
     #[test]
     fn a_damaged_key_check_over_an_empty_store_is_refused() {
         let root = TempRoot::new("mls-damaged-empty");
@@ -593,11 +605,22 @@ mod tests {
         let mut bytes = std::fs::read(&check).expect("read");
         let last = bytes.len() - 1;
         bytes[last] ^= 1;
-        std::fs::write(&check, bytes).expect("write");
-        assert!(matches!(
-            SealedFileMlsStorage::open(root.path(), &namespace(), &key(1)),
-            Err(FileStoreError::WrongStoreKey(_))
-        ));
+        std::fs::write(&check, &bytes).expect("write");
+        for byte in [1, 2] {
+            match SealedFileMlsStorage::open(root.path(), &namespace(), &key(byte)) {
+                Err(FileStoreError::KeyCheckUnverifiable(path)) => assert_eq!(path, check),
+                other => panic!("expected KeyCheckUnverifiable, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            std::fs::read(&check).expect("read"),
+            bytes,
+            "nothing changed"
+        );
+
+        // The remedy the error names: remove the check and the store opens.
+        std::fs::remove_file(&check).expect("remove check");
+        open(&root, 1);
     }
 
     /// The probe keeps going past a record that does not open: one damaged
@@ -622,6 +645,66 @@ mod tests {
         let store = open(&root, 1);
         assert!(check.exists(), "the good record proved the key");
         assert_eq!(store.list_keys("group_state").expect("list"), vec!["b"]);
+    }
+
+    /// Captures every warning raised on this thread, with its fields.
+    #[derive(Clone, Default)]
+    struct Warnings(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl tracing::Subscriber for Warnings {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            *metadata.level() <= tracing::Level::WARN
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Fields(String);
+            impl tracing::field::Visit for Fields {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    self.0.push_str(&format!("{}={value:?} ", field.name()));
+                }
+            }
+            let mut fields = Fields(String::new());
+            event.record(&mut fields);
+            self.0.lock().expect("warnings").push(fields.0);
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    /// The listing is how the engine enumerates its groups, so a record it
+    /// skips is one the engine never learns about. It must be reported as
+    /// loudly as `load` reports it, with the path, since names are digests.
+    #[test]
+    fn a_record_the_listing_skips_is_warned_about_with_its_path() {
+        let root = TempRoot::new("mls-list-warn");
+        let store = open(&root, 1);
+        store.store("group_state", "a", b"one").expect("store");
+        store.store("group_state", "b", b"two").expect("store");
+        let damaged = store.entry_path("group_state", "a");
+        let mut bytes = std::fs::read(&damaged).expect("read");
+        bytes[SEALED_MAGIC.len() + NONCE_BYTES] ^= 1;
+        std::fs::write(&damaged, bytes).expect("write");
+
+        let warnings = Warnings::default();
+        let listed = tracing::subscriber::with_default(warnings.clone(), || {
+            store.list_keys("group_state").expect("list")
+        });
+
+        assert_eq!(listed, vec!["b"]);
+        let warnings = warnings.0.lock().expect("warnings");
+        let path = damaged.display().to_string();
+        assert!(
+            warnings.iter().any(|w| w.contains(&path)),
+            "no warning names {path}: {warnings:?}"
+        );
     }
 
     /// Nothing to write down in a record's name, so the error must carry the

@@ -391,13 +391,27 @@ protocol.initialize_mls(Arc::new(secure), Arc::new(state))?;
   `FileStoreError::WrongStoreKey` before any record is read. The engine never
   sees an empty store and never mints a new identity over the old one. A
   check file that is lost or damaged is rebuilt only when an existing record
-  opens under the key offered, which proves it.
+  opens under the key offered, which proves it. A check that does not open
+  over a store with no records fails with
+  `FileStoreError::KeyCheckUnverifiable`, which names the check file: the
+  key may be wrong or the check damaged, and an empty store cannot tell.
+  There is nothing sealed to lose, so if the key is right, remove that file.
 - **One store per directory.** Each store holds an exclusive lock on its
   account directory while it is open, so a second engine over the same
   directories, in the same process or another, fails with
   `FileStoreError::InUse`. Two engines over one MLS directory would each
   advance ratchet state the other never sees. On a filesystem that cannot
-  lock (some network mounts) the store logs that and opens unguarded.
+  lock (some network mounts) the store logs that and opens unguarded. The
+  lock is the open handle, not the file, and it dies with the process: a
+  `*.lock` file left by a crash is not stale, and removing one while a store
+  is open lets a second store in beside it. Never delete them.
+- **Release both stores before reopening them.** A store is released when
+  the last reference to it drops, and the engine is not always the last
+  holder: with telemetry enabled, the engine's drop detaches the uploader
+  thread, which keeps the protocol-state store until its final flush ends
+  (up to three seconds). Call `disable_telemetry()` before dropping the
+  engine, and it waits for that flush, so a restart in the same process or
+  a logout that removes the directories finds them free.
 - **The sealed store never deletes on a read.** A record that does not
   authenticate is reported as `CorruptedData`, naming its file, and left in
   place, because deleting on a wrong key would destroy the identity. Once the
@@ -419,7 +433,8 @@ protocol.initialize_mls(Arc::new(secure), Arc::new(state))?;
   reinstates spent ratchet secrets and consumed key packages: peers' newer
   messages then fail to decrypt, and the sessions have to be re-established.
   A backup protects against losing the identity, not against losing the
-  latest epoch.
+  latest epoch. A backup tool can read the directory while the store is
+  open, on Windows as elsewhere: the lock file shares read access.
 
 The namespace must be the output of `account_storage_namespace`; anything
 else is refused before a directory is created.

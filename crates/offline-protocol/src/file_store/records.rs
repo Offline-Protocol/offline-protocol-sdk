@@ -103,6 +103,10 @@ impl StoreLock {
 /// ratchet state the other never sees, and the MLS state would diverge
 /// without any error. The lock turns that into a refused open. It is
 /// advisory: it orders stores that take it, which every built-in store does.
+///
+/// The lock is the open handle, not the file. It dies with the process, so a
+/// lock file left behind by a crash is not stale and needs no cleanup, and
+/// removing one while a store is open would let a second store in beside it.
 #[derive(Debug)]
 pub(super) struct DirectoryLock {
     _handle: File,
@@ -135,10 +139,14 @@ impl DirectoryLock {
         }
         #[cfg(windows)]
         {
-            // No sharing: a second open of the file fails while this handle
+            // Read sharing only: a second store asks for write access, which
+            // this handle does not share, so its open fails while this handle
             // lives, which is the lock. Windows releases it with the handle.
+            // Sharing nothing would also refuse every reader of the file: a
+            // backup of the key directory, which the docs tell operators to
+            // take, would fail on a live store.
             use std::os::windows::fs::OpenOptionsExt;
-            options.share_mode(0);
+            options.share_mode(WINDOWS_FILE_SHARE_READ);
         }
         let handle = match options.open(&path) {
             Ok(handle) => handle,
@@ -171,6 +179,10 @@ impl DirectoryLock {
 /// `ERROR_SHARING_VIOLATION`: the file is open elsewhere without sharing.
 #[cfg(windows)]
 const WINDOWS_SHARING_VIOLATION: i32 = 32;
+
+/// `FILE_SHARE_READ`: later opens may read the file, never write it.
+#[cfg(windows)]
+const WINDOWS_FILE_SHARE_READ: u32 = 0x0000_0001;
 
 /// Why a frame could not be built.
 #[derive(Debug)]
@@ -279,7 +291,7 @@ pub(super) fn private_mkdir(directory: &Path) -> io::Result<()> {
     // and each flush makes one entry in one parent durable.
     for made in &created {
         if let Some(parent) = made.parent() {
-            sync_directory(parent);
+            sync_directory(parent)?;
         }
     }
     Ok(())
@@ -311,13 +323,40 @@ fn make_private_directory(directory: &Path) -> io::Result<()> {
 
 /// Flushes a directory entry so a rename or unlink in it survives a crash.
 ///
-/// Best effort: a directory cannot be opened for `fsync` on every platform
-/// (notably Windows), and there the file-level flush is the strongest
-/// guarantee available.
-pub(super) fn sync_directory(directory: &Path) {
-    if let Ok(handle) = File::open(directory) {
-        let _ = handle.sync_all();
+/// On Unix a failed flush is an error: the entry it was meant to make durable
+/// may not survive power loss, so the write that depends on it must not be
+/// acknowledged. A filesystem that does not support flushing a directory at
+/// all (`EINVAL`, `ENOTSUP`) is the one exception, because there the
+/// file-level flush is already the strongest guarantee available.
+///
+/// Elsewhere it is best effort: a directory cannot be opened for a flush on
+/// Windows, and the file-level flush is what that platform offers.
+pub(super) fn sync_directory(directory: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        match File::open(directory).and_then(|handle| handle.sync_all()) {
+            Ok(()) => Ok(()),
+            Err(err) if directory_flush_unsupported(&err) => Ok(()),
+            Err(err) => Err(err),
+        }
     }
+    #[cfg(not(unix))]
+    {
+        if let Ok(handle) = File::open(directory) {
+            let _ = handle.sync_all();
+        }
+        Ok(())
+    }
+}
+
+/// Whether `err` says the filesystem cannot flush a directory at all, as
+/// opposed to failing to flush this one.
+#[cfg(unix)]
+fn directory_flush_unsupported(err: &io::Error) -> bool {
+    use rustix::io::Errno;
+    err.raw_os_error().is_some_and(|code| {
+        code == Errno::INVAL.raw_os_error() || code == Errno::NOTSUP.raw_os_error()
+    })
 }
 
 /// Writes `bytes` to `target` atomically and durably: a fresh owner-only
@@ -331,8 +370,7 @@ pub(super) fn write_atomic(directory: &Path, target: &Path, bytes: &[u8]) -> io:
         handle.sync_all()?;
         drop(handle);
         fs::rename(&temporary, target)?;
-        sync_directory(directory);
-        Ok(())
+        sync_directory(directory)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -412,7 +450,7 @@ pub(super) fn remove(path: &Path) -> io::Result<bool> {
     match fs::remove_file(path) {
         Ok(()) => {
             if let Some(parent) = path.parent() {
-                sync_directory(parent);
+                sync_directory(parent)?;
             }
             Ok(true)
         }

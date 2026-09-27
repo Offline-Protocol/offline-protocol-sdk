@@ -55,17 +55,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   (`OFFLINE_PROTOCOL_STORE_KEY`, hex or base64) or `StaticStoreKey`. A wrong
   key is refused at open with `FileStoreError::WrongStoreKey` before any
   record is read, and a lost or damaged key check is rebuilt only when a
-  record proves the key. The sealed store never deletes a record on a read;
-  a damaged one is reported as `CorruptedData` naming its file. Each store
-  holds an exclusive lock on its directory while open, so a second engine
-  over the same directories fails with `FileStoreError::InUse` instead of
-  silently diverging the MLS state.
-  `account_storage_namespace` is the binding-shared namespace derivation.
-  Both stores pass their conformance suites, and an engine restarted over
-  them keeps its address and its sealed documents. The `replicated_notes`
-  example now runs on them. Rust only; the FFI entry is separate work. The
-  threat model records the store key's exposure on a host without a
-  keystore as residual risk R18.
+  record proves the key; a damaged check over an empty store fails with
+  `FileStoreError::KeyCheckUnverifiable`, naming the file to remove. The
+  sealed store never deletes a record on a read; a damaged one is reported
+  as `CorruptedData` naming its file, and one the listing skips is logged as
+  a warning naming its file. Each store holds an exclusive lock on its
+  directory while open, so a second engine over the same directories fails
+  with `FileStoreError::InUse` instead of silently diverging the MLS state.
+  The lock file shares read access, so a backup can read a live store on
+  Windows too. A failed directory flush fails the write on Unix rather than
+  acknowledging it. `account_storage_namespace` is the binding-shared
+  namespace derivation. Both stores pass their conformance suites, and an
+  engine restarted over them keeps its address and its sealed documents. The
+  `replicated_notes` example now runs on them. Rust only; the FFI entry is
+  separate work. The threat model records the store key's exposure on a host
+  without a keystore as residual risk R18.
 
 ### Fixed
 

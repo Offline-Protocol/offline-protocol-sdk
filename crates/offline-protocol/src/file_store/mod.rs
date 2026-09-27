@@ -133,6 +133,19 @@ pub enum FileStoreError {
     /// supplying a different key than the one the store was created with.
     #[error("the store key does not open the store at {0}; nothing was changed")]
     WrongStoreKey(PathBuf),
+    /// The key check file does not open, and the store holds no record that
+    /// could prove the key either way.
+    ///
+    /// Nothing was read, changed or deleted. Either the key is wrong or the
+    /// check file is damaged, and an empty store cannot tell the two apart.
+    /// With nothing sealed to lose, removing the check file named here lets
+    /// the next open start the store afresh under the key offered.
+    #[error(
+        "the store key check at {0} does not open and the store has no record to prove \
+         the key; nothing was changed. If this is the right key, remove that file to \
+         start the store afresh"
+    )]
+    KeyCheckUnverifiable(PathBuf),
     /// Another store already has this directory open, in this process or in
     /// another one.
     ///
