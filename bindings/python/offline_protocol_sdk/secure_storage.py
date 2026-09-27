@@ -21,6 +21,9 @@ from .storage_namespace import require_account_storage_namespace
 
 logger = logging.getLogger(__name__)
 
+#: keyring backends that cannot hold a secret: every call fails, or nothing is kept.
+_INSECURE_KEYRING_MODULES = frozenset({"keyring.backends.fail", "keyring.backends.null"})
+
 # Base service name used for keyring entries
 _DEFAULT_SERVICE = "offline-protocol-mls-v2"
 
@@ -96,14 +99,23 @@ class SecureStorage(MlsStorageProvider):
                 "ProtocolManager build the provider."
             )
 
-        # Warn if keyring resolved to a plaintext or null backend — MLS key
-        # material would be stored unprotected.
+        # Warn if keyring resolved to a failing, null or plaintext backend: MLS
+        # key material would not be stored, or not stored securely. keyring's
+        # failing and null backends are both classes named plain ``Keyring``
+        # (in ``keyring.backends.fail`` and ``keyring.backends.null``), so the
+        # module is checked as well as the class name; the failing one is what a
+        # host without a secret service gets.
         try:
-            backend = keyring.get_keyring()
-            backend_name = type(backend).__name__
-            if "Fail" in backend_name or "Null" in backend_name or "PlaintextKeyring" in backend_name:
+            backend_cls = type(keyring.get_keyring())
+            backend_name = f"{backend_cls.__module__}.{backend_cls.__name__}"
+            if (
+                backend_cls.__module__ in _INSECURE_KEYRING_MODULES
+                or "Fail" in backend_cls.__name__
+                or "Null" in backend_cls.__name__
+                or "PlaintextKeyring" in backend_cls.__name__
+            ):
                 logger.warning(
-                    "keyring backend is '%s' — MLS keys will NOT be stored "
+                    "keyring backend is '%s': MLS keys will NOT be stored "
                     "securely. Install a platform secret service (e.g. "
                     "gnome-keyring, kwallet) for production use.",
                     backend_name,
