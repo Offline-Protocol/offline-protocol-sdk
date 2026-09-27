@@ -126,6 +126,67 @@ fn a_sealed_document_survives_a_restart_over_the_file_stores() {
     );
 }
 
+/// A damaged record key must not switch persistence off for good.
+///
+/// The sealed store never deletes on a read and reports the record as
+/// `CorruptedData`. If the engine treated that like a failed load, nothing
+/// would ever rewrite the record, and every launch after the damage would
+/// refuse to persist sensitive state. The engine regenerates instead, as it
+/// does for a key of the wrong length, and the next launch seals again.
+#[cfg(feature = "data")]
+#[test]
+fn a_damaged_record_key_is_regenerated_and_persistence_resumes() {
+    use offline_protocol_data::DataValue;
+
+    let roots = Roots {
+        keys: TempRoot::new("engine-rk-keys"),
+        state: TempRoot::new("engine-rk-state"),
+    };
+    drop(engine(&roots, 6).expect("open"));
+
+    let record_key = {
+        let store = SealedFileMlsStorage::open(
+            roots.keys.path(),
+            &account_storage_namespace(APP_ID, PROFILE),
+            &StaticStoreKey::new([6; 32]),
+        )
+        .expect("open sealed store");
+        store.record_path("protocol_state_record_key", "current")
+    };
+    let mut bytes = std::fs::read(&record_key).expect("read record key");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    std::fs::write(&record_key, bytes).expect("damage record key");
+
+    let space = "demo-space";
+    {
+        let mut protocol = engine(&roots, 6).expect("open over a damaged key");
+        protocol.data_create_doc(space, "notes").expect("create");
+        protocol
+            .data_map_set(
+                space,
+                "notes",
+                "meta",
+                "title",
+                DataValue::Text {
+                    value: "sealed under the new key".to_string(),
+                },
+            )
+            .expect("set");
+        protocol.data_flush(space, "notes").expect("flush");
+    }
+
+    let mut protocol = engine(&roots, 6).expect("reopen");
+    assert_eq!(
+        protocol
+            .data_map_get(space, "notes", "meta", "title")
+            .expect("get"),
+        Some(DataValue::Text {
+            value: "sealed under the new key".to_string(),
+        })
+    );
+}
+
 #[test]
 fn a_second_engine_over_the_same_stores_is_refused() {
     let roots = Roots {

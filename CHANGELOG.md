@@ -69,6 +69,14 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A protocol-state record key the store reports as corrupt is regenerated.**
+  The engine regenerated a record key of the wrong length but treated a
+  `CorruptedData` error as a failed load, so a store that seals its records
+  and never deletes on a read disabled sensitive persistence on every launch
+  for good. `CorruptedData` is reserved for permanent losses, so it now takes
+  the wrong-length path: a fresh key, and the records sealed under the old
+  one settled as failed on restore. A transient `LoadFailed` still leaves
+  the key alone.
 - **Frames a bridge builds for the core carried a fixed application id.** The
   iOS, Android and Python bridges stamped `"offline-messenger"` on every relay
   answer, relay group frame and legacy plain-text DM they rebuilt for the
