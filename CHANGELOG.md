@@ -64,8 +64,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   with `FileStoreError::InUse` instead of silently diverging the MLS state.
   The lock file shares read access, so a backup can read a live store on
   Windows too. A failed directory flush fails the write on Unix rather than
-  acknowledging it. `account_storage_namespace` is the binding-shared
-  namespace derivation. Both stores pass their conformance suites, and an
+  acknowledging it, and a store opens over a relative root on its first
+  run. `account_storage_namespace` is the binding-shared namespace
+  derivation. Both stores pass their conformance suites, and an
   engine restarted over them keeps its address and its sealed documents. The
   `replicated_notes` example now runs on them. The stores sit behind the
   default-on `file-store` feature. Rust only; the FFI entry is separate

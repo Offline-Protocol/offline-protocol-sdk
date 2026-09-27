@@ -290,11 +290,24 @@ pub(super) fn private_mkdir(directory: &Path) -> io::Result<()> {
     // Deepest first is not required: every directory in the list exists now,
     // and each flush makes one entry in one parent durable.
     for made in &created {
-        if let Some(parent) = made.parent() {
+        if let Some(parent) = flush_target(made) {
             sync_directory(parent)?;
         }
     }
     Ok(())
+}
+
+/// The directory whose entry for `made` must be flushed: its parent.
+///
+/// A one-component relative path (`keys`) has the empty path as its parent,
+/// and opening the empty path fails with "not found", which would fail the
+/// first open of a store over a relative root and let the second succeed.
+/// That parent is the working directory, so it is flushed as `.`.
+fn flush_target(made: &Path) -> Option<&Path> {
+    match made.parent()? {
+        parent if parent.as_os_str().is_empty() => Some(Path::new(".")),
+        parent => Some(parent),
+    }
 }
 
 /// `directory` and each of its ancestors that does not exist yet.
@@ -331,6 +344,11 @@ fn make_private_directory(directory: &Path) -> io::Result<()> {
 ///
 /// Elsewhere it is best effort: a directory cannot be opened for a flush on
 /// Windows, and the file-level flush is what that platform offers.
+///
+/// An error here arrives after the rename, unlink or creation it follows has
+/// already taken effect. It means "not known to be durable", never "nothing
+/// changed": a caller that reads the entry straight back may find it, and it
+/// may or may not survive power loss.
 pub(super) fn sync_directory(directory: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -363,6 +381,9 @@ fn directory_flush_unsupported(err: &io::Error) -> bool {
 /// temporary in the same directory, flushed, renamed over the target, and
 /// the directory flushed. A reader sees the old record or the new one, never
 /// a torn one, and an acknowledged write survives power loss.
+///
+/// An error from the final directory flush arrives after the rename, so the
+/// new record may already be in place: see [`sync_directory`].
 pub(super) fn write_atomic(directory: &Path, target: &Path, bytes: &[u8]) -> io::Result<()> {
     let (temporary, mut handle) = create_temporary(directory)?;
     let result = (|| {
@@ -446,6 +467,9 @@ pub(super) fn read_prefix(path: &Path, max: usize) -> Option<Vec<u8>> {
 }
 
 /// Removes `path`, flushing its directory. `Ok(false)` when it was absent.
+///
+/// An error from the directory flush arrives after the unlink, so the file
+/// may already be gone: see [`sync_directory`].
 pub(super) fn remove(path: &Path) -> io::Result<bool> {
     match fs::remove_file(path) {
         Ok(()) => {
@@ -663,6 +687,22 @@ mod tests {
         private_mkdir(&deep).expect("mkdir");
         assert!(deep.is_dir());
         assert!(missing_ancestors(&deep).is_empty());
+    }
+
+    /// The first open of a store over a relative root creates a directory
+    /// whose parent is the empty path. That must be flushed as the working
+    /// directory, not opened as "", which fails with "not found".
+    #[test]
+    fn a_top_level_relative_directory_flushes_the_working_directory() {
+        assert_eq!(flush_target(Path::new("keys")), Some(Path::new(".")));
+        assert_eq!(
+            flush_target(Path::new("keys/account-x")),
+            Some(Path::new("keys"))
+        );
+        assert_eq!(flush_target(Path::new("./keys")), Some(Path::new(".")));
+        assert_eq!(flush_target(Path::new("/keys")), Some(Path::new("/")));
+        assert_eq!(flush_target(Path::new("/")), None);
+        assert!(sync_directory(Path::new(".")).is_ok());
     }
 
     #[test]
