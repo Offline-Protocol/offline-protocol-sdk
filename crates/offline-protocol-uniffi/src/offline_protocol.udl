@@ -97,6 +97,13 @@ enum MlsStorageError {
 };
 
 // MLS Storage callback interface - apps implement this for platform-native secure storage
+//
+// Throw CorruptedData only for a record no later launch can read (damaged or
+// not authenticating). A locked or unavailable keystore, or any I/O failure,
+// is LoadFailed. The engine answers CorruptedData on the protocol-state record
+// key by minting a new key, which strands every record sealed under the old
+// one, so a transient fault reported as CorruptedData destroys recoverable
+// state.
 callback interface MlsStorageProvider {
     // Store data with the given key type and ID
     [Throws=MlsStorageError]

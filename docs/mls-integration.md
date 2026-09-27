@@ -442,7 +442,17 @@ else is refused before a directory is created.
 ### Implementing the Providers
 
 Implement `MlsStorageProvider` for secure material. Implement
-`ProtocolStateStorageProvider` with the same methods for app-container state:
+`ProtocolStateStorageProvider` with the same methods for app-container state.
+
+**Throw `CorruptedData` from either provider only for a record that no later
+launch can read.** A secure provider is held to the same rule as the
+protocol-state provider below, and the engine acts on it: `CorruptedData` for
+the protocol-state record key makes the engine mint a new key, which leaves
+every protocol-state record sealed under the old one unreadable for good.
+A Keychain that is locked until first unlock, a Keystore that is briefly
+unavailable, or any I/O failure is `LoadFailed`. The engine answers that by
+leaving the key alone and persisting no sensitive state for that session,
+and the next launch recovers.
 
 ```swift
 // iOS Custom Implementation

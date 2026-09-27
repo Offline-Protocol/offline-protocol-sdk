@@ -80,7 +80,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   for good. `CorruptedData` is reserved for permanent losses, so it now takes
   the wrong-length path: a fresh key, and the records sealed under the old
   one settled as failed on restore. A transient `LoadFailed` still leaves
-  the key alone.
+  the key alone. The rule is now written on `MlsStorage::load` and on the
+  secure provider in the UDL and the integration guide, not only on the
+  protocol-state provider: a custom secure store that reports a transient
+  fault as `CorruptedData` loses every sealed protocol-state record.
 - **Frames a bridge builds for the core carried a fixed application id.** The
   iOS, Android and Python bridges stamped `"offline-messenger"` on every relay
   answer, relay group frame and legacy plain-text DM they rebuilt for the

@@ -1639,9 +1639,10 @@ impl OfflineProtocol {
                 bytes.len()
             )),
             // The store read the record and it is not the key. The storage
-            // contract reserves `CorruptedData` for permanent losses (a
-            // transient failure is `LoadFailed`), so this is the wrong-length
-            // case reported by the store rather than found here.
+            // contract (`MlsStorage::load`) reserves `CorruptedData` for
+            // permanent losses (a transient failure is `LoadFailed`), so this
+            // is the wrong-length case reported by the store rather than
+            // found here.
             Err(StorageError::CorruptedData(reason)) => Some(reason),
             Err(e) => {
                 warn!(
@@ -1654,7 +1655,7 @@ impl OfflineProtocol {
         };
 
         // A corrupt record is not a usable key, and nothing can recover the
-        // original from it — so whatever it sealed is already lost before this
+        // original from it, so whatever it sealed is already lost before this
         // runs. Regenerating is what lets the install seal again; see the note
         // on this function for why refusing to is worse.
         if let Some(reason) = &unrecoverable {
@@ -1662,7 +1663,7 @@ impl OfflineProtocol {
                 reason = %reason,
                 "Protocol state record key is not a key and cannot be recovered; \
                  regenerating. Every record sealed under the old key is \
-                 unrecoverable and will be settled as failed on restore — this is \
+                 unrecoverable and will be settled as failed on restore; this is \
                  not routine key generation"
             );
         }
