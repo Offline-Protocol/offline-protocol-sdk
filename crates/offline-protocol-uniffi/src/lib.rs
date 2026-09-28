@@ -532,6 +532,7 @@ fn open_file_stores(
     use offline_protocol::{
         account_storage_namespace, FileProtocolStateStorage, SealedFileMlsStorage, StaticStoreKey,
     };
+    use std::path::Path;
     for (name, root) in [("mls_root", mls_root), ("state_root", state_root)] {
         if root.trim().is_empty() {
             return Err(ProtocolError::InvalidArgument(format!(
@@ -539,13 +540,13 @@ fn open_file_stores(
             )));
         }
     }
-    // One directory for both would put the identity inside the directory
-    // the installation removes, so removing protocol state would remove the
-    // identity too. Compared by path components, since neither need exist.
-    if same_directory(mls_root, state_root) {
+    // One directory for both, or one inside the other, would put the
+    // identity inside a directory the installation removes (or the reverse),
+    // so removing protocol state would remove the identity too.
+    if roots_overlap(Path::new(mls_root), Path::new(state_root)) {
         return Err(ProtocolError::InvalidArgument(
-            "mls_root and state_root must be different directories: mls_root holds the \
-             identity and must survive the removal of state_root"
+            "mls_root and state_root must be different directories, neither inside the \
+             other: mls_root holds the identity and must survive the removal of state_root"
                 .to_string(),
         ));
     }
@@ -561,43 +562,86 @@ fn open_file_stores(
     Ok((Arc::new(secure), Arc::new(state)))
 }
 
-/// Whether two roots name the same directory: by their canonical paths when
-/// both exist, by their path components otherwise.
-fn same_directory(a: &str, b: &str) -> bool {
-    use std::path::Path;
-    if let (Ok(a), Ok(b)) = (Path::new(a).canonicalize(), Path::new(b).canonicalize()) {
-        return a == b;
+/// Whether one root is the other, or lies inside it.
+///
+/// Neither root need exist yet, and either may be relative or spelled with
+/// `.` and `..`, so each is resolved first: see [`resolved_root`].
+fn roots_overlap(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let (a, b) = (resolved_root(a), resolved_root(b));
+    a.starts_with(&b) || b.starts_with(&a)
+}
+
+/// `path` made absolute, with its longest existing ancestor canonicalized
+/// (so a symlink or a differently spelled existing prefix compares equal)
+/// and the rest, which does not exist and so holds no symlink, resolved by
+/// its components.
+fn resolved_root(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    let mut existing = absolute.as_path();
+    let mut rest = Vec::new();
+    let base = loop {
+        if let Ok(canonical) = existing.canonicalize() {
+            break canonical;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(Component::Normal(name));
+                existing = parent;
+            }
+            // `..` or `.` as the last component: keep it for the walk below.
+            (Some(parent), None) => {
+                rest.extend(existing.components().next_back());
+                existing = parent;
+            }
+            (None, _) => break PathBuf::new(),
+        }
+    };
+    let mut resolved = base;
+    for component in rest.into_iter().rev() {
+        match component {
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            Component::CurDir => {}
+            other => resolved.push(other),
+        }
     }
-    Path::new(a).components().eq(Path::new(b).components())
+    resolved
 }
 
 /// Refuses a protocol-state account directory that holds records when the
-/// MLS account directory does not exist yet.
+/// MLS account directory holds none.
 ///
 /// That shape is a deployment moving onto the file stores (or one whose
 /// `mls_root` was lost) while keeping its state root. The file stores mint
 /// a new identity, so the device gets a new address, and the new identity's
 /// record key cannot unseal the old records: the first restore deletes the
 /// parked messages it cannot read, and going back does not bring them back.
-/// Nothing is created before this check, so a refusal changes nothing.
+///
+/// The MLS side is asked for records, not for its directory: an attempt
+/// refused at the state root has already created the MLS directory, its
+/// lock and its key check, and an existence test would let the retry
+/// through. A directory that cannot be read on either side is refused too,
+/// never taken for empty. Nothing is created before this check, so a
+/// refusal changes nothing.
 fn refuse_state_without_identity(
     mls_root: &str,
     state_root: &str,
     namespace: &str,
 ) -> Result<(), ProtocolError> {
-    use std::path::Path;
-    if Path::new(mls_root).join(namespace).exists() {
+    use offline_protocol::{FileProtocolStateStorage, SealedFileMlsStorage};
+    if SealedFileMlsStorage::holds_records(mls_root, namespace).map_err(file_store_error)? {
         return Ok(());
     }
-    let state_account = Path::new(state_root).join(namespace);
-    let holds_records = match std::fs::read_dir(&state_account) {
-        // Anything but a lock file is state some earlier run wrote.
-        Ok(entries) => entries
-            .flatten()
-            .any(|e| !e.file_name().to_string_lossy().ends_with(".lock")),
-        Err(_) => false,
-    };
-    if holds_records {
+    if FileProtocolStateStorage::holds_records(state_root, namespace).map_err(file_store_error)? {
+        let state_account = std::path::Path::new(state_root).join(namespace);
         return Err(ProtocolError::InvalidConfiguration(format!(
             "{} holds protocol state, but {mls_root} holds no identity for this account: the \
              file stores would start a new identity (a new address) and delete the state it \

@@ -557,10 +557,16 @@ async def test_a_state_root_kept_from_the_keyring_is_refused(
     assert fresh is not None and fresh != old_address
 
 
+@pytest.mark.parametrize(
+    "mls, state",
+    [("one", "one"), ("one/mls", "one"), ("one", "one/state"), ("one", "two/../one")],
+    ids=["equal", "mls-inside-state", "state-inside-mls", "dot-dot"],
+)
 @pytest.mark.asyncio
-async def test_equal_roots_are_refused(tmp_path: Path):
+async def test_overlapping_roots_are_refused(tmp_path: Path, mls: str, state: str):
     pm = ProtocolManager(
-        _config(), store_key=KEY, mls_root=tmp_path / "one", state_root=tmp_path / "one"
+        _config(), store_key=KEY, mls_root=tmp_path / mls, state_root=tmp_path / state
     )
     with pytest.raises(ProtocolError.InvalidArgument, match="different directories"):
         await pm.start()
+    assert not any(tmp_path.iterdir()), "a refused start creates nothing"

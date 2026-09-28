@@ -168,8 +168,8 @@ await pm.start()
   already holds it. Never derive it from a password or a host name.
 - **`mls_root` holds this device's identity.** It must survive an upgrade,
   and losing it gives the device a new address. `state_root` is scoped to
-  the installation. Keep them apart: the same directory for both is refused
-  with `ProtocolError.InvalidArgument`.
+  the installation. Keep them apart: the same directory for both, or one
+  inside the other, is refused with `ProtocolError.InvalidArgument`.
 - **Moving an existing deployment onto the file stores starts a new
   identity.** Nothing is carried over from the keyring: the device gets a
   new address, and its sessions and queued messages stay with the old one.
@@ -178,7 +178,9 @@ await pm.start()
   is refused with `ProtocolError.InvalidConfiguration`: the new identity
   cannot unseal the old records, and the first restore would delete the
   messages it could not read. The same refusal covers a lost `mls_root`
-  next to a surviving `state_root`.
+  next to a surviving `state_root`, and it still applies after an attempt
+  that failed part-way. A directory the process cannot read is refused
+  rather than taken for empty.
 - **`start()` raises instead of starting without the identity.** A wrong key
   raises `ProtocolError.InvalidConfiguration` and changes nothing on disk. A
   `state_root` that cannot be created also raises it, after the MLS store

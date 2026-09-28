@@ -217,28 +217,50 @@ fn after_start_it_is_refused_before_the_stores_open() {
     assert!(entries(&mls).is_empty() && entries(&state).is_empty());
 }
 
-/// One directory for both roots would put the identity inside the directory
-/// the installation removes. Refused before anything is created.
+/// One directory for both roots, or one inside the other, would put the
+/// identity inside a directory the installation removes. Refused before
+/// anything is created, however the roots are spelled.
 #[test]
-fn equal_roots_are_an_invalid_argument() {
-    let root = TempRoot::new("equal");
+fn overlapping_roots_are_an_invalid_argument() {
+    let root = TempRoot::new("overlap");
     let one = root.dir("one");
-    let protocol = instance("equal-user");
-    for (mls_root, state_root) in [
-        (one.clone(), one.clone()),
-        (one.clone(), format!("{one}/")),
-        (one.clone(), format!("{one}/./")),
-    ] {
+    let protocol = instance("overlap-user");
+    let refuse = |mls_root: String, state_root: String| {
         let err = protocol
-            .initialize_mls_with_file_stores(mls_root, state_root.clone(), KEY.to_vec())
-            .expect_err("equal roots");
+            .initialize_mls_with_file_stores(mls_root.clone(), state_root.clone(), KEY.to_vec())
+            .expect_err("overlapping roots");
         assert!(
             matches!(&err, ProtocolError::InvalidArgument(m) if m.contains("different directories")),
-            "{state_root}: expected InvalidArgument, got {err:?}"
+            "{mls_root} / {state_root}: expected InvalidArgument, got {err:?}"
         );
+    };
+    // Neither exists: resolved by components.
+    refuse(one.clone(), one.clone());
+    refuse(one.clone(), format!("{one}/"));
+    refuse(one.clone(), format!("{one}/./"));
+    refuse(one.clone(), root.dir("two/../one"));
+    refuse(format!("{one}/mls"), one.clone());
+    refuse(one.clone(), format!("{one}/state"));
+    assert!(entries(&root.dir("")).is_empty(), "nothing may be created");
+
+    // Both exist: resolved by their canonical paths, so a link to the same
+    // directory is the same directory.
+    std::fs::create_dir_all(&one).expect("one");
+    #[cfg(unix)]
+    {
+        let link = root.dir("link");
+        std::os::unix::fs::symlink(&one, &link).expect("symlink");
+        refuse(one.clone(), link.clone());
+        refuse(format!("{link}/mls"), one.clone());
     }
+    refuse(one.clone(), root.dir("one/../one"));
     assert!(!protocol.is_mls_initialized());
     assert!(entries(&one).is_empty());
+
+    // Siblings sharing a name prefix do not overlap.
+    protocol
+        .initialize_mls_with_file_stores(root.dir("data"), root.dir("data-state"), KEY.to_vec())
+        .expect("siblings open");
 }
 
 /// A deployment moving onto the file stores while keeping its state root:
@@ -292,4 +314,102 @@ fn state_with_its_identity_reopens() {
         .initialize_mls_with_file_stores(mls, state, KEY.to_vec())
         .expect("reopen");
     assert_eq!(second.local_address(), address);
+}
+
+/// An attempt refused at the state root has already created the MLS account
+/// directory, its lock file and its key check. The guard must still see no
+/// identity there, or the corrected retry over the kept state root would
+/// mint a new identity and delete the records it cannot unseal.
+#[test]
+fn a_retry_after_a_failed_state_root_is_still_refused() {
+    let root = TempRoot::new("retry-guard");
+    let (mls, state, held) = (root.dir("mls"), root.dir("state"), root.dir("held"));
+    let namespace = offline_protocol::account_storage_namespace("test-app", "retry-user");
+    let account = seed_state(&state, &namespace);
+
+    // The first attempt names a state root another store holds: the guard
+    // passes (nothing there), the MLS store opens, the state store refuses.
+    let holder = offline_protocol::FileProtocolStateStorage::open(&held, &namespace).expect("hold");
+    let protocol = instance("retry-user");
+    let err = protocol
+        .initialize_mls_with_file_stores(mls.clone(), held, KEY.to_vec())
+        .expect_err("a held state root");
+    assert!(matches!(err, ProtocolError::InvalidState(_)), "got {err:?}");
+    drop(holder);
+    assert!(
+        !entries(&format!("{mls}/{namespace}")).is_empty(),
+        "the refused attempt left the MLS directory, which is the case under test"
+    );
+
+    // The operator corrects the state root to the one the service always used.
+    let err = protocol
+        .initialize_mls_with_file_stores(mls, state, KEY.to_vec())
+        .expect_err("kept state with no identity");
+    assert!(
+        matches!(&err, ProtocolError::InvalidConfiguration(m) if m.contains("fresh directory")),
+        "expected the kept-state refusal, got {err:?}"
+    );
+    assert!(!protocol.is_mls_initialized());
+    assert!(account.join("t_records").join("k_entry").exists());
+}
+
+/// A directory that cannot be read proves nothing about what it holds, so
+/// it is refused rather than taken for empty (a new identity over records)
+/// or for absent (a new identity beside an existing one).
+#[cfg(unix)]
+#[test]
+fn an_unreadable_account_directory_is_refused_not_taken_for_empty() {
+    use std::os::unix::fs::PermissionsExt;
+    let set_mode = |path: &std::path::Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("chmod")
+    };
+    let root = TempRoot::new("unreadable");
+    let (mls, state) = (root.dir("mls"), root.dir("state"));
+    let namespace = offline_protocol::account_storage_namespace("test-app", "unreadable-user");
+    let account = seed_state(&state, &namespace);
+    set_mode(&account, 0o000);
+    if std::fs::read_dir(&account).is_ok() {
+        // Running as root: permissions do not bind, so there is no case.
+        set_mode(&account, 0o700);
+        return;
+    }
+    let protocol = instance("unreadable-user");
+    let err = protocol
+        .initialize_mls_with_file_stores(mls.clone(), state.clone(), KEY.to_vec())
+        .expect_err("unreadable state account");
+    set_mode(&account, 0o700);
+    assert!(
+        matches!(&err, ProtocolError::InvalidConfiguration(m) if m.contains("unusable")),
+        "expected an unusable-directory refusal, got {err:?}"
+    );
+    assert!(entries(&mls).is_empty(), "no identity may be minted");
+
+    // The identity exists, but its root cannot be read: refused as
+    // unreadable, never as "holds no identity".
+    std::fs::remove_dir_all(&account).expect("clear");
+    protocol
+        .initialize_mls_with_file_stores(mls.clone(), state.clone(), KEY.to_vec())
+        .expect("first open");
+    drop(protocol);
+    seed_state(&state, &namespace);
+    set_mode(std::path::Path::new(&mls), 0o000);
+    let result = instance("unreadable-user").initialize_mls_with_file_stores(
+        mls.clone(),
+        state,
+        KEY.to_vec(),
+    );
+    set_mode(std::path::Path::new(&mls), 0o700);
+    let err = result.expect_err("unreadable mls root");
+    assert!(
+        matches!(&err, ProtocolError::InvalidConfiguration(m)
+            if m.contains("unusable") && !m.contains("holds no identity")),
+        "expected an unusable-directory refusal, got {err:?}"
+    );
+}
+
+fn seed_state(state: &str, namespace: &str) -> std::path::PathBuf {
+    let account = std::path::Path::new(state).join(namespace);
+    std::fs::create_dir_all(account.join("t_records")).expect("seed state");
+    std::fs::write(account.join("t_records").join("k_entry"), b"sealed").expect("seed");
+    account
 }

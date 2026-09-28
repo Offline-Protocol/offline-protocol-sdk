@@ -87,8 +87,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   rather than logging and starting without the identity, and releases the
   callbacks it registered. Moving onto the file stores starts a new
   identity, so a state root that holds records with no identity beside it
-  is refused rather than restored and deleted, and one directory for both
-  roots is refused. Swift and Kotlin get the generated method and keep
+  is refused rather than restored and deleted (the check asks the MLS
+  store for records, so a failed earlier attempt cannot disarm it, and an
+  unreadable directory is refused rather than taken for empty), and roots
+  that are one directory or one inside the other are refused. Rust hosts
+  get the same probe as `holds_records` on both file stores. Swift and Kotlin get the generated method and keep
   their platform keystores.
 
 ### Fixed
