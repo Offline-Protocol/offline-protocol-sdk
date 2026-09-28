@@ -171,12 +171,19 @@ await pm.start()
   the installation. Keep them apart.
 - **`start()` raises instead of starting without the identity.** A wrong key
   raises `ProtocolError.InvalidConfiguration` and changes nothing on disk. A
+  `state_root` that cannot be created also raises it, after the MLS store
+  has created its own directory; fixing the root and retrying is safe. A
   directory another process holds raises `ProtocolError.InvalidState`. The
   keyring path logs its own initialisation failures and carries on; this one
   does not, because an operator who supplied a key asked for the sealed store.
-- **One process per account directory.** Each store holds a lock on its
-  directory while open. Release the manager (and call `disable_telemetry()`
-  first if telemetry is on) before opening the same directories again.
+- **One manager per account directory.** Each store holds a lock on its
+  directory while open, in this process or another. To restart in place,
+  call `stop()` then `start()` on the same manager. To open the directories
+  from a new manager instead, `await stop()` on the old one and drop every
+  reference to it first: `stop()` releases the transport callbacks, so the
+  stores close when the manager is freed. The name bound by
+  `async with ProtocolManager(...) as pm` outlives the block, so `del pm`
+  before opening the next one.
 
 What the stores guarantee, and what a copied directory reveals, is in the
 [MLS integration guide](../../docs/mls-integration.md#built-in-file-stores).

@@ -158,7 +158,7 @@ def _require_root(value: str | Path | None, variable: str, what: str) -> str:
     if value is not None and str(value).strip():
         return str(value)
     configured = os.environ.get(variable)
-    if configured:
+    if configured and configured.strip():
         return configured
     raise ValueError(f"the file stores need {what}; pass it or set {variable}")
 
@@ -189,14 +189,26 @@ class _FileStores:
                 raise ValueError(
                     f"store_key must be {_STORE_KEY_BYTES} bytes, got {len(store_key)}"
                 )
+            if not any(store_key):
+                raise ValueError(
+                    "store_key is all zero: an unset buffer, not a key"
+                )
+        if store_key_env is not None and not store_key_env.strip():
+            raise ValueError("store_key_env must name an environment variable")
         self._mls_root = _require_root(mls_root, _MLS_ROOT_ENV, "mls_root")
         self._state_root = _require_root(state_root, _STATE_ROOT_ENV, "state_root")
-        self._store_key = store_key
+        # A snapshot, not the caller's buffer: a bytearray the caller reuses
+        # before `start()` would otherwise create a new store sealed under
+        # whatever the buffer holds by then, and the real key would be
+        # refused on every later run.
+        self._store_key: bytes | None = (
+            bytes(store_key) if store_key is not None else None
+        )
         self._store_key_env = store_key_env
 
     def _key(self) -> bytes:
         if self._store_key is not None:
-            return bytes(self._store_key)
+            return self._store_key
         variable = self._store_key_env or ""
         text = os.environ.get(variable)
         if text is None:
@@ -496,6 +508,9 @@ class ProtocolManager:
             teardown_clean = False
             logger.debug("protocol.stop() raised (non-fatal)", exc_info=True)
 
+        if teardown_clean:
+            self._release_transport_callbacks()
+
         # Only release GC pins once Rust has confirmed it no longer holds
         # callback handles. If either teardown step raised, Rust may still
         # hold pointers to the pinned objects — dropping the last strong
@@ -511,6 +526,30 @@ class ProtocolManager:
             )
 
         logger.info("ProtocolManager stopped")
+
+    def _release_transport_callbacks(self) -> None:
+        """Replaces the transport callbacks with ones that reference nothing.
+
+        The core holds every registered callback, the BLE and peer-stream
+        callbacks hold their managers, and the managers hold the core. That
+        cycle runs through Rust, so Python's collector cannot break it, and
+        without this a stopped manager is never freed. With the file stores
+        that is not a leak but an outage: the core holds each store's
+        directory lock, so every later manager over the same directories is
+        refused. :meth:`start` registers the real callbacks again.
+        """
+        try:
+            self._protocol.set_ble_transport_callback(
+                _BleTransportCallbackImpl(None, None)
+            )
+            if self._wifi_cb is not None:
+                self._protocol.set_wifi_direct_transport_callback(
+                    _WifiDirectTransportCallbackImpl(None)
+                )
+        except Exception:
+            logger.debug(
+                "releasing transport callbacks raised (non-fatal)", exc_info=True
+            )
 
     def __del__(self) -> None:
         # A constructor that raised (a refused argument) leaves no `_running`.

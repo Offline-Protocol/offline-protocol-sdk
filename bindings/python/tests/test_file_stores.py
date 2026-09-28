@@ -21,12 +21,17 @@ from offline_protocol_sdk.storage_namespace import account_storage_namespace
 KEY = bytes(range(1, 33))
 
 
-def _config(profile: str = "file-store-user") -> ProtocolConfig:
+def _config(
+    profile: str = "file-store-user",
+    *,
+    ble_enabled: bool = False,
+    wifi_direct_enabled: bool = False,
+) -> ProtocolConfig:
     return ProtocolConfig(
         app_id="test-app",
         profile=profile,
-        ble_enabled=False,
-        wifi_direct_enabled=False,
+        ble_enabled=ble_enabled,
+        wifi_direct_enabled=wifi_direct_enabled,
         internet_enabled=True,
         reticulum_enabled=False,
         nostr_enabled=False,
@@ -54,6 +59,66 @@ async def _run_once(**kwargs) -> str | None:
         # The stores hold a directory lock until the core object is freed.
         del pm
         gc.collect()
+
+
+#: Every transport whose manager the core's callback holds. With BLE or the
+#: peer stream on, a stopped manager used to stay alive through a reference
+#: cycle that runs through Rust, holding the directory locks for good.
+_TRANSPORTS = pytest.mark.parametrize(
+    "transports",
+    [{}, {"wifi_direct_enabled": True}, {"ble_enabled": True}],
+    ids=["internet", "peer-stream", "ble"],
+)
+
+
+@_TRANSPORTS
+@pytest.mark.asyncio
+async def test_a_stopped_and_dropped_manager_releases_the_stores(
+    tmp_path: Path, transports: dict
+):
+    """No `gc.collect()`: dropping the last reference must be enough."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    first = ProtocolManager(_config(**transports), store_key=KEY, **roots)
+    await first.start()
+    address = first.local_address
+    await first.stop()
+    del first
+
+    second = ProtocolManager(_config(**transports), store_key=KEY, **roots)
+    await second.start()
+    try:
+        assert second.local_address == address
+    finally:
+        await second.stop()
+
+
+@pytest.mark.asyncio
+async def test_consecutive_context_managers_reopen_the_stores(tmp_path: Path):
+    """The `as` name outlives the block, so it has to be dropped between them."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    addresses = []
+    for _ in range(2):
+        async with ProtocolManager(
+            _config(wifi_direct_enabled=True), store_key=KEY, **roots
+        ) as pm:
+            addresses.append(pm.local_address)
+        del pm
+    assert addresses[0] is not None and addresses[0] == addresses[1]
+
+
+@pytest.mark.asyncio
+async def test_the_key_is_taken_when_the_manager_is_built(tmp_path: Path):
+    """A caller that reuses its buffer before `start()` must not change the key."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    buffer = bytearray(KEY)
+    pm = ProtocolManager(_config(), store_key=buffer, **roots)
+    buffer[:] = bytes([0x77] * 32)
+    await pm.start()
+    first = pm.local_address
+    await pm.stop()
+    del pm
+
+    assert await _run_once(store_key=KEY, **roots) == first
 
 
 @pytest.mark.asyncio
@@ -108,10 +173,14 @@ async def test_a_second_manager_over_the_same_directory_fails_start(tmp_path: Pa
         await first.stop()
 
 
+@_TRANSPORTS
 @pytest.mark.asyncio
-async def test_stop_then_start_reuses_the_open_stores(tmp_path: Path):
+async def test_stop_then_start_reuses_the_open_stores(tmp_path: Path, transports: dict):
     pm = ProtocolManager(
-        _config(), store_key=KEY, mls_root=tmp_path / "mls", state_root=tmp_path / "state"
+        _config(**transports),
+        store_key=KEY,
+        mls_root=tmp_path / "mls",
+        state_root=tmp_path / "state",
     )
     await pm.start()
     address = pm.local_address
@@ -132,6 +201,10 @@ def test_roots_fall_back_to_the_environment(tmp_path: Path, monkeypatch: pytest.
     with pytest.raises(ValueError, match="OFFLINE_PROTOCOL_MLS_ROOT"):
         ProtocolManager(_config(), store_key=KEY)
 
+    monkeypatch.setenv("OFFLINE_PROTOCOL_MLS_ROOT", "   ")
+    with pytest.raises(ValueError, match="OFFLINE_PROTOCOL_MLS_ROOT"):
+        ProtocolManager(_config(), store_key=KEY)
+
 
 def test_the_file_stores_replace_the_keyring_stores(tmp_path: Path):
     pm = ProtocolManager(
@@ -147,10 +220,23 @@ def test_the_file_stores_replace_the_keyring_stores(tmp_path: Path):
         (dict(store_key=KEY[:31]), ValueError),
         (dict(store_key=KEY + b"\x00"), ValueError),
         (dict(store_key=KEY.hex()), TypeError),
+        (dict(store_key=bytes(32)), ValueError),
+        (dict(store_key_env=""), ValueError),
+        (dict(store_key_env="  "), ValueError),
         (dict(store_key=KEY, storage=object()), ValueError),
         (dict(store_key=KEY, state_storage=object()), ValueError),
     ],
-    ids=["both-keys", "short", "long", "text", "with-storage", "with-state-storage"],
+    ids=[
+        "both-keys",
+        "short",
+        "long",
+        "text",
+        "all-zero",
+        "empty-env-name",
+        "blank-env-name",
+        "with-storage",
+        "with-state-storage",
+    ],
 )
 def test_conflicting_or_malformed_arguments_are_refused(tmp_path: Path, kwargs, error):
     kwargs.setdefault("mls_root", tmp_path / "mls")
