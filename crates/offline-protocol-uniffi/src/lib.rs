@@ -6154,7 +6154,7 @@ impl OfflineProtocol {
         secure_storage: Box<dyn MlsStorageProvider>,
         protocol_state_storage: Box<dyn ProtocolStateStorageProvider>,
     ) -> Result<(), ProtocolError> {
-        self.initialize_mls_over(|| {
+        self.initialize_mls_over("initialize_mls", || {
             let secure: Arc<dyn CoreMlsStorage> = Arc::new(MlsStorageWrapper {
                 provider: Arc::from(secure_storage),
             });
@@ -6176,9 +6176,11 @@ impl OfflineProtocol {
     ///
     /// Nothing is opened when MLS is already initialized, so a repeated call
     /// stays idempotent rather than being refused by the stores' own
-    /// one-store-per-directory lock. The key is scrubbed from this side's
-    /// copy once the store has derived its working keys; the caller's copy
-    /// is the caller's to scrub.
+    /// one-store-per-directory lock. The copy of the key this function owns
+    /// is scrubbed once the store has derived its working keys. The buffer
+    /// the FFI lifted it from is freed without scrubbing, and the caller's
+    /// copy (a Python `bytes` cannot be scrubbed at all) is the caller's
+    /// concern; residual risk R18 covers a key held in the clear.
     pub fn initialize_mls_with_file_stores(
         &self,
         mls_root: String,
@@ -6191,7 +6193,7 @@ impl OfflineProtocol {
             let config = protocol.config();
             (config.app_id.clone(), config.profile.clone())
         };
-        self.initialize_mls_over(|| {
+        self.initialize_mls_over("initialize_mls_with_file_stores", || {
             open_file_stores(&mls_root, &state_root, &app_id, &profile, &store_key)
         })
     }
@@ -6199,8 +6201,12 @@ impl OfflineProtocol {
     /// The one body behind both `initialize_mls` entry points. `open` runs
     /// only once the call is known to proceed: after the idempotence check
     /// and the before-`start()` check, under the engine lock.
+    ///
+    /// `entry` names the public method, so a refusal names the call the
+    /// caller actually made.
     fn initialize_mls_over(
         &self,
+        entry: &str,
         open: impl FnOnce() -> Result<EngineStores, ProtocolError>,
     ) -> Result<(), ProtocolError> {
         // Single-authority lifecycle:
@@ -6225,7 +6231,7 @@ impl OfflineProtocol {
         let state = *recover_rwlock_read(&self.state, "state");
         if state != ProtocolState::Stopped {
             return Err(ProtocolError::InvalidState(format!(
-                "initialize_mls must be called before start(): the protocol is {:?}, \
+                "{entry} must be called before start(): the protocol is {:?}, \
                  and deriving this device's address here would replace transports \
                  the platform has already connected",
                 state

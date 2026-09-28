@@ -1604,10 +1604,12 @@ interface OfflineProtocol {
     // Same lifecycle as initialize_mls: before start(), idempotent, and a
     // repeated call opens nothing. Refusals map onto existing variants:
     // InvalidArgument for an empty root or a key that is not 32 bytes;
-    // InvalidConfiguration for a wrong key, a key check that cannot prove
-    // the key, or a directory that cannot be created (the message names the
-    // path and says whether anything changed); InvalidState when another
-    // store already holds the directory, in this process or another.
+    // InvalidConfiguration for a wrong key or a key check that cannot prove
+    // the key (both change nothing), or a directory that cannot be created
+    // (the message names the path; when it is the state root, the MLS store
+    // has already created its directory, and a retry is safe); InvalidState
+    // when another store already holds the directory, in this process or
+    // another, or when start() has already run.
     [Throws=ProtocolError]
     void initialize_mls_with_file_stores(
         string mls_root,

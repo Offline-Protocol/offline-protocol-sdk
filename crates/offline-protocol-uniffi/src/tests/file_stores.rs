@@ -208,7 +208,11 @@ fn after_start_it_is_refused_before_the_stores_open() {
     let err = protocol
         .initialize_mls_with_file_stores(mls.clone(), state.clone(), KEY.to_vec())
         .expect_err("after start");
-    assert!(matches!(err, ProtocolError::InvalidState(_)), "{err:?}");
+    assert!(
+        matches!(&err, ProtocolError::InvalidState(m)
+            if m.starts_with("initialize_mls_with_file_stores must be called")),
+        "the refusal must name the call that was made: {err:?}"
+    );
     assert!(!protocol.is_mls_initialized());
     assert!(entries(&mls).is_empty() && entries(&state).is_empty());
 }

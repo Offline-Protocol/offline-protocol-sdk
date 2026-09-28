@@ -464,10 +464,16 @@ each message says what to change:
 |---------|---------|
 | An empty root, or a key that is not 32 bytes or is all zero | `InvalidArgument` |
 | A wrong key, a key check that cannot prove the key, a directory that cannot be created | `InvalidConfiguration` |
-| Another store already holds the directory, in this process or another | `InvalidState` |
+| Another store already holds the directory, in this process or another; or `start()` has already run | `InvalidState` |
 
 The MLS store opens first, so a refused key leaves no protocol-state
-directory behind. The Python `ProtocolManager` takes `store_key=` or
+directory behind. A state root that cannot be created is refused after the
+MLS store has created its own directory; nothing is sealed in it but the key
+check, and a retry with a usable root opens it. The key copy the FFI owns is
+scrubbed after the open, but the buffer it was lifted from is not, and a
+Python `bytes` cannot be, so treat the key as held in the clear by the
+process (residual risk
+[R18](security/threat-model.md#r18-a-host-without-a-platform-keystore-holds-the-store-key-in-the-clear-unless-the-operator-supplies-one)). The Python `ProtocolManager` takes `store_key=` or
 `store_key_env=` and calls it for you
 ([Python binding](../bindings/python/README.md#headless-hosts-the-built-in-file-stores)).
 Swift and Kotlin have the generated method but do not wire it: their modules
