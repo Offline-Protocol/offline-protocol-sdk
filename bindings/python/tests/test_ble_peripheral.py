@@ -479,3 +479,78 @@ class TestConcurrentAccess:
         assert errors == []
         assert peripheral._connected_centrals == {}
         assert peripheral._central_to_user_id == {}
+
+
+# ---------------------------------------------------------------------------
+# A stop() cancelled part-way
+# ---------------------------------------------------------------------------
+
+
+class TestInterruptedStop:
+    @pytest.mark.asyncio
+    async def test_a_stop_cancelled_inside_the_server_can_be_finished(
+        self, peripheral, mock_protocol
+    ):
+        """A shutdown deadline lands inside the GATT server's own stop, after
+        the state moved to STOPPING. The retry has to run the teardown again:
+        one that returned at once would leave the peripheral advertising,
+        behind a transport that no `stop()` can reach."""
+        release = asyncio.Event()
+
+        async def a_server_that_does_not_let_go() -> None:
+            await release.wait()
+
+        server = MagicMock()
+        server.stop = AsyncMock(side_effect=a_server_that_does_not_let_go)
+        peripheral._server = server
+        peripheral._is_advertising = True
+        peripheral._connected_centrals["central-1"] = 0.0
+        peripheral._state = TransportState.RUNNING
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(peripheral.stop(), 0.05)
+        assert peripheral.state == TransportState.STOPPING
+        assert peripheral.get_metrics()["is_advertising"] is True
+
+        release.set()
+        await peripheral.stop()
+
+        assert peripheral.state == TransportState.STOPPED
+        assert server.stop.await_count == 2
+        assert peripheral._server is None
+        assert peripheral.get_metrics()["is_advertising"] is False
+        assert peripheral._connected_centrals == {}
+        mock_protocol.ble_peer_lost.assert_called_once_with(peer_id="central-1")
+        mock_protocol.ble_status_changed.assert_called_once_with(is_available=False)
+
+    @pytest.mark.asyncio
+    async def test_stop_does_not_swallow_a_cancel_of_itself(self, peripheral):
+        """`stop()` cancels its monitor task and waits for it to finish. A
+        cancel of `stop()` that lands in that wait is the caller's shutdown
+        deadline, not the monitor's cancellation, and has to come out of
+        `stop()`. Caught there, the teardown ran on past the deadline."""
+
+        async def a_monitor_slow_to_wind_down() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.sleep(30)
+
+        monitor = asyncio.ensure_future(a_monitor_slow_to_wind_down())
+        await asyncio.sleep(0)
+        peripheral._peer_monitor_task = monitor
+        peripheral._state = TransportState.RUNNING
+
+        stopping = asyncio.ensure_future(peripheral.stop())
+        await asyncio.sleep(0.01)
+        assert not stopping.done()
+        stopping.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stopping
+        assert peripheral.state == TransportState.STOPPING
+
+        await peripheral.stop()
+
+        assert peripheral.state == TransportState.STOPPED
+        assert monitor.done()
+        assert peripheral._peer_monitor_task is None
