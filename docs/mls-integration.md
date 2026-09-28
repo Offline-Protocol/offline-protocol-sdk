@@ -405,13 +405,30 @@ protocol.initialize_mls(Arc::new(secure), Arc::new(state))?;
   lock is the open handle, not the file, and it dies with the process: a
   `*.lock` file left by a crash is not stale, and removing one while a store
   is open lets a second store in beside it. Never delete them.
-- **Release both stores before reopening them.** A store is released when
-  the last reference to it drops, and the engine is not always the last
-  holder: with telemetry enabled, the engine's drop detaches the uploader
-  thread, which keeps the protocol-state store until its final flush ends
-  (up to three seconds). Call `disable_telemetry()` before dropping the
-  engine, and it waits for that flush, so a restart in the same process or
-  a logout that removes the directories finds them free.
+- **Close both stores before reopening them.** `close()` on a store
+  releases its directory at once, whoever still holds the store, and every
+  later operation on it is an error. Dropping the last reference releases
+  it too, but the engine is not always the last holder: with telemetry
+  enabled, the engine's drop detaches the uploader thread, which keeps the
+  protocol-state store until its final flush ends (up to three seconds).
+  Call `disable_telemetry()` first, which waits for that flush, then stop
+  the engine and close the stores, so a restart in the same process or a
+  logout that removes the directories finds them free. Keep an `Arc` of
+  each store to close it by: the engine takes them as trait objects.
+- **Ask before handing the engine a state root it did not write.** The
+  engine deletes a sealed protocol-state record that does not open, as its
+  restore reaches it, which is right for one damaged record and wrong for
+  a store sealed under another identity's record key.
+  `FileProtocolStateStorage::sealed_state` answers for an open pair,
+  without changing either store. `Empty`: no record in a category the
+  engine seals. `Opens`: a record opens, so the pair belongs together.
+  `Foreign`: records exist, none of those tried opens in any category, and
+  the MLS store holds a usable record key or none, so the first restore
+  deletes the records it reads, queued and parked messages among them.
+  `KeyDamaged`: records exist and the MLS store's record key is damaged,
+  so nothing opens them again and refusing the pair saves nothing. The
+  telemetry queue is sealed under the same key and is not examined: a
+  batch that does not open is the uploader's to drop.
 - **The sealed store never deletes on a read.** A record that does not
   authenticate is reported as `CorruptedData`, naming its file, and left in
   place, because deleting on a wrong key would destroy the identity. Once the
@@ -463,8 +480,8 @@ each message says what to change:
 | Refusal | Variant |
 |---------|---------|
 | An empty root, roots that are one directory or one inside the other (however spelled), or a key that is not 32 bytes or is all zero | `InvalidArgument` |
-| A wrong key, a key check that cannot prove the key, a directory that cannot be created or read, or protocol state with no MLS records beside it | `InvalidConfiguration` |
-| Another store already holds the directory, in this process or another; or `start()` has already run | `InvalidState` |
+| A wrong key, a key check that cannot prove the key, a directory that cannot be created or read, protocol state with no MLS record beside it, or protocol state sealed under a record key the MLS store does not hold | `InvalidConfiguration` |
+| Another store already holds the directory, in this process or another; `start()` has already run; or `close_file_stores()` has | `InvalidState` |
 
 Moving a deployment onto these stores starts a new identity: nothing is
 carried over from the platform store, so the device gets a new address. A
@@ -474,14 +491,57 @@ identity's record key cannot unseal those records and the first restore
 would delete the parked messages it could not read. Use a fresh
 `state_root`, or restore the `mls_root` that wrote the state.
 
-The check asks for MLS records, not for the MLS directory. An attempt
-refused at the state root has already created that directory with its lock
-file and key check, and an existence test would let the corrected retry
-through, over the old state, and delete it. For the same reason an account
-directory that cannot be read is refused rather than taken for empty. A
-Rust host that opens the two stores itself can ask the same question with
-`SealedFileMlsStorage::holds_records` and
-`FileProtocolStateStorage::holds_records`, which create nothing.
+No refusal changes or deletes a record, and there are two of them, because
+no one question covers every case.
+
+The first is asked before anything is created: does the state root hold
+records while the MLS root holds none? It asks for MLS record files, not
+for the MLS directory and not for a type directory. An attempt refused at
+the state root has already created the MLS directory with its lock file
+and key check, and a first write that failed leaves a type directory with
+nothing in it; an existence test would let the corrected retry through,
+over the old state, and delete it. For the same reason an account
+directory that cannot be read is refused rather than taken for empty.
+
+The second is asked once both stores are open: do the sealed records in
+the state root open under the record key the MLS root holds? The first
+question cannot see an identity that is in place but is not the one that
+wrote the state, which is what an operator has after following the first
+refusal's advice (a fresh `state_root`) and later putting the old one back.
+This refusal leaves what opening the stores creates (a lock file in each
+directory, the MLS key check) and nothing else.
+
+A damaged record key is not refused, with or without sealed state beside
+it. Nothing opens that state again, so a refusal would save no record, and
+it would cost the settlement: the engine generates a new key and settles
+what its restore reads as failed, which is how the application learns
+which messages were lost.
+
+Roots are compared twice as well. As spelled, before anything is created,
+which settles every case where the names say so. Then as directories, once
+both exist, because a volume that folds case or normalizes names makes one
+directory of two spellings and nothing can know that in advance. The
+second refusal leaves the directory it created, holding two lock files and
+the MLS key check. None of those is a record, and neither `holds_records`
+takes them for one, so a corrected pair that names that directory again is
+not refused over them.
+
+A Rust host that opens the two stores itself can ask the same questions
+with `SealedFileMlsStorage::holds_records` and
+`FileProtocolStateStorage::holds_records`, which create nothing, and
+`FileProtocolStateStorage::sealed_state`.
+
+`close_file_stores()` releases both directories while the instance still
+exists, after `stop()`. Dropping the instance releases them too, but when a
+host object is dropped is the host runtime's decision (a kept reference, a
+callback cycle, an exception that still names it), and until then every
+later instance over the same directories is refused. The instance cannot
+run again afterwards: `start()`, `enable_telemetry()` and both
+`initialize_mls` entry points are refused. The call disables telemetry
+first and waits for the uploader's final flush, up to three seconds,
+because the uploader keeps its queue in the protocol-state store. An
+engine lock poisoned by a panic counts as stopped, since `stop()` cannot
+take it again.
 
 The MLS store opens first, so a refused key leaves no protocol-state
 directory behind. A state root that cannot be created is refused after the

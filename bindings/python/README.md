@@ -169,7 +169,11 @@ await pm.start()
 - **`mls_root` holds this device's identity.** It must survive an upgrade,
   and losing it gives the device a new address. `state_root` is scoped to
   the installation. Keep them apart: the same directory for both, or one
-  inside the other, is refused with `ProtocolError.InvalidArgument`.
+  inside the other, is refused with `ProtocolError.InvalidArgument`. That
+  includes two spellings of one directory on a volume that folds case
+  (`keys` and `Keys` on macOS or Windows). That is found only once the
+  directory exists, so the refusal leaves the directory it created, with
+  no record written.
 - **Moving an existing deployment onto the file stores starts a new
   identity.** Nothing is carried over from the keyring: the device gets a
   new address, and its sessions and queued messages stay with the old one.
@@ -179,31 +183,43 @@ await pm.start()
   cannot unseal the old records, and the first restore would delete the
   messages it could not read. The same refusal covers a lost `mls_root`
   next to a surviving `state_root`, and it still applies after an attempt
-  that failed part-way. A directory the process cannot read is refused
-  rather than taken for empty.
+  that failed part-way. It also covers an `mls_root` that holds an
+  identity, but not the one that wrote the state: a `state_root` put back
+  after a run over a fresh one is sealed under a key this identity does
+  not hold. A directory the process cannot read is refused rather than
+  taken for empty. No refusal changes or deletes a record.
 - **`start()` raises instead of starting without the identity.** A wrong key
-  raises `ProtocolError.InvalidConfiguration` and changes nothing on disk. A
+  raises `ProtocolError.InvalidConfiguration` and changes no record. A
   `state_root` that cannot be created also raises it, after the MLS store
   has created its own directory; fixing the root and retrying is safe. A
   directory another process holds raises `ProtocolError.InvalidState`. The
   keyring path logs its own initialisation failures and carries on; this one
   does not, because an operator who supplied a key asked for the sealed store.
-- **One manager per account directory.** Each store holds a lock on its
-  directory while open, in this process or another. To restart in place,
-  call `stop()` then `start()` on the same manager. To open the directories
-  from a new manager instead, `await stop()` on the old one and drop every
-  reference to it first, including any kept `pm.protocol`: the stores
-  close when the core object is freed, and `stop()` releases the callbacks
-  the core holds so that nothing else keeps it. A `stop()` that was
-  cancelled or raised part-way can be called again to finish. When the event handler refers
-  back to the manager (a method of the object that owns it, or a closure
-  over it), the two form a cycle that only the collector frees, so call
-  `gc.collect()` after dropping it. The name bound by
-  `async with ProtocolManager(...) as pm` outlives the block, so `del pm`
-  before opening the next one. A `start()` that raises releases the
-  callbacks itself, whether the stores refused or the engine did. A child
-  made with a bare `os.fork()` while the stores are open inherits their
-  locks and holds them until it exits; start subprocesses with
+- **One manager per account directory, and `close()` gives the directory
+  up.** Each store holds a lock on its directory while open, in this
+  process or another. `await pm.close()` stops the manager and releases
+  both directories before it returns, whatever still refers to the manager
+  or to `pm.protocol`, so a new manager can open them at once. A closed
+  manager cannot be started again. Leaving
+  `async with ProtocolManager(...) as pm` closes it, so two blocks over the
+  same directories need nothing between them, and a block whose entry
+  failed closes what that entry had opened. `close()` raises
+  `ProtocolError.InvalidState` when the engine could not be stopped:
+  nothing was released, and the call can be repeated.
+- **`stop()` keeps the directories, for a restart in place.** Call `stop()`
+  then `start()` on the same manager. A `stop()` or `close()` that was
+  cancelled or raised part-way can be called again to finish; a `close()`
+  cancelled while the core was already releasing the stores finishes by
+  itself a moment later. Do not rely
+  on dropping a stopped manager to release the directories: that happens
+  when the interpreter frees the core object, which a kept `pm.protocol`,
+  an event handler that refers back to the manager, or an exception whose
+  traceback names it can each put off. A `start()` that raises releases
+  the callbacks itself, whether the stores refused or the engine did; call
+  `close()` if the manager is not going to be started again.
+- **A forked child holds the directories.** A child made with a bare
+  `os.fork()` while the stores are open inherits their locks and holds
+  them until it exits, whatever the parent closes; start subprocesses with
   `subprocess` or the `spawn` method instead.
 
 What the stores guarantee, and what a copied directory reveals, is in the

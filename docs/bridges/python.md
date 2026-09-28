@@ -225,6 +225,40 @@ bounds as literals (`4`, `1_048_576`, `96`) for the C5 reason. DNS-SD needs
 the optional extra (`pip install 'offline-protocol-sdk[lan]'`); the base
 install carries no LGPL dependency.
 
+## P10. Freeing a core object never blocks, wherever the interpreter frees it
+
+The generated bindings keep every callback object in one handle map behind
+one lock. Rust goes through that map on every callback it makes (a lookup)
+and on every callback it drops (a removal). The collector runs between any
+two bytecodes, those inside the map's critical section included, and a core
+object it finalizes there drops the callbacks the core holds, each of which
+asks for the map's lock on the thread that already has it. With the plain
+lock the generator emits, that thread waits for itself and the process
+hangs.
+
+A core object reaches the collector whenever it sits in a reference cycle,
+and the ordinary shapes are cycles: an event handler that is a method of the
+object owning the manager, an exception whose traceback names the manager.
+It could not happen while a stopped manager was never freed at all, which is
+why it arrived with the fix for that leak.
+
+The package installs a re-entrant lock on every handle map when it is
+imported (`_callback_reentrancy.py`), before any callback exists. Re-entry
+is removal only, since a finalizer drops callbacks and never registers one,
+and each of the map's critical sections is one dictionary operation or a
+read followed by an insert under a fresh handle. The generated file cannot
+carry the change itself: it is regenerated from the UDL and the drift gate
+compares it byte for byte.
+
+`test_callback_reentrancy.py` frees a core while holding the map's lock, in
+a process of its own so that a regression fails one test instead of hanging
+the suite, and finds the maps by looking rather than by name, so a
+regenerated binding that moves the map or adds a second one is caught.
+
+Releasing the file stores does not depend on any of this. `close()` asks
+the core to release them (`close_file_stores`), and the directories are free
+when it returns, whatever still refers to the manager.
+
 ## Testing
 
 ```bash
