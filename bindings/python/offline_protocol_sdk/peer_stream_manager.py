@@ -568,7 +568,14 @@ class PeerStreamManager(TransportManager):
         )
 
     async def stop(self) -> None:
-        if self._state not in (TransportState.RUNNING, TransportState.STARTING):
+        # STOPPING too: a stop() cancelled part-way (a shutdown deadline)
+        # leaves the transport there, and a retry that returned at once would
+        # leave it half torn down for good. Every step below is idempotent.
+        if self._state not in (
+            TransportState.RUNNING,
+            TransportState.STARTING,
+            TransportState.STOPPING,
+        ):
             return
         self._update_state(TransportState.STOPPING)
         await self._close_everything()

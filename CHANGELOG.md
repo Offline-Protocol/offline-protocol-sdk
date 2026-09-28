@@ -96,8 +96,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   callbacks with inert ones, including one the application registered
   itself for Nostr or Reticulum, so the event handler receives nothing after
   `stop()`. A `stop()` that was cancelled or whose engine stop raised can be
-  called again to finish. `__del__` no longer raises on a manager whose
-  constructor raised.
+  called again to finish, including one cancelled inside a transport's own
+  stop: each transport's `stop()` now resumes from the stopping state
+  instead of returning. Overlapping `stop()` calls run one teardown, in
+  order, and the BLE peripheral no longer swallows a cancel of its `stop()`.
+  `__del__` no longer raises on a manager whose constructor raised.
 - **A protocol-state record key the store reports as corrupt is regenerated.**
   The engine regenerated a record key of the wrong length but treated a
   `CorruptedData` error as a failed load, so a store that seals its records

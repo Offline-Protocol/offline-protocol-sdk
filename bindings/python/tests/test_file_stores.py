@@ -270,6 +270,77 @@ async def test_an_interrupted_stop_can_be_finished(tmp_path: Path, interruption:
     assert await _run_once(store_key=KEY, **roots) == address
 
 
+async def _listening_peer_stream(roots: dict) -> ProtocolManager:
+    pm = ProtocolManager(_config(wifi_direct_enabled=True), store_key=KEY, **roots)
+    await pm.start()
+    pm.peer_stream.configure(listen_host="127.0.0.1", listen_port=0)
+    await pm.peer_stream.start()
+    return pm
+
+
+@pytest.mark.asyncio
+async def test_a_stop_cancelled_inside_a_transport_can_be_finished(tmp_path: Path):
+    """The deadline lands where the waiting is: inside a transport's own
+    `stop()`, which has already moved to STOPPING. The retry has to enter it
+    again, or the listener stays open and holds the manager, and the stores."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = await _listening_peer_stream(roots)
+    address = pm.local_address
+
+    close = pm.peer_stream._close_everything
+
+    async def a_peer_that_does_not_let_go() -> None:
+        await asyncio.sleep(30)
+        await close()
+
+    pm.peer_stream._close_everything = a_peer_that_does_not_let_go
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(pm.stop(), 0.1)
+    assert pm.peer_stream.state.value == "stopping"
+    del pm.peer_stream._close_everything, close, a_peer_that_does_not_let_go
+
+    await pm.stop()
+    assert pm.peer_stream.state.value == "stopped"
+    del pm
+    gc.collect()
+
+    assert await _run_once(store_key=KEY, **roots) == address
+
+
+@pytest.mark.asyncio
+async def test_overlapping_stops_tear_down_once_in_order(tmp_path: Path):
+    """A second `stop()` waits for the first rather than stopping the engine
+    while a transport is still closing."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = await _listening_peer_stream(roots)
+    order: list[str] = []
+
+    close = pm.peer_stream._close_everything
+
+    async def slow_close() -> None:
+        await asyncio.sleep(0.2)
+        await close()
+        order.append("transport closed")
+
+    engine_stop = pm._protocol.stop
+
+    def recording_engine_stop() -> None:
+        order.append(f"engine stopped (transport {pm.peer_stream.state.value})")
+        engine_stop()
+
+    pm.peer_stream._close_everything = slow_close
+    pm._protocol.stop = recording_engine_stop
+    first = asyncio.ensure_future(pm.stop())
+    await asyncio.sleep(0.02)
+    await pm.stop()
+    assert first.done()
+    await first
+
+    assert order == ["transport closed", "engine stopped (transport stopped)"]
+    del pm.peer_stream._close_everything, pm._protocol.stop, pm, first
+    gc.collect()
+
+
 @pytest.mark.asyncio
 async def test_the_key_is_taken_when_the_manager_is_built(tmp_path: Path):
     """A caller that reuses its buffer before `start()` must not change the key."""

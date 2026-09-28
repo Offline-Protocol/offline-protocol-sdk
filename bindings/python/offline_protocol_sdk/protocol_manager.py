@@ -377,6 +377,11 @@ class ProtocolManager:
         # already False then, so without this a retry would return at once
         # and leave the callbacks, and with them the store locks, held.
         self._teardown_pending = False
+        # One teardown at a time. A second stop() (a signal handler racing an
+        # `async with` exit) would otherwise stop the engine and release the
+        # callbacks while the first is still inside a transport, and two
+        # transport stops would interleave over the same sockets.
+        self._stop_lock = asyncio.Lock()
 
         # Registry of objects whose pointers are held by the Rust/UniFFI side.
         # Prevents garbage collection while the protocol is alive.
@@ -475,6 +480,10 @@ class ProtocolManager:
 
     async def stop(self) -> None:
         """Stop all transports and the processing loop."""
+        async with self._stop_lock:
+            await self._stop_locked()
+
+    async def _stop_locked(self) -> None:
         if not self._running and not self._teardown_pending:
             return
 
