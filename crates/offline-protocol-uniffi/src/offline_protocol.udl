@@ -1616,17 +1616,23 @@ interface OfflineProtocol {
     // mls_root that was lost), or an account directory that cannot be read.
     // As each store opens, MLS first: a directory that cannot be created
     // (the message names the path), a wrong key, or a key check that cannot
-    // prove the key. After both opened: protocol state sealed under a record
-    // key the MLS store does not hold. That is another identity's state, and
-    // the engine deletes what its restore reads of it, queued and parked
-    // messages among them. A refusal after the MLS store opened leaves its
-    // directory, lock file and key check, and no record, so the first
-    // refusal above still applies to a retry.
+    // prove the key. After both opened: protocol state that belongs with
+    // another MLS store. The first open of a pair binds the two with one
+    // pairing id, and later opens compare the ids; when either store holds
+    // no id, the state root is asked whether its sealed records open under
+    // this MLS store's record key. That is another identity's state, and the engine deletes what its
+    // restore reads of it, queued and parked messages among them. A refusal
+    // after the MLS store opened leaves its directory, lock file and key
+    // check, and no record, so the first refusal above still applies to a
+    // retry.
     //
-    // A damaged record key is not refused. Nothing opens the state sealed
-    // under it again, so a refusal would save no record, and the engine's
-    // new key and its settlement of that state as failed is how the
-    // application learns which messages were lost.
+    // A damaged record key is not refused, on the launch that finds it or
+    // on any launch after while the MLS root keeps its pairing file. Nothing opens the state sealed under it again, so
+    // a refusal would save no record, and the engine's new key and its
+    // settlement of that state as failed is how the application learns
+    // which messages were lost. What that launch cannot delete stays sealed
+    // under the lost key, and the pairing ids, not those records, say the
+    // state is still this identity's.
     //
     // InvalidState: another store already holds the directory, in this
     // process or another; start() has already run; or close_file_stores()

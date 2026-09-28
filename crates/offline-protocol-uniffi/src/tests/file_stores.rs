@@ -883,16 +883,7 @@ fn stores_the_engine_refused_are_closed_not_left_to_their_last_reference() {
     let (mls, state) = (root.dir("mls"), root.dir("state"));
     let namespace = offline_protocol::account_storage_namespace("test-app", "refused-pair-user");
     let key = offline_protocol::StaticStoreKey::from_slice(&KEY).expect("key");
-    let open = || -> Result<FileStores, offline_protocol::FileStoreError> {
-        Ok(FileStores {
-            secure: Arc::new(offline_protocol::SealedFileMlsStorage::open(
-                &mls, &namespace, &key,
-            )?),
-            state: Arc::new(offline_protocol::FileProtocolStateStorage::open(
-                &state, &namespace,
-            )?),
-        })
-    };
+    let open = || offline_protocol::FileStorePair::open(&mls, &state, &namespace, &key);
     let holds = |protocol: &OfflineProtocol| {
         matches!(
             &*recover_mutex(&protocol.file_stores, "file_stores"),
@@ -919,33 +910,6 @@ fn stores_the_engine_refused_are_closed_not_left_to_their_last_reference() {
     protocol
         .initialize_mls_with_file_stores(mls, state, KEY.to_vec())
         .expect("a retry on the same instance");
-}
-
-/// Only another identity's state is refused. A damaged record key is let
-/// through: nothing opens that state again, and the engine's regeneration
-/// is what settles the messages lost with it.
-#[test]
-fn only_state_another_identity_sealed_is_refused() {
-    use offline_protocol::SealedState;
-    let directory = std::path::Path::new("/var/lib/example/state/account");
-    let err = refuse_foreign_state(SealedState::Foreign, directory, "/var/lib/example/keys")
-        .expect_err("another identity's state");
-    assert!(
-        matches!(&err, ProtocolError::InvalidConfiguration(m)
-            if m.contains("another identity")
-                && m.contains("fresh directory")
-                && m.contains("/var/lib/example/state/account")
-                && m.contains("/var/lib/example/keys")),
-        "got {err:?}"
-    );
-    for verdict in [
-        SealedState::Empty,
-        SealedState::Opens,
-        SealedState::KeyDamaged,
-    ] {
-        refuse_foreign_state(verdict, directory, "/var/lib/example/keys")
-            .unwrap_or_else(|err| panic!("{verdict:?} was refused: {err:?}"));
-    }
 }
 
 /// End to end: a service whose record key is damaged still starts, as the
@@ -989,10 +953,108 @@ fn a_damaged_record_key_does_not_stop_the_service() {
 
     let protocol = instance("damaged-key-user");
     protocol
-        .initialize_mls_with_file_stores(mls, state, KEY.to_vec())
+        .initialize_mls_with_file_stores(mls.clone(), state.clone(), KEY.to_vec())
         .expect("a damaged record key is the engine's to regenerate");
-    assert_eq!(protocol.local_address(), Some(address));
+    assert_eq!(protocol.local_address(), Some(address.clone()));
     protocol.start().expect("start");
+    protocol.stop().expect("stop");
+    protocol.close_file_stores().expect("close");
+
+    // And every launch after it: the pair was bound on its first run, and a
+    // regenerated record key does not change what it is bound to.
+    let next = instance("damaged-key-user");
+    next.initialize_mls_with_file_stores(mls, state, KEY.to_vec())
+        .expect("the launch after the regeneration");
+    assert_eq!(next.local_address(), Some(address));
+}
+
+/// The launch after a record key was regenerated must open, however much
+/// the regenerating launch left sealed under the lost key. A document is
+/// read when it is opened, never at launch, so all of it is left: read by its
+/// records alone, the same identity's own state looked like another's, and
+/// the service was refused on every launch from then on.
+#[test]
+fn a_document_under_a_lost_record_key_does_not_stop_the_next_launch() {
+    let root = TempRoot::new("damaged-key-doc");
+    let (mls, state) = (root.dir("mls"), root.dir("state"));
+    let profile = "damaged-key-doc-user";
+    let service = || {
+        OfflineProtocol::new(ProtocolConfig {
+            profile: profile.to_string(),
+            data_enabled: true,
+            ..create_test_config()
+        })
+        .expect("protocol")
+    };
+    let namespace = offline_protocol::account_storage_namespace("test-app", profile);
+    let key = offline_protocol::StaticStoreKey::from_slice(&KEY).expect("key");
+    let verdict = || {
+        let secure = offline_protocol::SealedFileMlsStorage::open(&mls, &namespace, &key)
+            .expect("open the MLS store");
+        offline_protocol::FileProtocolStateStorage::open(&state, &namespace)
+            .expect("open the state store")
+            .sealed_state(&secure)
+            .expect("verdict")
+    };
+
+    let first = service();
+    first
+        .initialize_mls_with_file_stores(mls.clone(), state.clone(), KEY.to_vec())
+        .expect("init");
+    let address = first.local_address().expect("address");
+    first
+        .data_create_doc("demo-space".into(), "notes".into())
+        .expect("create");
+    first
+        .data_map_set(
+            "demo-space".into(),
+            "notes".into(),
+            "meta".into(),
+            "title".into(),
+            data_value_from_json(r#"{"kind":"text","value":"kept"}"#).expect("value"),
+        )
+        .expect("set");
+    first
+        .data_flush("demo-space".into(), "notes".into())
+        .expect("flush");
+    first.close_file_stores().expect("close");
+
+    let mut found = false;
+    for (path, bytes) in snapshot(&mls) {
+        let is_record = path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("e_"));
+        if !is_record {
+            continue;
+        }
+        let mut damaged = bytes.clone();
+        let last = damaged.len() - 1;
+        damaged[last] ^= 1;
+        std::fs::write(&path, damaged).expect("damage");
+        if verdict() == offline_protocol::SealedState::KeyDamaged {
+            found = true;
+            break;
+        }
+        std::fs::write(&path, bytes).expect("restore");
+    }
+    assert!(found, "one MLS record is the record key");
+
+    let second = service();
+    second
+        .initialize_mls_with_file_stores(mls.clone(), state.clone(), KEY.to_vec())
+        .expect("the damaged-key launch");
+    second.close_file_stores().expect("close");
+    assert_eq!(
+        verdict(),
+        offline_protocol::SealedState::Foreign,
+        "the document is still sealed under the lost key, or this proves nothing"
+    );
+
+    let third = service();
+    third
+        .initialize_mls_with_file_stores(mls, state, KEY.to_vec())
+        .expect("the launch after it");
+    assert_eq!(third.local_address(), Some(address));
 }
 
 /// A panic inside the engine poisons its lock, and `stop()` cannot take a

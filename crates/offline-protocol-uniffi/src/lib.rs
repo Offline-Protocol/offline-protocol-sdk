@@ -522,23 +522,8 @@ type EngineStores = (Arc<dyn CoreMlsStorage>, Arc<dyn CoreProtocolStateStorage>)
 /// The engine holds the same two stores behind its traits, and a trait
 /// object cannot be closed. Releasing a directory must not wait for the
 /// engine, or for whatever host object still refers to it, to be freed.
-#[derive(Clone)]
-struct FileStores {
-    secure: Arc<offline_protocol::SealedFileMlsStorage>,
-    state: Arc<offline_protocol::FileProtocolStateStorage>,
-}
-
-impl FileStores {
-    fn for_engine(&self) -> EngineStores {
-        (self.secure.clone(), self.state.clone())
-    }
-
-    /// Releases both directories. The protocol-state store first: it is the
-    /// one sealed under the other's record key.
-    fn close(&self) {
-        self.state.close();
-        self.secure.close();
-    }
+fn engine_stores(pair: &offline_protocol::FileStorePair) -> EngineStores {
+    (pair.secure_storage(), pair.state_storage())
 }
 
 /// Where an instance stands with the built-in file stores.
@@ -548,13 +533,20 @@ enum FileStoreState {
     /// caller supplied.
     #[default]
     Unused,
-    Open(FileStores),
+    Open(offline_protocol::FileStorePair),
     /// `close_file_stores` released them. The engine still holds the closed
     /// stores, so this instance cannot run again.
     Closed,
 }
 
-/// Opens the two built-in file stores for one account.
+/// Opens the two built-in file stores for one account, as one pair.
+///
+/// The pair refuses what the engine would lose data over (overlapping roots,
+/// state without an identity, another identity's state): see
+/// [`offline_protocol::FileStorePair::open`]. This adds only what the FFI
+/// owns, the arguments as strings and bytes, and the account directory,
+/// which comes from the instance's own `app_id` and `profile` so the caller
+/// cannot name one that disagrees with the identity it runs as.
 ///
 /// Every refusal names what the operator has to change: the error crosses the
 /// FFI as a string, and a headless host has no other place to learn that the
@@ -565,11 +557,8 @@ fn open_file_stores(
     app_id: &str,
     profile: &str,
     store_key: &[u8],
-) -> Result<FileStores, ProtocolError> {
-    use offline_protocol::{
-        account_storage_namespace, FileProtocolStateStorage, SealedFileMlsStorage, StaticStoreKey,
-    };
-    use std::path::Path;
+) -> Result<offline_protocol::FileStorePair, ProtocolError> {
+    use offline_protocol::{account_storage_namespace, FileStorePair, StaticStoreKey};
     for (name, root) in [("mls_root", mls_root), ("state_root", state_root)] {
         if root.trim().is_empty() {
             return Err(ProtocolError::InvalidArgument(format!(
@@ -577,185 +566,10 @@ fn open_file_stores(
             )));
         }
     }
-    // One directory for both, or one inside the other, would put the
-    // identity inside a directory the installation removes (or the reverse),
-    // so removing protocol state would remove the identity too.
-    if roots_overlap(Path::new(mls_root), Path::new(state_root)) {
-        return Err(ProtocolError::InvalidArgument(
-            "mls_root and state_root must be different directories, neither inside the \
-             other: mls_root holds the identity and must survive the removal of state_root"
-                .to_string(),
-        ));
-    }
     let key = StaticStoreKey::from_slice(store_key)
         .map_err(|e| ProtocolError::InvalidArgument(format!("store_key: {e}")))?;
     let namespace = account_storage_namespace(app_id, profile);
-    refuse_state_without_identity(mls_root, state_root, &namespace)?;
-    // MLS first: it proves the key, and a refused key should leave no
-    // protocol-state directory behind for an operator to wonder about.
-    let secure =
-        SealedFileMlsStorage::open(mls_root, &namespace, &key).map_err(file_store_error)?;
-    let state = FileProtocolStateStorage::open(state_root, &namespace).map_err(file_store_error)?;
-
-    // Both roots exist now, so the question asked above by spelling can be
-    // asked of the directories themselves. A volume that folds case or
-    // normalizes names (APFS and NTFS by default) makes one directory of two
-    // spellings that do not compare equal, and no comparison of names that
-    // do not exist yet can know it.
-    if roots_overlap(Path::new(mls_root), Path::new(state_root)) {
-        return Err(ProtocolError::InvalidArgument(format!(
-            "mls_root and state_root must be different directories, neither inside the \
-             other: {mls_root} and {state_root} are spelled apart, and on this volume one \
-             is the other or lies inside it. The stores' directories were created; no \
-             record was written or changed"
-        )));
-    }
-
-    // The engine deletes a sealed record that does not open, as its restore
-    // reaches it. That is right for one damaged record and wrong for a store
-    // sealed under another identity's record key, so it is asked before the
-    // engine gets the pair. The check above cannot see this case: it asks
-    // whether the MLS store holds an identity, not whether it holds the one
-    // that wrote this state.
-    refuse_foreign_state(
-        state.sealed_state(&secure).map_err(file_store_error)?,
-        state.directory(),
-        mls_root,
-    )?;
-    Ok(FileStores {
-        secure: Arc::new(secure),
-        state: Arc::new(state),
-    })
-}
-
-/// Refuses protocol state another identity sealed, and nothing else.
-///
-/// A damaged record key is let through. Nothing opens that state again,
-/// whoever sealed it, so a refusal would save no record, and it would cost
-/// the settlement: the engine generates a new key and settles what its
-/// restore reads as failed, which is how the application learns which
-/// messages were lost. An operator sent to a fresh state root would leave
-/// those message ids unsettled for good.
-fn refuse_foreign_state(
-    verdict: offline_protocol::SealedState,
-    state_directory: &std::path::Path,
-    mls_root: &str,
-) -> Result<(), ProtocolError> {
-    use offline_protocol::SealedState;
-    match verdict {
-        SealedState::Foreign => Err(ProtocolError::InvalidConfiguration(format!(
-            "{} holds protocol state sealed under a record key the identity in {mls_root} \
-             does not hold: it is another identity's, and starting would delete the \
-             queued and parked messages in it. Point state_root at a fresh directory, \
-             or use the mls_root that wrote this state. No record was changed",
-            state_directory.display()
-        ))),
-        SealedState::KeyDamaged => {
-            tracing::warn!(
-                state = %state_directory.display(),
-                "the protocol-state record key is damaged: the sealed state beside it \
-                 cannot be opened again, and the engine will settle it as failed"
-            );
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-/// Whether one root is the other, or lies inside it.
-///
-/// Neither root need exist yet, and either may be relative or spelled with
-/// `.` and `..`, so each is resolved first: see [`resolved_root`].
-fn roots_overlap(a: &std::path::Path, b: &std::path::Path) -> bool {
-    let (a, b) = (resolved_root(a), resolved_root(b));
-    a.starts_with(&b) || b.starts_with(&a)
-}
-
-/// `path` made absolute, with its longest existing ancestor canonicalized
-/// (so a symlink or a differently spelled existing prefix compares equal)
-/// and the rest, which does not exist and so holds no symlink, resolved by
-/// its components.
-fn resolved_root(path: &std::path::Path) -> std::path::PathBuf {
-    use std::path::{Component, PathBuf};
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
-    };
-    let mut existing = absolute.as_path();
-    let mut rest = Vec::new();
-    let base = loop {
-        if let Ok(canonical) = existing.canonicalize() {
-            break canonical;
-        }
-        match (existing.parent(), existing.file_name()) {
-            (Some(parent), Some(name)) => {
-                rest.push(Component::Normal(name));
-                existing = parent;
-            }
-            // `..` or `.` as the last component: keep it for the walk below.
-            (Some(parent), None) => {
-                rest.extend(existing.components().next_back());
-                existing = parent;
-            }
-            (None, _) => break PathBuf::new(),
-        }
-    };
-    let mut resolved = base;
-    for component in rest.into_iter().rev() {
-        match component {
-            Component::ParentDir => {
-                resolved.pop();
-            }
-            Component::CurDir => {}
-            other => resolved.push(other),
-        }
-    }
-    resolved
-}
-
-/// Refuses a protocol-state account directory that holds records when the
-/// MLS account directory holds none.
-///
-/// That shape is a deployment moving onto the file stores (or one whose
-/// `mls_root` was lost) while keeping its state root. The file stores mint
-/// a new identity, so the device gets a new address, and the new identity's
-/// record key cannot unseal the old records: the first restore deletes the
-/// parked messages it cannot read, and going back does not bring them back.
-///
-/// The MLS side is asked for record files, not for its directory or for a
-/// type directory: an attempt refused at the state root has already created
-/// the MLS directory, its lock and its key check, a first write that failed
-/// leaves a type directory with nothing in it, and an existence test would
-/// let the retry through. A directory that cannot be read on either side is
-/// refused too, never taken for empty. Nothing is created before this
-/// check, so a refusal changes nothing.
-///
-/// What this cannot see is an identity that is in place but did not write
-/// the state. That is asked once both stores are open: see
-/// [`open_file_stores`].
-fn refuse_state_without_identity(
-    mls_root: &str,
-    state_root: &str,
-    namespace: &str,
-) -> Result<(), ProtocolError> {
-    use offline_protocol::{FileProtocolStateStorage, SealedFileMlsStorage};
-    if SealedFileMlsStorage::holds_records(mls_root, namespace).map_err(file_store_error)? {
-        return Ok(());
-    }
-    if FileProtocolStateStorage::holds_records(state_root, namespace).map_err(file_store_error)? {
-        let state_account = std::path::Path::new(state_root).join(namespace);
-        return Err(ProtocolError::InvalidConfiguration(format!(
-            "{} holds protocol state, but {mls_root} holds no identity for this account: the \
-             file stores would start a new identity (a new address) and delete the state it \
-             cannot unseal. Point state_root at a fresh directory, or restore the mls_root \
-             that wrote this state",
-            state_account.display()
-        )));
-    }
-    Ok(())
+    FileStorePair::open(mls_root, state_root, &namespace, &key).map_err(file_store_error)
 }
 
 /// Maps a file-store refusal onto the existing variants. No new variant: the
@@ -767,12 +581,16 @@ fn file_store_error(err: offline_protocol::FileStoreError) -> ProtocolError {
         // Another store holds the directory: a second instance, or a second
         // process. Nothing about the arguments is wrong.
         E::InUse(_) | E::Closed(_) => ProtocolError::InvalidState(err.to_string()),
+        // The two roots as given cannot both be right: an argument to change.
+        E::RootsOverlap { .. } => ProtocolError::InvalidArgument(err.to_string()),
         // A wrong key, a check that cannot prove the key, a directory that
         // cannot be created: each is the operator's configuration to fix.
         E::WrongStoreKey(_)
         | E::KeyCheckUnverifiable(_)
         | E::Io { .. }
         | E::RecordKeyUnreadable(_)
+        | E::StateWithoutIdentity { .. }
+        | E::ForeignState { .. }
         | E::StoreKey(_)
         | E::InvalidNamespace => ProtocolError::InvalidConfiguration(err.to_string()),
         _ => ProtocolError::Other(err.to_string()),
@@ -6436,7 +6254,7 @@ impl OfflineProtocol {
                 // and a close would find nothing to release.
                 *recover_mutex(&self.file_stores, "file_stores") =
                     FileStoreState::Open(stores.clone());
-                Ok(stores.for_engine())
+                Ok(engine_stores(&stores))
             },
             || self.release_refused_stores(),
         )
