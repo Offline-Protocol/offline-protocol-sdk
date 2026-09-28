@@ -65,11 +65,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   diverging the MLS state. `close()` on either store releases its directory
   at once, whoever still holds the store, and every later operation on it
   is an error (a failed operation, never a lost record).
+  `FileStorePair::open` opens the two stores together and refuses the
+  pairs the engine would lose data over (see the next entry); its first open
+  binds the two with one pairing id, so a later open knows they belong
+  together whatever the engine does to its record key.
   `FileProtocolStateStorage::sealed_state` says whether the sealed records
   in a state store open under the record key an MLS store holds, without
-  changing either, so a host can refuse a pair the engine would delete
-  from: `Empty`, `Opens`, `Foreign` (sealed under another key) or
-  `KeyDamaged` (the record key itself is damaged, which no refusal helps).
+  changing either: `Empty`, `Opens`, `Foreign` (sealed under another key,
+  or under one this identity lost and replaced) or `KeyDamaged` (the record
+  key itself is damaged, which no refusal helps).
   On Windows the lock file shares read access, so a backup tool that shares
   write access, as they usually do, can read a live store. A failed
   directory flush fails the write on Unix rather than acknowledging it, and
@@ -101,17 +105,22 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   new identity, so each of these is refused, and no refusal changes or
   deletes a record: a state root that holds records with no MLS record
   beside it (asked of record files, so neither an earlier attempt that
-  failed nor a first write that failed can disarm it); a state root sealed
-  under a record key the MLS store does not hold (an identity is in place,
-  but not the one that wrote the state; a damaged record key is not
-  refused, because the engine's new key is what settles the messages lost
-  with it); an account directory that cannot be read, which is never taken
-  for empty; and roots that are one directory
+  failed nor a first write that failed can disarm it); a state root that
+  holds records and belongs with another MLS store (an identity is in
+  place, but not the one that wrote the state), decided by the pairing ids
+  the two stores' first open wrote, and for a state root never bound by
+  whether its sealed records open under this MLS store's record key; an
+  account directory that cannot be read, which is never taken for empty;
+  and roots that are one directory
   or one inside the other, compared as spelled before anything is created
   and again as directories once both exist, because a volume that folds
-  case makes one directory of two spellings. Rust hosts get the same
-  questions as `holds_records` on both file stores and `sealed_state` on
-  the protocol-state store.
+  case makes one directory of two spellings. A damaged record key is not
+  refused, on the launch that finds it or on any launch after while the MLS
+  root keeps its pairing file: the engine's
+  new key is what settles the messages lost with it, and the records it
+  cannot delete that launch stay under the lost key without making the
+  state look like another identity's. Rust hosts get the same refusals
+  from `FileStorePair::open`.
 - **`close_file_stores()` releases the file stores without waiting for the
   instance to be freed.** When a host object is freed is the host runtime's
   decision: a kept reference, a callback cycle, an exception that still
@@ -148,7 +157,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   traceback until the task next suspends, and on Python 3.13 and later
   nothing else in `stop()` is certain to suspend. A teardown also finishes
   on a loop whose default executor was shut down, by running its blocking
-  steps in place.
+  steps in place. A teardown step that raised (a telemetry disable, the
+  engine's stop) no longer keeps the manager alive through the logged
+  exception's traceback, which Python 3.10 freed only when the collector ran;
+  the Python Bindings job now runs the suite on 3.10 as well.
   `__del__` no longer raises on a manager whose constructor raised.
 - **Freeing a Python core object can no longer hang the process.** The
   generated bindings guard their callback handle map with a plain lock,

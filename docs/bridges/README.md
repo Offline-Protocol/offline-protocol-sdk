@@ -445,8 +445,9 @@ telemetry itself and waits for the uploader's final flush, up to three
 seconds, because the uploader keeps its queue in the protocol-state store;
 call it off the main thread.
 
-A Rust host that holds the two stores itself closes them with `close()` on
-each, after `disable_telemetry()` and the engine's stop. Dropping the engine
+A Rust host opens the two with `FileStorePair::open`, which refuses the
+pairs the engine would lose data over, and closes them with the pair's
+`close()`, after `disable_telemetry()` and the engine's stop. Dropping the engine
 alone detaches the uploader thread, which holds the protocol-state store
 until its final flush ends, up to three seconds later.
 

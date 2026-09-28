@@ -184,10 +184,14 @@ await pm.start()
   messages it could not read. The same refusal covers a lost `mls_root`
   next to a surviving `state_root`, and it still applies after an attempt
   that failed part-way. It also covers an `mls_root` that holds an
-  identity, but not the one that wrote the state: a `state_root` put back
-  after a run over a fresh one is sealed under a key this identity does
-  not hold. A directory the process cannot read is refused rather than
-  taken for empty. No refusal changes or deletes a record.
+  identity, but not the one that wrote the state: the first run over a pair
+  binds the two directories to each other, so a `state_root` put back after
+  a run over a fresh one is refused. A damaged key inside the store is not
+  refused, then or on any later start over the same `mls_root`: the SDK
+  replaces it and reports the
+  messages it lost as failed. A directory the process cannot read is
+  refused rather than taken for empty. No refusal changes or deletes a
+  record.
 - **`start()` raises instead of starting without the identity.** A wrong key
   raises `ProtocolError.InvalidConfiguration` and changes no record. A
   `state_root` that cannot be created also raises it, after the MLS store

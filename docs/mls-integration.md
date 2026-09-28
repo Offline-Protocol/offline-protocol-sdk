@@ -350,18 +350,24 @@ gateway, a headless node) does not have to write either provider. The engine
 crate ships one of each:
 
 ```rust
-use std::sync::Arc;
-use offline_protocol::{
-    account_storage_namespace, EnvStoreKey, FileProtocolStateStorage, SealedFileMlsStorage,
-};
+use offline_protocol::{account_storage_namespace, EnvStoreKey, FileStorePair};
 
 let namespace = account_storage_namespace("com.example.node", "default");
-// MLS material: may outlive an installation, so a root that survives upgrades.
-let secure = SealedFileMlsStorage::open("/var/lib/example/keys", &namespace, &EnvStoreKey::default())?;
-// Protocol state: scoped to the installation, removed with it.
-let state = FileProtocolStateStorage::open("/var/lib/example/state", &namespace)?;
-protocol.initialize_mls(Arc::new(secure), Arc::new(state))?;
+let stores = FileStorePair::open(
+    // MLS material: may outlive an installation, so a root that survives upgrades.
+    "/var/lib/example/keys",
+    // Protocol state: scoped to the installation, removed with it.
+    "/var/lib/example/state",
+    &namespace,
+    &EnvStoreKey::default(),
+)?;
+protocol.initialize_mls(stores.secure_storage(), stores.state_storage())?;
 ```
+
+Open the two stores as a pair, not one by one. `FileStorePair::open` refuses
+the pairs the engine would lose data over, which neither store can see alone,
+and binds the two so a later open knows they belong together (see
+[Over the FFI](#over-the-ffi) for each refusal).
 
 - **`FileProtocolStateStorage`** writes the `OPS1` format described below,
   byte for byte, with the same directory and file names as the iOS, Android
@@ -413,22 +419,32 @@ protocol.initialize_mls(Arc::new(secure), Arc::new(state))?;
   protocol-state store until its final flush ends (up to three seconds).
   Call `disable_telemetry()` first, which waits for that flush, then stop
   the engine and close the stores, so a restart in the same process or a
-  logout that removes the directories finds them free. Keep an `Arc` of
-  each store to close it by: the engine takes them as trait objects.
-- **Ask before handing the engine a state root it did not write.** The
+  logout that removes the directories finds them free. Keep the
+  `FileStorePair` to close it by (`close()` closes both, the state store
+  first): the engine takes the stores as trait objects.
+- **Never hand the engine a state root another identity wrote.** The
   engine deletes a sealed protocol-state record that does not open, as its
   restore reaches it, which is right for one damaged record and wrong for
-  a store sealed under another identity's record key.
-  `FileProtocolStateStorage::sealed_state` answers for an open pair,
-  without changing either store. `Empty`: no record in a category the
-  engine seals. `Opens`: a record opens, so the pair belongs together.
-  `Foreign`: records exist, none of those tried opens in any category, and
-  the MLS store holds a usable record key or none, so the first restore
-  deletes the records it reads, queued and parked messages among them.
-  `KeyDamaged`: records exist and the MLS store's record key is damaged,
-  so nothing opens them again and refusing the pair saves nothing. The
-  telemetry queue is sealed under the same key and is not examined: a
-  batch that does not open is the uploader's to drop.
+  a store sealed under another identity's record key. `FileStorePair`
+  records which MLS store a state store belongs with: its first open writes
+  one random pairing id into both (`mls-store.pair`, sealed under the store
+  key, and `state-store.pair`, in the clear), the MLS store first, and a
+  later open compares them. Neither file is a record, and a binding's
+  provider never reads them.
+- **The records alone cannot settle ownership.**
+  `FileProtocolStateStorage::sealed_state` asks the sealed records whether
+  they open under the MLS store's record key, without changing either
+  store. `Empty`: no record in a category the engine seals. `Opens`: a
+  record opens. `Foreign`: records exist, none of those tried opens, and the
+  MLS store holds a usable record key or none. `KeyDamaged`: records exist
+  and the record key is damaged. `Foreign` is also what this identity's own
+  state looks like once the engine has regenerated a damaged record key:
+  the launch that regenerates it cannot delete everything sealed under the
+  lost key (documents are read when they are opened, and each restore walk
+  stops at its delete allowance), so what is left opens under no key the
+  store holds. The pair asks the records only of a state store that was
+  never bound. The telemetry queue is sealed under the same key and is not
+  examined: a batch that does not open is the uploader's to drop.
 - **The sealed store never deletes on a read.** A record that does not
   authenticate is reported as `CorruptedData`, naming its file, and left in
   place, because deleting on a wrong key would destroy the identity. Once the
@@ -492,7 +508,8 @@ would delete the parked messages it could not read. Use a fresh
 `state_root`, or restore the `mls_root` that wrote the state.
 
 No refusal changes or deletes a record, and there are two of them, because
-no one question covers every case.
+no one question covers every case. Rust hosts get the same refusals from
+`FileStorePair::open`, which this entry point calls.
 
 The first is asked before anything is created: does the state root hold
 records while the MLS root holds none? It asks for MLS record files, not
@@ -503,19 +520,39 @@ nothing in it; an existence test would let the corrected retry through,
 over the old state, and delete it. For the same reason an account
 directory that cannot be read is refused rather than taken for empty.
 
-The second is asked once both stores are open: do the sealed records in
-the state root open under the record key the MLS root holds? The first
-question cannot see an identity that is in place but is not the one that
-wrote the state, which is what an operator has after following the first
-refusal's advice (a fresh `state_root`) and later putting the old one back.
-This refusal leaves what opening the stores creates (a lock file in each
-directory, the MLS key check) and nothing else.
+The second is asked once both stores are open: does the state root belong
+with this MLS root? The first question cannot see an identity that is in
+place but is not the one that wrote the state, which is what an operator
+has after following the first refusal's advice (a fresh `state_root`) and
+later putting the old one back. When both stores hold a pairing id, the
+ids decide: a state root that holds records and is bound to another MLS
+store is refused. When either holds none (a state root never bound, an MLS
+root restored from a backup older than its binding, a pairing file removed
+or damaged), the sealed records decide: records that open under no record
+key the MLS store holds are refused. A state root that holds no record is
+never refused, since it has nothing to lose. This refusal leaves what
+opening the stores creates (a lock file in each directory, the MLS key
+check) and nothing else. A pair that passes is bound. A new pairing id goes
+to the state root first, so a binding cut short by a crash leaves the MLS
+root without one, and the next open asks the records again.
+
+The ids say which MLS root a state root was paired with, not who wrote to
+it last. A state root that another writer shares (the keyring mode of a
+binding pointed at the same directory, a Rust host opening the state store
+alone) can hold another identity's records while the ids still match. Keep
+a file-store state root to the file stores: two identities over one state
+root already delete each other's sealed records at every restore.
 
 A damaged record key is not refused, with or without sealed state beside
-it. Nothing opens that state again, so a refusal would save no record, and
-it would cost the settlement: the engine generates a new key and settles
-what its restore reads as failed, which is how the application learns
-which messages were lost.
+it, on the launch that finds it or on any launch after while the MLS root
+keeps its pairing file. Nothing opens that
+state again, so a refusal would save no record, and it would cost the
+settlement: the engine generates a new key and settles what its restore
+reads as failed, which is how the application learns which messages were
+lost. What that launch cannot delete stays sealed under the lost key, and
+the pairing ids, not those records, say the state is still this
+identity's. Were the MLS pairing file lost as well, the records would
+decide, and those leftovers would read as another identity's state.
 
 Roots are compared twice as well. As spelled, before anything is created,
 which settles every case where the names say so. Then as directories, once
@@ -526,10 +563,8 @@ the MLS key check. None of those is a record, and neither `holds_records`
 takes them for one, so a corrected pair that names that directory again is
 not refused over them.
 
-A Rust host that opens the two stores itself can ask the same questions
-with `SealedFileMlsStorage::holds_records` and
-`FileProtocolStateStorage::holds_records`, which create nothing, and
-`FileProtocolStateStorage::sealed_state`.
+A Rust host gets every refusal above from `FileStorePair::open`. A host that
+opens the two stores one by one gets none of them.
 
 `close_file_stores()` releases both directories while the instance still
 exists, after `stop()`. Dropping the instance releases them too, but when a
