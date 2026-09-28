@@ -932,6 +932,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_canc
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite(
@@ -1428,6 +1430,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_block_user
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_group(`ptr`: Long,`groupName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -2048,6 +2052,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 6632.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores() != 28531.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 8723.toShort()) {
@@ -4201,6 +4208,8 @@ public interface OfflineProtocolInterface {
     
     fun `cancelFileTransfer`(`fileId`: kotlin.String)
     
+    fun `closeFileStores`()
+    
     fun `createGroup`(`groupName`: kotlin.String): MlsGroupInfo
     
     fun `createInvite`(`petname`: kotlin.String?, `sign`: kotlin.Boolean): kotlin.String
@@ -4830,6 +4839,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer(
         it,
         FfiConverterString.lower(`fileId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `closeFileStores`()
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores(
+        it,
+        _status)
 }
     }
     

@@ -1307,6 +1307,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func cancelFileTransfer(fileId: String) throws 
     
+    func closeFileStores() throws 
+    
     func createGroup(groupName: String) throws  -> MlsGroupInfo
     
     func createInvite(petname: String?, sign: Bool) throws  -> String
@@ -1812,6 +1814,13 @@ open func cancelFileTransfer(fileId: String)throws   {try rustCallWithError(FfiC
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(fileId),$0
+    )
+}
+}
+    
+open func closeFileStores()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores(
+            self.uniffiCloneHandle(),$0
     )
 }
 }
@@ -9718,6 +9727,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 6632) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores() != 28531) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 8723) {

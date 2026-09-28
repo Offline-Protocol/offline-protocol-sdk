@@ -1602,25 +1602,67 @@ interface OfflineProtocol {
     // `state_root` should be removed with the installation.
     //
     // Same lifecycle as initialize_mls: before start(), idempotent, and a
-    // repeated call opens nothing. Refusals map onto existing variants:
-    // InvalidArgument for an empty root, roots that are one directory or one
-    // inside the other, or a key that is not 32 bytes; InvalidConfiguration
-    // for a wrong key, a key check that cannot prove the key, protocol state
-    // with no MLS records beside it (a state root kept from another store,
-    // which the new identity could not unseal), or an account directory
-    // that cannot be read (all four change nothing), or for a directory
-    // that cannot be created (the message names the path; when it is the
-    // state root, the MLS store has already created its directory, and a
-    // retry is safe: that directory holds no record, so the kept-state
-    // refusal still applies); InvalidState when another store already holds
-    // the directory, in this process or another, or when start() has
-    // already run.
+    // repeated call opens nothing. No refusal changes or deletes a record.
+    // Refusals map onto existing variants.
+    //
+    // InvalidArgument: an empty root; roots that are one directory or one
+    // inside the other; a key that is not 32 bytes. Roots are compared as
+    // spelled before anything is created, and again as directories once
+    // both exist, because a volume that folds case makes one directory of
+    // two spellings. That second refusal leaves the directory it created.
+    //
+    // InvalidConfiguration, before anything is created: protocol state with
+    // no MLS record beside it (a state root kept from another store, or an
+    // mls_root that was lost), or an account directory that cannot be read.
+    // As each store opens, MLS first: a directory that cannot be created
+    // (the message names the path), a wrong key, or a key check that cannot
+    // prove the key. After both opened: protocol state sealed under a record
+    // key the MLS store does not hold. That is another identity's state, and
+    // the engine deletes what its restore reads of it, queued and parked
+    // messages among them. A refusal after the MLS store opened leaves its
+    // directory, lock file and key check, and no record, so the first
+    // refusal above still applies to a retry.
+    //
+    // A damaged record key is not refused. Nothing opens the state sealed
+    // under it again, so a refusal would save no record, and the engine's
+    // new key and its settlement of that state as failed is how the
+    // application learns which messages were lost.
+    //
+    // InvalidState: another store already holds the directory, in this
+    // process or another; start() has already run; or close_file_stores()
+    // has.
     [Throws=ProtocolError]
     void initialize_mls_with_file_stores(
         string mls_root,
         string state_root,
         bytes store_key
     );
+
+    // Release the built-in file stores this instance opened: both directory
+    // locks, at once, while the instance still exists. Freeing the instance
+    // releases them too, but when a host object is freed is the host
+    // runtime's decision (a kept reference, a callback cycle, an exception
+    // that still names it), and until then every later instance over the
+    // same directories is refused.
+    //
+    // Only after stop(): InvalidState otherwise. The instance cannot run
+    // again afterwards: start(), enable_telemetry() and both initialize_mls
+    // entry points are refused with InvalidState, and the next run needs a
+    // new instance. Idempotent. A no-op on an instance that never opened
+    // the file stores, which stays usable. An engine lock poisoned by a
+    // panic counts as stopped: stop() cannot take it again, and the
+    // directories must not wait for the instance to be freed.
+    //
+    // Nothing a closed instance is asked to do afterwards is persisted. A
+    // call that needs its stores fails; one for which the engine treats
+    // persistence as best effort completes in memory only.
+    //
+    // Disables telemetry first, exactly as disable_telemetry() does, so it
+    // can block for the uploader's final flush (up to three seconds): the
+    // uploader keeps its queue in the protocol-state store. Call it off the
+    // main thread.
+    [Throws=ProtocolError]
+    void close_file_stores();
     
     // Check if MLS is initialized
     boolean is_mls_initialized();

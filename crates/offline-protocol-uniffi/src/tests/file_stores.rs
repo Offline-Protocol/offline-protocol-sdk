@@ -405,6 +405,26 @@ fn an_unreadable_account_directory_is_refused_not_taken_for_empty() {
             if m.contains("unusable") && !m.contains("holds no identity")),
         "expected an unusable-directory refusal, got {err:?}"
     );
+
+    // An account directory that can be listed and not searched: its entries
+    // have names and nothing else can be asked of them. That is not "holds
+    // no identity" either.
+    let mls_account = std::path::Path::new(&mls).join(&namespace);
+    for mode in [0o400, 0o600] {
+        set_mode(&mls_account, mode);
+        let result = instance("unreadable-user").initialize_mls_with_file_stores(
+            mls.clone(),
+            root.dir("state"),
+            KEY.to_vec(),
+        );
+        set_mode(&mls_account, 0o700);
+        let err = result.expect_err("unsearchable mls account directory");
+        assert!(
+            matches!(&err, ProtocolError::InvalidConfiguration(m)
+                if m.contains("unusable") && !m.contains("holds no identity")),
+            "mode {mode:o}: expected an unusable-directory refusal, got {err:?}"
+        );
+    }
 }
 
 fn seed_state(state: &str, namespace: &str) -> std::path::PathBuf {
@@ -412,4 +432,598 @@ fn seed_state(state: &str, namespace: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(account.join("t_records")).expect("seed state");
     std::fs::write(account.join("t_records").join("k_entry"), b"sealed").expect("seed");
     account
+}
+
+/// Every file under `dir` with its bytes, for "no record was changed".
+fn snapshot(dir: &str) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let mut files = Vec::new();
+    let mut pending = vec![std::path::PathBuf::from(dir)];
+    while let Some(next) = pending.pop() {
+        for entry in std::fs::read_dir(&next).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let bytes = std::fs::read(&path).expect("read");
+                files.push((path, bytes));
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// Runs a service over the two roots that parks one outbound message, and
+/// stops it. Returns the service's address. What it leaves in `state` is
+/// what a real deployment leaves: a record sealed under the record key its
+/// MLS store holds.
+fn run_and_park_one(profile: &str, mls: &str, state: &str) -> String {
+    let root = TempRoot::new("park-peer");
+    let peer = instance("park-peer");
+    peer.initialize_mls_with_file_stores(root.dir("mls"), root.dir("state"), KEY.to_vec())
+        .expect("peer init");
+    let peer_address = peer.local_address().expect("peer address");
+
+    let service = instance(profile);
+    service
+        .initialize_mls_with_file_stores(mls.to_string(), state.to_string(), KEY.to_vec())
+        .expect("service init");
+    let address = service.local_address().expect("address");
+    service.start().expect("start");
+    service
+        .send_message(
+            peer_address,
+            "parked before the move".to_string(),
+            MessagePriority::Medium,
+            None,
+        )
+        .expect("send");
+    service.stop().expect("stop");
+    drop(service);
+
+    let namespace = offline_protocol::account_storage_namespace("test-app", profile);
+    let secure = offline_protocol::SealedFileMlsStorage::open(
+        mls,
+        &namespace,
+        &offline_protocol::StaticStoreKey::from_slice(&KEY).expect("key"),
+    )
+    .expect("reopen the MLS store");
+    assert_eq!(
+        offline_protocol::FileProtocolStateStorage::open(state, &namespace)
+            .expect("reopen the state store")
+            .sealed_state(&secure)
+            .expect("verdict"),
+        offline_protocol::SealedState::Opens,
+        "the fixture has to leave sealed state, or the tests below prove nothing"
+    );
+    address
+}
+
+/// The kept-state refusal asks whether the MLS store holds an identity. It
+/// cannot see an identity that is not the one that wrote the state: an
+/// operator who followed that refusal's advice (a fresh state root) and later
+/// puts the old state root back has an identity in place and state it cannot
+/// open. The engine would delete that state as unreadable. Refused instead,
+/// with every record as it was and both directories free again.
+#[test]
+fn state_sealed_by_another_identity_is_refused_and_kept() {
+    let root = TempRoot::new("foreign-state");
+    let (old_mls, old_state) = (root.dir("old-mls"), root.dir("old-state"));
+    let (mls, state) = (root.dir("mls"), root.dir("state"));
+    let old_address = run_and_park_one("foreign-user", &old_mls, &old_state);
+
+    let protocol = instance("foreign-user");
+    protocol
+        .initialize_mls_with_file_stores(mls.clone(), state.clone(), KEY.to_vec())
+        .expect("the new identity over a fresh state root");
+    let address = protocol.local_address().expect("address");
+    assert_ne!(address, old_address);
+    drop(protocol);
+
+    let before = snapshot(&old_state);
+    let identity_before = snapshot(&mls);
+    let protocol = instance("foreign-user");
+    let err = protocol
+        .initialize_mls_with_file_stores(mls.clone(), old_state.clone(), KEY.to_vec())
+        .expect_err("state another identity sealed");
+    assert!(
+        matches!(&err, ProtocolError::InvalidConfiguration(m)
+            if m.contains("another identity") && m.contains("fresh directory")),
+        "expected the foreign-state refusal, got {err:?}"
+    );
+    assert!(!protocol.is_mls_initialized());
+    assert_eq!(snapshot(&old_state), before, "no record may be changed");
+    assert_eq!(snapshot(&mls), identity_before);
+
+    // The refusal released both directories: the same instance opens the
+    // pair that belongs together, and the old pair still opens as itself.
+    protocol
+        .initialize_mls_with_file_stores(mls, state, KEY.to_vec())
+        .expect("the identity with its own state");
+    assert_eq!(protocol.local_address(), Some(address));
+    let old = instance("foreign-user");
+    old.initialize_mls_with_file_stores(old_mls, old_state, KEY.to_vec())
+        .expect("the old pair");
+    assert_eq!(old.local_address(), Some(old_address));
+}
+
+/// A first write that failed (a full disk, a crash) leaves a type directory
+/// with no record in it. That is not an identity, and taking it for one
+/// would let kept state through to be deleted.
+#[test]
+fn a_type_directory_with_no_record_is_not_an_identity() {
+    let root = TempRoot::new("empty-type");
+    let (mls, state) = (root.dir("mls"), root.dir("state"));
+    let namespace = offline_protocol::account_storage_namespace("test-app", "empty-type-user");
+    let account = seed_state(&state, &namespace);
+    let type_directory = std::path::Path::new(&mls)
+        .join(&namespace)
+        .join(format!("c_{}", "0".repeat(64)));
+    std::fs::create_dir_all(&type_directory).expect("type directory");
+    std::fs::write(type_directory.join(".write-crashed"), b"half").expect("temporary");
+
+    let protocol = instance("empty-type-user");
+    let err = protocol
+        .initialize_mls_with_file_stores(mls, state, KEY.to_vec())
+        .expect_err("kept state with no identity");
+    assert!(
+        matches!(&err, ProtocolError::InvalidConfiguration(m) if m.contains("fresh directory")),
+        "expected the kept-state refusal, got {err:?}"
+    );
+    assert!(!protocol.is_mls_initialized());
+    assert!(account.join("t_records").join("k_entry").exists());
+}
+
+/// Two spellings that do not compare equal can still be one directory: a
+/// volume that folds case makes `one` and `ONE` the same place, and nothing
+/// can know that before either exists. Asked again once both do. On a volume
+/// that keeps them apart, they are two roots and open as two.
+#[test]
+fn roots_that_are_one_directory_on_this_volume_are_refused() {
+    let root = TempRoot::new("folded");
+    std::fs::create_dir(root.dir("probe")).expect("probe");
+    let folds_case = std::path::Path::new(&root.dir("PROBE")).exists();
+    std::fs::remove_dir(root.dir("probe")).expect("remove probe");
+
+    let (lower, upper) = (root.dir("one"), root.dir("ONE"));
+    let protocol = instance("folded-user");
+    let outcome = protocol.initialize_mls_with_file_stores(lower, upper, KEY.to_vec());
+    if !folds_case {
+        outcome.expect("two directories on a volume that keeps case");
+        assert_eq!(entries(&root.dir("")).len(), 2);
+        return;
+    }
+    let err = outcome.expect_err("one directory under two spellings");
+    assert!(
+        matches!(&err, ProtocolError::InvalidArgument(m)
+            if m.contains("different directories") && m.contains("on this volume")),
+        "expected InvalidArgument, got {err:?}"
+    );
+    assert!(!protocol.is_mls_initialized());
+    let namespace = offline_protocol::account_storage_namespace("test-app", "folded-user");
+    assert!(
+        !offline_protocol::SealedFileMlsStorage::holds_records(root.dir("one"), &namespace)
+            .expect("probe"),
+        "no identity may be minted in a directory the installation removes"
+    );
+
+    // Nesting is found the same way, through a parent spelled two ways.
+    let err = protocol
+        .initialize_mls_with_file_stores(root.dir("nest/mls"), root.dir("NEST"), KEY.to_vec())
+        .expect_err("one root inside the other under two spellings");
+    assert!(
+        matches!(&err, ProtocolError::InvalidArgument(m) if m.contains("on this volume")),
+        "expected InvalidArgument, got {err:?}"
+    );
+
+    // What the refusal left in the shared directory (two lock files and the
+    // MLS key check) is not protocol state: a corrected pair that still
+    // names that directory as its state root is not told it holds any.
+    assert!(!offline_protocol::FileProtocolStateStorage::holds_records(
+        root.dir("ONE"),
+        &namespace
+    )
+    .expect("probe"),);
+    let corrected = instance("folded-user");
+    corrected
+        .initialize_mls_with_file_stores(root.dir("identity"), root.dir("ONE"), KEY.to_vec())
+        .expect("a fresh mls_root beside the directory the refusal left");
+    drop(corrected);
+
+    // Both directories were released, so the corrected roots open.
+    protocol
+        .initialize_mls_with_file_stores(root.dir("keys"), root.dir("two"), KEY.to_vec())
+        .expect("two directories");
+}
+
+/// The point of `close_file_stores`: the directories are free while the
+/// instance that opened them still exists. A host runtime frees an object
+/// when it decides to, and a second instance must not have to wait for that.
+/// The closed instance is refused from then on rather than left to run over
+/// stores that fail every write.
+#[test]
+fn close_file_stores_releases_the_directories_while_the_instance_lives() {
+    let root = TempRoot::new("close");
+    let (mls, state) = (root.dir("mls"), root.dir("state"));
+    let first = instance("close-user");
+    first
+        .initialize_mls_with_file_stores(mls.clone(), state.clone(), KEY.to_vec())
+        .expect("first init");
+    let address = first.local_address().expect("address");
+    first.start().expect("start");
+    first.stop().expect("stop");
+
+    first.close_file_stores().expect("close");
+    first
+        .close_file_stores()
+        .expect("closing twice is closing once");
+
+    let second = instance("close-user");
+    second
+        .initialize_mls_with_file_stores(mls.clone(), state.clone(), KEY.to_vec())
+        .expect("the directories are free while `first` is still alive");
+    assert_eq!(second.local_address(), Some(address));
+    second.start().expect("the second instance runs");
+
+    for (entry, err) in [
+        ("start", first.start().expect_err("start after close")),
+        (
+            "initialize_mls_with_file_stores",
+            first
+                .initialize_mls_with_file_stores(mls, state, KEY.to_vec())
+                .expect_err("init after close"),
+        ),
+    ] {
+        assert!(
+            matches!(&err, ProtocolError::InvalidState(m)
+                if m.starts_with(entry) && m.contains("close_file_stores")),
+            "{entry}: expected InvalidState naming the call, got {err:?}"
+        );
+    }
+    assert_eq!(first.get_state(), ProtocolState::Stopped);
+    // Anything that would write is an error, never a panic, and never a
+    // write into the directory the second instance now holds.
+    assert!(first.mls_generate_key_package().is_err());
+}
+
+/// A running engine writes to its stores, so they are not released under it.
+#[test]
+fn close_file_stores_is_refused_until_the_protocol_is_stopped() {
+    let root = TempRoot::new("close-running");
+    let (mls, state) = (root.dir("mls"), root.dir("state"));
+    let protocol = instance("close-running-user");
+    protocol
+        .initialize_mls_with_file_stores(mls.clone(), state.clone(), KEY.to_vec())
+        .expect("init");
+    protocol.start().expect("start");
+
+    let err = protocol.close_file_stores().expect_err("while running");
+    assert!(
+        matches!(&err, ProtocolError::InvalidState(m)
+            if m.starts_with("close_file_stores must be called after stop()")),
+        "got {err:?}"
+    );
+    let other = instance("close-running-user");
+    assert!(
+        matches!(
+            other.initialize_mls_with_file_stores(mls.clone(), state.clone(), KEY.to_vec()),
+            Err(ProtocolError::InvalidState(_))
+        ),
+        "a refused close releases nothing"
+    );
+
+    protocol.stop().expect("stop");
+    protocol.close_file_stores().expect("close after stop");
+    other
+        .initialize_mls_with_file_stores(mls, state, KEY.to_vec())
+        .expect("released");
+}
+
+/// An instance that never opened the file stores has nothing to release, and
+/// must stay usable: a binding may call this on every teardown without
+/// knowing which stores the application chose.
+#[test]
+fn close_file_stores_is_a_no_op_without_file_stores() {
+    let root = TempRoot::new("close-unused");
+    let protocol = instance("close-unused-user");
+    protocol.close_file_stores().expect("nothing to close");
+    protocol.start().expect("start");
+    protocol
+        .close_file_stores()
+        .expect("still nothing to close, running or not");
+    protocol.stop().expect("stop");
+
+    // A refused open leaves the instance as it was, not closed.
+    let err = protocol
+        .initialize_mls_with_file_stores(root.dir("one"), root.dir("one"), KEY.to_vec())
+        .expect_err("overlapping roots");
+    assert!(matches!(err, ProtocolError::InvalidArgument(_)));
+    protocol.close_file_stores().expect("nothing was opened");
+    protocol
+        .initialize_mls_with_file_stores(root.dir("mls"), root.dir("state"), KEY.to_vec())
+        .expect("usable after a no-op close");
+    protocol.start().expect("start");
+}
+
+/// The uploader keeps its queue in the protocol-state store, so the pipe is
+/// stopped, after its final flush, before that store closes. With the ingest
+/// unreachable the final flush has nowhere to send its batch but the queue:
+/// closing the store first would refuse that write, and the batch would be
+/// gone. A refused close leaves telemetry running, and a closed instance
+/// cannot start a new pipe over the store it gave up.
+#[test]
+fn close_file_stores_ends_telemetry_before_the_stores_go() {
+    let (client, _guard) = capture_uploads();
+    client.set_status(0);
+    let root = TempRoot::new("close-telemetry");
+    let (mls, state) = (root.dir("mls"), root.dir("state"));
+    let protocol = instance("close-telemetry-user");
+    protocol
+        .initialize_mls_with_file_stores(mls, state.clone(), KEY.to_vec())
+        .expect("init");
+    protocol
+        .enable_telemetry(telemetry_config(), AppState::Active)
+        .expect("telemetry enables");
+    protocol.start().expect("start");
+
+    protocol.close_file_stores().expect_err("while running");
+    assert!(
+        protocol.telemetry_stats().is_some(),
+        "a refused close changes nothing"
+    );
+
+    // Something for the final flush to carry. The configured interval is an
+    // hour, so what is collected from here on is still in the buffer when
+    // the close begins.
+    let peer = {
+        let root = TempRoot::new("close-telemetry-peer");
+        let peer = instance("close-telemetry-peer");
+        peer.initialize_mls_with_file_stores(root.dir("mls"), root.dir("state"), KEY.to_vec())
+            .expect("peer init");
+        peer.local_address().expect("peer address")
+    };
+    protocol
+        .send_message(peer, "counted".to_string(), MessagePriority::Medium, None)
+        .expect("send");
+    protocol.process().expect("process");
+    let buffered = protocol.telemetry_stats().expect("enabled").buffered;
+    assert!(
+        buffered > 0,
+        "the fixture has to leave events in the buffer"
+    );
+
+    protocol.stop().expect("stop");
+    protocol.close_file_stores().expect("close");
+    assert!(protocol.telemetry_stats().is_none());
+
+    let namespace = offline_protocol::account_storage_namespace("test-app", "close-telemetry-user");
+    let queued = {
+        use offline_protocol::ProtocolStateStorage;
+        offline_protocol::FileProtocolStateStorage::open(&state, &namespace)
+            .expect("the directory is free")
+            .list_keys("telemetry_batch")
+            .expect("list")
+    };
+    assert!(
+        !queued.is_empty(),
+        "the final flush must land in the queue before the store closes"
+    );
+
+    let err = protocol
+        .enable_telemetry(telemetry_config(), AppState::Active)
+        .expect_err("telemetry on a closed instance");
+    assert!(
+        matches!(&err, ProtocolError::InvalidState(m)
+            if m.starts_with("enable_telemetry") && m.contains("close_file_stores")),
+        "got {err:?}"
+    );
+    assert!(protocol.telemetry_stats().is_none());
+    offline_protocol::telemetry::pipe::testing::stop_capturing_uploads();
+}
+
+/// The engine can refuse a pair after both stores opened: here the identity
+/// record is damaged, which the sealed store reports and never repairs. The
+/// instance then holds nothing, so the directories are free at once, while
+/// it is still alive, for whoever comes to look at the damage.
+#[test]
+fn an_engine_that_refuses_the_pair_leaves_the_directories_free() {
+    let root = TempRoot::new("engine-refused");
+    let (mls, state) = (root.dir("mls"), root.dir("state"));
+    let namespace = offline_protocol::account_storage_namespace("test-app", "refused-user");
+    drop({
+        let first = instance("refused-user");
+        first
+            .initialize_mls_with_file_stores(mls.clone(), state.clone(), KEY.to_vec())
+            .expect("first init");
+        first
+    });
+    let mut damaged = 0;
+    for (path, mut bytes) in snapshot(&mls) {
+        let is_record = path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("e_"));
+        if is_record {
+            let last = bytes.len() - 1;
+            bytes[last] ^= 1;
+            std::fs::write(&path, bytes).expect("damage");
+            damaged += 1;
+        }
+    }
+    assert!(damaged > 0, "the first run stored its identity");
+
+    let protocol = instance("refused-user");
+    let err = protocol
+        .initialize_mls_with_file_stores(mls.clone(), state.clone(), KEY.to_vec())
+        .expect_err("a damaged identity");
+    assert!(matches!(err, ProtocolError::MlsError(_)), "got {err:?}");
+    assert!(!protocol.is_mls_initialized());
+
+    let key = offline_protocol::StaticStoreKey::from_slice(&KEY).expect("key");
+    offline_protocol::SealedFileMlsStorage::open(&mls, &namespace, &key)
+        .expect("the MLS directory is free while the instance lives");
+    offline_protocol::FileProtocolStateStorage::open(&state, &namespace)
+        .expect("the state directory is free while the instance lives");
+    protocol
+        .close_file_stores()
+        .expect("nothing is held, so nothing to close");
+    // Had the refused stores stayed recorded, that close would have been a
+    // real one and the instance would now be closed for good.
+    protocol
+        .start()
+        .expect("the instance was refused, it did not give up");
+}
+
+/// The engine can refuse the pair it was offered. The stores are then
+/// released by being closed, with a reference to them still alive, since a
+/// release that waited for the last reference is the failure this exists to
+/// prevent. An instance that holds no stores is left as it is.
+#[test]
+fn stores_the_engine_refused_are_closed_not_left_to_their_last_reference() {
+    let root = TempRoot::new("refused");
+    let (mls, state) = (root.dir("mls"), root.dir("state"));
+    let namespace = offline_protocol::account_storage_namespace("test-app", "refused-pair-user");
+    let key = offline_protocol::StaticStoreKey::from_slice(&KEY).expect("key");
+    let open = || -> Result<FileStores, offline_protocol::FileStoreError> {
+        Ok(FileStores {
+            secure: Arc::new(offline_protocol::SealedFileMlsStorage::open(
+                &mls, &namespace, &key,
+            )?),
+            state: Arc::new(offline_protocol::FileProtocolStateStorage::open(
+                &state, &namespace,
+            )?),
+        })
+    };
+    let holds = |protocol: &OfflineProtocol| {
+        matches!(
+            &*recover_mutex(&protocol.file_stores, "file_stores"),
+            FileStoreState::Open(_)
+        )
+    };
+    let protocol = instance("refused-pair-user");
+    protocol.release_refused_stores();
+    assert!(!holds(&protocol), "nothing held, nothing changed");
+
+    let stores = open().expect("open");
+    let still_referenced = stores.clone();
+    *recover_mutex(&protocol.file_stores, "file_stores") = FileStoreState::Open(stores);
+    assert!(matches!(
+        open(),
+        Err(offline_protocol::FileStoreError::InUse(_))
+    ));
+    protocol.release_refused_stores();
+    assert!(!holds(&protocol));
+    drop(open().expect("the directories are free while a reference lives"));
+    drop(still_referenced);
+
+    // Not closed for good: the instance was refused, it did not give up.
+    protocol
+        .initialize_mls_with_file_stores(mls, state, KEY.to_vec())
+        .expect("a retry on the same instance");
+}
+
+/// Only another identity's state is refused. A damaged record key is let
+/// through: nothing opens that state again, and the engine's regeneration
+/// is what settles the messages lost with it.
+#[test]
+fn only_state_another_identity_sealed_is_refused() {
+    use offline_protocol::SealedState;
+    let directory = std::path::Path::new("/var/lib/example/state/account");
+    let err = refuse_foreign_state(SealedState::Foreign, directory, "/var/lib/example/keys")
+        .expect_err("another identity's state");
+    assert!(
+        matches!(&err, ProtocolError::InvalidConfiguration(m)
+            if m.contains("another identity")
+                && m.contains("fresh directory")
+                && m.contains("/var/lib/example/state/account")
+                && m.contains("/var/lib/example/keys")),
+        "got {err:?}"
+    );
+    for verdict in [
+        SealedState::Empty,
+        SealedState::Opens,
+        SealedState::KeyDamaged,
+    ] {
+        refuse_foreign_state(verdict, directory, "/var/lib/example/keys")
+            .unwrap_or_else(|err| panic!("{verdict:?} was refused: {err:?}"));
+    }
+}
+
+/// End to end: a service whose record key is damaged still starts, as the
+/// same identity. The record key is found by damaging one MLS record at a
+/// time until the probe says so, since its file name is a keyed digest.
+#[test]
+fn a_damaged_record_key_does_not_stop_the_service() {
+    let root = TempRoot::new("damaged-key");
+    let (mls, state) = (root.dir("mls"), root.dir("state"));
+    let address = run_and_park_one("damaged-key-user", &mls, &state);
+    let namespace = offline_protocol::account_storage_namespace("test-app", "damaged-key-user");
+    let key = offline_protocol::StaticStoreKey::from_slice(&KEY).expect("key");
+    let verdict = || {
+        let secure = offline_protocol::SealedFileMlsStorage::open(&mls, &namespace, &key)
+            .expect("open the MLS store");
+        offline_protocol::FileProtocolStateStorage::open(&state, &namespace)
+            .expect("open the state store")
+            .sealed_state(&secure)
+            .expect("verdict")
+    };
+
+    let mut found = false;
+    for (path, bytes) in snapshot(&mls) {
+        let is_record = path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("e_"));
+        if !is_record {
+            continue;
+        }
+        let mut damaged = bytes.clone();
+        let last = damaged.len() - 1;
+        damaged[last] ^= 1;
+        std::fs::write(&path, damaged).expect("damage");
+        if verdict() == offline_protocol::SealedState::KeyDamaged {
+            found = true;
+            break;
+        }
+        std::fs::write(&path, bytes).expect("restore");
+    }
+    assert!(found, "one MLS record is the record key");
+
+    let protocol = instance("damaged-key-user");
+    protocol
+        .initialize_mls_with_file_stores(mls, state, KEY.to_vec())
+        .expect("a damaged record key is the engine's to regenerate");
+    assert_eq!(protocol.local_address(), Some(address));
+    protocol.start().expect("start");
+}
+
+/// A panic inside the engine poisons its lock, and `stop()` cannot take a
+/// poisoned lock, so the protocol never reaches stopped. The directories
+/// must still be releasable, or one panic holds them until the instance is
+/// freed, which is the wait this call exists to end.
+#[test]
+fn a_poisoned_engine_lock_does_not_hold_the_directories() {
+    let root = TempRoot::new("poisoned");
+    let (mls, state) = (root.dir("mls"), root.dir("state"));
+    let protocol = Arc::new(instance("poisoned-user"));
+    protocol
+        .initialize_mls_with_file_stores(mls.clone(), state.clone(), KEY.to_vec())
+        .expect("init");
+    protocol.start().expect("start");
+
+    let panicking = protocol.clone();
+    std::thread::spawn(move || {
+        let _held = panicking.lock_inner().expect("lock");
+        panic!("an engine call panicked (expected by this test)");
+    })
+    .join()
+    .expect_err("the thread panicked");
+    assert!(matches!(
+        protocol.stop(),
+        Err(ProtocolError::LockPoisoned(_))
+    ));
+    assert_eq!(protocol.get_state(), ProtocolState::Running);
+
+    protocol.close_file_stores().expect("close");
+    let next = instance("poisoned-user");
+    next.initialize_mls_with_file_stores(mls, state, KEY.to_vec())
+        .expect("the directories are free");
 }

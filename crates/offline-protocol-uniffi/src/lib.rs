@@ -517,6 +517,43 @@ pub trait ProtocolStateStorageProvider: Send + Sync {
 /// The two stores `initialize_mls` takes: secure, then protocol state.
 type EngineStores = (Arc<dyn CoreMlsStorage>, Arc<dyn CoreProtocolStateStorage>);
 
+/// The built-in file stores one instance opened, by their own types.
+///
+/// The engine holds the same two stores behind its traits, and a trait
+/// object cannot be closed. Releasing a directory must not wait for the
+/// engine, or for whatever host object still refers to it, to be freed.
+#[derive(Clone)]
+struct FileStores {
+    secure: Arc<offline_protocol::SealedFileMlsStorage>,
+    state: Arc<offline_protocol::FileProtocolStateStorage>,
+}
+
+impl FileStores {
+    fn for_engine(&self) -> EngineStores {
+        (self.secure.clone(), self.state.clone())
+    }
+
+    /// Releases both directories. The protocol-state store first: it is the
+    /// one sealed under the other's record key.
+    fn close(&self) {
+        self.state.close();
+        self.secure.close();
+    }
+}
+
+/// Where an instance stands with the built-in file stores.
+#[derive(Default)]
+enum FileStoreState {
+    /// It never opened them: MLS is not initialized, or runs over stores the
+    /// caller supplied.
+    #[default]
+    Unused,
+    Open(FileStores),
+    /// `close_file_stores` released them. The engine still holds the closed
+    /// stores, so this instance cannot run again.
+    Closed,
+}
+
 /// Opens the two built-in file stores for one account.
 ///
 /// Every refusal names what the operator has to change: the error crosses the
@@ -528,7 +565,7 @@ fn open_file_stores(
     app_id: &str,
     profile: &str,
     store_key: &[u8],
-) -> Result<EngineStores, ProtocolError> {
+) -> Result<FileStores, ProtocolError> {
     use offline_protocol::{
         account_storage_namespace, FileProtocolStateStorage, SealedFileMlsStorage, StaticStoreKey,
     };
@@ -559,7 +596,70 @@ fn open_file_stores(
     let secure =
         SealedFileMlsStorage::open(mls_root, &namespace, &key).map_err(file_store_error)?;
     let state = FileProtocolStateStorage::open(state_root, &namespace).map_err(file_store_error)?;
-    Ok((Arc::new(secure), Arc::new(state)))
+
+    // Both roots exist now, so the question asked above by spelling can be
+    // asked of the directories themselves. A volume that folds case or
+    // normalizes names (APFS and NTFS by default) makes one directory of two
+    // spellings that do not compare equal, and no comparison of names that
+    // do not exist yet can know it.
+    if roots_overlap(Path::new(mls_root), Path::new(state_root)) {
+        return Err(ProtocolError::InvalidArgument(format!(
+            "mls_root and state_root must be different directories, neither inside the \
+             other: {mls_root} and {state_root} are spelled apart, and on this volume one \
+             is the other or lies inside it. The stores' directories were created; no \
+             record was written or changed"
+        )));
+    }
+
+    // The engine deletes a sealed record that does not open, as its restore
+    // reaches it. That is right for one damaged record and wrong for a store
+    // sealed under another identity's record key, so it is asked before the
+    // engine gets the pair. The check above cannot see this case: it asks
+    // whether the MLS store holds an identity, not whether it holds the one
+    // that wrote this state.
+    refuse_foreign_state(
+        state.sealed_state(&secure).map_err(file_store_error)?,
+        state.directory(),
+        mls_root,
+    )?;
+    Ok(FileStores {
+        secure: Arc::new(secure),
+        state: Arc::new(state),
+    })
+}
+
+/// Refuses protocol state another identity sealed, and nothing else.
+///
+/// A damaged record key is let through. Nothing opens that state again,
+/// whoever sealed it, so a refusal would save no record, and it would cost
+/// the settlement: the engine generates a new key and settles what its
+/// restore reads as failed, which is how the application learns which
+/// messages were lost. An operator sent to a fresh state root would leave
+/// those message ids unsettled for good.
+fn refuse_foreign_state(
+    verdict: offline_protocol::SealedState,
+    state_directory: &std::path::Path,
+    mls_root: &str,
+) -> Result<(), ProtocolError> {
+    use offline_protocol::SealedState;
+    match verdict {
+        SealedState::Foreign => Err(ProtocolError::InvalidConfiguration(format!(
+            "{} holds protocol state sealed under a record key the identity in {mls_root} \
+             does not hold: it is another identity's, and starting would delete the \
+             queued and parked messages in it. Point state_root at a fresh directory, \
+             or use the mls_root that wrote this state. No record was changed",
+            state_directory.display()
+        ))),
+        SealedState::KeyDamaged => {
+            tracing::warn!(
+                state = %state_directory.display(),
+                "the protocol-state record key is damaged: the sealed state beside it \
+                 cannot be opened again, and the engine will settle it as failed"
+            );
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Whether one root is the other, or lies inside it.
@@ -625,12 +725,17 @@ fn resolved_root(path: &std::path::Path) -> std::path::PathBuf {
 /// record key cannot unseal the old records: the first restore deletes the
 /// parked messages it cannot read, and going back does not bring them back.
 ///
-/// The MLS side is asked for records, not for its directory: an attempt
-/// refused at the state root has already created the MLS directory, its
-/// lock and its key check, and an existence test would let the retry
-/// through. A directory that cannot be read on either side is refused too,
-/// never taken for empty. Nothing is created before this check, so a
-/// refusal changes nothing.
+/// The MLS side is asked for record files, not for its directory or for a
+/// type directory: an attempt refused at the state root has already created
+/// the MLS directory, its lock and its key check, a first write that failed
+/// leaves a type directory with nothing in it, and an existence test would
+/// let the retry through. A directory that cannot be read on either side is
+/// refused too, never taken for empty. Nothing is created before this
+/// check, so a refusal changes nothing.
+///
+/// What this cannot see is an identity that is in place but did not write
+/// the state. That is asked once both stores are open: see
+/// [`open_file_stores`].
 fn refuse_state_without_identity(
     mls_root: &str,
     state_root: &str,
@@ -661,12 +766,13 @@ fn file_store_error(err: offline_protocol::FileStoreError) -> ProtocolError {
     match err {
         // Another store holds the directory: a second instance, or a second
         // process. Nothing about the arguments is wrong.
-        E::InUse(_) => ProtocolError::InvalidState(err.to_string()),
+        E::InUse(_) | E::Closed(_) => ProtocolError::InvalidState(err.to_string()),
         // A wrong key, a check that cannot prove the key, a directory that
         // cannot be created: each is the operator's configuration to fix.
         E::WrongStoreKey(_)
         | E::KeyCheckUnverifiable(_)
         | E::Io { .. }
+        | E::RecordKeyUnreadable(_)
         | E::StoreKey(_)
         | E::InvalidNamespace => ProtocolError::InvalidConfiguration(err.to_string()),
         _ => ProtocolError::Other(err.to_string()),
@@ -2596,6 +2702,11 @@ pub struct OfflineProtocol {
     /// `event_callback` above, and for the same reason: state that must
     /// outlive anything owned by `inner` lives on this struct.
     transport_callbacks: Arc<RwLock<TransportCallbacks>>,
+    /// The built-in file stores this instance opened, so that
+    /// `close_file_stores` can release their directories while the engine,
+    /// and any host object that refers to this instance, still exists.
+    /// Taken after [`Self::inner`], never before it.
+    file_stores: Mutex<FileStoreState>,
 }
 
 /// The transport callbacks an app registered, kept so they can be re-applied
@@ -2769,6 +2880,7 @@ impl OfflineProtocol {
                 nostr: nostr_enabled,
             },
             transport_callbacks: Arc::new(RwLock::new(TransportCallbacks::default())),
+            file_stores: Mutex::new(FileStoreState::default()),
         })
     }
 
@@ -3076,6 +3188,7 @@ impl OfflineProtocol {
     /// Starts the protocol
     pub fn start(&self) -> Result<(), ProtocolError> {
         let mut protocol = self.lock_inner()?;
+        self.refuse_if_file_stores_closed("start")?;
         protocol.start().map_err(ProtocolError::from)?;
         *self.write_state()? = ProtocolState::Running;
 
@@ -3250,6 +3363,11 @@ impl OfflineProtocol {
             ))
         })?;
         let _lifecycle = recover_mutex(&self.telemetry_lifecycle, "telemetry_lifecycle");
+        // Under the lifecycle lock `close_file_stores` holds from before it
+        // stops the pipe until the stores are closed, so an enable cannot
+        // slip a new pipe in between the two: the uploader keeps its queue
+        // in the protocol-state store, and would run over a closed one.
+        self.refuse_if_file_stores_closed("enable_telemetry")?;
         host_log::install_host_logger();
         // A replaced pipe is stopped outside the engine lock, like disable.
         let previous = {
@@ -3287,12 +3405,18 @@ impl OfflineProtocol {
             let mut protocol = self.lock_inner()?;
             protocol.detach_telemetry_pipe()
         };
+        self.stop_detached_pipe(pipe);
+        Ok(())
+    }
+
+    /// The part of disabling telemetry that runs outside the engine lock.
+    /// The caller holds `telemetry_lifecycle`.
+    fn stop_detached_pipe(&self, pipe: Option<Arc<CoreTelemetryPipe>>) {
         *recover_rwlock_write(&self.telemetry_pipe, "telemetry_pipe") = None;
         host_log::set_pipe_debug(false);
         if let Some(pipe) = pipe {
             pipe.stop(offline_protocol::telemetry::pipe::FINAL_FLUSH_BUDGET);
         }
-        Ok(())
     }
 
     fn telemetry_pipe(&self) -> Option<Arc<CoreTelemetryPipe>> {
@@ -6257,15 +6381,21 @@ impl OfflineProtocol {
         secure_storage: Box<dyn MlsStorageProvider>,
         protocol_state_storage: Box<dyn ProtocolStateStorageProvider>,
     ) -> Result<(), ProtocolError> {
-        self.initialize_mls_over("initialize_mls", || {
-            let secure: Arc<dyn CoreMlsStorage> = Arc::new(MlsStorageWrapper {
-                provider: Arc::from(secure_storage),
-            });
-            let state: Arc<dyn CoreProtocolStateStorage> = Arc::new(ProtocolStateStorageWrapper {
-                provider: Arc::from(protocol_state_storage),
-            });
-            Ok((secure, state))
-        })
+        self.initialize_mls_over(
+            "initialize_mls",
+            || {
+                let secure: Arc<dyn CoreMlsStorage> = Arc::new(MlsStorageWrapper {
+                    provider: Arc::from(secure_storage),
+                });
+                let state: Arc<dyn CoreProtocolStateStorage> =
+                    Arc::new(ProtocolStateStorageWrapper {
+                        provider: Arc::from(protocol_state_storage),
+                    });
+                Ok((secure, state))
+            },
+            // The caller's stores are the caller's to release.
+            || {},
+        )
     }
 
     /// Initialize MLS over the SDK's built-in file stores, for a host with a
@@ -6296,9 +6426,121 @@ impl OfflineProtocol {
             let config = protocol.config();
             (config.app_id.clone(), config.profile.clone())
         };
-        self.initialize_mls_over("initialize_mls_with_file_stores", || {
-            open_file_stores(&mls_root, &state_root, &app_id, &profile, &store_key)
-        })
+        self.initialize_mls_over(
+            "initialize_mls_with_file_stores",
+            || {
+                let stores =
+                    open_file_stores(&mls_root, &state_root, &app_id, &profile, &store_key)?;
+                // Recorded here, under the engine lock `close_file_stores`
+                // takes, so there is no moment at which the stores are open
+                // and a close would find nothing to release.
+                *recover_mutex(&self.file_stores, "file_stores") =
+                    FileStoreState::Open(stores.clone());
+                Ok(stores.for_engine())
+            },
+            || self.release_refused_stores(),
+        )
+    }
+
+    /// Releases the stores the engine was offered and refused.
+    ///
+    /// Closed, not merely forgotten: MLS is not initialized, nothing will
+    /// use them, and a retry must find the directories free whatever still
+    /// holds a reference from the failed attempt. Runs under the engine lock
+    /// the refusal was given under, so nothing else has initialized MLS in
+    /// between and the stores recorded are the ones just refused.
+    fn release_refused_stores(&self) {
+        let mut held = recover_mutex(&self.file_stores, "file_stores");
+        if let FileStoreState::Open(stores) = &*held {
+            stores.close();
+            *held = FileStoreState::Unused;
+        }
+    }
+
+    /// Releases the built-in file stores this instance opened: both
+    /// directory locks, at once, while the instance still exists.
+    ///
+    /// The stores would also be released when the instance is freed, and
+    /// that is the problem this solves. When a host object is freed is the
+    /// host runtime's decision: a reference the application kept, a callback
+    /// cycle, an exception whose traceback still names the object. Until
+    /// then the directories stay locked and every later instance over them
+    /// is refused. After this call they are free, whoever holds what.
+    ///
+    /// Only after `stop()`. The engine keeps the closed stores, so the
+    /// instance cannot run again: `start()` and both `initialize_mls` entry
+    /// points are refused afterwards, and the next run needs a new instance.
+    /// Idempotent, and a no-op on an instance that never opened the file
+    /// stores, which stays usable.
+    ///
+    /// Telemetry is disabled first, as `disable_telemetry` does it: the
+    /// uploader keeps its queue in the protocol-state store, and its final
+    /// flush (up to three seconds) has to land before that store closes.
+    ///
+    /// An engine lock poisoned by a panic does not stop this call. `stop()`
+    /// cannot take that lock again, so the protocol never reaches stopped,
+    /// and no engine call runs behind it either: the instance is treated as
+    /// stopped for good, or its directories could only be released by
+    /// freeing it.
+    pub fn close_file_stores(&self) -> Result<(), ProtocolError> {
+        let engine_lost = self.inner.is_poisoned();
+        // Asked twice. Once before telemetry is touched, so a refused or
+        // needless call changes nothing; once under the lock the stores are
+        // closed under, because the first answer was given up with its lock.
+        let ready = |held: &FileStoreState| -> Result<bool, ProtocolError> {
+            if !matches!(held, FileStoreState::Open(_)) {
+                return Ok(false);
+            }
+            let state = *recover_rwlock_read(&self.state, "state");
+            if state != ProtocolState::Stopped && !engine_lost {
+                return Err(ProtocolError::InvalidState(format!(
+                    "close_file_stores must be called after stop(): the protocol is \
+                     {state:?}, and a running engine would find every write refused"
+                )));
+            }
+            Ok(true)
+        };
+        {
+            let _protocol = self.lock_inner_recovering();
+            if !ready(&recover_mutex(&self.file_stores, "file_stores"))? {
+                return Ok(());
+            }
+        }
+
+        // Held until the stores are closed, so `enable_telemetry` cannot
+        // start a pipe between the one stopped here and the close.
+        let _lifecycle = recover_mutex(&self.telemetry_lifecycle, "telemetry_lifecycle");
+        let pipe = self.lock_inner_recovering().detach_telemetry_pipe();
+        self.stop_detached_pipe(pipe);
+
+        // The engine lock: no engine call is part-way through a write when
+        // the stores go, and none starts one after.
+        let _protocol = self.lock_inner_recovering();
+        let mut held = recover_mutex(&self.file_stores, "file_stores");
+        if !ready(&held)? {
+            return Ok(());
+        }
+        if let FileStoreState::Open(stores) = &*held {
+            stores.close();
+        }
+        *held = FileStoreState::Closed;
+        Ok(())
+    }
+
+    /// Refuses `entry` once `close_file_stores` has run. The engine still
+    /// holds the closed stores, so it would start (or report MLS as already
+    /// initialized) and then fail every write.
+    fn refuse_if_file_stores_closed(&self, entry: &str) -> Result<(), ProtocolError> {
+        if matches!(
+            &*recover_mutex(&self.file_stores, "file_stores"),
+            FileStoreState::Closed
+        ) {
+            return Err(ProtocolError::InvalidState(format!(
+                "{entry} was called after close_file_stores(): this instance gave up its \
+                 stores and cannot run again, create a new one"
+            )));
+        }
+        Ok(())
     }
 
     /// The one body behind both `initialize_mls` entry points. `open` runs
@@ -6306,17 +6548,23 @@ impl OfflineProtocol {
     /// and the before-`start()` check, under the engine lock.
     ///
     /// `entry` names the public method, so a refusal names the call the
-    /// caller actually made.
+    /// caller actually made. `refused` runs when the engine refuses the
+    /// stores `open` returned, before the lock is given up.
     fn initialize_mls_over(
         &self,
         entry: &str,
         open: impl FnOnce() -> Result<EngineStores, ProtocolError>,
+        refused: impl FnOnce(),
     ) -> Result<(), ProtocolError> {
         // Single-authority lifecycle:
         // - CoreProtocol owns the only MlsManager instance for this runtime.
         // - UniFFI manual MLS APIs must route through that owner.
         // - Repeated calls are idempotent and never replace the existing manager.
         let mut protocol = self.lock_inner()?;
+        // Before the idempotence check: MLS is still "initialized" on an
+        // instance that closed its stores, and answering `Ok` would tell the
+        // caller it has working stores.
+        self.refuse_if_file_stores_closed(entry)?;
         if protocol.is_mls_initialized() {
             return Ok(());
         }
@@ -6342,9 +6590,13 @@ impl OfflineProtocol {
         }
 
         let (secure_storage, protocol_state_storage) = open()?;
-        protocol
-            .initialize_mls(secure_storage, protocol_state_storage)
-            .map_err(|e| ProtocolError::MlsError(e.to_string()))?;
+        if let Err(err) = protocol.initialize_mls(secure_storage, protocol_state_storage) {
+            // Told here, under the lock, and only for this failure: a step
+            // that fails further down fails after the engine took the
+            // stores, and MLS runs over them.
+            refused();
+            return Err(ProtocolError::MlsError(err.to_string()));
+        }
 
         // The address exists only now, so this is the first point the
         // transports can carry it. See `rebuild_transports_for_identity`.
