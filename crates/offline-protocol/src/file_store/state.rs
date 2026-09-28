@@ -98,6 +98,18 @@ impl FileProtocolStateStorage {
         &self.directory
     }
 
+    /// Whether `<root>/<namespace>/` holds protocol state, without opening,
+    /// creating or locking anything.
+    ///
+    /// Anything but the lock file counts: a lock file is all an open that
+    /// wrote nothing leaves, and every other entry is something a run (of
+    /// this store or of a binding's provider, which write the same format)
+    /// put there. A directory that cannot be read is an
+    /// [`FileStoreError::Io`], never "no state".
+    pub fn holds_records(root: impl AsRef<Path>, namespace: &str) -> Result<bool, FileStoreError> {
+        super::account_holds(root.as_ref(), namespace, |name| !name.ends_with(".lock"))
+    }
+
     fn type_directory(&self, key_type: &str) -> PathBuf {
         self.directory.join(type_directory_name(key_type))
     }
@@ -205,6 +217,25 @@ mod tests {
 
     fn open(root: &TempRoot) -> FileProtocolStateStorage {
         FileProtocolStateStorage::open(root.path(), &namespace()).expect("open")
+    }
+
+    /// A lock file is all an open that wrote nothing leaves; anything else
+    /// is state. The probe creates nothing.
+    #[test]
+    fn holds_records_ignores_only_the_lock_file() {
+        let root = TempRoot::new("state-holds");
+        let probe = || FileProtocolStateStorage::holds_records(root.path(), &namespace());
+        assert!(!probe().expect("absent"));
+        assert!(
+            !root.path().join(namespace()).exists(),
+            "the probe creates nothing"
+        );
+        let store = open(&root);
+        assert!(!probe().expect("lock file only"));
+        store
+            .store("lamport_clock", "current", b"1")
+            .expect("store");
+        assert!(probe().expect("a record"));
     }
 
     #[test]

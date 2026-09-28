@@ -169,6 +169,38 @@ fn account_directory(root: &std::path::Path, namespace: &str) -> Result<PathBuf,
     Ok(directory)
 }
 
+/// Whether the account directory `<root>/<namespace>/` holds an entry that
+/// `counts` accepts, without creating, locking or changing anything.
+///
+/// A directory that is not there holds nothing. One that cannot be read is
+/// an error, never "empty": a caller deciding whether it may start a new
+/// identity over it must not take a permission error for a fresh install.
+fn account_holds(
+    root: &std::path::Path,
+    namespace: &str,
+    counts: impl Fn(&str) -> bool,
+) -> Result<bool, FileStoreError> {
+    if !is_account_storage_namespace(namespace) {
+        return Err(FileStoreError::InvalidNamespace);
+    }
+    let directory = root.join(namespace);
+    let unusable = |source: std::io::Error| FileStoreError::Io {
+        path: directory.clone(),
+        source,
+    };
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(unusable(err)),
+    };
+    for entry in entries {
+        if counts(&entry.map_err(unusable)?.file_name().to_string_lossy()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Takes the store's exclusive lock on `directory`.
 fn lock_directory(
     directory: &std::path::Path,

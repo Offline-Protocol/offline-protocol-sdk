@@ -162,6 +162,20 @@ impl SealedFileMlsStorage {
         &self.directory
     }
 
+    /// Whether `<root>/<namespace>/` holds MLS records, without opening,
+    /// creating or locking anything.
+    ///
+    /// Records, not the directory: an open refused after the account
+    /// directory was made (a wrong key, a protocol-state root that could not
+    /// be created) leaves the directory, its lock file and its key check,
+    /// and no identity. A directory that cannot be read is an
+    /// [`FileStoreError::Io`], never "no records".
+    pub fn holds_records(root: impl AsRef<Path>, namespace: &str) -> Result<bool, FileStoreError> {
+        super::account_holds(root.as_ref(), namespace, |name| {
+            name.starts_with(TYPE_PREFIX)
+        })
+    }
+
     fn keyed_name(&self, prefix: &str, parts: &[&[u8]]) -> String {
         // Every part but the last is length-prefixed, so no two different
         // (type, id) pairs feed the MAC the same bytes.
@@ -498,6 +512,28 @@ mod tests {
                 (p, bytes)
             })
             .collect()
+    }
+
+    /// An open leaves a lock file and a key check and no record, so the
+    /// directory existing says nothing about an identity. Only a stored
+    /// record counts, and the probe itself creates nothing.
+    #[test]
+    fn holds_records_counts_records_not_the_directory() {
+        let root = TempRoot::new("mls-holds");
+        let probe = || SealedFileMlsStorage::holds_records(root.path(), &namespace());
+        assert!(!probe().expect("absent"));
+        assert!(
+            files_under(root.path()).is_empty(),
+            "the probe creates nothing"
+        );
+        let store = open(&root, 1);
+        assert!(!probe().expect("lock and key check only"));
+        store.store("identity", "self", b"key").expect("store");
+        assert!(probe().expect("a record"));
+        assert!(matches!(
+            SealedFileMlsStorage::holds_records(root.path(), "../escape"),
+            Err(FileStoreError::InvalidNamespace)
+        ));
     }
 
     #[test]
