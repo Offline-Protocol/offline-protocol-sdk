@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import gc
+import time
 import weakref
 from pathlib import Path
 
@@ -23,7 +24,12 @@ from offline_protocol_sdk.offline_protocol import (
     ProtocolError,
     ReticulumTransportCallback,
 )
-from offline_protocol_sdk.protocol_manager import ProtocolManager, _decode_store_key_text
+from offline_protocol_sdk import protocol_manager as manager_module
+from offline_protocol_sdk.protocol_manager import (
+    ProtocolManager,
+    _decode_store_key_text,
+    _run_here,
+)
 from offline_protocol_sdk.storage_namespace import account_storage_namespace
 
 KEY = bytes(range(1, 33))
@@ -100,25 +106,34 @@ async def test_a_stopped_and_dropped_manager_releases_the_stores(
         await second.stop()
 
 
+@_TRANSPORTS
 @pytest.mark.asyncio
-async def test_consecutive_context_managers_reopen_the_stores(tmp_path: Path):
-    """The `as` name outlives the block, so it has to be dropped between them."""
+async def test_consecutive_context_managers_reopen_the_stores(
+    tmp_path: Path, transports: dict
+):
+    """The `as` name outlives the block, and nothing here drops it: leaving
+    the block closes the stores, so the next block opens them with every
+    earlier manager still alive."""
     roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
-    addresses = []
-    for _ in range(2):
+    managers = []
+    for _ in range(3):
         async with ProtocolManager(
-            _config(wifi_direct_enabled=True), store_key=KEY, **roots
+            _config(**transports), store_key=KEY, **roots
         ) as pm:
-            addresses.append(pm.local_address)
-        del pm
-    assert addresses[0] is not None and addresses[0] == addresses[1]
+            managers.append(pm)
+            assert pm.local_address == managers[0].local_address
+    assert managers[0].local_address is not None
 
 
 class _Service:
     """The usual shape: the owner of a manager handles its events."""
 
-    def __init__(self, **kwargs) -> None:
-        self.pm = ProtocolManager(_config(), event_handler=self.on_event, **kwargs)
+    def __init__(self, config: ProtocolConfig | None = None, **kwargs) -> None:
+        self.pm = ProtocolManager(
+            config if config is not None else _config(),
+            event_handler=self.on_event,
+            **kwargs,
+        )
 
     def on_event(self, event: dict) -> None:
         pass
@@ -167,19 +182,16 @@ async def test_a_start_that_fails_after_the_stores_opened_releases_them(
 async def test_a_stopped_manager_is_freed_without_a_loop_turn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """`stop()` must not leave a caught exception whose traceback holds the
-    manager: it would pin the stores until the caller next yields.
+    """A stopped manager is freed by `del` alone, with nothing in between,
+    even when no hand-off in `stop()` suspends.
 
-    On Python 3.13+ the telemetry hand-off can complete without suspending,
-    so `stop()` finishes in the same task step that cancelled the process
-    loop. That was intermittent; a hand-off that never suspends makes it
-    certain.
+    On Python 3.13+ a hand-off whose worker already finished completes in
+    place, which was intermittent; a hand-off that runs here makes it
+    certain. `stop()` holds no exception whose traceback names the manager,
+    and it takes a loop turn of its own, so nothing the caller's task step
+    holds outlives it.
     """
-
-    async def without_suspending(func, /, *args, **kwargs):
-        return func(*args, **kwargs)
-
-    monkeypatch.setattr(asyncio, "to_thread", without_suspending)
+    monkeypatch.setattr(manager_module, "_hand_off", _run_here)
     roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
     pm = ProtocolManager(_config(), store_key=KEY, **roots)
     await pm.start()
@@ -570,3 +582,445 @@ async def test_overlapping_roots_are_refused(tmp_path: Path, mls: str, state: st
     with pytest.raises(ProtocolError.InvalidArgument, match="different directories"):
         await pm.start()
     assert not any(tmp_path.iterdir()), "a refused start creates nothing"
+
+
+# -- close(): release that does not wait for the interpreter -----------------
+
+
+@pytest.mark.parametrize("holder", ["name", "protocol", "handler", "exception"])
+@_TRANSPORTS
+@pytest.mark.asyncio
+async def test_close_releases_the_stores_whatever_still_holds_the_manager(
+    tmp_path: Path, transports: dict, holder: str
+):
+    """Every way a stopped manager was once kept alive, all held on purpose,
+    with no `del`, no collector pass and no loop turn before the reopen."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    kept: list = []
+    if holder == "handler":
+        service = _Service(_config(**transports), store_key=KEY, **roots)
+        pm = service.pm
+        kept.append(service)
+    else:
+        pm = ProtocolManager(_config(**transports), store_key=KEY, **roots)
+    await pm.start()
+    address = pm.local_address
+    if holder == "protocol":
+        kept.append(pm.protocol)
+    if holder == "exception":
+
+        def fails_with_the_manager_in_its_frame(manager: ProtocolManager) -> None:
+            raise RuntimeError(f"raised beside {type(manager).__name__}")
+
+        try:
+            fails_with_the_manager_in_its_frame(pm)
+        except RuntimeError as err:
+            kept.append(err)
+        assert kept[0].__traceback__.tb_next.tb_frame.f_locals["manager"] is pm
+
+    await pm.close()
+
+    second = ProtocolManager(_config(**transports), store_key=KEY, **roots)
+    await second.start()
+    try:
+        assert second.local_address == address
+        assert kept is not None and pm is not None
+    finally:
+        await second.close()
+
+
+@pytest.mark.asyncio
+async def test_a_closed_manager_cannot_be_started(tmp_path: Path):
+    """The core gave up its stores, so a restart would run an engine that
+    cannot write. Refused by name instead, and closing again is harmless."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = ProtocolManager(_config(), store_key=KEY, **roots)
+    await pm.start()
+    await pm.close()
+    await pm.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        await pm.start()
+    with pytest.raises(RuntimeError, match="closed"):
+        async with pm:
+            pass
+    with pytest.raises(ProtocolError.InvalidState, match="close_file_stores"):
+        pm.protocol.start()
+
+
+@pytest.mark.asyncio
+async def test_close_before_start_is_harmless(tmp_path: Path):
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = ProtocolManager(_config(), store_key=KEY, **roots)
+    await pm.close()
+    assert not any(tmp_path.iterdir()), "nothing was opened, so nothing is created"
+    assert await _run_once(store_key=KEY, **roots) is not None
+
+
+@pytest.mark.asyncio
+async def test_close_finishes_a_stop_cancelled_inside_a_transport(tmp_path: Path):
+    """A shutdown deadline, then `close()`: the teardown is finished and the
+    directories are free, in the same task step that caught the timeout."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = await _listening_peer_stream(roots)
+    address = pm.local_address
+    close = pm.peer_stream._close_everything
+
+    async def a_peer_that_does_not_let_go() -> None:
+        await asyncio.sleep(30)
+        await close()
+
+    pm.peer_stream._close_everything = a_peer_that_does_not_let_go
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(pm.close(), 0.1)
+    pm.peer_stream._close_everything = close
+
+    await pm.close()
+    assert pm.peer_stream.state.value == "stopped"
+
+    second = ProtocolManager(_config(), store_key=KEY, **roots)
+    await second.start()
+    try:
+        assert second.local_address == address
+    finally:
+        await second.close()
+
+
+@pytest.mark.asyncio
+async def test_close_releases_the_stores_after_the_engine_refused_to_start(
+    tmp_path: Path,
+):
+    """The stores are open by the time the engine starts. A manager whose
+    engine refused never ran, and `close()` still has to give them up."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = ProtocolManager(_config(ble_enabled=True), store_key=KEY, **roots)
+    real_start = pm._protocol.start
+
+    def refuse() -> None:
+        raise RuntimeError("engine start refused")
+
+    pm._protocol.start = refuse
+    with pytest.raises(RuntimeError, match="engine start refused"):
+        await pm.start()
+    pm._protocol.start = real_start
+    assert pm.protocol.is_mls_initialized()
+
+    await pm.close()
+    assert await _run_once(store_key=KEY, **roots) is not None
+    assert pm is not None
+
+
+@pytest.mark.asyncio
+async def test_close_reports_an_engine_that_would_not_stop(tmp_path: Path):
+    """A running engine writes to its stores, so they are not released under
+    it. The refusal is raised, nothing is released, and the call can be
+    repeated once the engine stops."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = ProtocolManager(_config(), store_key=KEY, **roots)
+    await pm.start()
+    real_stop = pm._protocol.stop
+
+    def refuse() -> None:
+        raise RuntimeError("engine stop refused")
+
+    pm._protocol.stop = refuse
+    with pytest.raises(ProtocolError.InvalidState, match="after stop"):
+        await pm.close()
+    assert not pm._closed, "a manager whose stores were not released is not closed"
+    other = ProtocolManager(_config(), store_key=KEY, **roots)
+    with pytest.raises(ProtocolError.InvalidState, match="already open"):
+        await other.start()
+
+    pm._protocol.stop = real_stop
+    await pm.close()
+    await other.start()
+    await other.close()
+
+
+@pytest.mark.asyncio
+async def test_a_keyring_manager_is_stopped_by_the_block_and_can_be_entered_again(
+    tmp_path: Path, in_memory_storage
+):
+    """Only the file stores need closing, so every other manager keeps the
+    exit it always had. `close()` is still final for it."""
+    pm = ProtocolManager(
+        _config(), storage=in_memory_storage, state_root=tmp_path / "state"
+    )
+    async with pm:
+        address = pm.local_address
+    async with pm:
+        assert pm.local_address == address
+
+    await pm.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        await pm.start()
+
+
+# -- stop() always yields -----------------------------------------------------
+
+
+@pytest.mark.parametrize("retries_with", ["stop", "close"])
+@pytest.mark.asyncio
+async def test_a_retry_that_never_suspends_still_frees_the_manager(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retries_with: str
+):
+    """A caller retrying after a cancelled `stop()` is inside the task step
+    that threw the CancelledError, and that step holds the exception, whose
+    traceback holds the manager, until the task next suspends. On Python
+    3.13+ the telemetry hand-off can finish in place, so nothing in the retry
+    suspended and the manager outlived `del`: the next manager was refused
+    its directories about one run in fifty. A hand-off that never suspends
+    makes that certain, on every Python."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = await _listening_peer_stream(roots)
+    address = pm.local_address
+    close = pm.peer_stream._close_everything
+
+    async def a_peer_that_does_not_let_go() -> None:
+        await asyncio.sleep(30)
+        await close()
+
+    pm.peer_stream._close_everything = a_peer_that_does_not_let_go
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(pm.stop(), 0.1)
+    del pm.peer_stream._close_everything, close, a_peer_that_does_not_let_go
+
+    # A context of its own: `undo()` on the fixture would also take back
+    # the stub that keeps the suite off the real keychain.
+    with monkeypatch.context() as patch:
+        patch.setattr(manager_module, "_hand_off", _run_here)
+        await getattr(pm, retries_with)()
+
+    manager = weakref.ref(pm)
+    del pm
+    assert manager() is None, "the retry must not leave the manager pinned"
+    assert await _run_once(store_key=KEY, **roots) == address
+
+
+@pytest.mark.asyncio
+async def test_no_tick_runs_after_stop_was_called(tmp_path: Path, in_memory_storage):
+    """The caller is woken in the loop iteration in which the process loop's
+    timer fires, as any caller woken by a timer or by I/O can be. The process
+    loop is cancelled before `stop()` first suspends, so it does not run once
+    more, and deliver one more message, to a caller that has started tearing
+    its own side down."""
+    pm = ProtocolManager(
+        _config(), storage=in_memory_storage, state_root=tmp_path / "state"
+    )
+    await pm.start()
+    await asyncio.sleep(0)
+    ticks_after_stop: list[bool] = []
+    stop_called = False
+    real = pm._protocol.process
+
+    def counting() -> None:
+        ticks_after_stop.append(stop_called)
+        real()
+
+    pm._protocol.process = counting
+    time.sleep(0.12)  # the process loop's 100 ms timer is now overdue
+    loop = asyncio.get_running_loop()
+    woken = loop.create_future()
+    loop.call_soon(woken.set_result, None)
+    await woken
+    stop_called = True
+    await pm.stop()
+    del pm._protocol.process
+
+    assert not any(ticks_after_stop)
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_while_stop_waits_for_the_process_loop_is_the_callers(
+    tmp_path: Path,
+):
+    """`stop()` cancels the process loop and waits for it. A cancel that
+    arrives during that wait is a shutdown deadline, and must reach the
+    caller: awaiting the cancelled task instead would raise for both, and a
+    handler that swallowed the task's cancel would swallow the deadline."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = ProtocolManager(_config(), store_key=KEY, **roots)
+    await pm.start()
+    pm._process_task.cancel()
+    await asyncio.wait({pm._process_task})
+
+    async def slow_to_finish() -> None:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.3)
+
+    pm._process_task = asyncio.ensure_future(slow_to_finish())
+    await asyncio.sleep(0)
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(pm.stop(), 0.05)
+    await pm.close()
+
+
+@pytest.mark.asyncio
+async def test_a_block_whose_entry_failed_releases_the_stores(tmp_path: Path):
+    """`__aexit__` does not run for an entry that failed, and the inline
+    form leaves no name to close. The stores are open by the time the engine
+    starts, so a start refused there has to give them up itself: here the
+    exception is kept, and the manager with it, and the next block opens."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = ProtocolManager(_config(ble_enabled=True), store_key=KEY, **roots)
+
+    def refuse() -> None:
+        raise RuntimeError("engine start refused")
+
+    pm._protocol.start = refuse
+    kept = None
+    try:
+        async with pm:
+            pytest.fail("the block must not be entered")
+    except RuntimeError as err:
+        kept = err
+        async with ProtocolManager(_config(), store_key=KEY, **roots) as second:
+            assert second.local_address is not None
+    assert kept is not None and pm._closed
+
+
+@pytest.mark.asyncio
+async def test_a_close_cancelled_while_the_core_releases_still_closes(tmp_path: Path):
+    """A cancel does not stop the core: the stores are released a moment
+    later whether or not anyone waits. The manager has to end up closed to
+    match, or it reports itself startable over stores it no longer has."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = ProtocolManager(_config(), store_key=KEY, **roots)
+    await pm.start()
+    real = pm._protocol.close_file_stores
+
+    def slow_release() -> None:
+        time.sleep(0.3)
+        real()
+
+    pm._protocol.close_file_stores = slow_release
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(pm.close(), 0.05)
+    assert not pm._closed, "not closed before the core has released the stores"
+
+    await asyncio.sleep(0.5)
+    del pm._protocol.close_file_stores
+    assert pm._closed
+    with pytest.raises(RuntimeError, match="closed"):
+        await pm.start()
+    assert await _run_once(store_key=KEY, **roots) is not None
+
+
+@pytest.mark.asyncio
+async def test_close_releases_the_stores_off_the_loop(tmp_path: Path):
+    """The core's release can block for the uploader's final flush, up to
+    three seconds. Everything else on the loop keeps running meanwhile."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = ProtocolManager(_config(), store_key=KEY, **roots)
+    await pm.start()
+    real = pm._protocol.close_file_stores
+
+    def slow_release() -> None:
+        time.sleep(0.3)
+        real()
+
+    pm._protocol.close_file_stores = slow_release
+    turns = 0
+
+    async def something_else() -> None:
+        nonlocal turns
+        while True:
+            await asyncio.sleep(0.02)
+            turns += 1
+
+    other = asyncio.ensure_future(something_else())
+    await pm.stop()
+    before = turns
+    await pm.close()
+    other.cancel()
+    await asyncio.wait({other})
+    del pm._protocol.close_file_stores
+
+    assert turns - before >= 5, "the loop was blocked while the core released"
+
+
+@pytest.mark.asyncio
+async def test_close_works_on_a_loop_whose_executor_was_shut_down(tmp_path: Path):
+    """A teardown must be able to finish on any loop it is asked to finish
+    on. A loop that has shut its executor down refuses every hand-off, and
+    the stores would otherwise stay held through every retry."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = ProtocolManager(_config(ble_enabled=True), store_key=KEY, **roots)
+    await pm.start()
+    address = pm.local_address
+    await asyncio.get_running_loop().shutdown_default_executor()
+
+    await pm.close()
+    assert pm._closed and not pm._teardown_pending
+
+    second = ProtocolManager(_config(), store_key=KEY, **roots)
+    await second.start()
+    try:
+        assert second.local_address == address
+    finally:
+        await second.close()
+
+
+@pytest.mark.asyncio
+async def test_close_finishes_a_teardown_that_stop_could_not(tmp_path: Path):
+    """`stop()` holds the callbacks back when a teardown step raised, since
+    a running engine may still call them. Once the core has released the
+    stores the engine runs no more, so a closed manager holds nothing: it
+    is freed by `del` alone, with a transport that pins it enabled."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = ProtocolManager(_config(ble_enabled=True), store_key=KEY, **roots)
+    await pm.start()
+
+    def refuse() -> None:
+        raise RuntimeError("telemetry would not disable")
+
+    pm.disable_telemetry = refuse
+    await pm.stop()
+    assert pm._teardown_pending
+
+    await pm.close()
+    del pm.disable_telemetry
+    assert pm._closed and not pm._teardown_pending
+    manager = weakref.ref(pm)
+    del pm
+    assert manager() is None
+
+
+@pytest.mark.asyncio
+async def test_a_keyring_close_reports_an_engine_that_would_not_stop(
+    tmp_path: Path, in_memory_storage
+):
+    """Without the file stores the core has nothing to refuse to release,
+    so the manager reports the engine itself. Not closed, and not silent."""
+    pm = ProtocolManager(
+        _config(), storage=in_memory_storage, state_root=tmp_path / "state"
+    )
+    await pm.start()
+    real_stop = pm._protocol.stop
+
+    def refuse() -> None:
+        raise RuntimeError("engine stop refused")
+
+    pm._protocol.stop = refuse
+    with pytest.raises(ProtocolError.InvalidState, match="could not stop the engine"):
+        await pm.close()
+    assert not pm._closed
+
+    pm._protocol.stop = real_stop
+    await pm.close()
+    assert pm._closed
+
+
+@pytest.mark.parametrize("started", [False, True], ids=["never-started", "started"])
+@pytest.mark.asyncio
+async def test_a_closed_manager_keeps_no_store_key(tmp_path: Path, started: bool):
+    """The key is held until the core takes it. A manager closed before that
+    will never hand it over, so it does not keep it either."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = ProtocolManager(_config(), store_key=KEY, **roots)
+    assert pm._file_stores._store_key == KEY
+    if started:
+        await pm.start()
+    await pm.close()
+    assert pm._file_stores._store_key is None

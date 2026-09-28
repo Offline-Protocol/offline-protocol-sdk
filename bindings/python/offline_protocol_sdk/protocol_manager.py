@@ -26,6 +26,7 @@ from .offline_protocol import (
     NostrTransportCallback,
     OfflineProtocol,
     ProtocolConfig,
+    ProtocolError,
     AppState,
     ReticulumTransportCallback,
     TelemetryConfig,
@@ -154,6 +155,32 @@ def _decode_store_key_text(variable: str, text: str) -> bytes:
     )
 
 
+def _run_here(call: Callable[[], Any]) -> asyncio.Future[Any]:
+    """Runs ``call`` on this thread and returns a future that is already
+    done, carrying its result or its error."""
+    done: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+    try:
+        done.set_result(call())
+    except Exception as err:
+        done.set_exception(err)
+    return done
+
+
+def _hand_off(call: Callable[[], Any]) -> asyncio.Future[Any]:
+    """Starts a blocking core call off the loop and returns its future.
+
+    A teardown must be able to finish on any loop it is asked to finish on.
+    A loop whose default executor has been shut down refuses the hand-off
+    before anything is submitted, so the call runs here instead: blocking
+    the loop for one teardown step is better than a manager that can never
+    release what it holds.
+    """
+    try:
+        return asyncio.get_running_loop().run_in_executor(None, call)
+    except RuntimeError:
+        return _run_here(call)
+
+
 def _require_root(value: str | Path | None, variable: str, what: str) -> str:
     if value is not None and str(value).strip():
         return str(value)
@@ -218,6 +245,10 @@ class _FileStores:
             raise ValueError(f"the environment variable {variable} is not set")
         return _decode_store_key_text(variable, text)
 
+    def forget_key(self) -> None:
+        """Drops a key the core will never take: the manager was closed."""
+        self._store_key = None
+
     def initialize(self, protocol: OfflineProtocol) -> None:
         # A restart of the same manager: the stores are already open, and
         # the key was dropped when the core took it.
@@ -247,6 +278,12 @@ class ProtocolManager:
         await pm.start()
         ...
         await pm.stop()
+
+    :meth:`stop` leaves the manager ready for another :meth:`start`.
+    :meth:`close` is final: it stops, and with the file stores it releases
+    their directories at once, so a new manager can open them while this one
+    still exists. Leaving ``async with`` closes a manager that uses the file
+    stores and stops any other.
 
     Parameters
     ----------
@@ -382,6 +419,9 @@ class ProtocolManager:
         # callbacks while the first is still inside a transport, and two
         # transport stops would interleave over the same sockets.
         self._stop_lock = asyncio.Lock()
+        # Set by `close()`. The core has given up its stores by then, so a
+        # later `start()` would run an engine that cannot write.
+        self._closed = False
 
         # Registry of objects whose pointers are held by the Rust/UniFFI side.
         # Prevents garbage collection while the protocol is alive.
@@ -405,6 +445,11 @@ class ProtocolManager:
 
     async def start(self) -> None:
         """Wire callbacks, initialise MLS, and start the processing loop."""
+        if self._closed:
+            raise RuntimeError(
+                "this ProtocolManager is closed: close() released its stores "
+                "for good, create a new manager"
+            )
         if self._running:
             return
 
@@ -486,9 +531,75 @@ class ProtocolManager:
         logger.info("ProtocolManager started (address=%s)", self.local_address)
 
     async def stop(self) -> None:
-        """Stop all transports and the processing loop."""
+        """Stop all transports and the processing loop.
+
+        The manager can be started again. With the file stores, the
+        directories stay open for that restart: use :meth:`close` to give
+        them up.
+        """
         async with self._stop_lock:
             await self._stop_locked()
+
+    async def close(self) -> None:
+        """Stop, and release what this manager holds, for good.
+
+        With the file stores, both directories are released before this
+        returns, whatever still refers to the manager or to ``protocol``: a
+        name the application kept, an event handler, an exception. A new
+        manager can open them at once. Without an explicit release the
+        directories stay locked until the core object is freed, and when
+        that happens is the interpreter's decision, not the caller's.
+
+        The manager cannot be started again; create a new one. Safe to call
+        twice, and on a manager that never started. Raises
+        ``ProtocolError.InvalidState`` when the engine could not be stopped:
+        nothing was released, the manager is not closed, and the call can be
+        repeated. A call cancelled while the core is releasing the stores
+        still releases them, and the manager is closed once it has.
+        """
+        await self.stop()
+        if self._file_stores is None:
+            # Nothing of this manager's outlives a stopped engine, and the
+            # core has no stores to ask, so an engine that would not stop is
+            # reported here.
+            if self._teardown_pending:
+                raise ProtocolError.InvalidState(
+                    "close() could not stop the engine, so the manager is "
+                    "not closed; call close() again"
+                )
+            self._closed = True
+            return
+        # Off the loop: when `stop()` could not disable telemetry, the core
+        # does it here, and the uploader's final flush can block for up to
+        # three seconds. Shielded, and marked from the hand-off itself: a
+        # caller's cancel does not stop the core, so the manager has to end
+        # up closed whether or not anyone is still waiting for it.
+        release = _hand_off(self._protocol.close_file_stores)
+        if release.done():
+            # Already over (the call ran here, or its worker was quick). A
+            # callback added now would run on a later loop turn, after this
+            # method had returned a manager not yet marked closed.
+            self._closed_by(release)
+            release.result()
+            return
+        release.add_done_callback(self._closed_by)
+        await asyncio.shield(release)
+
+    def _closed_by(self, release: asyncio.Future[Any]) -> None:
+        """Marks the manager closed once the core released the stores."""
+        if release.cancelled() or release.exception() is not None:
+            return
+        self._closed = True
+        if self._file_stores is not None:
+            self._file_stores.forget_key()
+        if self._teardown_pending:
+            # `stop()` could not finish (telemetry would not disable, or the
+            # engine lock was poisoned), and the core released the stores
+            # anyway, which it does only for an engine that runs no more.
+            # What `stop()` held back for a running engine can go.
+            self._release_callbacks()
+            self._prevent_gc.clear()
+            self._teardown_pending = False
 
     async def _stop_locked(self) -> None:
         if not self._running and not self._teardown_pending:
@@ -500,14 +611,26 @@ class ProtocolManager:
         # Cancel processing loop
         if self._process_task is not None and not self._process_task.done():
             self._process_task.cancel()
-            # Waited on, never awaited: awaiting a cancelled task raises its
-            # CancelledError into this frame, and that exception's traceback
-            # holds `self`. The step that raised it keeps it alive until the
-            # caller next yields, and on Python 3.13+ `stop()` can finish in
-            # that same step, so the stopped manager (and its store locks)
-            # outlived `del`.
+            # Waited on, never awaited. A CancelledError raised here is then
+            # always the caller's (a shutdown deadline), never the process
+            # task's own: awaiting the task would raise for both, and a
+            # handler that swallowed the task's would swallow the caller's
+            # cancel with it and run the teardown to its end regardless.
             await asyncio.wait({self._process_task})
         self._process_task = None
+
+        # One loop turn, always. A caller that retries after a cancelled
+        # stop() is still inside the task step that threw the CancelledError,
+        # and that step holds the exception (and through its traceback the
+        # first stop()'s frames, so this manager) until the task next
+        # suspends. Nothing below is certain to suspend: on Python 3.13+ an
+        # executor hand-off whose worker already finished completes in
+        # place. Without this turn the manager outlived `del` about one time
+        # in fifty, and the next manager was refused its directories. Taken
+        # here, after the process loop was cancelled, and not on entry: a
+        # turn before the cancel lets that loop run one more tick, and
+        # deliver one more message, after `stop()` was called.
+        await asyncio.sleep(0)
 
         # Stop transports
         if self.ble is not None:
@@ -527,7 +650,7 @@ class ProtocolManager:
         try:
             # Off the loop: the final flush blocks for up to three seconds,
             # and every other awaitable in this teardown would wait behind it.
-            await asyncio.to_thread(self.disable_telemetry)
+            await _hand_off(self.disable_telemetry)
         except Exception:
             teardown_clean = False
             logger.debug(
@@ -607,11 +730,34 @@ class ProtocolManager:
             )
 
     async def __aenter__(self) -> ProtocolManager:
-        await self.start()
+        try:
+            await self.start()
+        except BaseException:
+            # `__aexit__` does not run for an entry that failed, and
+            # `async with ProtocolManager(...)` leaves the caller no name to
+            # close. A start that fails after the stores opened would hold
+            # the directories for as long as the exception lives.
+            if self._file_stores is not None:
+                try:
+                    await self.close()
+                except Exception:
+                    logger.debug(
+                        "close() after a failed start raised (non-fatal)",
+                        exc_info=True,
+                    )
+            raise
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
-        await self.stop()
+        # The file stores hold their directories until they are closed, and
+        # the name bound by `async with ... as pm` outlives the block, so a
+        # stop alone would refuse the next block over the same directories.
+        # Any other manager keeps the exit it always had, and can be entered
+        # again.
+        if self._file_stores is not None:
+            await self.close()
+        else:
+            await self.stop()
 
     # -- event handling -------------------------------------------------------
 
