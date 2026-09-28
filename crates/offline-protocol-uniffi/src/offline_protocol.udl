@@ -1592,6 +1592,28 @@ interface OfflineProtocol {
         MlsStorageProvider secure_storage,
         ProtocolStateStorageProvider protocol_state_storage
     );
+
+    // Initialize MLS over the SDK's built-in file stores, for a host with a
+    // filesystem and no platform keystore (a headless Linux service). The MLS
+    // store opens at `mls_root`, every record sealed under `store_key` (32
+    // bytes, never all zero); the protocol-state store opens at `state_root`.
+    // Both use the account directory derived from this instance's app_id and
+    // profile. `mls_root` must survive an upgrade (it holds the identity);
+    // `state_root` should be removed with the installation.
+    //
+    // Same lifecycle as initialize_mls: before start(), idempotent, and a
+    // repeated call opens nothing. Refusals map onto existing variants:
+    // InvalidArgument for an empty root or a key that is not 32 bytes;
+    // InvalidConfiguration for a wrong key, a key check that cannot prove
+    // the key, or a directory that cannot be created (the message names the
+    // path and says whether anything changed); InvalidState when another
+    // store already holds the directory, in this process or another.
+    [Throws=ProtocolError]
+    void initialize_mls_with_file_stores(
+        string mls_root,
+        string state_root,
+        bytes store_key
+    );
     
     // Check if MLS is initialized
     boolean is_mls_initialized();

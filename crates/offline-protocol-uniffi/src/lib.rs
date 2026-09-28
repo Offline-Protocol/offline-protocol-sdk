@@ -514,6 +514,62 @@ pub trait ProtocolStateStorageProvider: Send + Sync {
     fn list_keys(&self, key_type: String) -> Result<Vec<String>, MlsStorageError>;
 }
 
+/// The two stores `initialize_mls` takes: secure, then protocol state.
+type EngineStores = (Arc<dyn CoreMlsStorage>, Arc<dyn CoreProtocolStateStorage>);
+
+/// Opens the two built-in file stores for one account.
+///
+/// Every refusal names what the operator has to change: the error crosses the
+/// FFI as a string, and a headless host has no other place to learn that the
+/// key is wrong or the directory is held by another process.
+fn open_file_stores(
+    mls_root: &str,
+    state_root: &str,
+    app_id: &str,
+    profile: &str,
+    store_key: &[u8],
+) -> Result<EngineStores, ProtocolError> {
+    use offline_protocol::{
+        account_storage_namespace, FileProtocolStateStorage, SealedFileMlsStorage, StaticStoreKey,
+    };
+    for (name, root) in [("mls_root", mls_root), ("state_root", state_root)] {
+        if root.trim().is_empty() {
+            return Err(ProtocolError::InvalidArgument(format!(
+                "{name} must name a directory"
+            )));
+        }
+    }
+    let key = StaticStoreKey::from_slice(store_key)
+        .map_err(|e| ProtocolError::InvalidArgument(format!("store_key: {e}")))?;
+    let namespace = account_storage_namespace(app_id, profile);
+    // MLS first: it proves the key, and a refused key should leave no
+    // protocol-state directory behind for an operator to wonder about.
+    let secure =
+        SealedFileMlsStorage::open(mls_root, &namespace, &key).map_err(file_store_error)?;
+    let state = FileProtocolStateStorage::open(state_root, &namespace).map_err(file_store_error)?;
+    Ok((Arc::new(secure), Arc::new(state)))
+}
+
+/// Maps a file-store refusal onto the existing variants. No new variant: the
+/// error enum is append-only and positional (bridge contract C2), and each
+/// case already has a variant that says what kind of fix it needs.
+fn file_store_error(err: offline_protocol::FileStoreError) -> ProtocolError {
+    use offline_protocol::FileStoreError as E;
+    match err {
+        // Another store holds the directory: a second instance, or a second
+        // process. Nothing about the arguments is wrong.
+        E::InUse(_) => ProtocolError::InvalidState(err.to_string()),
+        // A wrong key, a check that cannot prove the key, a directory that
+        // cannot be created: each is the operator's configuration to fix.
+        E::WrongStoreKey(_)
+        | E::KeyCheckUnverifiable(_)
+        | E::Io { .. }
+        | E::StoreKey(_)
+        | E::InvalidNamespace => ProtocolError::InvalidConfiguration(err.to_string()),
+        _ => ProtocolError::Other(err.to_string()),
+    }
+}
+
 /// Wrapper to adapt UniFFI callback to core MlsStorage trait
 struct MlsStorageWrapper {
     provider: Arc<dyn MlsStorageProvider>,
@@ -6098,13 +6154,55 @@ impl OfflineProtocol {
         secure_storage: Box<dyn MlsStorageProvider>,
         protocol_state_storage: Box<dyn ProtocolStateStorageProvider>,
     ) -> Result<(), ProtocolError> {
-        let secure_wrapper = Arc::new(MlsStorageWrapper {
-            provider: Arc::from(secure_storage),
-        });
-        let state_wrapper = Arc::new(ProtocolStateStorageWrapper {
-            provider: Arc::from(protocol_state_storage),
-        });
+        self.initialize_mls_over(|| {
+            let secure: Arc<dyn CoreMlsStorage> = Arc::new(MlsStorageWrapper {
+                provider: Arc::from(secure_storage),
+            });
+            let state: Arc<dyn CoreProtocolStateStorage> = Arc::new(ProtocolStateStorageWrapper {
+                provider: Arc::from(protocol_state_storage),
+            });
+            Ok((secure, state))
+        })
+    }
 
+    /// Initialize MLS over the SDK's built-in file stores, for a host with a
+    /// filesystem and no platform keystore.
+    ///
+    /// The MLS store opens at `mls_root`, sealed under `store_key` (32
+    /// bytes); the protocol-state store opens at `state_root`. Both live in
+    /// the account directory named by this instance's own `app_id` and
+    /// `profile`, the derivation every binding uses, so the caller cannot
+    /// name a directory that disagrees with the identity it runs as.
+    ///
+    /// Nothing is opened when MLS is already initialized, so a repeated call
+    /// stays idempotent rather than being refused by the stores' own
+    /// one-store-per-directory lock. The key is scrubbed from this side's
+    /// copy once the store has derived its working keys; the caller's copy
+    /// is the caller's to scrub.
+    pub fn initialize_mls_with_file_stores(
+        &self,
+        mls_root: String,
+        state_root: String,
+        store_key: Vec<u8>,
+    ) -> Result<(), ProtocolError> {
+        let store_key = zeroize::Zeroizing::new(store_key);
+        let (app_id, profile) = {
+            let protocol = self.lock_inner()?;
+            let config = protocol.config();
+            (config.app_id.clone(), config.profile.clone())
+        };
+        self.initialize_mls_over(|| {
+            open_file_stores(&mls_root, &state_root, &app_id, &profile, &store_key)
+        })
+    }
+
+    /// The one body behind both `initialize_mls` entry points. `open` runs
+    /// only once the call is known to proceed: after the idempotence check
+    /// and the before-`start()` check, under the engine lock.
+    fn initialize_mls_over(
+        &self,
+        open: impl FnOnce() -> Result<EngineStores, ProtocolError>,
+    ) -> Result<(), ProtocolError> {
         // Single-authority lifecycle:
         // - CoreProtocol owns the only MlsManager instance for this runtime.
         // - UniFFI manual MLS APIs must route through that owner.
@@ -6134,8 +6232,9 @@ impl OfflineProtocol {
             )));
         }
 
+        let (secure_storage, protocol_state_storage) = open()?;
         protocol
-            .initialize_mls(secure_wrapper, state_wrapper)
+            .initialize_mls(secure_storage, protocol_state_storage)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))?;
 
         // The address exists only now, so this is the first point the
@@ -7517,6 +7616,8 @@ mod error_mapping_tests {
 
 #[cfg(test)]
 mod tests {
+    mod file_stores;
+
     use super::*;
     use std::collections::HashMap;
     use std::sync::Arc;

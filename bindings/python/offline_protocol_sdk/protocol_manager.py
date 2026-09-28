@@ -8,8 +8,11 @@ wraps the UniFFI ``OfflineProtocol`` instance with transport managers, a
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
+import os
 import platform
 import sys
 from pathlib import Path
@@ -35,7 +38,7 @@ from .ble_peripheral import BlePeripheral
 from .internet_manager import InternetManager
 from .peer_stream_manager import PeerStreamManager
 from .secure_storage import SecureStorage
-from .state_storage import AppStateStorage
+from .state_storage import _STATE_ROOT_ENV, AppStateStorage
 from .storage_namespace import account_storage_namespace
 
 logger = logging.getLogger(__name__)
@@ -120,6 +123,98 @@ class _ReticulumTransportCallbackImpl(ReticulumTransportCallback):
         pass
 
 
+#: Where :class:`ProtocolManager` finds the sealed MLS store's root when
+#: ``mls_root`` is not given.
+_MLS_ROOT_ENV = "OFFLINE_PROTOCOL_MLS_ROOT"
+#: Length of a store key.
+_STORE_KEY_BYTES = 32
+
+
+def _decode_store_key_text(variable: str, text: str) -> bytes:
+    """A store key from its text form: 64 hex digits, or standard base64.
+
+    The same forms the Rust ``EnvStoreKey`` accepts, so one secret works
+    whichever side reads it. Base64 must be canonical (it re-encodes to the
+    same text), as the Rust decoder requires.
+    """
+    text = text.strip()
+    if len(text) == 2 * _STORE_KEY_BYTES and all(c in "0123456789abcdefABCDEF" for c in text):
+        return bytes.fromhex(text)
+    unpadded = text.rstrip("=")
+    try:
+        raw = base64.b64decode(unpadded + "=" * (-len(unpadded) % 4), validate=True)
+    except (binascii.Error, ValueError):
+        raw = b""
+    canonical = base64.b64encode(raw).decode("ascii")
+    if len(raw) == _STORE_KEY_BYTES and text in (canonical, canonical.rstrip("=")):
+        return raw
+    raise ValueError(
+        f"{variable} must hold a {_STORE_KEY_BYTES}-byte store key as 64 hex "
+        "digits or as base64"
+    )
+
+
+def _require_root(value: str | Path | None, variable: str, what: str) -> str:
+    if value is not None and str(value).strip():
+        return str(value)
+    configured = os.environ.get(variable)
+    if configured:
+        return configured
+    raise ValueError(f"the file stores need {what}; pass it or set {variable}")
+
+
+class _FileStores:
+    """The built-in file stores: where they live and where the key comes from.
+
+    The roots are resolved at construction so a missing one fails there.
+    The key is read when :meth:`initialize` runs and handed to the core; a
+    key passed as bytes is dropped once the core has taken it, and one read
+    from the environment is never kept.
+    """
+
+    def __init__(
+        self,
+        *,
+        mls_root: str | Path | None,
+        state_root: str | Path | None,
+        store_key: bytes | bytearray | None,
+        store_key_env: str | None,
+    ) -> None:
+        if store_key is not None and store_key_env is not None:
+            raise ValueError("pass store_key or store_key_env, not both")
+        if store_key is not None:
+            if not isinstance(store_key, (bytes, bytearray)):
+                raise TypeError("store_key must be bytes")
+            if len(store_key) != _STORE_KEY_BYTES:
+                raise ValueError(
+                    f"store_key must be {_STORE_KEY_BYTES} bytes, got {len(store_key)}"
+                )
+        self._mls_root = _require_root(mls_root, _MLS_ROOT_ENV, "mls_root")
+        self._state_root = _require_root(state_root, _STATE_ROOT_ENV, "state_root")
+        self._store_key = store_key
+        self._store_key_env = store_key_env
+
+    def _key(self) -> bytes:
+        if self._store_key is not None:
+            return bytes(self._store_key)
+        variable = self._store_key_env or ""
+        text = os.environ.get(variable)
+        if text is None:
+            raise ValueError(f"the environment variable {variable} is not set")
+        return _decode_store_key_text(variable, text)
+
+    def initialize(self, protocol: OfflineProtocol) -> None:
+        # A restart of the same manager: the stores are already open, and
+        # the key was dropped when the core took it.
+        if protocol.is_mls_initialized():
+            return
+        protocol.initialize_mls_with_file_stores(
+            self._mls_root, self._state_root, self._key()
+        )
+        # Kept until the core accepted it, so a refused start can be retried.
+        self._store_key = None
+
+
 class ProtocolManager:
     """Manages the full protocol lifecycle for desktop platforms.
 
@@ -153,8 +248,32 @@ class ProtocolManager:
         must select an application-owned directory that the installer removes
         with the application.
     state_root:
-        Root directory for the built-in :class:`AppStateStorage`. Ignored when
-        ``state_storage`` is supplied.
+        Root directory for protocol state: the built-in
+        :class:`AppStateStorage`, or the file stores' protocol-state half.
+        Ignored when ``state_storage`` is supplied.
+    store_key:
+        Selects the SDK's built-in file stores instead of ``SecureStorage``
+        and ``AppStateStorage``: 32 bytes that seal every MLS record (the
+        identity, group state, and the key that seals protocol state). For a
+        host with a filesystem and no platform keyring, such as a headless
+        Linux service. Exclusive with ``store_key_env``, ``storage`` and
+        ``state_storage``.
+    store_key_env:
+        Selects the file stores like ``store_key``, reading the key when
+        :meth:`start` runs from this environment variable, as 64 hex digits
+        or as base64 (conventionally ``OFFLINE_PROTOCOL_STORE_KEY``). This is
+        how a service manager usually hands a process a secret; unset the
+        variable after :meth:`start` if nothing else needs it.
+    mls_root:
+        Root directory of the sealed MLS store in file-store mode, or
+        ``OFFLINE_PROTOCOL_MLS_ROOT``. It holds this device's identity, so it
+        must survive an upgrade, and it should not be ``state_root``.
+
+    With the file stores, :meth:`start` raises when MLS cannot be
+    initialised (a wrong key, a directory another process holds) instead of
+    starting without encryption: an operator who supplied a key asked for
+    the sealed store, and a service that runs without it has lost its
+    identity without saying so.
     """
 
     def __init__(
@@ -165,23 +284,45 @@ class ProtocolManager:
         state_storage: Any | None = None,
         *,
         state_root: str | Path | None = None,
+        store_key: bytes | bytearray | None = None,
+        store_key_env: str | None = None,
+        mls_root: str | Path | None = None,
     ) -> None:
         self._config = config
         self._event_handler = event_handler
 
         profile = config.profile  # type: ignore[union-attr]
         app_id = config.app_id  # type: ignore[union-attr]
-        storage_namespace = account_storage_namespace(app_id, profile)
-        self._storage = (
-            storage
-            if storage is not None
-            else SecureStorage(namespace=storage_namespace)
-        )
-        self._state_storage = (
-            state_storage
-            if state_storage is not None
-            else AppStateStorage(root=state_root, namespace=storage_namespace)
-        )
+
+        # The built-in file stores, when a store key was given. Opened by
+        # the core in `start()`; nothing on this side holds them.
+        self._file_stores: _FileStores | None = None
+        if store_key is not None or store_key_env is not None:
+            if storage is not None or state_storage is not None:
+                raise ValueError(
+                    "store_key/store_key_env select the built-in file stores; "
+                    "they cannot be combined with storage= or state_storage="
+                )
+            self._file_stores = _FileStores(
+                mls_root=mls_root,
+                state_root=state_root,
+                store_key=store_key,
+                store_key_env=store_key_env,
+            )
+            self._storage: Any | None = None
+            self._state_storage: Any | None = None
+        else:
+            storage_namespace = account_storage_namespace(app_id, profile)
+            self._storage = (
+                storage
+                if storage is not None
+                else SecureStorage(namespace=storage_namespace)
+            )
+            self._state_storage = (
+                state_storage
+                if state_storage is not None
+                else AppStateStorage(root=state_root, namespace=storage_namespace)
+            )
 
         # Create the core protocol instance
         self._protocol = OfflineProtocol(config)
@@ -273,12 +414,11 @@ class ProtocolManager:
         # Keep strong references to all objects passed to the Rust/UniFFI
         # side so that Python's GC cannot collect them while Rust holds
         # raw callback pointers.
-        self._prevent_gc = [
-            self._event_cb,
-            self._ble_cb,
-            self._storage,
-            self._state_storage,
-        ]
+        self._prevent_gc = [self._event_cb, self._ble_cb]
+        if self._storage is not None:
+            self._prevent_gc.append(self._storage)
+        if self._state_storage is not None:
+            self._prevent_gc.append(self._state_storage)
         if self._wifi_cb is not None:
             self._prevent_gc.append(self._wifi_cb)
         if self._nostr_cb is not None:
@@ -287,10 +427,16 @@ class ProtocolManager:
             self._prevent_gc.append(self._reticulum_cb)
 
         # Initialise MLS encryption
-        try:
-            self._protocol.initialize_mls(self._storage, self._state_storage)
-        except Exception as exc:
-            logger.warning("MLS initialisation failed (non-fatal): %s", exc)
+        if self._file_stores is not None:
+            # Fails closed: a refused key or a held directory raises here,
+            # before the engine starts, rather than running without the
+            # identity the operator's key protects.
+            self._file_stores.initialize(self._protocol)
+        else:
+            try:
+                self._protocol.initialize_mls(self._storage, self._state_storage)
+            except Exception as exc:
+                logger.warning("MLS initialisation failed (non-fatal): %s", exc)
 
         # Start the protocol engine
         self._protocol.start()
@@ -367,7 +513,8 @@ class ProtocolManager:
         logger.info("ProtocolManager stopped")
 
     def __del__(self) -> None:
-        if self._running:
+        # A constructor that raised (a refused argument) leaves no `_running`.
+        if getattr(self, "_running", False):
             logger.error(
                 "ProtocolManager garbage-collected while still running! "
                 "Call await stop() before discarding the manager to avoid "

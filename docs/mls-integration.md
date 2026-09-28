@@ -441,6 +441,38 @@ protocol.initialize_mls(Arc::new(secure), Arc::new(state))?;
 The namespace must be the output of `account_storage_namespace`; anything
 else is refused before a directory is created.
 
+#### Over the FFI
+
+A binding opens the same two stores with one call, in place of
+`initialize_mls`:
+
+```python
+protocol.initialize_mls_with_file_stores(
+    "/var/lib/example/keys",   # mls_root: survives upgrades
+    "/var/lib/example/state",  # state_root: removed with the installation
+    store_key,                 # 32 bytes
+)
+```
+
+The account directory comes from the instance's own `app_id` and `profile`,
+so the caller cannot name one that disagrees with the identity it runs as.
+The call keeps `initialize_mls`'s lifecycle: before `start()`, idempotent,
+and a repeated call opens nothing. Refusals use existing error variants, and
+each message says what to change:
+
+| Refusal | Variant |
+|---------|---------|
+| An empty root, or a key that is not 32 bytes or is all zero | `InvalidArgument` |
+| A wrong key, a key check that cannot prove the key, a directory that cannot be created | `InvalidConfiguration` |
+| Another store already holds the directory, in this process or another | `InvalidState` |
+
+The MLS store opens first, so a refused key leaves no protocol-state
+directory behind. The Python `ProtocolManager` takes `store_key=` or
+`store_key_env=` and calls it for you
+([Python binding](../bindings/python/README.md#headless-hosts-the-built-in-file-stores)).
+Swift and Kotlin have the generated method but do not wire it: their modules
+use the Keychain and the Keystore.
+
 ### Implementing the Providers
 
 Implement `MlsStorageProvider` for secure material. Implement

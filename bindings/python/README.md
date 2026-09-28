@@ -141,8 +141,45 @@ reach `AppStateStorage`. On a plaintext backend that key sits in a readable
 file, so the sealing gives you separation of *lifecycle* but not of
 *confidentiality*: anyone who can read the credential store can open every
 sealed protocol-state record. Install a real secret service (gnome-keyring,
-kwallet) for any deployment where that matters, or supply your own
-`MlsStorageProvider`.
+kwallet) for any deployment where that matters, supply your own
+`MlsStorageProvider`, or use the built-in file stores below.
+
+### Headless hosts: the built-in file stores
+
+A server or container usually has no secret service at all. Pass a store key
+and `ProtocolManager` uses the SDK's built-in file stores instead of
+`SecureStorage` and `AppStateStorage`: every MLS record is sealed on disk under
+that key, and protocol state is written in the same format `AppStateStorage`
+writes.
+
+```python
+pm = ProtocolManager(
+    config,
+    store_key_env="OFFLINE_PROTOCOL_STORE_KEY",  # 64 hex digits or base64
+    mls_root="/var/lib/example/keys",            # or OFFLINE_PROTOCOL_MLS_ROOT
+    state_root="/var/lib/example/state",         # or OFFLINE_PROTOCOL_STATE_ROOT
+)
+await pm.start()
+```
+
+- **The store key is 32 random bytes, generated once and kept.** Generate it
+  with `openssl rand -hex 32`, and hand it to the process the way the service
+  manager hands it any secret. Pass `store_key=<bytes>` instead if the host
+  already holds it. Never derive it from a password or a host name.
+- **`mls_root` holds this device's identity.** It must survive an upgrade,
+  and losing it gives the device a new address. `state_root` is scoped to
+  the installation. Keep them apart.
+- **`start()` raises instead of starting without the identity.** A wrong key
+  raises `ProtocolError.InvalidConfiguration` and changes nothing on disk. A
+  directory another process holds raises `ProtocolError.InvalidState`. The
+  keyring path logs its own initialisation failures and carries on; this one
+  does not, because an operator who supplied a key asked for the sealed store.
+- **One process per account directory.** Each store holds a lock on its
+  directory while open. Release the manager (and call `disable_telemetry()`
+  first if telemetry is on) before opening the same directories again.
+
+What the stores guarantee, and what a copied directory reveals, is in the
+[MLS integration guide](../../docs/mls-integration.md#built-in-file-stores).
 
 Restartable message-plane state is kept separately by `AppStateStorage`, outside
 the credential store. The built-in stores derive an opaque account namespace

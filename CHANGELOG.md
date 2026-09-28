@@ -71,9 +71,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   derivation. Both stores pass their conformance suites, and an
   engine restarted over them keeps its address and its sealed documents. The
   `replicated_notes` example now runs on them. The stores sit behind the
-  default-on `file-store` feature. Rust only; the FFI entry is separate
-  work. The threat model records the store key's exposure on a host without
-  a keystore as residual risk R18.
+  default-on `file-store` feature. The threat model records the store key's
+  exposure on a host without a keystore as residual risk R18.
+- **Bindings can open the built-in file stores.**
+  `initialize_mls_with_file_stores(mls_root, state_root, store_key)` opens
+  both stores in place of `initialize_mls`, in the account directory derived
+  from the instance's own `app_id` and `profile`. It keeps `initialize_mls`'s
+  lifecycle, and its refusals use existing error variants
+  (`InvalidArgument`, `InvalidConfiguration` for a wrong key, `InvalidState`
+  for a directory another store holds), so the error enum is unchanged. The
+  Python `ProtocolManager` takes `store_key=` or `store_key_env=` (64 hex
+  digits or base64, as the Rust `EnvStoreKey` reads), with `mls_root=` or
+  `OFFLINE_PROTOCOL_MLS_ROOT`, and uses the file stores instead of the
+  keyring. On that path `start()` raises when MLS cannot be initialised,
+  rather than logging and starting without the identity. Swift and Kotlin
+  get the generated method and keep their platform keystores.
 
 ### Fixed
 

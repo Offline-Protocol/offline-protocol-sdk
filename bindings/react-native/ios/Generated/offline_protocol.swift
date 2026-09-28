@@ -1397,6 +1397,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func initializeMls(secureStorage: MlsStorageProvider, protocolStateStorage: ProtocolStateStorageProvider) throws 
     
+    func initializeMlsWithFileStores(mlsRoot: String, stateRoot: String, storeKey: Data) throws 
+    
     func internetAddressDeclarationRefused(reason: String) 
     
     func internetAddressDeclared(address: String) 
@@ -2192,6 +2194,16 @@ open func initializeMls(secureStorage: MlsStorageProvider, protocolStateStorage:
             self.uniffiCloneHandle(),
         FfiConverterCallbackInterfaceMlsStorageProvider_lower(secureStorage),
         FfiConverterCallbackInterfaceProtocolStateStorageProvider_lower(protocolStateStorage),$0
+    )
+}
+}
+    
+open func initializeMlsWithFileStores(mlsRoot: String, stateRoot: String, storeKey: Data)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls_with_file_stores(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(mlsRoot),
+        FfiConverterString.lower(stateRoot),
+        FfiConverterData.lower(storeKey),$0
     )
 }
 }
@@ -9841,6 +9853,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 43685) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores() != 58803) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused() != 30965) {
