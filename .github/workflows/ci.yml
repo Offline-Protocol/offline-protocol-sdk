@@ -462,6 +462,22 @@ jobs:
       - name: Run pytest
         run: pytest bindings/python/tests/ -v
 
+      # Again on the newest Python the package declares, over the same built
+      # library. Interpreter changes reach the bindings' lifecycle: on 3.13+
+      # an executor hand-off can complete without suspending, which once left
+      # a stopped manager pinned (and its store locks held) where 3.12 never
+      # showed it.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: "pip"
+          cache-dependency-path: bindings/python/pyproject.toml
+
+      - name: Run pytest on Python 3.13
+        run: |
+          pip install -e 'bindings/python[dev]'
+          pytest bindings/python/tests/ -v
+
   # release.yml runs only on a `v*` tag, so every line of it used to reach
   # production untested — the packaging step's first real execution would be
   # during a release, with a half-built asset set as the failure mode. The
