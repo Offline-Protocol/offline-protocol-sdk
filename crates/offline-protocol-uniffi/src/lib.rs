@@ -539,15 +539,74 @@ fn open_file_stores(
             )));
         }
     }
+    // One directory for both would put the identity inside the directory
+    // the installation removes, so removing protocol state would remove the
+    // identity too. Compared by path components, since neither need exist.
+    if same_directory(mls_root, state_root) {
+        return Err(ProtocolError::InvalidArgument(
+            "mls_root and state_root must be different directories: mls_root holds the \
+             identity and must survive the removal of state_root"
+                .to_string(),
+        ));
+    }
     let key = StaticStoreKey::from_slice(store_key)
         .map_err(|e| ProtocolError::InvalidArgument(format!("store_key: {e}")))?;
     let namespace = account_storage_namespace(app_id, profile);
+    refuse_state_without_identity(mls_root, state_root, &namespace)?;
     // MLS first: it proves the key, and a refused key should leave no
     // protocol-state directory behind for an operator to wonder about.
     let secure =
         SealedFileMlsStorage::open(mls_root, &namespace, &key).map_err(file_store_error)?;
     let state = FileProtocolStateStorage::open(state_root, &namespace).map_err(file_store_error)?;
     Ok((Arc::new(secure), Arc::new(state)))
+}
+
+/// Whether two roots name the same directory: by their canonical paths when
+/// both exist, by their path components otherwise.
+fn same_directory(a: &str, b: &str) -> bool {
+    use std::path::Path;
+    if let (Ok(a), Ok(b)) = (Path::new(a).canonicalize(), Path::new(b).canonicalize()) {
+        return a == b;
+    }
+    Path::new(a).components().eq(Path::new(b).components())
+}
+
+/// Refuses a protocol-state account directory that holds records when the
+/// MLS account directory does not exist yet.
+///
+/// That shape is a deployment moving onto the file stores (or one whose
+/// `mls_root` was lost) while keeping its state root. The file stores mint
+/// a new identity, so the device gets a new address, and the new identity's
+/// record key cannot unseal the old records: the first restore deletes the
+/// parked messages it cannot read, and going back does not bring them back.
+/// Nothing is created before this check, so a refusal changes nothing.
+fn refuse_state_without_identity(
+    mls_root: &str,
+    state_root: &str,
+    namespace: &str,
+) -> Result<(), ProtocolError> {
+    use std::path::Path;
+    if Path::new(mls_root).join(namespace).exists() {
+        return Ok(());
+    }
+    let state_account = Path::new(state_root).join(namespace);
+    let holds_records = match std::fs::read_dir(&state_account) {
+        // Anything but a lock file is state some earlier run wrote.
+        Ok(entries) => entries
+            .flatten()
+            .any(|e| !e.file_name().to_string_lossy().ends_with(".lock")),
+        Err(_) => false,
+    };
+    if holds_records {
+        return Err(ProtocolError::InvalidConfiguration(format!(
+            "{} holds protocol state, but {mls_root} holds no identity for this account: the \
+             file stores would start a new identity (a new address) and delete the state it \
+             cannot unseal. Point state_root at a fresh directory, or restore the mls_root \
+             that wrote this state",
+            state_account.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Maps a file-store refusal onto the existing variants. No new variant: the

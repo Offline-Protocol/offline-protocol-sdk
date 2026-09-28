@@ -498,3 +498,45 @@ def test_key_text_accepts_what_the_rust_provider_accepts():
     ):
         with pytest.raises(ValueError):
             _decode_store_key_text("V", text)
+
+
+@pytest.mark.asyncio
+async def test_a_state_root_kept_from_the_keyring_is_refused(
+    tmp_path: Path, in_memory_storage
+):
+    """Moving a deployment onto the file stores mints a new identity. Kept
+    state from the old one cannot be unsealed and would be deleted by the
+    first restore, so the start is refused and nothing changes."""
+    state_root = tmp_path / "state"
+    old = ProtocolManager(_config(), storage=in_memory_storage, state_root=state_root)
+    await old.start()
+    old_address = old.local_address
+    await old.stop()
+    del old
+    gc.collect()
+    before = sorted(p.relative_to(state_root) for p in state_root.rglob("*"))
+
+    pm = ProtocolManager(
+        _config(), store_key=KEY, mls_root=tmp_path / "mls", state_root=state_root
+    )
+    with pytest.raises(ProtocolError.InvalidConfiguration, match="fresh directory"):
+        await pm.start()
+    assert not (tmp_path / "mls").exists() or not any((tmp_path / "mls").iterdir())
+    assert sorted(p.relative_to(state_root) for p in state_root.rglob("*")) == before
+    del pm
+    gc.collect()
+
+    # A fresh state root is the documented way over, with a new address.
+    fresh = await _run_once(
+        store_key=KEY, mls_root=tmp_path / "mls", state_root=tmp_path / "fresh-state"
+    )
+    assert fresh is not None and fresh != old_address
+
+
+@pytest.mark.asyncio
+async def test_equal_roots_are_refused(tmp_path: Path):
+    pm = ProtocolManager(
+        _config(), store_key=KEY, mls_root=tmp_path / "one", state_root=tmp_path / "one"
+    )
+    with pytest.raises(ProtocolError.InvalidArgument, match="different directories"):
+        await pm.start()

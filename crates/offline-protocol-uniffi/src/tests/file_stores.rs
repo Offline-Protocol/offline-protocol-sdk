@@ -216,3 +216,80 @@ fn after_start_it_is_refused_before_the_stores_open() {
     assert!(!protocol.is_mls_initialized());
     assert!(entries(&mls).is_empty() && entries(&state).is_empty());
 }
+
+/// One directory for both roots would put the identity inside the directory
+/// the installation removes. Refused before anything is created.
+#[test]
+fn equal_roots_are_an_invalid_argument() {
+    let root = TempRoot::new("equal");
+    let one = root.dir("one");
+    let protocol = instance("equal-user");
+    for (mls_root, state_root) in [
+        (one.clone(), one.clone()),
+        (one.clone(), format!("{one}/")),
+        (one.clone(), format!("{one}/./")),
+    ] {
+        let err = protocol
+            .initialize_mls_with_file_stores(mls_root, state_root.clone(), KEY.to_vec())
+            .expect_err("equal roots");
+        assert!(
+            matches!(&err, ProtocolError::InvalidArgument(m) if m.contains("different directories")),
+            "{state_root}: expected InvalidArgument, got {err:?}"
+        );
+    }
+    assert!(!protocol.is_mls_initialized());
+    assert!(entries(&one).is_empty());
+}
+
+/// A deployment moving onto the file stores while keeping its state root:
+/// the MLS store would mint a new identity, and the first restore would
+/// delete the old identity's records it cannot unseal. Refused before
+/// either store opens, so nothing changes and the remedy is named.
+#[test]
+fn state_without_an_identity_is_refused_before_anything_changes() {
+    let root = TempRoot::new("orphaned-state");
+    let (mls, state) = (root.dir("mls"), root.dir("state"));
+    let namespace = offline_protocol::account_storage_namespace("test-app", "orphan-user");
+    let account = std::path::Path::new(&state).join(&namespace);
+    std::fs::create_dir_all(account.join("t_records")).expect("seed state");
+    std::fs::write(account.join("t_records").join("k_entry"), b"sealed").expect("seed");
+
+    let protocol = instance("orphan-user");
+    let err = protocol
+        .initialize_mls_with_file_stores(mls.clone(), state.clone(), KEY.to_vec())
+        .expect_err("state without an identity");
+    assert!(
+        matches!(&err, ProtocolError::InvalidConfiguration(m)
+            if m.contains("fresh directory") && m.contains(&namespace)),
+        "expected InvalidConfiguration naming the remedy, got {err:?}"
+    );
+    assert!(!protocol.is_mls_initialized());
+    assert!(entries(&mls).is_empty(), "no identity may be minted");
+    assert!(account.join("t_records").join("k_entry").exists());
+
+    // A lock file alone is not state: an earlier open left it, nothing more.
+    std::fs::remove_dir_all(account.join("t_records")).expect("clear");
+    std::fs::write(account.join("state-store.lock"), b"").expect("lock");
+    protocol
+        .initialize_mls_with_file_stores(mls, state, KEY.to_vec())
+        .expect("a lock file alone opens");
+    assert!(protocol.local_address().is_some());
+}
+
+/// The same state root with the identity that wrote it opens as before.
+#[test]
+fn state_with_its_identity_reopens() {
+    let root = TempRoot::new("paired");
+    let (mls, state) = (root.dir("mls"), root.dir("state"));
+    let first = instance("paired-user");
+    first
+        .initialize_mls_with_file_stores(mls.clone(), state.clone(), KEY.to_vec())
+        .expect("first");
+    let address = first.local_address();
+    drop(first);
+    let second = instance("paired-user");
+    second
+        .initialize_mls_with_file_stores(mls, state, KEY.to_vec())
+        .expect("reopen");
+    assert_eq!(second.local_address(), address);
+}

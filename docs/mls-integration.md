@@ -462,9 +462,17 @@ each message says what to change:
 
 | Refusal | Variant |
 |---------|---------|
-| An empty root, or a key that is not 32 bytes or is all zero | `InvalidArgument` |
-| A wrong key, a key check that cannot prove the key, a directory that cannot be created | `InvalidConfiguration` |
+| An empty root, the same directory for both roots, or a key that is not 32 bytes or is all zero | `InvalidArgument` |
+| A wrong key, a key check that cannot prove the key, a directory that cannot be created, or protocol state with no identity beside it | `InvalidConfiguration` |
 | Another store already holds the directory, in this process or another; or `start()` has already run | `InvalidState` |
+
+Moving a deployment onto these stores starts a new identity: nothing is
+carried over from the platform store, so the device gets a new address. A
+protocol-state account directory that holds records while the MLS account
+directory does not exist is refused before either store opens, because the
+new identity's record key cannot unseal those records and the first restore
+would delete the parked messages it could not read. Use a fresh
+`state_root`, or restore the `mls_root` that wrote the state.
 
 The MLS store opens first, so a refused key leaves no protocol-state
 directory behind. A state root that cannot be created is refused after the
