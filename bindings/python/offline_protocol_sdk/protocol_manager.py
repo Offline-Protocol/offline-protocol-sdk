@@ -166,6 +166,18 @@ def _run_here(call: Callable[[], Any]) -> asyncio.Future[Any]:
     return done
 
 
+def _forget_frames(err: BaseException) -> None:
+    """Drops the traceback of an exception a teardown caught and logged.
+
+    The traceback holds the teardown's frames, and through them the
+    manager. The executor future that carried the exception keeps it, in a
+    reference cycle that Python 3.10 frees only when the collector runs, so
+    a stopped or closed manager outlived ``del`` there (3.11 and later free
+    it at once). Nothing reads the traceback once it is logged.
+    """
+    err.__traceback__ = None
+
+
 def _hand_off(call: Callable[[], Any]) -> asyncio.Future[Any]:
     """Starts a blocking core call off the loop and returns its future.
 
@@ -651,19 +663,21 @@ class ProtocolManager:
             # Off the loop: the final flush blocks for up to three seconds,
             # and every other awaitable in this teardown would wait behind it.
             await _hand_off(self.disable_telemetry)
-        except Exception:
+        except Exception as err:
             teardown_clean = False
             logger.debug(
                 "disable_telemetry raised during stop (non-fatal)",
                 exc_info=True,
             )
+            _forget_frames(err)
 
         # Stop protocol engine
         try:
             self._protocol.stop()
-        except Exception:
+        except Exception as err:
             teardown_clean = False
             logger.debug("protocol.stop() raised (non-fatal)", exc_info=True)
+            _forget_frames(err)
 
         if teardown_clean:
             self._release_callbacks()
