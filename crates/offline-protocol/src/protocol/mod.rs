@@ -26,6 +26,8 @@ mod types;
 pub(crate) use decryption_queue::PendingDecryptionQueue;
 pub use decryption_queue::PendingQueueMetrics;
 pub(crate) use prefixes::*;
+#[cfg(feature = "file-store")]
+pub(crate) use storage::{sealed_state_key_types, stored_state_record_key, StoredRecordKey};
 pub(crate) use storage::{PruneAllowance, RestorableRecord};
 pub(crate) use types::*;
 pub use types::{GatewayCarrier, MediaSendOptions, ProtocolState, SendMessageOptions};

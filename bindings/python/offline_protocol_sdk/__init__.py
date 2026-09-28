@@ -3,6 +3,13 @@
 # Re-export all UniFFI-generated types (available after build-desktop.sh runs)
 from .offline_protocol import *  # noqa: F401, F403
 
+# Before anything registers a callback: see the module for the hang it prevents.
+from . import offline_protocol as _generated
+from ._callback_reentrancy import make_handle_maps_reentrant as _make_reentrant
+
+_make_reentrant(_generated)
+del _generated, _make_reentrant
+
 # Platform managers
 from .secure_storage import SecureStorage  # noqa: F401
 from .state_storage import AppStateStorage  # noqa: F401

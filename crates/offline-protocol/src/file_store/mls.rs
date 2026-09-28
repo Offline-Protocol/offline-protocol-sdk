@@ -14,7 +14,8 @@ use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use super::key::{StoreKeyError, StoreKeyProvider, STORE_KEY_BYTES};
-use super::records::{self, BoundedRead, DirectoryLock, StoreLock, SweepMemo, MAX_FRAME_BYTES};
+use super::pair::{StoredPairing, PAIRING_ID_BYTES};
+use super::records::{self, BoundedRead, StoreLock, SweepMemo, MAX_FRAME_BYTES};
 use super::{account_directory, lock_directory, FileStoreError};
 
 /// Magic of a sealed record file. Distinct from the plain frame's `OPS1`, so
@@ -55,6 +56,12 @@ const KEY_CHECK_PROBE_LIMIT: usize = 64;
 /// The lock file this store holds in its account directory. Distinct from
 /// the protocol-state store's, so the two can share a root.
 const LOCK_FILE: &str = "mls-store.lock";
+
+/// The pairing id this store shares with the protocol-state store beside it,
+/// sealed like the key check. In the account directory, outside every type
+/// directory, so [`SealedFileMlsStorage::holds_records`] never takes it for an
+/// identity: it is written before the engine has minted one.
+pub(super) const PAIRING_FILE: &str = "mls-store.pair";
 
 /// MLS storage in files, every record sealed under a key derived from the
 /// operator's store key.
@@ -98,7 +105,6 @@ pub struct SealedFileMlsStorage {
     /// packages and groups often, and a damaged record stays damaged, so one
     /// warning per file per store says everything without flooding the log.
     listing_warned: Mutex<HashSet<PathBuf>>,
-    _directory_lock: DirectoryLock,
 }
 
 impl std::fmt::Debug for SealedFileMlsStorage {
@@ -129,7 +135,7 @@ impl SealedFileMlsStorage {
     /// [`FileStoreError::KeyCheckUnverifiable`], which names the check file.
     ///
     /// A second store over the same directory is refused with
-    /// [`FileStoreError::InUse`] while this one lives.
+    /// [`FileStoreError::InUse`] until this one is closed or dropped.
     ///
     /// `root` should be a directory that survives an upgrade: this store holds
     /// the device's identity, and losing it gives the device a new address.
@@ -148,10 +154,9 @@ impl SealedFileMlsStorage {
             directory,
             cipher: ChaCha20Poly1305::new(Key::from_slice(seal_key.as_slice())),
             name_key,
-            lock: StoreLock::default(),
+            lock: StoreLock::new(directory_lock),
             swept: SweepMemo::default(),
             listing_warned: Mutex::default(),
-            _directory_lock: directory_lock,
         };
         store.verify_store_key()?;
         Ok(store)
@@ -160,6 +165,96 @@ impl SealedFileMlsStorage {
     /// The directory this store owns.
     pub fn directory(&self) -> &Path {
         &self.directory
+    }
+
+    /// Releases the directory and refuses every later operation.
+    ///
+    /// The lock goes at once, whoever still holds the store: an engine that
+    /// was handed it, a host object its runtime has not freed yet. An
+    /// operation in flight finishes first. Afterwards every operation is an
+    /// error naming the directory, and a new store may open over it. Closing
+    /// twice is closing once.
+    pub fn close(&self) {
+        self.lock.close();
+    }
+
+    /// Whether `<root>/<namespace>/` holds MLS records, without opening,
+    /// creating or locking anything.
+    ///
+    /// A record file, not the directory and not a type directory. An open
+    /// refused after the account directory was made (a wrong key, a
+    /// protocol-state root that could not be created) leaves the directory,
+    /// its lock file and its key check, and no identity. A first write that
+    /// failed (a full disk, a crash) leaves a type directory with nothing in
+    /// it but a temporary. A directory that cannot be read, at either level,
+    /// is an [`FileStoreError::Io`], never "no records".
+    pub fn holds_records(root: impl AsRef<Path>, namespace: &str) -> Result<bool, FileStoreError> {
+        super::account_holds(root.as_ref(), namespace, |path, name| {
+            if !name.starts_with(TYPE_PREFIX) {
+                return Ok(false);
+            }
+            // A file that merely carries the prefix holds no record. Asked
+            // of the entry, not left to the error a directory read gives for
+            // a file, which differs by platform. `metadata`, not `is_dir`:
+            // an account directory that can be listed but not searched
+            // fails here, and `is_dir` would answer "not a directory", which
+            // reads as "no records".
+            if !std::fs::metadata(path)?.is_dir() {
+                return Ok(false);
+            }
+            records::holds_entry(path, ENTRY_PREFIX)
+        })
+    }
+
+    /// The pairing id this store holds, read under the store key.
+    ///
+    /// `Damaged` is a file that is there and does not open: it names no
+    /// state root, and the pair falls back to asking the records.
+    pub(super) fn pairing(&self) -> Result<StoredPairing, FileStoreError> {
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| FileStoreError::Closed(self.directory.clone()))?;
+        let path = self.directory.join(PAIRING_FILE);
+        let raw = match records::read_bounded(&path, PAIRING_ID_BYTES + SEAL_OVERHEAD).map_err(
+            |source| FileStoreError::Io {
+                path: path.clone(),
+                source,
+            },
+        )? {
+            BoundedRead::Bytes(raw) => raw,
+            BoundedRead::Absent => return Ok(StoredPairing::Absent),
+            BoundedRead::Oversized => return Ok(StoredPairing::Damaged),
+        };
+        Ok(match self.open_sealed(PAIRING_FILE, &raw) {
+            Some(plain) if plain.len() == PAIRING_ID_BYTES => {
+                let mut id = [0u8; PAIRING_ID_BYTES];
+                id.copy_from_slice(&plain);
+                StoredPairing::Present(id)
+            }
+            _ => StoredPairing::Damaged,
+        })
+    }
+
+    /// Records `id` as this store's pairing id, durably.
+    pub(super) fn set_pairing(&self, id: &[u8; PAIRING_ID_BYTES]) -> Result<(), FileStoreError> {
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| FileStoreError::Closed(self.directory.clone()))?;
+        let sealed = self.seal(PAIRING_FILE, id).ok_or_else(|| {
+            FileStoreError::StoreKey(StoreKeyError::Unavailable(
+                "sealing the pairing id failed".to_string(),
+            ))
+        })?;
+        let path = self.directory.join(PAIRING_FILE);
+        records::write_atomic(&self.directory, &path, &sealed)
+            .map_err(|source| FileStoreError::Io { path, source })
+    }
+
+    /// What a closed store answers.
+    fn closed(&self) -> String {
+        format!("the store at {} is closed", self.directory.display())
     }
 
     fn keyed_name(&self, prefix: &str, parts: &[&[u8]]) -> String {
@@ -266,7 +361,10 @@ impl SealedFileMlsStorage {
     /// Proves the store key against the check file, minting the file on a
     /// fresh store and rebuilding it when a record proves the key.
     fn verify_store_key(&self) -> Result<(), FileStoreError> {
-        let _guard = self.lock.lock();
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| FileStoreError::Closed(self.directory.clone()))?;
         // The check is the one file written into the account directory, so
         // a crash mid-write orphans its temporary here, where no store write
         // would ever sweep.
@@ -389,7 +487,10 @@ impl MlsStorage for SealedFileMlsStorage {
         let sealed = self
             .seal(&name, &framed)
             .ok_or_else(|| StorageError::StoreFailed("sealing the record failed".to_string()))?;
-        let _guard = self.lock.lock();
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| StorageError::StoreFailed(self.closed()))?;
         let directory = self.type_directory(key_type);
         records::private_mkdir(&directory)
             .map_err(|err| StorageError::StoreFailed(err.to_string()))?;
@@ -399,7 +500,10 @@ impl MlsStorage for SealedFileMlsStorage {
     }
 
     fn load(&self, key_type: &str, key_id: &str) -> StorageResult<Option<Vec<u8>>> {
-        let _guard = self.lock.lock();
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| StorageError::LoadFailed(self.closed()))?;
         let name = self.entry_name(key_type, key_id);
         let path = self.type_directory(key_type).join(&name);
         let raw = match records::read_bounded(&path, MAX_SEALED_BYTES)
@@ -429,14 +533,20 @@ impl MlsStorage for SealedFileMlsStorage {
     }
 
     fn delete(&self, key_type: &str, key_id: &str) -> StorageResult<()> {
-        let _guard = self.lock.lock();
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| StorageError::DeleteFailed(self.closed()))?;
         records::remove(&self.entry_path(key_type, key_id))
             .map(|_| ())
             .map_err(|err| StorageError::DeleteFailed(err.to_string()))
     }
 
     fn list_keys(&self, key_type: &str) -> StorageResult<Vec<String>> {
-        let _guard = self.lock.lock();
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| StorageError::LoadFailed(self.closed()))?;
         let mut keys = BTreeSet::new();
         records::for_each_entry(
             &self.type_directory(key_type),
@@ -498,6 +608,90 @@ mod tests {
                 (p, bytes)
             })
             .collect()
+    }
+
+    /// An open leaves a lock file and a key check and no record, so the
+    /// directory existing says nothing about an identity. Only a stored
+    /// record counts, and the probe itself creates nothing.
+    #[test]
+    fn holds_records_counts_records_not_the_directory() {
+        let root = TempRoot::new("mls-holds");
+        let probe = || SealedFileMlsStorage::holds_records(root.path(), &namespace());
+        assert!(!probe().expect("absent"));
+        assert!(
+            files_under(root.path()).is_empty(),
+            "the probe creates nothing"
+        );
+        let store = open(&root, 1);
+        assert!(!probe().expect("lock and key check only"));
+
+        // What a first write that failed leaves: the type directory, and a
+        // temporary in it. Neither is an identity. Nor is a file that merely
+        // carries a type directory's prefix.
+        let type_directory = store.type_directory("identity");
+        std::fs::create_dir(&type_directory).expect("type directory");
+        assert!(!probe().expect("an empty type directory"));
+        std::fs::write(
+            type_directory.join(format!("{}crashed", records::TEMP_PREFIX)),
+            b"half a record",
+        )
+        .expect("temporary");
+        std::fs::write(store.directory().join("c_not-a-directory"), b"").expect("stray file");
+        assert!(!probe().expect("a temporary and a stray file"));
+
+        store.store("identity", "self", b"key").expect("store");
+        assert!(probe().expect("a record"));
+        assert!(matches!(
+            SealedFileMlsStorage::holds_records(root.path(), "../escape"),
+            Err(FileStoreError::InvalidNamespace)
+        ));
+    }
+
+    /// Closing releases the directory while the store is still held, which
+    /// is the point: a host whose runtime has not freed the object yet must
+    /// not keep the next store out. What the closed store then answers is a
+    /// failed operation, never a lost record, because the engine settles a
+    /// lost record as gone for good and regenerates a lost record key.
+    #[test]
+    fn a_closed_store_releases_the_directory_and_refuses_every_operation() {
+        let root = TempRoot::new("mls-close");
+        let store = open(&root, 1);
+        store.store("identity", "self", b"key").expect("store");
+        assert!(matches!(
+            SealedFileMlsStorage::open(root.path(), &namespace(), &key(1)),
+            Err(FileStoreError::InUse(_))
+        ));
+
+        store.close();
+        store.close();
+        let next = open(&root, 1);
+        assert_eq!(
+            next.load("identity", "self").expect("load"),
+            Some(b"key".to_vec()),
+            "the record written before the close is the next store's to read"
+        );
+
+        assert!(matches!(
+            store.store("identity", "self", b"other"),
+            Err(StorageError::StoreFailed(m)) if m.contains("closed")
+        ));
+        assert!(matches!(
+            store.load("identity", "self"),
+            Err(StorageError::LoadFailed(m)) if m.contains("closed")
+        ));
+        assert!(matches!(
+            store.delete("identity", "self"),
+            Err(StorageError::DeleteFailed(m)) if m.contains("closed")
+        ));
+        assert!(matches!(
+            store.list_keys("identity"),
+            Err(StorageError::LoadFailed(m)) if m.contains("closed")
+        ));
+        assert_eq!(
+            next.load("identity", "self").expect("load"),
+            Some(b"key".to_vec()),
+            "a closed store changes nothing in a directory it no longer holds"
+        );
     }
 
     #[test]

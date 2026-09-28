@@ -141,8 +141,93 @@ reach `AppStateStorage`. On a plaintext backend that key sits in a readable
 file, so the sealing gives you separation of *lifecycle* but not of
 *confidentiality*: anyone who can read the credential store can open every
 sealed protocol-state record. Install a real secret service (gnome-keyring,
-kwallet) for any deployment where that matters, or supply your own
-`MlsStorageProvider`.
+kwallet) for any deployment where that matters, supply your own
+`MlsStorageProvider`, or use the built-in file stores below.
+
+### Headless hosts: the built-in file stores
+
+A server or container usually has no secret service at all. Pass a store key
+and `ProtocolManager` uses the SDK's built-in file stores instead of
+`SecureStorage` and `AppStateStorage`: every MLS record is sealed on disk under
+that key, and protocol state is written in the same format `AppStateStorage`
+writes.
+
+```python
+pm = ProtocolManager(
+    config,
+    store_key_env="OFFLINE_PROTOCOL_STORE_KEY",  # 64 hex digits or base64
+    mls_root="/var/lib/example/keys",            # or OFFLINE_PROTOCOL_MLS_ROOT
+    state_root="/var/lib/example/state",         # or OFFLINE_PROTOCOL_STATE_ROOT
+)
+await pm.start()
+```
+
+- **The store key is 32 random bytes, generated once and kept.** Generate it
+  with `openssl rand -hex 32`, and hand it to the process the way the service
+  manager hands it any secret. Pass `store_key=<bytes>` instead if the host
+  already holds it. Never derive it from a password or a host name.
+- **`mls_root` holds this device's identity.** It must survive an upgrade,
+  and losing it gives the device a new address. `state_root` is scoped to
+  the installation. Keep them apart: the same directory for both, or one
+  inside the other, is refused with `ProtocolError.InvalidArgument`. That
+  includes two spellings of one directory on a volume that folds case
+  (`keys` and `Keys` on macOS or Windows). That is found only once the
+  directory exists, so the refusal leaves the directory it created, with
+  no record written.
+- **Moving an existing deployment onto the file stores starts a new
+  identity.** Nothing is carried over from the keyring: the device gets a
+  new address, and its sessions and queued messages stay with the old one.
+  Point `state_root` at a fresh directory. Both modes read
+  `OFFLINE_PROTOCOL_STATE_ROOT`, so a kept one is the easy mistake, and it
+  is refused with `ProtocolError.InvalidConfiguration`: the new identity
+  cannot unseal the old records, and the first restore would delete the
+  messages it could not read. The same refusal covers a lost `mls_root`
+  next to a surviving `state_root`, and it still applies after an attempt
+  that failed part-way. It also covers an `mls_root` that holds an
+  identity, but not the one that wrote the state: the first run over a pair
+  binds the two directories to each other, so a `state_root` put back after
+  a run over a fresh one is refused. A damaged key inside the store is not
+  refused, then or on any later start over the same `mls_root`: the SDK
+  replaces it and reports the
+  messages it lost as failed. A directory the process cannot read is
+  refused rather than taken for empty. No refusal changes or deletes a
+  record.
+- **`start()` raises instead of starting without the identity.** A wrong key
+  raises `ProtocolError.InvalidConfiguration` and changes no record. A
+  `state_root` that cannot be created also raises it, after the MLS store
+  has created its own directory; fixing the root and retrying is safe. A
+  directory another process holds raises `ProtocolError.InvalidState`. The
+  keyring path logs its own initialisation failures and carries on; this one
+  does not, because an operator who supplied a key asked for the sealed store.
+- **One manager per account directory, and `close()` gives the directory
+  up.** Each store holds a lock on its directory while open, in this
+  process or another. `await pm.close()` stops the manager and releases
+  both directories before it returns, whatever still refers to the manager
+  or to `pm.protocol`, so a new manager can open them at once. A closed
+  manager cannot be started again. Leaving
+  `async with ProtocolManager(...) as pm` closes it, so two blocks over the
+  same directories need nothing between them, and a block whose entry
+  failed closes what that entry had opened. `close()` raises
+  `ProtocolError.InvalidState` when the engine could not be stopped:
+  nothing was released, and the call can be repeated.
+- **`stop()` keeps the directories, for a restart in place.** Call `stop()`
+  then `start()` on the same manager. A `stop()` or `close()` that was
+  cancelled or raised part-way can be called again to finish; a `close()`
+  cancelled while the core was already releasing the stores finishes by
+  itself a moment later. Do not rely
+  on dropping a stopped manager to release the directories: that happens
+  when the interpreter frees the core object, which a kept `pm.protocol`,
+  an event handler that refers back to the manager, or an exception whose
+  traceback names it can each put off. A `start()` that raises releases
+  the callbacks itself, whether the stores refused or the engine did; call
+  `close()` if the manager is not going to be started again.
+- **A forked child holds the directories.** A child made with a bare
+  `os.fork()` while the stores are open inherits their locks and holds
+  them until it exits, whatever the parent closes; start subprocesses with
+  `subprocess` or the `spawn` method instead.
+
+What the stores guarantee, and what a copied directory reveals, is in the
+[MLS integration guide](../../docs/mls-integration.md#built-in-file-stores).
 
 Restartable message-plane state is kept separately by `AppStateStorage`, outside
 the credential store. The built-in stores derive an opaque account namespace

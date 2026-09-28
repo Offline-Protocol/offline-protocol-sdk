@@ -241,7 +241,14 @@ class BlePeripheral(TransportManager):
 
     async def stop(self) -> None:
         """Stop advertising and disconnect all centrals."""
-        if self._state not in (TransportState.RUNNING, TransportState.STARTING):
+        # STOPPING too: a stop() cancelled part-way (a shutdown deadline)
+        # leaves the transport there, and a retry that returned at once would
+        # leave it half torn down for good. Every step below is idempotent.
+        if self._state not in (
+            TransportState.RUNNING,
+            TransportState.STARTING,
+            TransportState.STOPPING,
+        ):
             return
 
         self._update_state(TransportState.STOPPING)
@@ -249,10 +256,10 @@ class BlePeripheral(TransportManager):
         # Cancel background tasks
         if self._peer_monitor_task is not None and not self._peer_monitor_task.done():
             self._peer_monitor_task.cancel()
-            try:
-                await self._peer_monitor_task
-            except asyncio.CancelledError:
-                pass
+            # Waited on, not awaited: catching CancelledError here would also
+            # swallow a cancel of this stop() itself, so a caller's shutdown
+            # deadline would be ignored and the teardown would run past it.
+            await asyncio.wait({self._peer_monitor_task})
         self._peer_monitor_task = None
 
         # Stop GATT server

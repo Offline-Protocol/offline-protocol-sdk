@@ -306,6 +306,7 @@ alone.
 | Reticulum available reported **only after** the gateway binds the session | An unbound session may submit and be told a verdict, and is never a recipient, so offering it to the selector offers a transport that can only refuse |
 | Relay capabilities cleared **on** internet drop | Otherwise a stale capability keeps the broadcast gate open |
 | Per-peer end-to-end capabilities restored **before** queued sends flush | Otherwise the startup flush emits downgraded envelopes to every established peer |
+| `close_file_stores()` **after** `stop()`, and nothing after it | A running engine writes to its stores, so the call is refused until the protocol is stopped; afterwards the engine holds closed stores, so `start()`, `enable_telemetry()` and both `initialize_mls` entry points are refused |
 
 ## C8. The identifier the bridge reports must match the namespace it is asked for
 
@@ -424,13 +425,31 @@ The built-in Rust file stores, `FileProtocolStateStorage` and
 `SealedFileMlsStorage`, are the worked example: each is green on its suite in
 the engine's tests, and each has a reopen test, including one that restarts an
 engine over both and finds the same address and the same sealed document
-([MLS integration](../mls-integration.md#built-in-file-stores)). No binding
-exposes them yet. A Rust host that uses them owns both directories, which
-includes removing them on logout, after both stores (and the engine holding
-them) are dropped: each store holds a lock on its directory while it is open.
-With telemetry enabled, call `disable_telemetry()` before dropping the engine:
-the drop alone detaches the uploader thread, which holds the protocol-state
-store until its final flush ends, up to three seconds later.
+([MLS integration](../mls-integration.md#built-in-file-stores)). A binding
+reaches them through `initialize_mls_with_file_stores`; only the Python
+`ProtocolManager` wires it (`store_key=` or `store_key_env=`), because the
+mobile modules have a platform keystore. A host that uses them owns both
+directories, which includes removing them on logout, after both stores are
+closed: each store holds a lock on its directory while it is open.
+
+**Release the directories with `close_file_stores()`, never by dropping the
+instance.** Dropping releases them too, but a binding does not decide when
+its object is dropped: the host runtime does. A reference the application
+kept, a callback cycle that runs through Rust, an exception whose traceback
+names the object, each holds the instance, and with it both locks, so every
+later instance over the same directories is refused. None of those is
+visible from the binding's own code, and a test that drops its last
+reference proves only that the test held no other. The call is only valid
+after `stop()`, and the instance cannot run again afterwards. It disables
+telemetry itself and waits for the uploader's final flush, up to three
+seconds, because the uploader keeps its queue in the protocol-state store;
+call it off the main thread.
+
+A Rust host opens the two with `FileStorePair::open`, which refuses the
+pairs the engine would lose data over, and closes them with the pair's
+`close()`, after `disable_telemetry()` and the engine's stop. Dropping the engine
+alone detaches the uploader thread, which holds the protocol-state store
+until its final flush ends, up to three seconds later.
 
 The MLS storage trait has a suite of its own,
 `offline_protocol::mls_storage_conformance::run` (`run_json` for the same JSON
@@ -546,7 +565,7 @@ never told the pipe it backgrounded, or a main-thread watchdog kill on
 |---------|------|
 | Swift | The manual Objective-C bridge kept in step with every `@objc` method; secure storage backed by Keychain; a live-instance check before emitting; the telemetry session boundary inside a background task (C12); a Multipeer manager that announces a peer only under the address its preamble proved, one per address (S8) |
 | Kotlin | Secure storage backed by Keystore; no blocking work on the main looper; awareness that platform callbacks arrive on binder threads; the telemetry session boundary from an `Application.ActivityLifecycleCallbacks` watcher, never `onHostPause` (C12); a Wi-Fi Direct manager that announces a peer only under the address its preamble proved, one per address (K8) |
-| Python | Nothing platform-specific; it is the thinnest binding and therefore the best place to smoke-test an ABI change; the host platform for telemetry from `platform`; a BLE peripheral that serves the address and the core-built identity assertion, and a central that verifies before it announces (P8); a peer-stream manager that announces a host only under the address its preamble proved, and keeps one announced stream per address (P9) |
+| Python | Nothing platform-specific; it is the thinnest binding and therefore the best place to smoke-test an ABI change; a re-entrant lock on the generated callback handle map, installed at import, because the collector can free a core object inside a callback lookup and the core's drop then asks for that lock again (P10); the host platform for telemetry from `platform`; a BLE peripheral that serves the address and the core-built identity assertion, and a central that verifies before it announces (P8); a peer-stream manager that announces a host only under the address its preamble proved, and keeps one announced stream per address (P9) |
 | TypeScript | Config normalization, event typing kept in step with the core, no assumption that a native method exists in an older binary, and no telemetry lifecycle code of its own |
 
 A storage adapter written in any of them owes the same thing: a green

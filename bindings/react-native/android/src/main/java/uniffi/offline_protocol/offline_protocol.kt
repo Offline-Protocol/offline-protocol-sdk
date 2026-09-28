@@ -932,6 +932,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_canc
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite(
@@ -1021,6 +1023,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused(
 ): Short
@@ -1427,6 +1431,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_con
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_group(`ptr`: Long,`groupName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_invite(`ptr`: Long,`petname`: RustBuffer.ByValue,`sign`: Byte,uniffi_out_err: UniffiRustCallStatus, 
@@ -1516,6 +1522,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pendin
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_identity_assertion(`ptr`: Long,`signedData`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(`ptr`: Long,`secureStorage`: Long,`protocolStateStorage`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls_with_file_stores(`ptr`: Long,`mlsRoot`: RustBuffer.ByValue,`stateRoot`: RustBuffer.ByValue,`storeKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declaration_refused(`ptr`: Long,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -2046,6 +2054,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 6632.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores() != 28531.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 8723.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2179,6 +2190,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 43685.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores() != 58803.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused() != 30965.toShort()) {
@@ -4194,6 +4208,8 @@ public interface OfflineProtocolInterface {
     
     fun `cancelFileTransfer`(`fileId`: kotlin.String)
     
+    fun `closeFileStores`()
+    
     fun `createGroup`(`groupName`: kotlin.String): MlsGroupInfo
     
     fun `createInvite`(`petname`: kotlin.String?, `sign`: kotlin.Boolean): kotlin.String
@@ -4283,6 +4299,8 @@ public interface OfflineProtocolInterface {
     fun `identityAssertion`(`signedData`: List<kotlin.UByte>): List<kotlin.UByte>
     
     fun `initializeMls`(`secureStorage`: MlsStorageProvider, `protocolStateStorage`: ProtocolStateStorageProvider)
+    
+    fun `initializeMlsWithFileStores`(`mlsRoot`: kotlin.String, `stateRoot`: kotlin.String, `storeKey`: kotlin.ByteArray)
     
     fun `internetAddressDeclarationRefused`(`reason`: kotlin.String)
     
@@ -4821,6 +4839,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer(
         it,
         FfiConverterString.lower(`fileId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `closeFileStores`()
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores(
+        it,
+        _status)
 }
     }
     
@@ -5419,6 +5450,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(
         it,
         FfiConverterTypeMlsStorageProvider.lower(`secureStorage`),FfiConverterTypeProtocolStateStorageProvider.lower(`protocolStateStorage`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `initializeMlsWithFileStores`(`mlsRoot`: kotlin.String, `stateRoot`: kotlin.String, `storeKey`: kotlin.ByteArray)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls_with_file_stores(
+        it,
+        FfiConverterString.lower(`mlsRoot`),FfiConverterString.lower(`stateRoot`),FfiConverterByteArray.lower(`storeKey`),_status)
 }
     }
     

@@ -42,7 +42,8 @@ pub use events::{
 #[cfg(feature = "file-store")]
 pub use file_store::{
     account_storage_namespace, EnvStoreKey, FileProtocolStateStorage, FileStoreError,
-    SealedFileMlsStorage, StaticStoreKey, StoreKeyError, StoreKeyProvider,
+    FileStorePair, SealedFileMlsStorage, SealedState, StaticStoreKey, StoreKeyError,
+    StoreKeyProvider,
 };
 pub use group_mesh::{
     GroupRichReadiness, GroupSendOptions, RelaySyncState, MAX_RELAY_CAPABILITIES,

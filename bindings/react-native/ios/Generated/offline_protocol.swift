@@ -1307,6 +1307,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func cancelFileTransfer(fileId: String) throws 
     
+    func closeFileStores() throws 
+    
     func createGroup(groupName: String) throws  -> MlsGroupInfo
     
     func createInvite(petname: String?, sign: Bool) throws  -> String
@@ -1396,6 +1398,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func identityAssertion(signedData: [UInt8]) throws  -> [UInt8]
     
     func initializeMls(secureStorage: MlsStorageProvider, protocolStateStorage: ProtocolStateStorageProvider) throws 
+    
+    func initializeMlsWithFileStores(mlsRoot: String, stateRoot: String, storeKey: Data) throws 
     
     func internetAddressDeclarationRefused(reason: String) 
     
@@ -1814,6 +1818,13 @@ open func cancelFileTransfer(fileId: String)throws   {try rustCallWithError(FfiC
 }
 }
     
+open func closeFileStores()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores(
+            self.uniffiCloneHandle(),$0
+    )
+}
+}
+    
 open func createGroup(groupName: String)throws  -> MlsGroupInfo  {
     return try  FfiConverterTypeMlsGroupInfo_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_group(
@@ -2192,6 +2203,16 @@ open func initializeMls(secureStorage: MlsStorageProvider, protocolStateStorage:
             self.uniffiCloneHandle(),
         FfiConverterCallbackInterfaceMlsStorageProvider_lower(secureStorage),
         FfiConverterCallbackInterfaceProtocolStateStorageProvider_lower(protocolStateStorage),$0
+    )
+}
+}
+    
+open func initializeMlsWithFileStores(mlsRoot: String, stateRoot: String, storeKey: Data)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls_with_file_stores(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(mlsRoot),
+        FfiConverterString.lower(stateRoot),
+        FfiConverterData.lower(storeKey),$0
     )
 }
 }
@@ -9708,6 +9729,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 6632) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores() != 28531) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 8723) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -9841,6 +9865,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 43685) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores() != 58803) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused() != 30965) {

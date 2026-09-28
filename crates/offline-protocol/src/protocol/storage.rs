@@ -143,7 +143,8 @@ impl StateCategory {
         })
     }
 
-    /// Every category, for tests that must cover the whole set.
+    /// Every category: for [`sealed_state_key_types`], and for tests that
+    /// must cover the whole set.
     ///
     /// [`Self::requires_sealing`] is an exhaustive `match`, so a new variant
     /// cannot be added without deciding its sensitivity. Nothing forces the
@@ -153,7 +154,7 @@ impl StateCategory {
     /// list plus `every_category_maps_back_from_its_key_type` closes that
     /// gap, so the omission is a failing test rather than a production
     /// write path that never worked.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "file-store"))]
     pub(crate) const ALL: &'static [Self] = &[
         Self::PendingMessages,
         Self::PendingMessageEntries,
@@ -183,7 +184,7 @@ impl StateCategory {
     ///
     /// The inverse of [`Self::from_key_type`], and an exhaustive `match`, so
     /// a new variant has to name its key type here before it compiles.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "file-store"))]
     pub(crate) fn key_type(self) -> &'static str {
         match self {
             Self::PendingMessages => storage_keys::PENDING_MESSAGES,
@@ -322,6 +323,66 @@ impl StateCategory {
             | Self::NostrWatermark
             | Self::StateAdoption => false,
         }
+    }
+}
+
+/// The key types whose values are sealed before they reach the store: what a
+/// reader has to look at to learn whether a store's sealed records open under
+/// a given record key.
+#[cfg(feature = "file-store")]
+pub(crate) fn sealed_state_key_types() -> impl Iterator<Item = &'static str> {
+    StateCategory::ALL
+        .iter()
+        .filter(|category| category.requires_sealing())
+        .map(|category| category.key_type())
+}
+
+/// What a secure store holds where the protocol-state record key belongs.
+pub(crate) enum StoredRecordKey {
+    /// A key of the right length, as the cipher built from it.
+    Usable(StateRecordCipher),
+    /// No record: a store that has never sealed protocol state.
+    Absent,
+    /// A record that is not the key and never will be: the wrong length, or
+    /// one the store itself reports as permanently lost. The reason is for
+    /// the log.
+    Unrecoverable(String),
+}
+
+/// Reads the protocol-state record key from `storage`, changing nothing.
+///
+/// There is one reading of this record, used twice: by
+/// `restore_or_init_state_record_key`, which decides from it whether to
+/// generate a key, and by the file stores' probe
+/// ([`crate::FileProtocolStateStorage::sealed_state`]), which decides from it
+/// whether a protocol-state store belongs with this secure store. Two
+/// readings would come to disagree about which failures are permanent, and
+/// the probe would then pass a pair that restore goes on to delete from.
+///
+/// `Err` is a read that failed and may succeed on a later launch. The storage
+/// contract (`MlsStorage::load`) reserves `CorruptedData` for permanent
+/// losses (a transient failure is `LoadFailed`), so that one is an answer:
+/// the wrong-length case, reported by the store rather than found here.
+pub(crate) fn stored_state_record_key(
+    storage: &dyn MlsStorage,
+) -> std::result::Result<StoredRecordKey, StorageError> {
+    match storage.load(
+        storage_keys::STATE_RECORD_KEY,
+        storage_keys::STATE_RECORD_KEY_ID,
+    ) {
+        Ok(Some(bytes)) if bytes.len() == STATE_RECORD_KEY_BYTES => {
+            let bytes = Zeroizing::new(bytes);
+            let mut key = Zeroizing::new([0u8; STATE_RECORD_KEY_BYTES]);
+            key.copy_from_slice(&bytes);
+            Ok(StoredRecordKey::Usable(StateRecordCipher::new(&key)))
+        }
+        Ok(None) => Ok(StoredRecordKey::Absent),
+        Ok(Some(bytes)) => Ok(StoredRecordKey::Unrecoverable(format!(
+            "stored key is {} bytes, expected {STATE_RECORD_KEY_BYTES}",
+            bytes.len()
+        ))),
+        Err(StorageError::CorruptedData(reason)) => Ok(StoredRecordKey::Unrecoverable(reason)),
+        Err(err) => Err(err),
     }
 }
 
@@ -1621,29 +1682,14 @@ impl OfflineProtocol {
             return;
         };
 
-        let unrecoverable = match storage.load(
-            storage_keys::STATE_RECORD_KEY,
-            storage_keys::STATE_RECORD_KEY_ID,
-        ) {
-            Ok(Some(bytes)) if bytes.len() == STATE_RECORD_KEY_BYTES => {
-                let bytes = Zeroizing::new(bytes);
-                let mut key = Zeroizing::new([0u8; STATE_RECORD_KEY_BYTES]);
-                key.copy_from_slice(&bytes);
+        let unrecoverable = match stored_state_record_key(storage.as_ref()) {
+            Ok(StoredRecordKey::Usable(cipher)) => {
                 debug!("Restored protocol state record key from secure storage");
-                self.state_record_cipher = Some(StateRecordCipher::new(&key));
+                self.state_record_cipher = Some(cipher);
                 return;
             }
-            Ok(None) => None,
-            Ok(Some(bytes)) => Some(format!(
-                "stored key is {} bytes, expected {STATE_RECORD_KEY_BYTES}",
-                bytes.len()
-            )),
-            // The store read the record and it is not the key. The storage
-            // contract (`MlsStorage::load`) reserves `CorruptedData` for
-            // permanent losses (a transient failure is `LoadFailed`), so this
-            // is the wrong-length case reported by the store rather than
-            // found here.
-            Err(StorageError::CorruptedData(reason)) => Some(reason),
+            Ok(StoredRecordKey::Absent) => None,
+            Ok(StoredRecordKey::Unrecoverable(reason)) => Some(reason),
             Err(e) => {
                 warn!(
                     error = %e,

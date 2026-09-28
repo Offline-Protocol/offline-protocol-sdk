@@ -62,7 +62,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   once per store, as a warning naming its file. Each store holds an
   exclusive lock on its directory while open, so a second engine over the
   same directories fails with `FileStoreError::InUse` instead of silently
-  diverging the MLS state.
+  diverging the MLS state. `close()` on either store releases its directory
+  at once, whoever still holds the store, and every later operation on it
+  is an error (a failed operation, never a lost record).
+  `FileStorePair::open` opens the two stores together and refuses the
+  pairs the engine would lose data over (see the next entry); its first open
+  binds the two with one pairing id, so a later open knows they belong
+  together whatever the engine does to its record key.
+  `FileProtocolStateStorage::sealed_state` says whether the sealed records
+  in a state store open under the record key an MLS store holds, without
+  changing either: `Empty`, `Opens`, `Foreign` (sealed under another key,
+  or under one this identity lost and replaced) or `KeyDamaged` (the record
+  key itself is damaged, which no refusal helps).
   On Windows the lock file shares read access, so a backup tool that shares
   write access, as they usually do, can read a live store. A failed
   directory flush fails the write on Unix rather than acknowledging it, and
@@ -71,12 +82,96 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   derivation. Both stores pass their conformance suites, and an
   engine restarted over them keeps its address and its sealed documents. The
   `replicated_notes` example now runs on them. The stores sit behind the
-  default-on `file-store` feature. Rust only; the FFI entry is separate
-  work. The threat model records the store key's exposure on a host without
-  a keystore as residual risk R18.
+  default-on `file-store` feature. The threat model records the store key's
+  exposure on a host without a keystore as residual risk R18.
+- **Bindings can open the built-in file stores.**
+  `initialize_mls_with_file_stores(mls_root, state_root, store_key)` opens
+  both stores in place of `initialize_mls`, in the account directory derived
+  from the instance's own `app_id` and `profile`. It keeps `initialize_mls`'s
+  lifecycle, and its refusals use existing error variants
+  (`InvalidArgument`, `InvalidConfiguration` for a wrong key, `InvalidState`
+  for a directory another store holds), so the error enum is unchanged. The
+  Python `ProtocolManager` takes `store_key=` or `store_key_env=` (64 hex
+  digits or base64, as the Rust `EnvStoreKey` reads), with `mls_root=` or
+  `OFFLINE_PROTOCOL_MLS_ROOT`, and uses the file stores instead of the
+  keyring. On that path `start()` raises when MLS cannot be initialised,
+  rather than logging and starting without the identity, and releases the
+  callbacks it registered. Swift and Kotlin get the generated methods and
+  keep their platform keystores.
+- **The file-store entry point refuses a pair of roots it would lose data
+  over.** The engine deletes a sealed protocol-state record that does not
+  open, which is right for one damaged record and wrong for a whole state
+  root sealed under another identity. Moving onto the file stores starts a
+  new identity, so each of these is refused, and no refusal changes or
+  deletes a record: a state root that holds records with no MLS record
+  beside it (asked of record files, so neither an earlier attempt that
+  failed nor a first write that failed can disarm it); a state root that
+  holds records and belongs with another MLS store (an identity is in
+  place, but not the one that wrote the state), decided by the pairing ids
+  the two stores' first open wrote, and for a state root never bound by
+  whether its sealed records open under this MLS store's record key; an
+  account directory that cannot be read, which is never taken for empty;
+  and roots that are one directory
+  or one inside the other, compared as spelled before anything is created
+  and again as directories once both exist, because a volume that folds
+  case makes one directory of two spellings. A damaged record key is not
+  refused, on the launch that finds it or on any launch after while the MLS
+  root keeps its pairing file: the engine's
+  new key is what settles the messages lost with it, and the records it
+  cannot delete that launch stay under the lost key without making the
+  state look like another identity's. Rust hosts get the same refusals
+  from `FileStorePair::open`.
+- **`close_file_stores()` releases the file stores without waiting for the
+  instance to be freed.** When a host object is freed is the host runtime's
+  decision: a kept reference, a callback cycle, an exception that still
+  names the object. Until then the directories stayed locked and every
+  later instance over them was refused. The new FFI method releases both
+  locks at once, after `stop()` (or after a panic poisoned the engine
+  lock, which `stop()` cannot take again), and stops telemetry first so
+  the uploader's final flush reaches its queue. The instance cannot run
+  again afterwards, and it is a no-op on an instance that never opened the
+  file stores. The Python `ProtocolManager` gets `close()`, which stops
+  and then releases, and leaving `async with` closes a manager that uses
+  the file stores, so two blocks over the same directories need no `del`
+  between them; a block whose entry failed after the stores opened closes
+  them too. Any other manager is stopped by the block, as before, and can
+  be entered again. A `close()` cancelled while the core is releasing
+  still releases, and the manager is closed once it has.
 
 ### Fixed
 
+- **A stopped Python `ProtocolManager` is freed.** The core kept every
+  callback the manager registered, and those reached the manager again
+  through Rust, where the collector cannot see the cycle, so a stopped
+  manager lived as long as the process. `stop()` now replaces all five
+  callbacks with inert ones, including one the application registered
+  itself for Nostr or Reticulum, so the event handler receives nothing after
+  `stop()`. A `stop()` that was cancelled or whose engine stop raised can be
+  called again to finish, including one cancelled inside a transport's own
+  stop: each transport's `stop()` now resumes from the stopping state
+  instead of returning. Overlapping `stop()` calls run one teardown, in
+  order, and the BLE peripheral no longer swallows a cancel of its `stop()`.
+  `stop()` always takes one loop turn, once the process loop is cancelled:
+  a caller retrying after a cancelled `stop()` is inside the task step that
+  threw the cancellation, which holds the manager through the exception's
+  traceback until the task next suspends, and on Python 3.13 and later
+  nothing else in `stop()` is certain to suspend. A teardown also finishes
+  on a loop whose default executor was shut down, by running its blocking
+  steps in place. A teardown step that raised (a telemetry disable, the
+  engine's stop) no longer keeps the manager alive through the logged
+  exception's traceback, which Python 3.10 freed only when the collector ran;
+  the Python Bindings job now runs the suite on 3.10 as well.
+  `__del__` no longer raises on a manager whose constructor raised.
+- **Freeing a Python core object can no longer hang the process.** The
+  generated bindings guard their callback handle map with a plain lock,
+  taken on every callback lookup and removal. The collector can run a
+  finalizer inside that critical section, a core object's drop releases
+  the callbacks it holds, and each release asked for the same lock on the
+  same thread, which then waited for itself. It needed a core object in a
+  reference cycle (an event handler that is a method of the manager's
+  owner is enough) and a collection at the wrong bytecode, and it could
+  not happen while stopped managers were never freed at all. The package
+  now gives the handle map a re-entrant lock when it is imported.
 - **A protocol-state record key the store reports as corrupt is regenerated.**
   The engine regenerated a record key of the wrong length but treated a
   `CorruptedData` error as a failed load, so a store that seals its records

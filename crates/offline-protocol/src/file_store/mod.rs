@@ -39,11 +39,16 @@
 //!   read, so a record that fails afterwards is damaged, and the error names
 //!   the file so the operator can decide.
 //! - **One store per directory.** Each store holds an exclusive lock on its
-//!   account directory for its lifetime, and a second store over the same
-//!   directory, in this process or another, is refused with
+//!   account directory until it is closed or dropped, and a second store over
+//!   the same directory, in this process or another, is refused with
 //!   [`FileStoreError::InUse`]. Two stores over one MLS directory would each
 //!   advance ratchet state the other never sees, and the groups would diverge
 //!   without an error.
+//! - **Releasing a directory never depends on who still holds the store.**
+//!   `close` releases the lock at once and makes every later operation an
+//!   error. A host whose runtime decides when an object is freed (a garbage
+//!   collector, a reference cycle through a callback) would otherwise hold
+//!   the directory for as long as anything, anywhere, kept a reference.
 //!
 //! # Layout
 //!
@@ -57,12 +62,14 @@
 
 mod key;
 mod mls;
+mod pair;
 mod records;
 mod state;
 
 pub use key::{EnvStoreKey, StaticStoreKey, StoreKeyError, StoreKeyProvider, STORE_KEY_BYTES};
 pub use mls::SealedFileMlsStorage;
-pub use state::FileProtocolStateStorage;
+pub use pair::FileStorePair;
+pub use state::{FileProtocolStateStorage, SealedState};
 
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -106,10 +113,12 @@ pub fn is_account_storage_namespace(value: &str) -> bool {
     })
 }
 
-/// Why a built-in file store could not be opened.
+/// Why a built-in file store could not be opened, or could not answer a
+/// question about its directory.
 ///
-/// Opening is the only step with its own error type: once open, each store
-/// reports through the error type of the trait it implements.
+/// Opening and the probes are the only steps with their own error type: a
+/// record operation reports through the error type of the trait the store
+/// implements.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum FileStoreError {
@@ -155,6 +164,95 @@ pub enum FileStoreError {
         "the store at {0} is already open elsewhere; two stores over one directory are refused"
     )]
     InUse(PathBuf),
+    /// The store was closed, and holds its directory no longer.
+    #[error("the store at {0} is closed")]
+    Closed(PathBuf),
+    /// The MLS store could not say whether it holds the key that seals
+    /// protocol state.
+    ///
+    /// Nothing was changed. This is a read that failed, not a key that is
+    /// missing or damaged: those are answers, and are reported as
+    /// [`SealedState`].
+    #[error("the protocol-state record key could not be read: {0}; nothing was changed")]
+    RecordKeyUnreadable(String),
+    /// [`FileStorePair::open`] was given one directory for both roots, or
+    /// one inside the other.
+    ///
+    /// The MLS root holds the identity and must survive the removal of the
+    /// state root, which is scoped to the installation. When
+    /// `on_this_volume` is set, the roots are spelled apart and are one
+    /// directory only on this volume (one that folds case), which shows only
+    /// once both exist: the stores' directories were created then, and no
+    /// record was written.
+    #[error("{}", roots_overlap_message(.mls_root, .state_root, .on_this_volume))]
+    RootsOverlap {
+        /// The MLS root as given.
+        mls_root: PathBuf,
+        /// The protocol-state root as given.
+        state_root: PathBuf,
+        /// Found only once both directories existed.
+        on_this_volume: bool,
+    },
+    /// The protocol-state account directory holds records and the MLS root
+    /// holds no identity for the account.
+    ///
+    /// Nothing was created. Opening would mint a new identity (a new
+    /// address) whose record key cannot unseal those records, and the first
+    /// restore would delete the ones it read: a deployment moving onto the
+    /// file stores with a kept state root, or one whose MLS root was lost.
+    #[error(
+        "{} holds protocol state, but {} holds no identity for this account: the file \
+         stores would start a new identity (a new address) and delete the state it cannot \
+         unseal. Point state_root at a fresh directory, or restore the mls_root that wrote \
+         this state",
+        .state.display(),
+        .mls_root.display()
+    )]
+    StateWithoutIdentity {
+        /// The protocol-state account directory.
+        state: PathBuf,
+        /// The MLS root.
+        mls_root: PathBuf,
+    },
+    /// The protocol-state account directory belongs to another MLS store:
+    /// it is bound to another one, or its sealed records open under no
+    /// record key this one holds.
+    ///
+    /// No record was changed. Handing the pair to an engine would delete the
+    /// queued and parked messages its restore reads.
+    #[error(
+        "{} holds protocol state that another identity wrote, not the one in {}: starting \
+         would delete the queued and parked messages in it. Use the mls_root that wrote this \
+         state, or point state_root at a fresh directory. No record was changed",
+        .state.display(),
+        .mls_root.display()
+    )]
+    ForeignState {
+        /// The protocol-state account directory.
+        state: PathBuf,
+        /// The MLS root.
+        mls_root: PathBuf,
+    },
+}
+
+fn roots_overlap_message(
+    mls_root: &std::path::Path,
+    state_root: &std::path::Path,
+    on_this_volume: &bool,
+) -> String {
+    if *on_this_volume {
+        format!(
+            "mls_root and state_root must be different directories, neither inside the \
+             other: {} and {} are spelled apart, and on this volume one is the other or lies \
+             inside it. The stores' directories were created; no record was written or changed",
+            mls_root.display(),
+            state_root.display()
+        )
+    } else {
+        "mls_root and state_root must be different directories, neither inside the other: \
+         mls_root holds the identity and must survive the removal of state_root"
+            .to_string()
+    }
 }
 
 fn account_directory(root: &std::path::Path, namespace: &str) -> Result<PathBuf, FileStoreError> {
@@ -167,6 +265,44 @@ fn account_directory(root: &std::path::Path, namespace: &str) -> Result<PathBuf,
         source,
     })?;
     Ok(directory)
+}
+
+/// Whether the account directory `<root>/<namespace>/` holds an entry that
+/// `counts` accepts, without creating, locking or changing anything.
+///
+/// A directory that is not there holds nothing. One that cannot be read is
+/// an error, never "empty": a caller deciding whether it may start a new
+/// identity over it must not take a permission error for a fresh install.
+/// `counts` is handed the entry's path and name, and may look inside it; an
+/// error it returns is reported against the path it was given.
+fn account_holds(
+    root: &std::path::Path,
+    namespace: &str,
+    counts: impl Fn(&std::path::Path, &str) -> std::io::Result<bool>,
+) -> Result<bool, FileStoreError> {
+    if !is_account_storage_namespace(namespace) {
+        return Err(FileStoreError::InvalidNamespace);
+    }
+    let directory = root.join(namespace);
+    let unusable = |path: &std::path::Path, source: std::io::Error| FileStoreError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    let entries = match std::fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(unusable(&directory, err)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|err| unusable(&directory, err))?;
+        let path = entry.path();
+        if counts(&path, &entry.file_name().to_string_lossy())
+            .map_err(|err| unusable(&path, err))?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Takes the store's exclusive lock on `directory`.
