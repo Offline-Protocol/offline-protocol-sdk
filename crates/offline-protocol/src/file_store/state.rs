@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 
 use offline_protocol_mls::storage::MlsStorage;
 
+use super::pair::PAIRING_ID_BYTES;
 use super::records::{self, BoundedRead, StoreLock, SweepMemo, MAX_FRAME_BYTES, MAX_HEADER_BYTES};
 use super::{account_directory, lock_directory, FileStoreError};
 use crate::protocol::state_crypto::StateRecordCipher;
@@ -25,6 +26,12 @@ const ENTRY_PREFIX: &str = "k_";
 /// The lock file this store holds in its account directory. Distinct from
 /// the sealed store's, so the two can share a root.
 const LOCK_FILE: &str = "state-store.lock";
+
+/// The pairing id of the MLS store this state belongs with, in the clear. In
+/// the account directory, outside every type directory, so
+/// [`FileProtocolStateStorage::holds_records`] never takes it for state, and
+/// the binding providers, which only read type directories, never see it.
+const PAIRING_FILE: &str = "state-store.pair";
 
 /// Sealed records [`FileProtocolStateStorage::sealed_state`] tries in each
 /// category before it moves to the next. One that opens settles the whole
@@ -47,6 +54,15 @@ const SEALED_STATE_PROBE_LIMIT: usize = 64;
 /// It is asked of the categories the engine seals. The telemetry queue is
 /// sealed under the same key and is not examined: a batch that does not open
 /// is the uploader's to drop, and no message is lost with it.
+///
+/// The records alone cannot tell another identity's state from this
+/// identity's state after the engine regenerated a damaged record key. The
+/// launch that regenerates it cannot delete everything sealed under the lost
+/// key (documents are read when they are opened, and each restore walk stops
+/// at its delete allowance), so every later launch finds records that open
+/// under no key the MLS store holds, and this answers `Foreign`. Open the two
+/// stores with [`crate::FileStorePair`], which records which MLS store a state
+/// store belongs with and asks the records only of a state store never bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SealedState {
@@ -57,7 +73,8 @@ pub enum SealedState {
     Opens,
     /// Sealed records exist, in no category does one of those tried open,
     /// and the MLS store holds a usable record key or none at all: they were
-    /// sealed under another key. The engine deletes the ones its restore
+    /// sealed under another key, another identity's or one this identity
+    /// lost and replaced (see above). The engine deletes the ones its restore
     /// reads, queued and parked messages among them.
     Foreign,
     /// Sealed records exist and the MLS store's record key is damaged, so
@@ -251,6 +268,49 @@ impl FileProtocolStateStorage {
         })
     }
 
+    /// The pairing id this store was bound to, or `None` for a store never
+    /// bound (written by an engine over stores opened one by one, or by a
+    /// binding's provider). A file of the wrong length names no MLS store,
+    /// and reads as `None`.
+    pub(super) fn pairing(&self) -> Result<Option<[u8; PAIRING_ID_BYTES]>, FileStoreError> {
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| FileStoreError::Closed(self.directory.clone()))?;
+        let path = self.directory.join(PAIRING_FILE);
+        match records::read_bounded(&path, PAIRING_ID_BYTES)
+            .map_err(|source| FileStoreError::Io { path, source })?
+        {
+            BoundedRead::Bytes(raw) if raw.len() == PAIRING_ID_BYTES => {
+                let mut id = [0u8; PAIRING_ID_BYTES];
+                id.copy_from_slice(&raw);
+                Ok(Some(id))
+            }
+            BoundedRead::Bytes(_) | BoundedRead::Absent | BoundedRead::Oversized => Ok(None),
+        }
+    }
+
+    /// Binds this store to the MLS store whose pairing id is `id`, durably.
+    pub(super) fn set_pairing(&self, id: &[u8; PAIRING_ID_BYTES]) -> Result<(), FileStoreError> {
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| FileStoreError::Closed(self.directory.clone()))?;
+        #[cfg(test)]
+        if tests::FAIL_PAIRING_WRITE.with(|fail| fail.replace(false)) {
+            return Err(FileStoreError::Io {
+                path: self.directory.join(PAIRING_FILE),
+                source: std::io::Error::other("injected by a test"),
+            });
+        }
+        // The only file written into the account directory, so a crash
+        // mid-write orphans its temporary here, where no record write sweeps.
+        self.swept.sweep_once(&self.directory);
+        let path = self.directory.join(PAIRING_FILE);
+        records::write_atomic(&self.directory, &path, id)
+            .map_err(|source| FileStoreError::Io { path, source })
+    }
+
     /// What a closed store answers.
     fn closed(&self) -> String {
         format!("the store at {} is closed", self.directory.display())
@@ -391,12 +451,19 @@ impl ProtocolStateStorage for FileProtocolStateStorage {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::file_store::account_storage_namespace;
     use crate::file_store::records::MAX_VALUE_BYTES;
     use crate::file_store::test_support::TempRoot;
     use offline_protocol_mls::storage::{StorageError, StorageResult};
+
+    thread_local! {
+        /// Set by a test to make this thread's next pairing write fail, as a
+        /// full disk or a crash would.
+        pub(in crate::file_store) static FAIL_PAIRING_WRITE: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+    }
 
     fn namespace() -> String {
         account_storage_namespace("com.example.state", "alice")

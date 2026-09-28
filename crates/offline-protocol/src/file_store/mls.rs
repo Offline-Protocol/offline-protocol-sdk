@@ -14,6 +14,7 @@ use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use super::key::{StoreKeyError, StoreKeyProvider, STORE_KEY_BYTES};
+use super::pair::{StoredPairing, PAIRING_ID_BYTES};
 use super::records::{self, BoundedRead, StoreLock, SweepMemo, MAX_FRAME_BYTES};
 use super::{account_directory, lock_directory, FileStoreError};
 
@@ -55,6 +56,12 @@ const KEY_CHECK_PROBE_LIMIT: usize = 64;
 /// The lock file this store holds in its account directory. Distinct from
 /// the protocol-state store's, so the two can share a root.
 const LOCK_FILE: &str = "mls-store.lock";
+
+/// The pairing id this store shares with the protocol-state store beside it,
+/// sealed like the key check. In the account directory, outside every type
+/// directory, so [`SealedFileMlsStorage::holds_records`] never takes it for an
+/// identity: it is written before the engine has minted one.
+pub(super) const PAIRING_FILE: &str = "mls-store.pair";
 
 /// MLS storage in files, every record sealed under a key derived from the
 /// operator's store key.
@@ -197,6 +204,52 @@ impl SealedFileMlsStorage {
             }
             records::holds_entry(path, ENTRY_PREFIX)
         })
+    }
+
+    /// The pairing id this store holds, read under the store key.
+    ///
+    /// `Damaged` is a file that is there and does not open: it names no
+    /// state root, and the pair falls back to asking the records.
+    pub(super) fn pairing(&self) -> Result<StoredPairing, FileStoreError> {
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| FileStoreError::Closed(self.directory.clone()))?;
+        let path = self.directory.join(PAIRING_FILE);
+        let raw = match records::read_bounded(&path, PAIRING_ID_BYTES + SEAL_OVERHEAD).map_err(
+            |source| FileStoreError::Io {
+                path: path.clone(),
+                source,
+            },
+        )? {
+            BoundedRead::Bytes(raw) => raw,
+            BoundedRead::Absent => return Ok(StoredPairing::Absent),
+            BoundedRead::Oversized => return Ok(StoredPairing::Damaged),
+        };
+        Ok(match self.open_sealed(PAIRING_FILE, &raw) {
+            Some(plain) if plain.len() == PAIRING_ID_BYTES => {
+                let mut id = [0u8; PAIRING_ID_BYTES];
+                id.copy_from_slice(&plain);
+                StoredPairing::Present(id)
+            }
+            _ => StoredPairing::Damaged,
+        })
+    }
+
+    /// Records `id` as this store's pairing id, durably.
+    pub(super) fn set_pairing(&self, id: &[u8; PAIRING_ID_BYTES]) -> Result<(), FileStoreError> {
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| FileStoreError::Closed(self.directory.clone()))?;
+        let sealed = self.seal(PAIRING_FILE, id).ok_or_else(|| {
+            FileStoreError::StoreKey(StoreKeyError::Unavailable(
+                "sealing the pairing id failed".to_string(),
+            ))
+        })?;
+        let path = self.directory.join(PAIRING_FILE);
+        records::write_atomic(&self.directory, &path, &sealed)
+            .map_err(|source| FileStoreError::Io { path, source })
     }
 
     /// What a closed store answers.

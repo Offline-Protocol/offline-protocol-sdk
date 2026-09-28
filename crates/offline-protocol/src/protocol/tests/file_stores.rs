@@ -11,8 +11,8 @@ use std::sync::Arc;
 use crate::config::ProtocolConfig;
 use crate::file_store::test_support::{files_under, TempRoot};
 use crate::file_store::{
-    account_storage_namespace, FileProtocolStateStorage, FileStoreError, SealedFileMlsStorage,
-    SealedState, StaticStoreKey,
+    account_storage_namespace, FileProtocolStateStorage, FileStoreError, FileStorePair,
+    SealedFileMlsStorage, SealedState, StaticStoreKey,
 };
 use crate::protocol::types::storage_keys;
 use crate::protocol::OfflineProtocol;
@@ -303,6 +303,133 @@ fn a_damaged_record_key_is_reported_as_damaged() {
         sealed_state(&roots.keys, 9, &roots.state),
         SealedState::KeyDamaged
     );
+}
+
+/// An engine over a [`FileStorePair`], as the bindings open it.
+fn paired_engine(roots: &Roots, key: u8) -> Result<OfflineProtocol, FileStoreError> {
+    let pair = FileStorePair::open(
+        roots.keys.path(),
+        roots.state.path(),
+        &account_storage_namespace(APP_ID, PROFILE),
+        &StaticStoreKey::new([key; 32]),
+    )?;
+    let config = ProtocolConfig::builder(APP_ID, PROFILE)
+        .build()
+        .expect("config");
+    let mut protocol = OfflineProtocol::new(config).expect("engine");
+    protocol
+        .initialize_mls(pair.secure_storage(), pair.state_storage())
+        .expect("initialize_mls");
+    Ok(protocol)
+}
+
+/// Damages the protocol-state record key in the MLS store under `roots`.
+fn damage_record_key(roots: &Roots, key: u8) {
+    let record_key = SealedFileMlsStorage::open(
+        roots.keys.path(),
+        &account_storage_namespace(APP_ID, PROFILE),
+        &StaticStoreKey::new([key; 32]),
+    )
+    .expect("open sealed store")
+    .record_path(
+        storage_keys::STATE_RECORD_KEY,
+        storage_keys::STATE_RECORD_KEY_ID,
+    );
+    let mut bytes = std::fs::read(&record_key).expect("read record key");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    std::fs::write(&record_key, bytes).expect("damage record key");
+}
+
+/// The launch after a record key was regenerated opens as the same identity.
+///
+/// The damaged-key launch is let through, and the engine regenerates the
+/// key, but it cannot delete everything sealed under the lost one: each
+/// restore walk stops at its delete allowance. The next launch then finds
+/// sealed records that open under no key it holds, which the records alone
+/// read as another identity's state. The pair was bound on its first open,
+/// and that decides it. The pair here is an engine's first run over stores
+/// opened one by one, so it was never bound: the damaged-key launch binds it.
+#[test]
+fn the_launch_after_a_regenerated_record_key_opens_as_the_same_identity() {
+    let roots = Roots {
+        keys: TempRoot::new("regen-keys"),
+        state: TempRoot::new("regen-state"),
+    };
+    let parked = crate::protocol::storage::MAX_RESTORE_PRUNE_DELETES + 40;
+    park(&roots, 5, parked);
+    damage_record_key(&roots, 5);
+
+    let address = {
+        let protocol = paired_engine(&roots, 5).expect("the damaged-key launch opens");
+        protocol.local_address().expect("address").to_string()
+    };
+    let namespace = account_storage_namespace(APP_ID, PROFILE);
+    let leftovers = {
+        use crate::protocol_state_storage::ProtocolStateStorage;
+        FileProtocolStateStorage::open(roots.state.path(), &namespace)
+            .expect("open")
+            .list_keys(storage_keys::OUTBOX)
+            .expect("list")
+            .len()
+    };
+    assert!(
+        leftovers > 0,
+        "the fixture has to leave records under the lost key, or it proves nothing"
+    );
+    assert_eq!(
+        sealed_state(&roots.keys, 5, &roots.state),
+        SealedState::Foreign,
+        "what the records alone say about the same identity's own state"
+    );
+
+    for launch in ["the next launch", "and the one after"] {
+        let protocol = paired_engine(&roots, 5).unwrap_or_else(|err| panic!("{launch}: {err}"));
+        assert_eq!(protocol.local_address(), Some(address.as_str()));
+    }
+}
+
+/// The same, for a document: documents are read when they are opened, never
+/// at launch, so the damaged-key launch deletes nothing of them. This pair is
+/// bound from its first run.
+#[cfg(feature = "data")]
+#[test]
+fn a_document_under_a_lost_record_key_does_not_turn_its_own_state_foreign() {
+    use offline_protocol_data::DataValue;
+
+    let roots = Roots {
+        keys: TempRoot::new("regen-doc-keys"),
+        state: TempRoot::new("regen-doc-state"),
+    };
+    let address = {
+        let mut protocol = paired_engine(&roots, 6).expect("open");
+        protocol
+            .data_create_doc("demo-space", "notes")
+            .expect("create");
+        protocol
+            .data_map_set(
+                "demo-space",
+                "notes",
+                "meta",
+                "title",
+                DataValue::Text {
+                    value: "sealed under the first key".to_string(),
+                },
+            )
+            .expect("set");
+        protocol.data_flush("demo-space", "notes").expect("flush");
+        protocol.local_address().expect("address").to_string()
+    };
+    damage_record_key(&roots, 6);
+    drop(paired_engine(&roots, 6).expect("the damaged-key launch opens"));
+    assert_eq!(
+        sealed_state(&roots.keys, 6, &roots.state),
+        SealedState::Foreign,
+        "the document is still there, under the lost key"
+    );
+
+    let protocol = paired_engine(&roots, 6).expect("the launch after it opens");
+    assert_eq!(protocol.local_address(), Some(address.as_str()));
 }
 
 #[test]

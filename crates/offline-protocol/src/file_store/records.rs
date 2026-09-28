@@ -566,9 +566,10 @@ pub(super) fn holds_entry(directory: &Path, prefix: &str) -> io::Result<bool> {
     };
     for entry in entries {
         let entry = entry?;
-        if entry.file_name().to_string_lossy().starts_with(prefix)
-            && entry.file_type().map(|t| t.is_file()).unwrap_or(false)
-        {
+        // An entry whose type cannot be read is an error, never "not a
+        // record": the caller decides from this whether a new identity may
+        // start over the directory.
+        if entry.file_name().to_string_lossy().starts_with(prefix) && entry.file_type()?.is_file() {
             return Ok(true);
         }
     }
