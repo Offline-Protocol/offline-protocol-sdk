@@ -180,10 +180,14 @@ await pm.start()
   directory while open, in this process or another. To restart in place,
   call `stop()` then `start()` on the same manager. To open the directories
   from a new manager instead, `await stop()` on the old one and drop every
-  reference to it first: `stop()` releases the transport callbacks, so the
-  stores close when the manager is freed. The name bound by
+  reference to it first: `stop()` releases the callbacks the core holds, so
+  the stores close when the manager is freed. When the event handler refers
+  back to the manager (a method of the object that owns it, or a closure
+  over it), the two form a cycle that only the collector frees, so call
+  `gc.collect()` after dropping it. The name bound by
   `async with ProtocolManager(...) as pm` outlives the block, so `del pm`
-  before opening the next one.
+  before opening the next one. A `start()` that raises after the stores
+  opened releases the callbacks itself.
 
 What the stores guarantee, and what a copied directory reveals, is in the
 [MLS integration guide](../../docs/mls-integration.md#built-in-file-stores).

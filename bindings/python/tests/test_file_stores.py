@@ -8,8 +8,10 @@ than start it without that identity.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import gc
+import weakref
 from pathlib import Path
 
 import pytest
@@ -106,6 +108,81 @@ async def test_consecutive_context_managers_reopen_the_stores(tmp_path: Path):
     assert addresses[0] is not None and addresses[0] == addresses[1]
 
 
+class _Service:
+    """The usual shape: the owner of a manager handles its events."""
+
+    def __init__(self, **kwargs) -> None:
+        self.pm = ProtocolManager(_config(), event_handler=self.on_event, **kwargs)
+
+    def on_event(self, event: dict) -> None:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_a_handler_that_reaches_the_manager_does_not_pin_the_stores(
+    tmp_path: Path,
+):
+    """The registered event callback holds the handler, and the handler holds
+    the manager: a cycle through Rust that the collector could not break."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    service = _Service(store_key=KEY, **roots)
+    await service.pm.start()
+    address = service.pm.local_address
+    await service.pm.stop()
+    del service
+    gc.collect()
+
+    assert await _run_once(store_key=KEY, **roots) == address
+
+
+@_TRANSPORTS
+@pytest.mark.asyncio
+async def test_a_start_that_fails_after_the_stores_opened_releases_them(
+    tmp_path: Path, transports: dict
+):
+    """`stop()` does nothing for a manager that never ran, so `start()` has to
+    release the callbacks itself when the engine refuses to start."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = ProtocolManager(_config(**transports), store_key=KEY, **roots)
+
+    def refuse() -> None:
+        raise RuntimeError("engine start refused")
+
+    pm._protocol.start = refuse
+    with pytest.raises(RuntimeError, match="engine start refused"):
+        await pm.start()
+    assert pm.protocol.is_mls_initialized()
+    del pm._protocol.start, pm
+
+    assert await _run_once(store_key=KEY, **roots) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_manager_is_freed_without_a_loop_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`stop()` must not leave a caught exception whose traceback holds the
+    manager: it would pin the stores until the caller next yields.
+
+    On Python 3.13+ the telemetry hand-off can complete without suspending,
+    so `stop()` finishes in the same task step that cancelled the process
+    loop. That was intermittent; a hand-off that never suspends makes it
+    certain.
+    """
+
+    async def without_suspending(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", without_suspending)
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = ProtocolManager(_config(), store_key=KEY, **roots)
+    await pm.start()
+    await pm.stop()
+    ref = weakref.ref(pm)
+    del pm
+    assert ref() is None, "a stopped manager must be freed by `del` alone"
+
+
 @pytest.mark.asyncio
 async def test_the_key_is_taken_when_the_manager_is_built(tmp_path: Path):
     """A caller that reuses its buffer before `start()` must not change the key."""
@@ -191,7 +268,8 @@ async def test_stop_then_start_reuses_the_open_stores(tmp_path: Path, transports
 
 
 def test_roots_fall_back_to_the_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("OFFLINE_PROTOCOL_MLS_ROOT", str(tmp_path / "mls"))
+    # A service manager's environment file can leave a trailing newline.
+    monkeypatch.setenv("OFFLINE_PROTOCOL_MLS_ROOT", f"{tmp_path / 'mls'}\n")
     # conftest sets OFFLINE_PROTOCOL_STATE_ROOT for every test.
     pm = ProtocolManager(_config(), store_key=KEY)
     assert pm._file_stores is not None

@@ -159,7 +159,10 @@ def _require_root(value: str | Path | None, variable: str, what: str) -> str:
         return str(value)
     configured = os.environ.get(variable)
     if configured and configured.strip():
-        return configured
+        # A service manager's environment file can carry stray whitespace;
+        # the key text is trimmed for the same reason. An argument is taken
+        # as given, since a path may legitimately end in a space.
+        return configured.strip()
     raise ValueError(f"the file stores need {what}; pass it or set {variable}")
 
 
@@ -450,8 +453,14 @@ class ProtocolManager:
             except Exception as exc:
                 logger.warning("MLS initialisation failed (non-fatal): %s", exc)
 
-        # Start the protocol engine
-        self._protocol.start()
+        # Start the protocol engine. A refusal here comes after the stores
+        # opened, and `stop()` does nothing for a manager that never ran, so
+        # release the callbacks now or the stores stay held for good.
+        try:
+            self._protocol.start()
+        except BaseException:
+            self._release_callbacks()
+            raise
         self._running = True
 
         # Start the 100 ms processing loop
@@ -469,10 +478,13 @@ class ProtocolManager:
         # Cancel processing loop
         if self._process_task is not None and not self._process_task.done():
             self._process_task.cancel()
-            try:
-                await self._process_task
-            except asyncio.CancelledError:
-                pass
+            # Waited on, never awaited: awaiting a cancelled task raises its
+            # CancelledError into this frame, and that exception's traceback
+            # holds `self`. The step that raised it keeps it alive until the
+            # caller next yields, and on Python 3.13+ `stop()` can finish in
+            # that same step, so the stopped manager (and its store locks)
+            # outlived `del`.
+            await asyncio.wait({self._process_task})
         self._process_task = None
 
         # Stop transports
@@ -509,7 +521,7 @@ class ProtocolManager:
             logger.debug("protocol.stop() raised (non-fatal)", exc_info=True)
 
         if teardown_clean:
-            self._release_transport_callbacks()
+            self._release_callbacks()
 
         # Only release GC pins once Rust has confirmed it no longer holds
         # callback handles. If either teardown step raised, Rust may still
@@ -527,18 +539,22 @@ class ProtocolManager:
 
         logger.info("ProtocolManager stopped")
 
-    def _release_transport_callbacks(self) -> None:
-        """Replaces the transport callbacks with ones that reference nothing.
+    def _release_callbacks(self) -> None:
+        """Replaces the callbacks that can reach this manager with inert ones.
 
-        The core holds every registered callback, the BLE and peer-stream
-        callbacks hold their managers, and the managers hold the core. That
-        cycle runs through Rust, so Python's collector cannot break it, and
-        without this a stopped manager is never freed. With the file stores
-        that is not a leak but an outage: the core holds each store's
-        directory lock, so every later manager over the same directories is
-        refused. :meth:`start` registers the real callbacks again.
+        The core holds every registered callback. The BLE and peer-stream
+        callbacks hold their managers, and the event callback holds the
+        application's handler, which is often a bound method of the object
+        that owns this manager or a closure over it. Each of those reaches
+        the core again, and the cycle runs through Rust, so Python's
+        collector cannot see it, let alone break it: without this a stopped
+        manager is never freed. With the file stores that is not a leak but
+        an outage, because the core holds each store's directory lock and
+        every later manager over the same directories is refused.
+        :meth:`start` registers the real callbacks again.
         """
         try:
+            self._protocol.set_event_callback(_EventCallbackImpl(None))
             self._protocol.set_ble_transport_callback(
                 _BleTransportCallbackImpl(None, None)
             )
