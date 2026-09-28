@@ -455,8 +455,15 @@ class ProtocolManager:
         if self._file_stores is not None:
             # Fails closed: a refused key or a held directory raises here,
             # before the engine starts, rather than running without the
-            # identity the operator's key protects.
-            self._file_stores.initialize(self._protocol)
+            # identity the operator's key protects. The callbacks above are
+            # already registered and `stop()` does nothing for a manager
+            # that never ran, so release them here or the core (and, through
+            # a handler that reaches it, the manager) outlives every refusal.
+            try:
+                self._file_stores.initialize(self._protocol)
+            except BaseException:
+                self._release_callbacks()
+                raise
         else:
             try:
                 self._protocol.initialize_mls(self._storage, self._state_storage)

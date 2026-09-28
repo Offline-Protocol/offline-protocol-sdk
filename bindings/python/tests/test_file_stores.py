@@ -500,6 +500,30 @@ def test_key_text_accepts_what_the_rust_provider_accepts():
             _decode_store_key_text("V", text)
 
 
+@pytest.mark.parametrize("holder", ["ble", "handler"])
+@pytest.mark.asyncio
+async def test_a_start_refused_by_the_stores_frees_the_core(tmp_path: Path, holder: str):
+    """The callbacks are registered before the stores open. A refusal there
+    (a wrong key, a held directory) must release them, or every refused
+    attempt leaks a core, and a handler that reaches the manager leaks it too."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    await _run_once(store_key=KEY, **roots)
+
+    wrong = bytes([0x33] * 32)
+    if holder == "ble":
+        pm = ProtocolManager(_config(ble_enabled=True), store_key=wrong, **roots)
+    else:
+        pm = _Service(store_key=wrong, **roots).pm
+    with pytest.raises(ProtocolError.InvalidConfiguration):
+        await pm.start()
+    manager, core = weakref.ref(pm), weakref.ref(pm.protocol)
+    del pm
+    gc.collect()
+
+    assert core() is None, "a refused start must not leave the core registered"
+    assert manager() is None
+
+
 @pytest.mark.asyncio
 async def test_a_state_root_kept_from_the_keyring_is_refused(
     tmp_path: Path, in_memory_storage

@@ -84,8 +84,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   digits or base64, as the Rust `EnvStoreKey` reads), with `mls_root=` or
   `OFFLINE_PROTOCOL_MLS_ROOT`, and uses the file stores instead of the
   keyring. On that path `start()` raises when MLS cannot be initialised,
-  rather than logging and starting without the identity. Moving onto the
-  file stores starts a new
+  rather than logging and starting without the identity, and releases the
+  callbacks it registered. Moving onto the file stores starts a new
   identity, so a state root that holds records with no identity beside it
   is refused rather than restored and deleted, and one directory for both
   roots is refused. Swift and Kotlin get the generated method and keep

@@ -198,8 +198,11 @@ await pm.start()
   over it), the two form a cycle that only the collector frees, so call
   `gc.collect()` after dropping it. The name bound by
   `async with ProtocolManager(...) as pm` outlives the block, so `del pm`
-  before opening the next one. A `start()` that raises after the stores
-  opened releases the callbacks itself.
+  before opening the next one. A `start()` that raises releases the
+  callbacks itself, whether the stores refused or the engine did. A child
+  made with a bare `os.fork()` while the stores are open inherits their
+  locks and holds them until it exits; start subprocesses with
+  `subprocess` or the `spawn` method instead.
 
 What the stores guarantee, and what a copied directory reveals, is in the
 [MLS integration guide](../../docs/mls-integration.md#built-in-file-stores).
