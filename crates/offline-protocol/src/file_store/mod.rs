@@ -39,11 +39,16 @@
 //!   read, so a record that fails afterwards is damaged, and the error names
 //!   the file so the operator can decide.
 //! - **One store per directory.** Each store holds an exclusive lock on its
-//!   account directory for its lifetime, and a second store over the same
-//!   directory, in this process or another, is refused with
+//!   account directory until it is closed or dropped, and a second store over
+//!   the same directory, in this process or another, is refused with
 //!   [`FileStoreError::InUse`]. Two stores over one MLS directory would each
 //!   advance ratchet state the other never sees, and the groups would diverge
 //!   without an error.
+//! - **Releasing a directory never depends on who still holds the store.**
+//!   `close` releases the lock at once and makes every later operation an
+//!   error. A host whose runtime decides when an object is freed (a garbage
+//!   collector, a reference cycle through a callback) would otherwise hold
+//!   the directory for as long as anything, anywhere, kept a reference.
 //!
 //! # Layout
 //!
@@ -62,7 +67,7 @@ mod state;
 
 pub use key::{EnvStoreKey, StaticStoreKey, StoreKeyError, StoreKeyProvider, STORE_KEY_BYTES};
 pub use mls::SealedFileMlsStorage;
-pub use state::FileProtocolStateStorage;
+pub use state::{FileProtocolStateStorage, SealedState};
 
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -106,10 +111,12 @@ pub fn is_account_storage_namespace(value: &str) -> bool {
     })
 }
 
-/// Why a built-in file store could not be opened.
+/// Why a built-in file store could not be opened, or could not answer a
+/// question about its directory.
 ///
-/// Opening is the only step with its own error type: once open, each store
-/// reports through the error type of the trait it implements.
+/// Opening and the probes are the only steps with their own error type: a
+/// record operation reports through the error type of the trait the store
+/// implements.
 #[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum FileStoreError {
@@ -155,6 +162,17 @@ pub enum FileStoreError {
         "the store at {0} is already open elsewhere; two stores over one directory are refused"
     )]
     InUse(PathBuf),
+    /// The store was closed, and holds its directory no longer.
+    #[error("the store at {0} is closed")]
+    Closed(PathBuf),
+    /// The MLS store could not say whether it holds the key that seals
+    /// protocol state.
+    ///
+    /// Nothing was changed. This is a read that failed, not a key that is
+    /// missing or damaged: those are answers, and are reported as
+    /// [`SealedState`].
+    #[error("the protocol-state record key could not be read: {0}; nothing was changed")]
+    RecordKeyUnreadable(String),
 }
 
 fn account_directory(root: &std::path::Path, namespace: &str) -> Result<PathBuf, FileStoreError> {
@@ -175,26 +193,32 @@ fn account_directory(root: &std::path::Path, namespace: &str) -> Result<PathBuf,
 /// A directory that is not there holds nothing. One that cannot be read is
 /// an error, never "empty": a caller deciding whether it may start a new
 /// identity over it must not take a permission error for a fresh install.
+/// `counts` is handed the entry's path and name, and may look inside it; an
+/// error it returns is reported against the path it was given.
 fn account_holds(
     root: &std::path::Path,
     namespace: &str,
-    counts: impl Fn(&str) -> bool,
+    counts: impl Fn(&std::path::Path, &str) -> std::io::Result<bool>,
 ) -> Result<bool, FileStoreError> {
     if !is_account_storage_namespace(namespace) {
         return Err(FileStoreError::InvalidNamespace);
     }
     let directory = root.join(namespace);
-    let unusable = |source: std::io::Error| FileStoreError::Io {
-        path: directory.clone(),
+    let unusable = |path: &std::path::Path, source: std::io::Error| FileStoreError::Io {
+        path: path.to_path_buf(),
         source,
     };
     let entries = match std::fs::read_dir(&directory) {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(err) => return Err(unusable(err)),
+        Err(err) => return Err(unusable(&directory, err)),
     };
     for entry in entries {
-        if counts(&entry.map_err(unusable)?.file_name().to_string_lossy()) {
+        let entry = entry.map_err(|err| unusable(&directory, err))?;
+        let path = entry.path();
+        if counts(&path, &entry.file_name().to_string_lossy())
+            .map_err(|err| unusable(&path, err))?
+        {
             return Ok(true);
         }
     }

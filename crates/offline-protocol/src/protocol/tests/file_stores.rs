@@ -12,8 +12,9 @@ use crate::config::ProtocolConfig;
 use crate::file_store::test_support::{files_under, TempRoot};
 use crate::file_store::{
     account_storage_namespace, FileProtocolStateStorage, FileStoreError, SealedFileMlsStorage,
-    StaticStoreKey,
+    SealedState, StaticStoreKey,
 };
+use crate::protocol::types::storage_keys;
 use crate::protocol::OfflineProtocol;
 
 const APP_ID: &str = "com.example.headless";
@@ -184,6 +185,123 @@ fn a_damaged_record_key_is_regenerated_and_persistence_resumes() {
         Some(DataValue::Text {
             value: "sealed under the new key".to_string(),
         })
+    );
+}
+
+/// Runs an engine over `roots`, parks `count` sealed records, and stops.
+fn park(roots: &Roots, key: u8, count: usize) {
+    let protocol = engine(roots, key).expect("open");
+    let storage = protocol
+        .protocol_state_storage
+        .clone()
+        .expect("a state store");
+    for index in 0..count {
+        protocol
+            .write_state_record(
+                storage.as_ref(),
+                storage_keys::OUTBOX,
+                &format!("message-{index}"),
+                b"parked",
+            )
+            .expect("a sealed write");
+    }
+}
+
+fn sealed_state(keys: &TempRoot, key: u8, state: &TempRoot) -> SealedState {
+    let namespace = account_storage_namespace(APP_ID, PROFILE);
+    let secure =
+        SealedFileMlsStorage::open(keys.path(), &namespace, &StaticStoreKey::new([key; 32]))
+            .expect("open the MLS store");
+    FileProtocolStateStorage::open(state.path(), &namespace)
+        .expect("open the state store")
+        .sealed_state(&secure)
+        .expect("a verdict")
+}
+
+/// The engine deletes a sealed record that does not open, so a state store
+/// sealed under another identity's record key is emptied by the first
+/// restore. The probe is how a host learns that before it hands the pair
+/// over, and it has to tell the three cases apart on real engine output.
+#[test]
+fn the_probe_tells_a_store_that_belongs_from_one_that_does_not() {
+    let ours = Roots {
+        keys: TempRoot::new("probe-keys"),
+        state: TempRoot::new("probe-state"),
+    };
+    let theirs = Roots {
+        keys: TempRoot::new("probe-other-keys"),
+        state: TempRoot::new("probe-other-state"),
+    };
+    let never_ran = TempRoot::new("probe-fresh-keys");
+
+    // An engine that parked nothing left no sealed record.
+    drop(engine(&ours, 8).expect("open"));
+    assert_eq!(sealed_state(&ours.keys, 8, &ours.state), SealedState::Empty);
+
+    park(&ours, 8, 3);
+    park(&theirs, 8, 1);
+    let before = files_under(ours.state.path());
+
+    assert_eq!(sealed_state(&ours.keys, 8, &ours.state), SealedState::Opens);
+    // Another identity, with a record key of its own.
+    assert_eq!(
+        sealed_state(&theirs.keys, 8, &ours.state),
+        SealedState::Foreign
+    );
+    // A store that never ran an engine holds no record key at all.
+    assert_eq!(
+        sealed_state(&never_ran, 8, &ours.state),
+        SealedState::Foreign
+    );
+    assert_eq!(
+        files_under(ours.state.path()),
+        before,
+        "the probe changes nothing, whatever it answers"
+    );
+
+    // One record that opens settles it, whatever else is damaged.
+    let damaged = &before
+        .iter()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("k_"))
+        })
+        .collect::<Vec<_>>()[..2];
+    for path in damaged {
+        let mut bytes = std::fs::read(path).expect("read");
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(path, bytes).expect("damage");
+    }
+    assert_eq!(sealed_state(&ours.keys, 8, &ours.state), SealedState::Opens);
+}
+
+/// A record key the store reports as damaged is an answer, not a failed
+/// read, and not the answer a foreign store gets: nothing sealed under it
+/// opens again, and the engine's regeneration is what settles the loss.
+#[test]
+fn a_damaged_record_key_is_reported_as_damaged() {
+    let roots = Roots {
+        keys: TempRoot::new("probe-rk-keys"),
+        state: TempRoot::new("probe-rk-state"),
+    };
+    park(&roots, 9, 1);
+    let namespace = account_storage_namespace(APP_ID, PROFILE);
+    let record_key =
+        SealedFileMlsStorage::open(roots.keys.path(), &namespace, &StaticStoreKey::new([9; 32]))
+            .expect("open sealed store")
+            .record_path(
+                storage_keys::STATE_RECORD_KEY,
+                storage_keys::STATE_RECORD_KEY_ID,
+            );
+    let mut bytes = std::fs::read(&record_key).expect("read record key");
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    std::fs::write(&record_key, bytes).expect("damage record key");
+
+    assert_eq!(
+        sealed_state(&roots.keys, 9, &roots.state),
+        SealedState::KeyDamaged
     );
 }
 

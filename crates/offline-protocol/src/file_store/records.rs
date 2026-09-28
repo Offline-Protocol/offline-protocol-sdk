@@ -77,27 +77,54 @@ const FILE_MODE: u32 = 0o600;
 /// Per store, not per process. The bindings use one process-wide lock because
 /// two of their providers over one directory are possible and an instance
 /// lock cannot order them. Here that case cannot arise: each store holds a
-/// [`DirectoryLock`] on its account directory for its whole lifetime, so a
+/// [`DirectoryLock`] on its account directory until it is closed, so a
 /// second store over the same directory is refused at open, and two stores
 /// that do coexist touch disjoint directories. A process-wide lock would only
 /// serialise unrelated accounts behind one another's durable writes, each of
 /// which costs two full flushes.
-#[derive(Default)]
-pub(super) struct StoreLock(Mutex<()>);
+///
+/// The [`DirectoryLock`] lives inside the mutex, so closing a store and
+/// running an operation on it are ordered: an operation either finishes
+/// before the directory is released or is refused after. Held apart, a write
+/// already past its check could land in a directory that another store had
+/// opened in between.
+pub(super) struct StoreLock(Mutex<Option<DirectoryLock>>);
+
+/// The lock for one operation. The store is open for as long as it is held.
+pub(super) type StoreGuard<'a> = MutexGuard<'a, Option<DirectoryLock>>;
 
 impl StoreLock {
-    /// Takes the lock. A panic while it was held cannot have left a record
-    /// torn (every write is a rename), so a poisoned lock is still safe to
-    /// take.
-    pub(super) fn lock(&self) -> MutexGuard<'_, ()> {
-        self.0
+    /// A lock over a store that holds `directory`.
+    pub(super) fn new(directory: DirectoryLock) -> Self {
+        Self(Mutex::new(Some(directory)))
+    }
+
+    /// Takes the lock for one operation, or `None` once the store is closed.
+    ///
+    /// A panic while it was held cannot have left a record torn (every write
+    /// is a rename), so a poisoned lock is still safe to take.
+    pub(super) fn open(&self) -> Option<StoreGuard<'_>> {
+        let guard = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.is_some().then_some(guard)
+    }
+
+    /// Releases the directory, after any operation in flight. Every later
+    /// [`Self::open`] is `None`, and closing twice is closing once.
+    pub(super) fn close(&self) {
+        let released = self
+            .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        drop(released);
     }
 }
 
-/// An exclusive lock on a store's account directory, held for the store's
-/// lifetime and released when it drops (or when the process dies).
+/// An exclusive lock on a store's account directory, held until the store is
+/// closed or dropped (or the process dies).
 ///
 /// Two stores over one directory, in one process or two, would each write
 /// ratchet state the other never sees, and the MLS state would diverge
@@ -519,6 +546,33 @@ pub(super) fn for_each_entry(
         visit(&entry.path(), name);
     }
     Ok(())
+}
+
+/// Whether `directory` holds a regular file whose name starts with `prefix`.
+/// Stops at the first one. A missing directory, or a file in its place,
+/// holds none.
+pub(super) fn holds_entry(directory: &Path, prefix: &str) -> io::Result<bool> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(false)
+        }
+        Err(err) => return Err(err),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with(prefix)
+            && entry.file_type().map(|t| t.is_file()).unwrap_or(false)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Remembers which directories a store has swept, so the sweep runs once per

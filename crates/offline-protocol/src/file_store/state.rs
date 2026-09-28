@@ -6,10 +6,12 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::records::{
-    self, BoundedRead, DirectoryLock, StoreLock, SweepMemo, MAX_FRAME_BYTES, MAX_HEADER_BYTES,
-};
+use offline_protocol_mls::storage::MlsStorage;
+
+use super::records::{self, BoundedRead, StoreLock, SweepMemo, MAX_FRAME_BYTES, MAX_HEADER_BYTES};
 use super::{account_directory, lock_directory, FileStoreError};
+use crate::protocol::state_crypto::StateRecordCipher;
+use crate::protocol::{sealed_state_key_types, stored_state_record_key, StoredRecordKey};
 use crate::protocol_state_storage::{
     ProtocolStateError, ProtocolStateResult, ProtocolStateStorage,
 };
@@ -23,6 +25,55 @@ const ENTRY_PREFIX: &str = "k_";
 /// The lock file this store holds in its account directory. Distinct from
 /// the sealed store's, so the two can share a root.
 const LOCK_FILE: &str = "state-store.lock";
+
+/// Sealed records [`FileProtocolStateStorage::sealed_state`] tries in each
+/// category before it moves to the next. One that opens settles the whole
+/// question, so the ceiling is only reached in a category none of whose
+/// records open. Per category, not overall: damage confined to one category
+/// must not speak for a store whose other categories open.
+const SEALED_STATE_PROBE_LIMIT: usize = 64;
+
+/// What the record key an MLS store holds makes of the sealed records in a
+/// protocol-state store.
+///
+/// The engine seals protocol state under a key it keeps in the MLS store, and
+/// a record that does not open is deleted as the restore reaches it: a
+/// record nothing can read is a loss to settle, not a read to retry. That is
+/// right for one damaged record and wrong for a store sealed under another
+/// identity's key, where the first restore deletes the queued and parked
+/// messages of an identity that is merely somewhere else. This is the
+/// question to ask before the engine is handed the pair.
+///
+/// It is asked of the categories the engine seals. The telemetry queue is
+/// sealed under the same key and is not examined: a batch that does not open
+/// is the uploader's to drop, and no message is lost with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SealedState {
+    /// No record in any category the engine seals.
+    Empty,
+    /// A sealed record opens under the MLS store's record key: the two
+    /// stores belong together.
+    Opens,
+    /// Sealed records exist, in no category does one of those tried open,
+    /// and the MLS store holds a usable record key or none at all: they were
+    /// sealed under another key. The engine deletes the ones its restore
+    /// reads, queued and parked messages among them.
+    Foreign,
+    /// Sealed records exist and the MLS store's record key is damaged, so
+    /// nothing will open them again, whoever sealed them. Refusing the pair
+    /// saves nothing. The engine generates a new key and settles what its
+    /// restore reads as failed, which is how the application learns which
+    /// messages were lost.
+    KeyDamaged,
+}
+
+/// What [`FileProtocolStateStorage::probe_category`] found in one category.
+enum SealedCategory {
+    Empty,
+    Opens,
+    NoneOpens,
+}
 
 /// Protocol-state storage in plain files, in the format the Python, Swift and
 /// Kotlin providers write.
@@ -43,7 +94,6 @@ pub struct FileProtocolStateStorage {
     directory: PathBuf,
     lock: StoreLock,
     swept: SweepMemo,
-    _directory_lock: DirectoryLock,
 }
 
 impl std::fmt::Debug for FileProtocolStateStorage {
@@ -81,16 +131,129 @@ impl FileProtocolStateStorage {
     /// installation, and a store that outlives it resends settled work.
     ///
     /// A second store over the same directory is refused with
-    /// [`FileStoreError::InUse`] while this one lives.
+    /// [`FileStoreError::InUse`] until this one is closed or dropped.
     pub fn open(root: impl AsRef<Path>, namespace: &str) -> Result<Self, FileStoreError> {
         let directory = account_directory(root.as_ref(), namespace)?;
         let directory_lock = lock_directory(&directory, LOCK_FILE)?;
         Ok(Self {
             directory,
-            lock: StoreLock::default(),
+            lock: StoreLock::new(directory_lock),
             swept: SweepMemo::default(),
-            _directory_lock: directory_lock,
         })
+    }
+
+    /// Releases the directory and refuses every later operation.
+    ///
+    /// The lock goes at once, whoever still holds the store. An operation in
+    /// flight finishes first. Afterwards every operation is an error naming
+    /// the directory, and a new store may open over it. Closing twice is
+    /// closing once.
+    pub fn close(&self) {
+        self.lock.close();
+    }
+
+    /// What the record key `secure` holds makes of the sealed records here.
+    ///
+    /// Read-only on both stores: nothing is deleted, and no record key is
+    /// generated. A record whose framing does not parse is passed over, since
+    /// it says nothing about any key. A record that cannot be read at all is
+    /// an [`FileStoreError::Io`], and a record key the MLS store cannot read
+    /// (as opposed to one it does not hold, or holds damaged) is an
+    /// [`FileStoreError::RecordKeyUnreadable`]: neither is taken for an
+    /// answer.
+    pub fn sealed_state(&self, secure: &dyn MlsStorage) -> Result<SealedState, FileStoreError> {
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| FileStoreError::Closed(self.directory.clone()))?;
+        let key = stored_state_record_key(secure)
+            .map_err(|err| FileStoreError::RecordKeyUnreadable(err.to_string()))?;
+        let cipher = match &key {
+            StoredRecordKey::Usable(cipher) => Some(cipher),
+            StoredRecordKey::Absent | StoredRecordKey::Unrecoverable(_) => None,
+        };
+        let mut sealed_records = false;
+        for key_type in sealed_state_key_types() {
+            match self.probe_category(key_type, cipher)? {
+                SealedCategory::Empty => {}
+                SealedCategory::Opens => return Ok(SealedState::Opens),
+                SealedCategory::NoneOpens => sealed_records = true,
+            }
+        }
+        Ok(match key {
+            _ if !sealed_records => SealedState::Empty,
+            StoredRecordKey::Unrecoverable(_) => SealedState::KeyDamaged,
+            StoredRecordKey::Usable(_) | StoredRecordKey::Absent => SealedState::Foreign,
+        })
+    }
+
+    /// Tries the records of one sealed category against `cipher`, up to the
+    /// ceiling, stopping at the first that opens. Without a cipher nothing
+    /// can open, so one record is enough to know the category is not empty.
+    fn probe_category(
+        &self,
+        key_type: &str,
+        cipher: Option<&StateRecordCipher>,
+    ) -> Result<SealedCategory, FileStoreError> {
+        let directory = self.type_directory(key_type);
+        let ceiling = if cipher.is_some() {
+            SEALED_STATE_PROBE_LIMIT
+        } else {
+            1
+        };
+        let mut tried = 0usize;
+        let mut opened = false;
+        let mut unreadable = None;
+        records::for_each_entry(
+            &directory,
+            ENTRY_PREFIX,
+            records::MAX_LISTED_ENTRIES,
+            |path, _| {
+                if opened || unreadable.is_some() || tried >= ceiling {
+                    return;
+                }
+                let raw = match records::read_bounded(path, MAX_FRAME_BYTES) {
+                    Ok(BoundedRead::Bytes(raw)) => raw,
+                    Ok(BoundedRead::Absent | BoundedRead::Oversized) => return,
+                    Err(source) => {
+                        unreadable = Some(FileStoreError::Io {
+                            path: path.to_path_buf(),
+                            source,
+                        });
+                        return;
+                    }
+                };
+                let Some(header) = records::parse_header(&raw) else {
+                    return;
+                };
+                if header.key_type != key_type {
+                    return;
+                }
+                tried += 1;
+                opened = cipher.is_some_and(|cipher| {
+                    cipher
+                        .open(key_type, &header.key_id, &raw[header.value_offset..])
+                        .is_some()
+                });
+            },
+        )
+        .map_err(|source| FileStoreError::Io {
+            path: directory.clone(),
+            source,
+        })?;
+        if let Some(err) = unreadable {
+            return Err(err);
+        }
+        Ok(match (opened, tried) {
+            (true, _) => SealedCategory::Opens,
+            (false, 0) => SealedCategory::Empty,
+            (false, _) => SealedCategory::NoneOpens,
+        })
+    }
+
+    /// What a closed store answers.
+    fn closed(&self) -> String {
+        format!("the store at {} is closed", self.directory.display())
     }
 
     /// The directory this store owns.
@@ -101,13 +264,24 @@ impl FileProtocolStateStorage {
     /// Whether `<root>/<namespace>/` holds protocol state, without opening,
     /// creating or locking anything.
     ///
-    /// Anything but the lock file counts: a lock file is all an open that
-    /// wrote nothing leaves, and every other entry is something a run (of
-    /// this store or of a binding's provider, which write the same format)
-    /// put there. A directory that cannot be read is an
+    /// A record file in a type directory, which is where this store and
+    /// every binding's provider put a record. Not the lock file an open
+    /// leaves, not a type directory every record has since been deleted
+    /// from, and not what the MLS store leaves in a directory the two were
+    /// wrongly made to share: none of those is state a new identity could
+    /// strand. A directory that cannot be read, at either level, is an
     /// [`FileStoreError::Io`], never "no state".
     pub fn holds_records(root: impl AsRef<Path>, namespace: &str) -> Result<bool, FileStoreError> {
-        super::account_holds(root.as_ref(), namespace, |name| !name.ends_with(".lock"))
+        super::account_holds(root.as_ref(), namespace, |path, name| {
+            if !name.starts_with(TYPE_PREFIX) {
+                return Ok(false);
+            }
+            // `metadata`, not `is_dir`: see `SealedFileMlsStorage::holds_records`.
+            if !std::fs::metadata(path)?.is_dir() {
+                return Ok(false);
+            }
+            records::holds_entry(path, ENTRY_PREFIX)
+        })
     }
 
     fn type_directory(&self, key_type: &str) -> PathBuf {
@@ -136,7 +310,10 @@ impl ProtocolStateStorage for FileProtocolStateStorage {
     fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> ProtocolStateResult<()> {
         let framed = records::frame(key_type, key_id, data)
             .map_err(|err| ProtocolStateError::StoreFailed(err.to_string()))?;
-        let _guard = self.lock.lock();
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| ProtocolStateError::StoreFailed(self.closed()))?;
         let directory = self.type_directory(key_type);
         records::private_mkdir(&directory)
             .map_err(|err| ProtocolStateError::StoreFailed(err.to_string()))?;
@@ -146,7 +323,10 @@ impl ProtocolStateStorage for FileProtocolStateStorage {
     }
 
     fn load(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<Option<Vec<u8>>> {
-        let _guard = self.lock.lock();
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| ProtocolStateError::LoadFailed(self.closed()))?;
         let path = self.entry_path(key_type, key_id);
         let raw = match records::read_bounded(&path, MAX_FRAME_BYTES)
             .map_err(|err| ProtocolStateError::LoadFailed(err.to_string()))?
@@ -173,14 +353,20 @@ impl ProtocolStateStorage for FileProtocolStateStorage {
     }
 
     fn delete(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<()> {
-        let _guard = self.lock.lock();
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| ProtocolStateError::DeleteFailed(self.closed()))?;
         records::remove(&self.entry_path(key_type, key_id))
             .map(|_| ())
             .map_err(|err| ProtocolStateError::DeleteFailed(err.to_string()))
     }
 
     fn list_keys(&self, key_type: &str) -> ProtocolStateResult<Vec<String>> {
-        let _guard = self.lock.lock();
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| ProtocolStateError::LoadFailed(self.closed()))?;
         // Deduped: a planted copy of a record under another name must not
         // make its id appear twice.
         let mut keys = BTreeSet::new();
@@ -210,6 +396,7 @@ mod tests {
     use crate::file_store::account_storage_namespace;
     use crate::file_store::records::MAX_VALUE_BYTES;
     use crate::file_store::test_support::TempRoot;
+    use offline_protocol_mls::storage::{StorageError, StorageResult};
 
     fn namespace() -> String {
         account_storage_namespace("com.example.state", "alice")
@@ -219,10 +406,13 @@ mod tests {
         FileProtocolStateStorage::open(root.path(), &namespace()).expect("open")
     }
 
-    /// A lock file is all an open that wrote nothing leaves; anything else
-    /// is state. The probe creates nothing.
+    /// Only a record file is state. Not the lock file an open leaves, not a
+    /// type directory emptied since, and not what the MLS store leaves in a
+    /// directory the two were wrongly made to share: taking any of those for
+    /// state refuses a fresh identity over a directory that holds nothing to
+    /// lose. The probe creates nothing.
     #[test]
-    fn holds_records_ignores_only_the_lock_file() {
+    fn holds_records_counts_record_files_and_nothing_else() {
         let root = TempRoot::new("state-holds");
         let probe = || FileProtocolStateStorage::holds_records(root.path(), &namespace());
         assert!(!probe().expect("absent"));
@@ -232,10 +422,260 @@ mod tests {
         );
         let store = open(&root);
         assert!(!probe().expect("lock file only"));
+
+        for stray in ["mls-store.lock", "store-key-check", "t_not-a-directory"] {
+            std::fs::write(store.directory().join(stray), b"").expect("stray file");
+        }
+        std::fs::create_dir(store.directory().join("c_an-mls-type-directory")).expect("mls");
+        assert!(!probe().expect("what another store left"));
+
+        store.store("outbox", "one", b"sealed").expect("store");
+        store.delete("outbox", "one").expect("delete");
+        assert!(store.type_directory("outbox").is_dir());
+        assert!(!probe().expect("a type directory with no record left in it"));
+
         store
             .store("lamport_clock", "current", b"1")
             .expect("store");
         assert!(probe().expect("a record"));
+    }
+
+    /// Closing releases the directory while the store is still held. What
+    /// the closed store then answers is a failed operation, never
+    /// `Corrupted`: the engine settles a corrupt record as a message that
+    /// failed for good.
+    #[test]
+    fn a_closed_store_releases_the_directory_and_refuses_every_operation() {
+        let root = TempRoot::new("state-close");
+        let store = open(&root);
+        store.store("outbox", "one", b"kept").expect("store");
+        assert!(matches!(
+            FileProtocolStateStorage::open(root.path(), &namespace()),
+            Err(FileStoreError::InUse(_))
+        ));
+
+        store.close();
+        store.close();
+        let next = open(&root);
+        assert_eq!(
+            next.load("outbox", "one").expect("load"),
+            Some(b"kept".to_vec())
+        );
+
+        assert!(matches!(
+            store.store("outbox", "one", b"other"),
+            Err(ProtocolStateError::StoreFailed(m)) if m.contains("closed")
+        ));
+        assert!(matches!(
+            store.load("outbox", "one"),
+            Err(ProtocolStateError::LoadFailed(m)) if m.contains("closed")
+        ));
+        assert!(matches!(
+            store.delete("outbox", "one"),
+            Err(ProtocolStateError::DeleteFailed(m)) if m.contains("closed")
+        ));
+        assert!(matches!(
+            store.list_keys("outbox"),
+            Err(ProtocolStateError::LoadFailed(m)) if m.contains("closed")
+        ));
+        assert!(matches!(
+            store.sealed_state(&NoRecordKey),
+            Err(FileStoreError::Closed(_))
+        ));
+        assert_eq!(
+            next.load("outbox", "one").expect("load"),
+            Some(b"kept".to_vec()),
+            "a closed store changes nothing in a directory it no longer holds"
+        );
+    }
+
+    /// A secure store that holds no record key, one that cannot say, one
+    /// that holds a given key, and one whose key record is damaged.
+    struct NoRecordKey;
+    struct UnreadableRecordKey;
+    struct RecordKey([u8; 32]);
+    struct DamagedRecordKey;
+
+    impl MlsStorage for RecordKey {
+        fn store(&self, _: &str, _: &str, _: &[u8]) -> StorageResult<()> {
+            Ok(())
+        }
+        fn load(&self, _: &str, _: &str) -> StorageResult<Option<Vec<u8>>> {
+            Ok(Some(self.0.to_vec()))
+        }
+        fn delete(&self, _: &str, _: &str) -> StorageResult<()> {
+            Ok(())
+        }
+        fn list_keys(&self, _: &str) -> StorageResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
+    impl MlsStorage for DamagedRecordKey {
+        fn store(&self, _: &str, _: &str, _: &[u8]) -> StorageResult<()> {
+            Ok(())
+        }
+        fn load(&self, _: &str, _: &str) -> StorageResult<Option<Vec<u8>>> {
+            Err(StorageError::CorruptedData(
+                "the record does not authenticate".to_string(),
+            ))
+        }
+        fn delete(&self, _: &str, _: &str) -> StorageResult<()> {
+            Ok(())
+        }
+        fn list_keys(&self, _: &str) -> StorageResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Seals `count` records of `key_type` under `key`, as the engine does.
+    fn seal_records(store: &FileProtocolStateStorage, key: [u8; 32], key_type: &str, count: usize) {
+        let cipher = StateRecordCipher::new(&key);
+        for index in 0..count {
+            let key_id = format!("record-{index}");
+            let sealed = cipher.seal(key_type, &key_id, b"parked").expect("seal");
+            store.store(key_type, &key_id, &sealed).expect("store");
+        }
+    }
+
+    /// The ceiling is per category. Damage that fills one category (or a
+    /// category another key sealed) must not speak for a store whose other
+    /// categories open: the engine would drop those records and keep the
+    /// rest, and a verdict of `Foreign` would refuse the whole store.
+    #[test]
+    fn records_that_do_not_open_in_one_category_do_not_speak_for_the_store() {
+        let root = TempRoot::new("state-per-category");
+        let store = open(&root);
+        let mut sealed_types = sealed_state_key_types();
+        let (first, second) = (
+            sealed_types.next().expect("a sealed category"),
+            sealed_types.next().expect("a second sealed category"),
+        );
+        seal_records(&store, [2; 32], first, SEALED_STATE_PROBE_LIMIT + 6);
+        assert_eq!(
+            store.sealed_state(&RecordKey([1; 32])).expect("foreign"),
+            SealedState::Foreign
+        );
+
+        seal_records(&store, [1; 32], second, 1);
+        assert_eq!(
+            store.sealed_state(&RecordKey([1; 32])).expect("opens"),
+            SealedState::Opens
+        );
+    }
+
+    /// A damaged record key is its own answer. Nothing opens the sealed
+    /// records again, whoever sealed them, so it is not `Foreign`: a host
+    /// that refuses a foreign store must not refuse this one, where the
+    /// engine's regeneration is what tells the application what was lost.
+    #[test]
+    fn a_damaged_record_key_is_not_a_foreign_store() {
+        let root = TempRoot::new("state-damaged-key");
+        let store = open(&root);
+        assert_eq!(
+            store.sealed_state(&DamagedRecordKey).expect("empty"),
+            SealedState::Empty
+        );
+        let sealed_type = sealed_state_key_types().next().expect("a sealed category");
+        seal_records(&store, [1; 32], sealed_type, 1);
+        assert_eq!(
+            store.sealed_state(&DamagedRecordKey).expect("damaged"),
+            SealedState::KeyDamaged
+        );
+        assert_eq!(
+            store.sealed_state(&NoRecordKey).expect("no key"),
+            SealedState::Foreign
+        );
+    }
+
+    impl MlsStorage for NoRecordKey {
+        fn store(&self, _: &str, _: &str, _: &[u8]) -> StorageResult<()> {
+            Ok(())
+        }
+        fn load(&self, _: &str, _: &str) -> StorageResult<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn delete(&self, _: &str, _: &str) -> StorageResult<()> {
+            Ok(())
+        }
+        fn list_keys(&self, _: &str) -> StorageResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
+    impl MlsStorage for UnreadableRecordKey {
+        fn store(&self, _: &str, _: &str, _: &[u8]) -> StorageResult<()> {
+            Ok(())
+        }
+        fn load(&self, _: &str, _: &str) -> StorageResult<Option<Vec<u8>>> {
+            Err(StorageError::LoadFailed(
+                "the disk did not answer".to_string(),
+            ))
+        }
+        fn delete(&self, _: &str, _: &str) -> StorageResult<()> {
+            Ok(())
+        }
+        fn list_keys(&self, _: &str) -> StorageResult<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// A read of the record key that failed is not "no record key": taking
+    /// it for one would refuse a healthy pair, and taking it for a usable
+    /// key is not possible. It is reported as what it is.
+    #[test]
+    fn a_record_key_that_cannot_be_read_is_not_an_answer() {
+        let root = TempRoot::new("state-unreadable-key");
+        let store = open(&root);
+        assert!(matches!(
+            store.sealed_state(&UnreadableRecordKey),
+            Err(FileStoreError::RecordKeyUnreadable(m)) if m.contains("did not answer")
+        ));
+    }
+
+    /// Only a record in a sealed category counts, only one whose framing
+    /// parses, and none is changed by being looked at.
+    #[test]
+    fn the_sealed_state_probe_reads_sealed_categories_and_changes_nothing() {
+        let root = TempRoot::new("state-probe");
+        let store = open(&root);
+        assert_eq!(
+            store.sealed_state(&NoRecordKey).expect("empty"),
+            SealedState::Empty
+        );
+
+        // Not a sealed category, so it says nothing about any key.
+        store
+            .store("lamport_clock", "current", b"1")
+            .expect("store");
+        assert_eq!(
+            store.sealed_state(&NoRecordKey).expect("unsealed only"),
+            SealedState::Empty
+        );
+
+        // A file in a sealed category whose framing does not parse.
+        let torn = store.type_directory("outbox").join("k_torn");
+        std::fs::create_dir_all(torn.parent().expect("parent")).expect("type directory");
+        std::fs::write(&torn, b"not a frame").expect("torn");
+        assert_eq!(
+            store.sealed_state(&NoRecordKey).expect("unparseable"),
+            SealedState::Empty
+        );
+
+        store
+            .store("outbox", "one", b"sealed elsewhere")
+            .expect("store");
+        let before = crate::file_store::test_support::files_under(root.path());
+        assert_eq!(
+            store.sealed_state(&NoRecordKey).expect("foreign"),
+            SealedState::Foreign
+        );
+        assert_eq!(
+            crate::file_store::test_support::files_under(root.path()),
+            before,
+            "the probe deletes nothing, the torn file included"
+        );
+        assert!(torn.exists());
     }
 
     #[test]
