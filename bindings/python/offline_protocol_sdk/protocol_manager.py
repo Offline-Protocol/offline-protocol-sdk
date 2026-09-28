@@ -372,6 +372,11 @@ class ProtocolManager:
         # Processing loop task
         self._process_task: asyncio.Task[None] | None = None
         self._running = False
+        # Set while a teardown has begun and not run to its end: a `stop()`
+        # cancelled part-way, or one whose engine stop raised. `_running` is
+        # already False then, so without this a retry would return at once
+        # and leave the callbacks, and with them the store locks, held.
+        self._teardown_pending = False
 
         # Registry of objects whose pointers are held by the Rust/UniFFI side.
         # Prevents garbage collection while the protocol is alive.
@@ -470,10 +475,11 @@ class ProtocolManager:
 
     async def stop(self) -> None:
         """Stop all transports and the processing loop."""
-        if not self._running:
+        if not self._running and not self._teardown_pending:
             return
 
         self._running = False
+        self._teardown_pending = True
 
         # Cancel processing loop
         if self._process_task is not None and not self._process_task.done():
@@ -530,6 +536,7 @@ class ProtocolManager:
         # callback fire.
         if teardown_clean:
             self._prevent_gc.clear()
+            self._teardown_pending = False
         elif self._prevent_gc:
             logger.warning(
                 "ProtocolManager stop() encountered errors; retaining %d GC "
@@ -543,9 +550,11 @@ class ProtocolManager:
         """Replaces the callbacks that can reach this manager with inert ones.
 
         The core holds every registered callback. The BLE and peer-stream
-        callbacks hold their managers, and the event callback holds the
-        application's handler, which is often a bound method of the object
-        that owns this manager or a closure over it. Each of those reaches
+        callbacks hold their managers, the event callback holds the
+        application's handler (often a bound method of the object that owns
+        this manager, or a closure over it), and an application that drives
+        Nostr or Reticulum itself registers its own callback, which needs
+        the core to drain it. Each of those reaches
         the core again, and the cycle runs through Rust, so Python's
         collector cannot see it, let alone break it: without this a stopped
         manager is never freed. With the file stores that is not a leak but
@@ -553,19 +562,24 @@ class ProtocolManager:
         every later manager over the same directories is refused.
         :meth:`start` registers the real callbacks again.
         """
-        try:
-            self._protocol.set_event_callback(_EventCallbackImpl(None))
-            self._protocol.set_ble_transport_callback(
-                _BleTransportCallbackImpl(None, None)
-            )
-            if self._wifi_cb is not None:
-                self._protocol.set_wifi_direct_transport_callback(
-                    _WifiDirectTransportCallbackImpl(None)
-                )
-        except Exception:
-            logger.debug(
-                "releasing transport callbacks raised (non-fatal)", exc_info=True
-            )
+        # Every slot, whether or not this manager registered it: the app
+        # may have. Each in its own `try`, so one refusal cannot leave the
+        # rest held. Every setter accepts a callback for a disabled transport.
+        core = self._protocol
+        for register, inert in (
+            (core.set_event_callback, _EventCallbackImpl(None)),
+            (core.set_ble_transport_callback, _BleTransportCallbackImpl(None, None)),
+            (
+                core.set_wifi_direct_transport_callback,
+                _WifiDirectTransportCallbackImpl(None),
+            ),
+            (core.set_nostr_transport_callback, _NostrTransportCallbackImpl()),
+            (core.set_reticulum_transport_callback, _ReticulumTransportCallbackImpl()),
+        ):
+            try:
+                register(inert)
+            except Exception:
+                logger.debug("releasing a callback raised (non-fatal)", exc_info=True)
 
     def __del__(self) -> None:
         # A constructor that raised (a refused argument) leaves no `_running`.

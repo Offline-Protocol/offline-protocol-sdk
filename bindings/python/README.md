@@ -180,8 +180,10 @@ await pm.start()
   directory while open, in this process or another. To restart in place,
   call `stop()` then `start()` on the same manager. To open the directories
   from a new manager instead, `await stop()` on the old one and drop every
-  reference to it first: `stop()` releases the callbacks the core holds, so
-  the stores close when the manager is freed. When the event handler refers
+  reference to it first, including any kept `pm.protocol`: the stores
+  close when the core object is freed, and `stop()` releases the callbacks
+  the core holds so that nothing else keeps it. A `stop()` that was
+  cancelled or raised part-way can be called again to finish. When the event handler refers
   back to the manager (a method of the object that owns it, or a closure
   over it), the two form a cycle that only the collector frees, so call
   `gc.collect()` after dropping it. The name bound by

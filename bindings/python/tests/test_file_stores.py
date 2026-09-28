@@ -16,7 +16,13 @@ from pathlib import Path
 
 import pytest
 
-from offline_protocol_sdk.offline_protocol import OverflowPolicy, ProtocolConfig, ProtocolError
+from offline_protocol_sdk.offline_protocol import (
+    NostrTransportCallback,
+    OverflowPolicy,
+    ProtocolConfig,
+    ProtocolError,
+    ReticulumTransportCallback,
+)
 from offline_protocol_sdk.protocol_manager import ProtocolManager, _decode_store_key_text
 from offline_protocol_sdk.storage_namespace import account_storage_namespace
 
@@ -181,6 +187,87 @@ async def test_a_stopped_manager_is_freed_without_a_loop_turn(
     ref = weakref.ref(pm)
     del pm
     assert ref() is None, "a stopped manager must be freed by `del` alone"
+
+
+class _OwnNostr(NostrTransportCallback):
+    """An application driving Nostr itself, as the stub's docstring asks."""
+
+    def __init__(self, core) -> None:
+        self.core = core
+
+    def on_messages_available(self) -> None:
+        pass
+
+
+class _OwnReticulum(ReticulumTransportCallback):
+    def __init__(self, core) -> None:
+        self.core = core
+
+    def on_messages_available(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize(
+    "callback, setter",
+    [
+        (_OwnNostr, "set_nostr_transport_callback"),
+        (_OwnReticulum, "set_reticulum_transport_callback"),
+    ],
+    ids=["nostr", "reticulum"],
+)
+@pytest.mark.asyncio
+async def test_a_callback_the_application_registered_does_not_pin_the_stores(
+    tmp_path: Path, callback, setter: str
+):
+    """It needs only the core to drain its transport, and that is enough to
+    pin the core, and with it the stores, through Rust."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = ProtocolManager(_config(), store_key=KEY, **roots)
+    await pm.start()
+    address = pm.local_address
+    getattr(pm.protocol, setter)(callback(pm.protocol))
+    await pm.stop()
+    del pm
+    gc.collect()
+
+    assert await _run_once(store_key=KEY, **roots) == address
+
+
+@pytest.mark.parametrize("interruption", ["cancelled", "engine-refused"])
+@pytest.mark.asyncio
+async def test_an_interrupted_stop_can_be_finished(tmp_path: Path, interruption: str):
+    """`_running` is cleared first, so a retry must still see the teardown owed."""
+    roots = dict(mls_root=tmp_path / "mls", state_root=tmp_path / "state")
+    pm = ProtocolManager(_config(ble_enabled=True), store_key=KEY, **roots)
+    await pm.start()
+    address = pm.local_address
+
+    if interruption == "cancelled":
+        release = asyncio.Event()
+
+        async def slow_ble_stop() -> None:
+            await release.wait()
+
+        pm.ble.stop = slow_ble_stop
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(pm.stop(), 0.1)
+        del pm.ble.stop
+    else:
+        real_stop = pm._protocol.stop
+
+        def refuse_once() -> None:
+            del pm._protocol.stop
+            raise RuntimeError("engine stop refused")
+
+        pm._protocol.stop = refuse_once
+        await pm.stop()
+        del real_stop
+
+    await pm.stop()
+    del pm
+    gc.collect()
+
+    assert await _run_once(store_key=KEY, **roots) == address
 
 
 @pytest.mark.asyncio
