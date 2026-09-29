@@ -2379,6 +2379,7 @@ dependencies = [
  "offline-protocol-core",
  "offline-protocol-mls",
  "offline-protocol-sealed",
+ "portable-atomic-util",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

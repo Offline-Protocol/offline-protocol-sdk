@@ -31,12 +31,11 @@
 //! arrives as.
 //!
 //! ```
-//! use offline_protocol_leaf::{LeafDevice, LeafStore, MemoryStore};
-//! use std::sync::Arc;
+//! use offline_protocol_leaf::{shared_store, LeafDevice, MemoryStore};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // A real device implements `LeafStore` over its secure key storage.
-//! let store: Arc<dyn LeafStore> = Arc::new(MemoryStore::new());
+//! let store = shared_store(MemoryStore::new());
 //! let mut device = LeafDevice::open(store, "com.example.lock")?;
 //!
 //! // `now` comes from the radio stack, the commissioner, or the pairing
@@ -91,6 +90,20 @@
 //! Builds with `--no-default-features` for a target with no `std`, which is
 //! the configuration the CI job gates. The `std` build is the same code with
 //! its dependencies' `std` features on, and is what the unit tests run under.
+//!
+//! CI builds and lints it for a Cortex-M33 (`thumbv8m.main-none-eabihf`), for
+//! RISC-V with the atomic extension (`riscv32imac-unknown-none-elf`: ESP32-C6
+//! and ESP32-H2), and for the two classes with no compare-and-swap at all
+//! (`riscv32imc-unknown-none-elf`: ESP32-C3 and ESP32-C2; `thumbv6m-none-eabi`:
+//! every Cortex-M0). On those last two the firmware must link a
+//! critical-section implementation, because the store handle's reference count
+//! and mls-rs's own locks are built on one; see [`SharedStore`].
+//!
+//! Compiling is all that is claimed. Nothing here is linked into an image or
+//! run on a board by CI. ESP32-C3 and ESP32-C2 cannot yet be built on esp-hal
+//! at all: mls-rs selects portable-atomic's `critical-section` backend on them,
+//! esp-hal selects `unsafe-assume-single-core`, and portable-atomic refuses the
+//! pair.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
@@ -107,11 +120,13 @@ mod error;
 mod frames;
 mod identity;
 mod keypkg;
+mod shared;
 pub mod store;
 
 pub use device::{Handled, LeafDevice, LeafEvent};
 pub use error::{LeafError, Result};
 pub use identity::CIPHERSUITE;
+pub use shared::{shared_store, SharedStore};
 pub use store::{LeafStore, StoreError};
 
 #[cfg(any(test, feature = "std"))]
@@ -137,6 +152,7 @@ mod manifest_guard_tests {
         "thiserror",
         "zeroize",
         "getrandom",
+        "portable-atomic-util",
         "mls-rs",
         "mls-rs-crypto-rustcrypto",
         "mls-rs-core",
