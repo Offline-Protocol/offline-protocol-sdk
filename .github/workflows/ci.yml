@@ -552,9 +552,11 @@ jobs:
       - name: Package release assets against a fixture tree
         run: bash scripts/tests/test-package-release-assets.sh
 
-      # The gate reads a real archive with otool, so it runs only where the
-      # iOS library is built, which in CI is a release. This drives everything
-      # in it that is text handling, with a stand-in for otool.
+      # The gate reads a real archive with otool, so it runs where the iOS
+      # library is built: in a release, on all three archives, and in the
+      # Swift Package job below, on the simulator archive of every pull
+      # request. This drives everything in it that is text handling, with a
+      # stand-in for otool, on a runner that has none.
       - name: Test the iOS deployment-target gate
         run: bash scripts/tests/test-ios-min-os.sh
 
@@ -770,3 +772,255 @@ jobs:
             mesh/Mesh.swift ble/MeshConnectionRegistry.swift \
             ble/BleDiscoveryBootstrapPolicy.swift \
             Generated/offline_protocol.swift
+
+  # ---------------------------------------------------------------------------
+  # Native packages (ADR 0025)
+  #
+  # The Swift package and the Android library are built from the bridge
+  # sources the React Native module compiles, where they are, less the files
+  # that need React. These jobs are the check that the rest still builds
+  # without it: a shared source that gains a React import passes every job
+  # above and fails here.
+  # ---------------------------------------------------------------------------
+
+  native-package-scripts:
+    name: Native Package Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Shellcheck the packaging scripts
+        run: |
+          shellcheck --severity=warning \
+            scripts/assemble-swift-package.sh \
+            scripts/package-swiftpm-xcframework.sh \
+            scripts/ios-deployment-target.sh \
+            scripts/pick-ios-simulator.sh \
+            scripts/tests/test-assemble-swift-package.sh
+
+      # Exactly what the script writes, and what it refuses. The job below
+      # runs its success path only. Once a release pushes its output to a
+      # public repository and tags it, that cannot be taken back (ADR 0025).
+      - name: Assemble the Swift package against a fixture tree
+        run: bash scripts/tests/test-assemble-swift-package.sh
+
+      - name: Test the AAR check
+        run: python3 -B -m unittest scripts/tests/test_check_android_aar.py
+
+  swift-package:
+    name: Swift Package
+    runs-on: macos-latest
+    # A simulator that does not boot holds a runner for six hours.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-swift-package
+
+      # One simulator slice, for the architecture of this runner. The release
+      # builds the device slice and both simulator architectures.
+      #
+      # For the pod's deployment target, which the C compiler learns only
+      # from the environment: unset, it stamps its objects for the SDK of
+      # this image, and every link below warns about each of them.
+      #
+      # Then the gate the release runs (docs/bridges/swift.md, S9), on the
+      # archive this job built. This is the one job that builds the iOS
+      # library on a pull request, so it is where a crate that stops honouring
+      # the variable is caught before a release. The arm64 simulator slice is
+      # held to the simulator's floor where the pod's target is below it.
+      - name: Build the Rust library for the simulator
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            arm64) TARGET=aarch64-apple-ios-sim ;;
+            x86_64) TARGET=x86_64-apple-ios ;;
+            *) echo "::error::no iOS simulator target for $(uname -m)"; exit 1 ;;
+          esac
+          source bindings/react-native/scripts/shared/xcframework.sh
+          IPHONEOS_DEPLOYMENT_TARGET="$(bash scripts/ios-deployment-target.sh)"
+          export IPHONEOS_DEPLOYMENT_TARGET
+          cargo build --release --locked --target "$TARGET" \
+            --package offline-protocol-uniffi
+          ARCHIVE="target/$TARGET/release/liboffline_protocol_uniffi.a"
+          CEILING="$IPHONEOS_DEPLOYMENT_TARGET"
+          if [ "$TARGET" = aarch64-apple-ios-sim ]; then
+            CEILING="$(arm64_simulator_ceiling "$IPHONEOS_DEPLOYMENT_TARGET")"
+          fi
+          assert_archive_min_os "$ARCHIVE" "$CEILING"
+          echo "SIMULATOR_ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      # Everything from here is written under build/, not target/. The cache
+      # above saves target/ after deleting the files it does not know and
+      # keeping their directories, so a package assembled there comes back
+      # on the next run as an empty tree the assemble script refuses.
+      - name: Build the XCFramework the package links
+        run: bash scripts/package-swiftpm-xcframework.sh build/swiftpm "$SIMULATOR_ARCHIVE"
+
+      # --bridge-tests adds the suites from bindings/react-native/ios/tests.
+      # Three of them run nowhere else: the SwiftPM harness above cannot
+      # compile the sources they cover.
+      - name: Assemble the package
+        run: >
+          bash scripts/assemble-swift-package.sh
+          --output build/offline-protocol-swift --version 0.0.0 --bridge-tests
+          --xcframework-path build/swiftpm/offline_protocolFFI.xcframework
+
+      # The manifest a release writes names a url and a checksum, and nothing
+      # above renders one. It is parsed here and not built: there is no
+      # archive at that url.
+      - name: Parse the manifest a release would write
+        run: |
+          set -euo pipefail
+          bash scripts/assemble-swift-package.sh \
+            --output build/release-manifest --version 0.0.0 \
+            --xcframework-url https://example.com/offline-protocol-0.0.0-swiftpm-xcframework.zip \
+            --xcframework-checksum 0000000000000000000000000000000000000000000000000000000000000000
+          swift package --package-path build/release-manifest dump-package > build/release-manifest.json
+          python3 - build/release-manifest.json "$(bash scripts/ios-deployment-target.sh)" <<'PYTHON'
+          import json, sys
+          manifest = json.load(open(sys.argv[1]))
+          binary = [t for t in manifest["targets"] if t["type"] == "binary"]
+          assert len(binary) == 1, binary
+          assert binary[0]["url"].endswith("swiftpm-xcframework.zip"), binary[0]
+          assert binary[0]["checksum"] == "0" * 64, binary[0]
+          platforms = {p["platformName"]: p["version"] for p in manifest["platforms"]}
+          assert platforms == {"ios": sys.argv[2]}, platforms
+          assert [p["name"] for p in manifest["products"]] == ["OfflineProtocolSDK"], manifest["products"]
+          print("the release manifest parses:", binary[0]["url"], platforms)
+          PYTHON
+
+      - name: Test the package on a simulator
+        working-directory: build/offline-protocol-swift
+        run: |
+          set -euo pipefail
+          SIMULATOR="$(bash ../../scripts/pick-ios-simulator.sh)"
+          STATUS=0
+          xcodebuild test -scheme OfflineProtocolSDK \
+            -destination "platform=iOS Simulator,id=$SIMULATOR" \
+            -derivedDataPath ../package-build \
+            > ../package-test.log 2>&1 || STATUS=$?
+          # The log is thousands of lines. What failed, and the totals.
+          grep -E "error:|Test Case .* failed|Executed [0-9]+ tests?|\*\* TEST" \
+            ../package-test.log | tail -60 || true
+          if [ "$STATUS" != 0 ]; then
+            echo "::error::xcodebuild test exited $STATUS"
+            exit "$STATUS"
+          fi
+          # A run that built and executed nothing also exits 0. Every suite
+          # file holds one suite, named after the file.
+          MISSING=0
+          while IFS= read -r suite; do
+            name="$(basename "$suite" .swift)"
+            grep -q "Test Suite '$name' passed" ../package-test.log || {
+              echo "::error::$name did not run"
+              MISSING=$((MISSING + 1))
+            }
+          done < <(find Tests -name '*.swift' | sort)
+          [ "$MISSING" = 0 ]
+
+      # The package from an application's side: the product by the name the
+      # README gives, a plain import, and a call into the library from a
+      # module that is not the package.
+      - name: Test an application against the package
+        working-directory: bindings/swift/consumer-check
+        run: |
+          set -euo pipefail
+          SIMULATOR="$(bash ../../../scripts/pick-ios-simulator.sh)"
+          STATUS=0
+          xcodebuild test -scheme ConsumerCheck-Package \
+            -destination "platform=iOS Simulator,id=$SIMULATOR" \
+            -derivedDataPath ../../../build/consumer-build \
+            > ../../../build/consumer-test.log 2>&1 || STATUS=$?
+          grep -E "error:|Test Case .* failed|Executed [0-9]+ tests?|\*\* TEST" \
+            ../../../build/consumer-test.log | tail -30 || true
+          if [ "$STATUS" != 0 ]; then
+            echo "::error::xcodebuild test exited $STATUS"
+            exit "$STATUS"
+          fi
+          grep -q "Test Suite 'UseTests' passed" ../../../build/consumer-test.log || {
+            echo "::error::UseTests did not run"
+            exit 1
+          }
+
+      - name: Keep the test logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-package-test-logs
+          path: |
+            build/package-test.log
+            build/consumer-test.log
+          if-no-files-found: ignore
+          retention-days: 5
+
+  android-library:
+    name: Android Library
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      # The Gradle the React Native harness runs on. The plugins come from
+      # the harness too: the library's settings read them out of it.
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.9"
+
+      # No native library: this job does not cross-compile Rust for Android.
+      - name: Test the library and write it out as a Maven repository
+        working-directory: bindings/kotlin
+        run: >
+          gradle --no-daemon --stacktrace -PVERSION_NAME=0.0.0
+          :offline-protocol-android:testDebugUnitTest
+          :offline-protocol-android:publishAllPublicationsToStagingRepository
+
+      # Gradle succeeds on a test task that found no test. The sources are
+      # read from another directory, so that is one wrong path away.
+      - name: Check that the suite ran
+        run: |
+          python3 - bindings/kotlin/offline-protocol-android/build/test-results/testDebugUnitTest <<'PYTHON'
+          import glob, os, re, sys
+          results = glob.glob(os.path.join(sys.argv[1], "*.xml"))
+          tests = failures = 0
+          for path in results:
+              head = open(path, encoding="utf-8").read(4000)
+              found = re.search(r'tests="(\d+)" skipped="\d+" failures="(\d+)" errors="(\d+)"', head)
+              assert found, f"cannot read the totals of {path}"
+              tests += int(found.group(1))
+              failures += int(found.group(2)) + int(found.group(3))
+          named = "TEST-com.offlineprotocol.RelayControlOpTranslatorTest.xml"
+          assert any(os.path.basename(p) == named for p in results), f"{named} is not among the results"
+          assert tests >= 400, f"only {tests} tests ran"
+          assert failures == 0, f"{failures} failed"
+          print(f"{tests} tests in {len(results)} suites")
+          PYTHON
+
+      - name: Check what is inside the AAR and the sources jar
+        run: |
+          PUBLISHED=bindings/kotlin/offline-protocol-android/build/maven/com/offlineprotocol/offline-protocol-android/0.0.0
+          python3 -B scripts/check_android_aar.py \
+            "$PUBLISHED/offline-protocol-android-0.0.0.aar" \
+            --sources-jar "$PUBLISHED/offline-protocol-android-0.0.0-sources.jar"
+
+      # One dependency line and nothing else, resolved from the repository
+      # the step above wrote, in a release build that minifies. R8 stops on a
+      # class it cannot find, so this is where a rule the library forgot to
+      # ship fails, instead of in an application.
+      - name: Build a minified application against the published library
+        working-directory: bindings/kotlin/consumer-check
+        run: gradle --no-daemon --stacktrace -PVERSION_NAME=0.0.0 :app:assembleRelease

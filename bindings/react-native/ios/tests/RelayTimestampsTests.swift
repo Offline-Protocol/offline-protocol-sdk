@@ -34,6 +34,27 @@ final class RelayTimestampsTests: XCTestCase {
         XCTAssertNil(RelayTimestamps.parseToMsOrNull("2024-13-45T99:99:99Z"))
     }
 
+    func testParsesANumericOffset() {
+        // The same instant as 2024-01-01T00:00:00.500Z, written east and west.
+        XCTAssertEqual(
+            RelayTimestamps.parseToMsOrNull("2024-01-01T05:30:00.500+05:30"), 1_704_067_200_500)
+        XCTAssertEqual(
+            RelayTimestamps.parseToMsOrNull("2023-12-31T19:00:00.500-05:00"), 1_704_067_200_500)
+    }
+
+    func testTruncatesAFractionToTheMillisecond() {
+        XCTAssertEqual(
+            RelayTimestamps.parseToMsOrNull("2024-01-01T00:00:00.123987654Z"), 1_704_067_200_123)
+        XCTAssertEqual(RelayTimestamps.parseToMsOrNull("2024-01-01T00:00:00.1Z"), 1_704_067_200_100)
+    }
+
+    // No zone: a local time, which names no instant. The Kotlin twin also
+    // refuses an impossible date, 24:00 and an offset without a colon, which
+    // Foundation's formatter accepts. That difference predates both suites.
+    func testRefusesATimeWithNoZone() {
+        XCTAssertNil(RelayTimestamps.parseToMsOrNull("2024-01-01T00:00:00"))
+    }
+
     func testEpochSecondsAreScaledToMilliseconds() {
         // ~2024-07 as epoch seconds; without the heuristic this would render
         // as January 1970 in a last-seen display.

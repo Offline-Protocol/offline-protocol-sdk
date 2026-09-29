@@ -373,16 +373,36 @@ class MeshForegroundService : Service() {
      * The target is named as a string rather than a class reference — see
      * [MeshWakePolicy.WAKE_SERVICE_CLASS] for why that is load-bearing rather
      * than stylistic.
+     *
+     * A string names a class that may not be there. The native Android
+     * library leaves the wake service out, because it needs React Native, so
+     * an application on the library that sets the opt-in has no such
+     * service. `startService` does not throw for that: it returns null and
+     * starts nothing. Taken as a wake under way, that would hold "Mesh
+     * Active" over no mesh for the whole watchdog budget. So the service has
+     * to resolve first, and a null from the start counts as a failure too.
      */
+    @Suppress("DEPRECATION") // The ResolveInfoFlags overload is API 33+ only.
     private fun dispatchWake(settings: MeshWakeSettings): Boolean = try {
         val intent = Intent().apply {
             setClassName(packageName, MeshWakePolicy.WAKE_SERVICE_CLASS)
             putExtra(MeshWakePolicy.EXTRA_TIMEOUT_MS, settings.timeoutMs)
             putExtra(MeshWakePolicy.EXTRA_REASON, MeshWakePolicy.REASON_STICKY_RESTART)
         }
-        startService(intent)
-        armWakeWatchdog(MeshWakePolicy.watchdogDelayMs(settings))
-        true
+        if (packageManager.resolveService(intent, 0) == null) {
+            Log.w(
+                TAG,
+                "Mesh wake is enabled, but ${MeshWakePolicy.WAKE_SERVICE_CLASS} is not " +
+                    "declared in this application; stopping instead",
+            )
+            false
+        } else if (startService(intent) == null) {
+            Log.w(TAG, "The mesh wake service did not start; stopping instead")
+            false
+        } else {
+            armWakeWatchdog(MeshWakePolicy.watchdogDelayMs(settings))
+            true
+        }
     } catch (e: Exception) {
         Log.w(TAG, "Could not start the mesh wake service: ${e.message}", e)
         false

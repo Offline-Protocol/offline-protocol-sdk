@@ -3,6 +3,7 @@ package com.offlineprotocol
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Bundle
 import android.os.Looper
 import java.time.Duration
@@ -147,6 +148,21 @@ class MeshForegroundServiceTest {
             putBoolean("com.offlineprotocol.MESH_WAKE_ENABLED", true)
             putInt("com.offlineprotocol.MESH_WAKE_TIMEOUT_SECONDS", WAKE_TIMEOUT_SECONDS)
         }
+    }
+
+    /**
+     * Declares the wake service, as the React Native module's manifest does in
+     * an application. The native Android library leaves it out, and nothing
+     * declares it in this suite unless a test does.
+     */
+    private fun declareWakeService() {
+        val application = RuntimeEnvironment.getApplication()
+        shadowOf(application.packageManager).addOrUpdateService(
+            ServiceInfo().apply {
+                packageName = application.packageName
+                name = "com.offlineprotocol.MeshHeadlessWakeService"
+            }
+        )
     }
 
     /**
@@ -351,6 +367,7 @@ class MeshForegroundServiceTest {
     @Test
     fun `sticky restart with no host wakes javascript when the app opted in`() {
         optInToWake()
+        declareWakeService()
         assertNull("no host registered is the precondition for a wake", MeshForegroundService.onStopRequestedByUser)
 
         val service = createService()
@@ -383,8 +400,26 @@ class MeshForegroundServiceTest {
     }
 
     @Test
+    fun `an opt-in with no wake service declared stops at once instead of waking`() {
+        // The native Android library: the opt-in is set, and the service it
+        // names needs React Native and is not in the application. Nothing
+        // declares it here.
+        optInToWake()
+
+        val service = createService()
+        val result = service.onStartCommand(null, 0, 1)
+
+        assertNull("a service that does not resolve must not be started", nextStartedService())
+        assertEquals(Service.START_NOT_STICKY, result)
+        // At once, not when the watchdog would have fired: nothing was idled.
+        assertTrue(shadowOf(service).isForegroundStopped)
+        assertTrue(shadowOf(service).isStoppedBySelf)
+    }
+
+    @Test
     fun `the wake watchdog stops the keep-alive when no host arrives`() {
         optInToWake()
+        declareWakeService()
 
         val service = createService()
         service.onStartCommand(null, 0, 1)
@@ -404,6 +439,7 @@ class MeshForegroundServiceTest {
     @Test
     fun `the wake watchdog leaves the keep-alive up when the wake landed`() {
         optInToWake()
+        declareWakeService()
 
         val service = createService()
         service.onStartCommand(null, 0, 1)
@@ -423,6 +459,7 @@ class MeshForegroundServiceTest {
     @Test
     fun `a mesh start disarms the wake watchdog`() {
         optInToWake()
+        declareWakeService()
 
         val service = createService()
         service.onStartCommand(null, 0, 1)

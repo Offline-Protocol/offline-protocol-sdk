@@ -201,3 +201,63 @@ Two consequences of the `compileOnly` path that shape what you can test:
   instantiated at unit-test runtime **at all**. That is a design constraint, not
   only a testing one: put an invariant that needs coverage in a collaborator,
   not in the module.
+
+## The Android library
+
+The Android library is these sources, built without React Native. It is not a
+second copy of the bridge. The Gradle build in `bindings/kotlin` points its
+source sets at `bindings/react-native/android` and leaves out the three files
+that need React
+([C13](README.md#c13-a-shared-bridge-source-compiles-without-react),
+[ADR 0025](../adr/0025-native-packages-are-assembled-in-place.md)).
+
+What it takes from the module it reads from the module: the SDK levels and
+the version of every dependency from `build.gradle`, the compiler and the
+Android plugin from the test harness, the rules for an application's R8 from
+`consumer-rules.pro`, and the manifest, which a task rewrites at build time
+without the headless wake service and the `WAKE_LOCK` permission that only
+React Native's headless task needs. That task fails when either entry is
+missing, because a renamed entry would otherwise ship under its new name.
+
+Six things about it are easy to get wrong:
+
+- **It is built by the toolchain the module's tests run on, not by the
+  newest.** Kotlin refuses metadata more than one version ahead of the
+  compiler reading it. Built by Kotlin 2.2, the library could not be used by
+  an application on Kotlin 1.9 or 2.0, which fails on every symbol in it.
+- **JNA is an `api` dependency.** The generated types extend JNA's. An
+  application never calls them, and can reach them, and with JNA published
+  at runtime scope the compiler cannot see their supertypes.
+- **`androidx.core` is declared by the library and not by the module.** The
+  foreground service and both permission checks need it, and in a React
+  Native application it arrives through React Native. The module declares it
+  for its tests, which is the version the library reads.
+- **A source set cannot leave a file out, so the tasks that read one are
+  told.** The compiler is, and so is whatever packs sources. Left alone, the
+  sources jar published the React module as the source of a library that
+  does not contain it. Which task packs it is the plugin's to change, so
+  `scripts/check_android_aar.py` looks inside the jar that is published.
+- **The mesh wake is inert in the library.** `MeshForegroundService` starts
+  the wake service by its class name, only when the application sets
+  `MESH_WAKE_ENABLED`, and that class is not in the library. `startService`
+  does not throw for a service that is not declared, it returns null, so the
+  service resolves the name first. Set in a native application, the opt-in
+  finds no such service and the keep-alive stops at once, as it does with the
+  opt-in off. Before that check it held "Mesh Active" over no mesh until the
+  watchdog fired.
+- **Nothing calls `java.time`.** It needs API 26 and `minSdk` is 24, and on
+  API 24 or 25 the call throws an `Error` that a `catch (e: Exception)` does
+  not catch. The unit suite runs on a JVM that has it, so
+  `android_bridge_sources_never_call_java_time` in the uniffi crate is what
+  refuses one. `RelayTimestamps` parses ISO-8601 by hand.
+
+The `Android Library` job runs the unit suite, and checks that it ran:
+Gradle succeeds on a test task that found no test. It writes the library out
+as a Maven repository, checks what is inside the AAR and the sources jar,
+and builds `bindings/kotlin/consumer-check` against it. That last build is
+an application that declares one dependency and nothing else, and minifies.
+It fails when what it calls needs something the library's metadata does not
+bring, and when R8 needs a rule the library does not ship. The second is how
+it was found that no application could minify against the library: Tink,
+which `security-crypto` brings, refers to annotation classes it does not
+ship, and R8 treats a class it cannot find as an error.

@@ -1,0 +1,63 @@
+# Offline Protocol SDK for Swift
+
+Offline-first messaging for iOS: BLE mesh and internet relay transports, with
+end-to-end encryption (MLS, RFC 9420) applied automatically.
+
+This is the Swift package of the
+[Offline Protocol SDK](https://github.com/Offline-Protocol/offline-protocol-sdk).
+It needs no React Native.
+
+## Install
+
+In Xcode, add the package by URL and pick a version. In a manifest:
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/Offline-Protocol/offline-protocol-swift.git", from: "@@VERSION@@")
+],
+targets: [
+    .target(name: "YourApp", dependencies: [
+        .product(name: "OfflineProtocolSDK", package: "offline-protocol-swift")
+    ])
+]
+```
+
+Requirements: iOS @@IOS_DEPLOYMENT_TARGET@@ or later. iOS only: the binary
+has no macOS or Mac Catalyst slice.
+
+## What is in it
+
+| Part | What it is |
+|------|------------|
+| `offline_protocolFFI` | The Rust library, as an XCFramework for device and simulator |
+| Generated bindings | `OfflineProtocol`, `ProtocolConfig`, `MeshServices`, `DataStore` and the rest of the API, generated from the Rust interface |
+| Transports | The BLE, internet relay, Wi-Fi Direct, Nostr and Reticulum managers, the same sources the React Native module compiles |
+| Storage | The Keychain store for MLS material and the file store for protocol state |
+
+The Rust core is an I/O-free engine. It queues, routes and encrypts, and never
+opens a socket or touches a radio for the protocol. A transport manager does
+the I/O for one transport: it drains the engine's outbound queue, sends, and
+hands inbound bytes back.
+
+## Status
+
+The storage providers are not yet public, so an application cannot construct
+them, and wiring the transports to the engine is the application's to write.
+A public entry point that does both is the next addition to this package.
+
+What is public today is what the React Native module happened to need
+public. It is not yet a decided API, and names in it may change before the
+first release that says otherwise.
+
+## Where this package comes from
+
+This repository is generated. Every source in it is a copy of a file in
+[offline-protocol-sdk](https://github.com/Offline-Protocol/offline-protocol-sdk),
+written here by that repository's release workflow, and the `VERSION` file
+names the commit. Changes made here are overwritten by the next release.
+Issues and pull requests belong in the main repository.
+
+## License
+
+AGPL-3.0-only, with a commercial license available. See `LICENSE` and
+`LICENSE-COMMERCIAL.md`. Cryptography export notice: `EXPORT.md`.

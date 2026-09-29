@@ -7,8 +7,8 @@ binding.
 | Document | Scope |
 |----------|-------|
 | This file | The contract every binding shares |
-| [Swift](swift.md) | iOS native and the React Native iOS bridge |
-| [Kotlin](kotlin.md) | Android native and the React Native Android bridge |
+| [Swift](swift.md) | iOS native, the Swift package and the React Native iOS bridge |
+| [Kotlin](kotlin.md) | Android native, the Android library and the React Native Android bridge |
 | [Python](python.md) | Desktop and tooling |
 | [TypeScript](typescript.md) | The React Native JavaScript surface |
 
@@ -558,6 +558,40 @@ The failure this prevents: a batch stamped `os: android` because an app
 forwarded a platform string, a session that never closes because the app
 never told the pipe it backgrounded, or a main-thread watchdog kill on
 `disableTelemetry`.
+
+## C13. A shared bridge source compiles without React
+
+Every hand-written bridge source compiles with no React on the classpath,
+except the ones named as needing it:
+
+| Platform | Needs React |
+|----------|-------------|
+| Android | `OfflineProtocolModule.kt`, `OfflineProtocolPackage.kt`, `MeshHeadlessWakeService.kt` |
+| iOS | `OfflineProtocolModule.swift`, `OfflineProtocolModule.m` |
+
+The Swift package and the Android library are built from the files the React
+Native module compiles, where they are, less those five
+([ADR 0025](../adr/0025-native-packages-are-assembled-in-place.md)). So a
+transport manager that takes a `Promise`, or a policy class that imports
+React for one type, still builds in React Native and breaks both native
+packages for every application that uses them.
+
+The check is the package build, on every pull request: the `Swift Package`
+job builds the package and runs it on a simulator, and the `Android Library`
+job compiles the library and its suite. Each list of what to leave out is
+checked the other way too. A name on it that matches no file is a rename
+nobody carried over, and both builds refuse it, because the renamed file
+would otherwise be taken.
+
+**A value the React Native package declares, and that would drift without
+anything failing, is read and not written again.** The packages read the iOS
+deployment target, the Android SDK levels, every dependency version, the
+compiler and the manifest from where the module declares them. A value that
+has to change is changed there.
+
+The failure this prevents: a native package that stops building, or builds
+against a different version of a dependency than the code was tested with,
+found by the first application to update.
 
 ## What each binding owes
 

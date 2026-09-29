@@ -149,9 +149,55 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   them too. Any other manager is stopped by the block, as before, and can
   be entered again. A `close()` cancelled while the core is releasing
   still releases, and the manager is closed once it has.
+- **A Swift package and an Android library, built without React Native.**
+  Both are built from the bridge sources the React Native module compiles,
+  where they are: the transport managers, the storage providers and the
+  generated bindings, less the five files that need React. The Swift package
+  is `OfflineProtocolSDK`, assembled by `scripts/assemble-swift-package.sh`.
+  The Android library is `com.offlineprotocol:offline-protocol-android`,
+  built by the Gradle build in `bindings/kotlin`. CI builds and tests both
+  on every pull request, and builds an application against each. Neither is
+  published yet. What is public in them is what the React Native module
+  happened to need public, not a chosen API, and on iOS that leaves out the
+  storage providers, so an application cannot construct the built-in stores
+  there. Both carry the license, the commercial license, the third-party
+  notices and the export notice.
+- **Three iOS suites run for the first time.** The mesh controller, the BLE
+  discovery bootstrap policy and the error mapping suites are excluded from
+  the SwiftPM test harness, and nothing else ran them. They run in the Swift
+  package's job. Two mesh controller tests were failing: they registered two
+  peers in a mesh with room for four, so the eviction they assert was never
+  weighed. They now fill the mesh, as their Kotlin twins have since #120.
 
 ### Fixed
 
+- **Relay timestamps parse on Android 7.** The Android bridge parsed them
+  with `java.time.Instant`, which exists from Android 8 (API 26), while the
+  SDK supports Android 7 (API 24). On Android 7 the call threw
+  `NoClassDefFoundError`, which the surrounding `catch (e: Exception)` does
+  not catch, for a legacy relay message and an ISO-8601 last-seen timestamp.
+  An application that enables core library desugaring was not affected. The
+  timestamp is now parsed without `java.time`, with the answers `Instant`
+  gave, and a Rust guard refuses a new `java.time` call in the bridge. Not
+  run on an Android 7 device.
+- **An opted-in mesh wake with no wake service stops at once.** A sticky
+  restart that wakes JavaScript started the wake service by name, and
+  `startService` returns null rather than throwing when no such service is
+  declared. The keep-alive then held "Mesh Active" over no mesh until the
+  wake watchdog fired. It now checks that the service resolves, and stops as
+  it does without the opt-in. A React Native application declares the
+  service, so this reached only the native Android library.
+- **The iOS deployment target has one reader.** The release build and the
+  Swift package read the podspec with two parsers that disagreed on a bare
+  major version, a trailing dot and a second declaration. There is one now,
+  and it refuses all three. The Swift package's CI job runs the release's
+  deployment-target gate on the library it builds, on every pull request.
+- **An Android application that minifies can build against the SDK.** Tink,
+  which `androidx.security:security-crypto` brings for the MLS store, refers
+  to Error Prone's annotation classes and does not ship them, and R8 stops a
+  release build on a class it cannot find. The SDK's consumer rules now tell
+  R8 to disregard them. A React Native application was affected only if
+  nothing else in it brought the annotations.
 - **A stopped Python `ProtocolManager` is freed.** The core kept every
   callback the manager registered, and those reached the manager again
   through Rust, where the collector cannot see the cycle, so a stopped
