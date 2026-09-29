@@ -237,11 +237,14 @@ Six things about it are easy to get wrong:
   sources jar published the React module as the source of a library that
   does not contain it. Which task packs it is the plugin's to change, so
   `scripts/check_android_aar.py` looks inside the jar that is published.
-- **The mesh wake is inert in the library, and must stay off.**
-  `MeshForegroundService` starts the wake service by its class name, only
-  when the application sets `MESH_WAKE_ENABLED`, and that class is not in the
-  library. Set in a native application, the start finds no such service, and
-  the keep-alive stops when the wake budget runs out.
+- **The mesh wake is inert in the library.** `MeshForegroundService` starts
+  the wake service by its class name, only when the application sets
+  `MESH_WAKE_ENABLED`, and that class is not in the library. `startService`
+  does not throw for a service that is not declared, it returns null, so the
+  service resolves the name first. Set in a native application, the opt-in
+  finds no such service and the keep-alive stops at once, as it does with the
+  opt-in off. Before that check it held "Mesh Active" over no mesh until the
+  watchdog fired.
 - **Nothing calls `java.time`.** It needs API 26 and `minSdk` is 24, and on
   API 24 or 25 the call throws an `Error` that a `catch (e: Exception)` does
   not catch. The unit suite runs on a JVM that has it, so

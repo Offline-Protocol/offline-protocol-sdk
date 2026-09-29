@@ -179,6 +179,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   timestamp is now parsed without `java.time`, with the answers `Instant`
   gave, and a Rust guard refuses a new `java.time` call in the bridge. Not
   run on an Android 7 device.
+- **An opted-in mesh wake with no wake service stops at once.** A sticky
+  restart that wakes JavaScript started the wake service by name, and
+  `startService` returns null rather than throwing when no such service is
+  declared. The keep-alive then held "Mesh Active" over no mesh until the
+  wake watchdog fired. It now checks that the service resolves, and stops as
+  it does without the opt-in. A React Native application declares the
+  service, so this reached only the native Android library.
 - **The iOS deployment target has one reader.** The release build and the
   Swift package read the podspec with two parsers that disagreed on a bare
   major version, a trailing dot and a second declaration. There is one now,
