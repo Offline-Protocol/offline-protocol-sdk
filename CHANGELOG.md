@@ -251,6 +251,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   accepts some forged assertions the strict check refuses. They now call
   `verifyIdentityAssertion`, the same check the Python central and both
   peer-stream managers use.
+- **The iOS library is built for the pod's deployment target.** The C and
+  assembly objects inside it, from `ring` and `oslog`, were stamped for the
+  newest iOS the release machine's Xcode knew, so an application linking the
+  pod got one linker warning for each of them. The build now reads the pod's
+  target, iOS 13.0, hands it to every compiler, and refuses to package an
+  archive holding an object built for anything newer. The arm64 simulator
+  slice is held to 14.0, the oldest system that simulator has. The SDK's own
+  Rust code is compiled for the pod's target as well, where it was compiled
+  for the Rust target's floor of iOS 10.
 
 ### Changed
 

@@ -239,6 +239,36 @@ manual clock, and `PeerStreamFramingTests` replays the chapter's vectors. The
 manager's session handling (advertise, browse, invite) is not covered in CI
 (C9).
 
+## S9. Every object is built for the pod's deployment target
+
+No object in the iOS library declares a minimum OS newer than the one the
+podspec declares. The arm64 simulator slice is held to iOS 14.0 where the
+pod's target is below that, because no arm64 simulator exists before 14.0 and
+the toolchain raises the slice to it.
+
+Two compilers read `IPHONEOS_DEPLOYMENT_TARGET`, and they fall back
+differently when it is unset. The Rust compiler falls back to the target's own
+floor, which is below anything the pod would declare. The C compiler behind
+`cc-rs`, which builds the C and assembly in `ring` and `oslog`, falls back to
+the version of the installed SDK. So with the variable unset those objects
+were stamped for whichever Xcode built the release, and the linker of every
+application using the pod warned about each of them.
+
+Three things hold the invariant:
+
+- `bindings/react-native/scripts/build-uniffi-ios.sh` reads the target out of
+  the podspec and exports it before it builds. The number is written once, in
+  the podspec. The SDK's own Rust code is compiled for it too.
+- After the build, the script reads every object in every slice and refuses to
+  package one that is too new. An archive it could not read fails the same
+  way: one with no stamp in it, and one `otool` read part of before giving
+  up.
+- `scripts/tests/test-ios-min-os.sh`, at the repository root, runs on every
+  pull request. The gate needs `otool`, so in CI it runs only where the
+  library is built, which is a release. The test covers what can go wrong
+  without one: the parser, the podspec reader, a failing `otool`, and that
+  the build script still calls the gate on all three archives.
+
 ## Testing
 
 ```bash
