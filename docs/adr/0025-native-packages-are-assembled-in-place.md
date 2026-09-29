@@ -64,9 +64,9 @@ that does not exist yet.
 6. **Code that exists only for a native application lives in
    `bindings/swift` and `bindings/kotlin`.**
 7. **The Swift package ships through a distribution repository that is
-   generated output.** The release workflow writes the assembled tree there
-   and tags it, after the archive it names is published. Nobody edits that
-   repository.
+   generated output.** The release workflow is to write the assembled tree
+   there and tag it, after the archive it names is published. Nobody edits
+   that repository.
 8. **Neither package carries a version of its own.** Both take it from the
    tag, so there is nothing for the version gate to compare.
 
@@ -90,6 +90,10 @@ that does not exist yet.
   tag must never move, because Swift Package Manager records the revision
   behind each version and refuses one that changed, and a version on a Maven
   repository is permanent. A bad release is answered by the next one.
+- **Nothing publishes either package yet.** The release workflow builds
+  neither. Wiring it needs the distribution repository, a deploy key, a
+  signing key and a Maven channel, none of which exists, and it is a change
+  of its own. Until then decisions 7 and 8 describe what a release is to do.
 - A release AAR carries the four legal files the Swift package carries
   (`LICENSE`, `LICENSE-COMMERCIAL.md`, `THIRD-PARTY-NOTICES.md`,
   `EXPORT.md`). Both packages hold the Rust library, and the notices are

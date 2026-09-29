@@ -799,8 +799,8 @@ jobs:
             scripts/tests/test-assemble-swift-package.sh
 
       # Exactly what the script writes, and what it refuses. The job below
-      # runs its success path only, and its output is pushed to a public
-      # repository and tagged, which cannot be taken back.
+      # runs its success path only. Once a release pushes its output to a
+      # public repository and tags it, that cannot be taken back (ADR 0025).
       - name: Assemble the Swift package against a fixture tree
         run: bash scripts/tests/test-assemble-swift-package.sh
 

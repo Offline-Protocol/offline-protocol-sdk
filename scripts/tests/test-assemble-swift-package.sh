@@ -2,9 +2,10 @@
 
 # Drives scripts/assemble-swift-package.sh against a fixture tree.
 #
-# The script's output is a public package: the release workflow pushes the
-# tree it writes to the distribution repository and tags it, and neither a
-# tag nor a resolved checksum can be taken back. Building that tree needs a
+# The script's output is meant to be a public package: a release is to push
+# the tree it writes to the distribution repository and tag it, and neither a
+# tag nor a resolved checksum can be taken back once it does. Nothing is
+# pushed yet (ADR 0025). Building that tree needs a
 # Mac and the Rust library, so the job that does runs the success path only.
 # This runs everywhere, and its weight is on the other half: exactly what the
 # script writes, and what it refuses.

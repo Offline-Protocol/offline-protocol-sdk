@@ -80,7 +80,9 @@ not cross-compile Rust for Android. With them in
 `bindings/react-native/android/src/main/jniLibs`, which is where
 `bindings/react-native/scripts/build-uniffi-android.sh` puts them, the same
 commands build the library a release would, and `--require-natives` makes
-the check insist on all four ABIs. Nothing publishes the library yet.
+the check insist on all four ABIs. The check also refuses a native library
+under any other name, which is what an old build leaves in that directory.
+Nothing publishes the library yet.
 
 ## What an application has to declare
 
