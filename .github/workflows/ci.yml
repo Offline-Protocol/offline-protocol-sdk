@@ -544,10 +544,19 @@ jobs:
         run: |
           shellcheck --severity=warning \
             scripts/package-release-assets.sh \
-            scripts/tests/test-package-release-assets.sh
+            scripts/tests/test-package-release-assets.sh \
+            bindings/react-native/scripts/shared/xcframework.sh \
+            bindings/react-native/scripts/build-uniffi-ios.sh \
+            scripts/tests/test-ios-min-os.sh
 
       - name: Package release assets against a fixture tree
         run: bash scripts/tests/test-package-release-assets.sh
+
+      # The gate reads a real archive with otool, so it runs only where the
+      # iOS library is built, which in CI is a release. This drives everything
+      # in it that is text handling, with a stand-in for otool.
+      - name: Test the iOS deployment-target gate
+        run: bash scripts/tests/test-ios-min-os.sh
 
   react-native-typecheck:
     name: React Native Typecheck

@@ -31,6 +31,14 @@ for arch in "${IOS_ARCHS[@]}"; do
   rustup target add "$arch"
 done
 
+# Every compiler in the build targets the oldest iOS the pod admits, and they
+# learn it from the environment. Set unconditionally: a value inherited from
+# the caller's shell would build a different library on every machine.
+# See THE DEPLOYMENT TARGET in shared/xcframework.sh.
+IOS_DEPLOYMENT_TARGET="$(ios_deployment_target "$SCRIPT_DIR/../MeshSdk.podspec")"
+export IPHONEOS_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET"
+echo "Building for iOS $IOS_DEPLOYMENT_TARGET and later"
+
 # Build for each architecture
 echo "Building UniFFI library for iOS architectures..."
 for arch in "${IOS_ARCHS[@]}"; do
@@ -52,6 +60,12 @@ static_lib_for() {
     echo "$root/deps/liboffline_protocol_uniffi.a"
   fi
 }
+
+echo "Checking the deployment target of every object..."
+assert_archive_min_os "$(static_lib_for aarch64-apple-ios)" "$IOS_DEPLOYMENT_TARGET"
+assert_archive_min_os "$(static_lib_for aarch64-apple-ios-sim)" \
+  "$(arm64_simulator_ceiling "$IOS_DEPLOYMENT_TARGET")"
+assert_archive_min_os "$(static_lib_for x86_64-apple-ios)" "$IOS_DEPLOYMENT_TARGET"
 
 echo "Packaging the XCFramework..."
 
