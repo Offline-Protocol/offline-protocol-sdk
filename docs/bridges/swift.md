@@ -122,11 +122,13 @@ five places, and missing any one produces a different, unhelpful symptom:
    `react_native_podspec_ships_every_hand_written_ios_source` fails `cargo test`
    on an unlisted top-level source. A file added under `ble/` or `mesh/` needs
    no podspec edit at all.
-2. The Swift package manifest's target sources, for the typecheck harness.
+2. The target sources in `bindings/react-native/ios/Package.swift`, the
+   manifest of the test harness. Not the Swift package that ships, which
+   takes a new source without being told ([below](#the-swift-package)).
 3. Any exclusion list it must **not** be in.
 4. The test target, if it has tests.
 5. **The `.github/workflows/ci.yml` "iOS bridge typecheck" file list**, if the
-   file is one the package manifest excludes. This is the one most often
+   file is one the harness manifest excludes. This is the one most often
    forgotten, because the local recipe globs the directory while CI enumerates
    explicitly: the local harness stays green and CI fails with `cannot find
    'YourNewType' in scope`.
@@ -255,9 +257,9 @@ current set rather than trusting this sentence.
 
 **Error mapping is not in that list.** `ProtocolErrorBridge` depends on the
 generated UniFFI module, so both it and its test suite are excluded from the
-package manifest; they ride the app build only. The same holds for the mesh
-controller and the Bluetooth discovery bootstrap policy: suites exist, `swift
-test` does not run them.
+harness manifest. The same holds for the mesh controller and the Bluetooth
+discovery bootstrap policy: suites exist, `swift test` does not run them. The
+`Swift Package` job does, as described at the end of this section.
 
 **Excluded from `swift test` does not mean unchecked.** A separate CI step,
 "iOS bridge typecheck (files excluded from the SwiftPM harness)", runs `swiftc
@@ -283,3 +285,52 @@ source in `ios/` by glob, so a new file is covered without being listed.
 
 The exclusion list in `Package.swift` remains the source of truth for what
 `swift test` skips.
+
+**The `Swift Package` job runs every suite, the excluded three included.** It
+builds the Rust library for the simulator, assembles the package with
+`--bridge-tests` and runs it with `xcodebuild test`
+([bindings/swift](../../bindings/swift/README.md#build-and-test-it)). That is
+the only place the mesh controller, the BLE discovery bootstrap policy and
+the error mapping suites execute, and the only place anything in the bridge
+is linked against the library: `LinkTests` calls into Rust, and runs the
+storage conformance suite against the built-in state store (C11). The job
+then builds `bindings/swift/consumer-check`, which depends on the package as
+an application would, with a plain import, and calls into the library from
+outside the module.
+
+## The Swift package
+
+The Swift package is these sources, assembled. It is not a second copy of
+the bridge. `scripts/assemble-swift-package.sh`
+writes a directory Swift Package Manager can build, from the sources in
+`bindings/react-native/ios` and the generated bindings, beside a manifest
+rendered from `bindings/swift/Package.swift.template`
+([C13](README.md#c13-a-shared-bridge-source-compiles-without-react),
+[ADR 0025](../adr/0025-native-packages-are-assembled-in-place.md)).
+
+Four things about it fail in ways that do not point at their cause:
+
+- **The Swift module is `OfflineProtocolSDK`, not `OfflineProtocol`.** The
+  generated bindings declare a class called `OfflineProtocol`, and a module
+  that shares a name with one of its own types cannot be used to qualify
+  anything in it.
+- **The test harness's stand-ins are behind `OFFLINE_PROTOCOL_HARNESS_SHIMS`,
+  not `SWIFT_PACKAGE`.** Swift Package Manager defines `SWIFT_PACKAGE` for
+  every package it builds. Under that switch the package declared
+  `MlsStorageError`, `MlsStorageProvider` and `ProtocolStateStorageProvider`
+  twice, once as a stand-in and once generated.
+- **The header sits in `Headers/offline_protocolFFI/` inside each slice, not
+  in `Headers/`.** Xcode copies the headers of every binary an application
+  links into one directory, and a module map is always called
+  `module.modulemap`, so two libraries that ship one at the top overwrite
+  each other. Every library UniFFI generates ships one.
+- **The manifest stays at tools version 5.9.** It selects the Swift 5
+  language mode. Under Swift 6 the storage providers do not compile.
+
+The XCFramework the pod ships has no headers in it, because the podspec
+supplies search paths. `scripts/package-swiftpm-xcframework.sh` builds the
+package's own from the same archives.
+
+The package takes a source at the top level of `ios/`, or under `ble/` or
+`mesh/`, without being told, which is what the podspec takes. A source in a
+new directory is in neither until it is named in both.

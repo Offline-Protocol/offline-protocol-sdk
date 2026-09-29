@@ -149,9 +149,33 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   them too. Any other manager is stopped by the block, as before, and can
   be entered again. A `close()` cancelled while the core is releasing
   still releases, and the manager is closed once it has.
+- **A Swift package and an Android library, built without React Native.**
+  Both are built from the bridge sources the React Native module compiles,
+  where they are: the transport managers, the storage providers and the
+  generated bindings, less the five files that need React. The Swift package
+  is `OfflineProtocolSDK`, assembled by `scripts/assemble-swift-package.sh`.
+  The Android library is `com.offlineprotocol:offline-protocol-android`,
+  built by the Gradle build in `bindings/kotlin`. CI builds and tests both
+  on every pull request, and builds an application against each. Neither is
+  published yet. What is public in them is what the React Native module
+  happened to need public, not a chosen API, and on iOS that leaves out the
+  storage providers, so an application cannot construct the built-in stores
+  there.
+- **Three iOS suites run for the first time.** The mesh controller, the BLE
+  discovery bootstrap policy and the error mapping suites are excluded from
+  the SwiftPM test harness, and nothing else ran them. They run in the Swift
+  package's job. Two mesh controller tests were failing: they registered two
+  peers in a mesh with room for four, so the eviction they assert was never
+  weighed. They now fill the mesh, as their Kotlin twins have since #120.
 
 ### Fixed
 
+- **An Android application that minifies can build against the SDK.** Tink,
+  which `androidx.security:security-crypto` brings for the MLS store, refers
+  to Error Prone's annotation classes and does not ship them, and R8 stops a
+  release build on a class it cannot find. The SDK's consumer rules now tell
+  R8 to disregard them. A React Native application was affected only if
+  nothing else in it brought the annotations.
 - **A stopped Python `ProtocolManager` is freed.** The core kept every
   callback the manager registered, and those reached the manager again
   through Rust, where the collector cannot see the cycle, so a stopped
