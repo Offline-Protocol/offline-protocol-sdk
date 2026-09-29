@@ -170,6 +170,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **The iOS deployment target has one reader.** The release build and the
+  Swift package read the podspec with two parsers that disagreed on a bare
+  major version, a trailing dot and a second declaration. There is one now,
+  and it refuses all three. The Swift package's CI job runs the release's
+  deployment-target gate on the library it builds, on every pull request.
 - **An Android application that minifies can build against the SDK.** Tink,
   which `androidx.security:security-crypto` brings for the MLS store, refers
   to Error Prone's annotation classes and does not ship them, and R8 stops a

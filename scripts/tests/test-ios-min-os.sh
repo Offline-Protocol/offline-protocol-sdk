@@ -3,11 +3,12 @@
 # Drives the iOS deployment-target gate in
 # bindings/react-native/scripts/shared/xcframework.sh without a Mac.
 #
-# The gate reads a real archive with otool, so it runs only where the iOS
-# library is built, and in CI that is a release. Everything that can go wrong
-# in it is text handling: reading the number out of the podspec, parsing what
-# otool prints, and deciding what a failed otool means. This feeds it that
-# text, with a stand-in for otool where one is called.
+# The gate reads a real archive with otool, so it runs only on a Mac that
+# built the iOS library: a release, and the Swift Package job on every pull
+# request. Everything that can go wrong in it is text handling: reading the
+# number out of the podspec, parsing what otool prints, and deciding what a
+# failed otool means. This feeds it that text, with a stand-in for otool
+# where one is called, on any runner.
 
 set -euo pipefail
 
@@ -21,7 +22,7 @@ source "$RN_SCRIPTS/shared/xcframework.sh"
 FAILURES=0
 ASSERTIONS=0
 # A test that stops asserting passes. Raise this with every check added.
-EXPECTED_ASSERTIONS=50
+EXPECTED_ASSERTIONS=59
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -148,6 +149,39 @@ equal "and prints no version" "$OUTPUT" ""
 
 equal "the real podspec says" \
   "$(ios_deployment_target "$REPO_ROOT/bindings/react-native/MeshSdk.podspec" | grep -cE '^[0-9]+\.[0-9]+$')" "1"
+
+# refused <name> <podspec text>
+#
+# The reader must fail and print no version. Each of these was once read two
+# ways: the release build took it, and the Swift package refused it.
+refused() {
+  local status=0 output
+  printf '%b' "$2" >"$PODSPEC"
+  output="$(ios_deployment_target "$PODSPEC" 2>/dev/null)" || status=$?
+  equal "$1 is refused" "$status" "1"
+  equal "$1 prints no version" "$output" ""
+}
+
+refused "a bare major version" '  s.platforms = { :ios => "15" }\n'
+refused "a version with a trailing dot" '  s.platforms = { :ios => "13." }\n'
+refused "two declarations" \
+  '  s.platforms = { :ios => "13.0" }\n  s.platforms = { :ios => "15.1" }\n'
+
+printf '  s.platforms = { :ios => "13.4.1" }\n' >"$PODSPEC"
+equal "a patch version is read" "$(ios_deployment_target "$PODSPEC")" "13.4.1"
+
+# The script the Swift package and its CI job ask is this function, not a
+# second parser. Pointed at a fixture podspec, it answers what the function
+# answers, and refuses what the function refuses.
+mkdir -p "$WORK/root/bindings/react-native"
+printf '  s.platforms = { :ios => "14.2" }\n' >"$WORK/root/bindings/react-native/MeshSdk.podspec"
+equal "the package's script reads what the release build reads" \
+  "$(PACKAGE_SOURCE_ROOT="$WORK/root" bash "$REPO_ROOT/scripts/ios-deployment-target.sh")" "14.2"
+printf '  s.platforms = { :ios => "15" }\n' >"$WORK/root/bindings/react-native/MeshSdk.podspec"
+STATUS=0
+PACKAGE_SOURCE_ROOT="$WORK/root" bash "$REPO_ROOT/scripts/ios-deployment-target.sh" \
+  >/dev/null 2>&1 || STATUS=$?
+equal "and refuses what the release build refuses" "$STATUS" "1"
 
 echo "the simulator ceiling"
 

@@ -552,9 +552,11 @@ jobs:
       - name: Package release assets against a fixture tree
         run: bash scripts/tests/test-package-release-assets.sh
 
-      # The gate reads a real archive with otool, so it runs only where the
-      # iOS library is built, which in CI is a release. This drives everything
-      # in it that is text handling, with a stand-in for otool.
+      # The gate reads a real archive with otool, so it runs where the iOS
+      # library is built: in a release, on all three archives, and in the
+      # Swift Package job below, on the simulator archive of every pull
+      # request. This drives everything in it that is text handling, with a
+      # stand-in for otool, on a runner that has none.
       - name: Test the iOS deployment-target gate
         run: bash scripts/tests/test-ios-min-os.sh
 
@@ -827,6 +829,12 @@ jobs:
       # For the pod's deployment target, which the C compiler learns only
       # from the environment: unset, it stamps its objects for the SDK of
       # this image, and every link below warns about each of them.
+      #
+      # Then the gate the release runs (docs/bridges/swift.md, S9), on the
+      # archive this job built. This is the one job that builds the iOS
+      # library on a pull request, so it is where a crate that stops honouring
+      # the variable is caught before a release. The arm64 simulator slice is
+      # held to the simulator's floor where the pod's target is below it.
       - name: Build the Rust library for the simulator
         run: |
           set -euo pipefail
@@ -835,11 +843,18 @@ jobs:
             x86_64) TARGET=x86_64-apple-ios ;;
             *) echo "::error::no iOS simulator target for $(uname -m)"; exit 1 ;;
           esac
+          source bindings/react-native/scripts/shared/xcframework.sh
           IPHONEOS_DEPLOYMENT_TARGET="$(bash scripts/ios-deployment-target.sh)"
           export IPHONEOS_DEPLOYMENT_TARGET
           cargo build --release --locked --target "$TARGET" \
             --package offline-protocol-uniffi
-          echo "SIMULATOR_ARCHIVE=target/$TARGET/release/liboffline_protocol_uniffi.a" >> "$GITHUB_ENV"
+          ARCHIVE="target/$TARGET/release/liboffline_protocol_uniffi.a"
+          CEILING="$IPHONEOS_DEPLOYMENT_TARGET"
+          if [ "$TARGET" = aarch64-apple-ios-sim ]; then
+            CEILING="$(arm64_simulator_ceiling "$IPHONEOS_DEPLOYMENT_TARGET")"
+          fi
+          assert_archive_min_os "$ARCHIVE" "$CEILING"
+          echo "SIMULATOR_ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
 
       # Everything from here is written under build/, not target/. The cache
       # above saves target/ after deleting the files it does not know and

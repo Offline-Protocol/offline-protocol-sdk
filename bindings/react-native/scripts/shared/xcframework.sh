@@ -47,19 +47,32 @@ ARCHIVE_BASENAME="liboffline_protocol_uniffi.a"
 
 # ios_deployment_target <podspec>
 #
-# Prints the oldest iOS the pod admits. Fails when the podspec does not say,
-# rather than let a build run with the variable empty, which cc-rs reads as
-# unset.
+# Prints the oldest iOS the pod admits. The one reader of that number: the
+# release build calls it, and so does scripts/ios-deployment-target.sh, which
+# the Swift package's manifest and CI build ask. Two readers would be two
+# rules for one line, and they would disagree on some podspec.
+#
+# Read strictly. The line has to be there exactly once, with a version of two
+# or three components. Two lines are a question with no answer here, and the
+# first of them is not an answer. A bare "15" or a "13." is refused rather
+# than handed to a compiler or rendered into a manifest. Fails rather than let
+# a build run with the variable empty, which cc-rs reads as unset.
 ios_deployment_target() {
   local podspec="$1"
-  local target
+  local found count
 
-  target="$(sed -n 's/^[[:space:]]*s\.platforms[[:space:]]*=.*:ios[[:space:]]*=>[[:space:]]*"\([0-9][0-9.]*\)".*/\1/p' "$podspec" | head -1)"
-  if [ -z "$target" ]; then
-    echo "ERROR: $podspec does not declare s.platforms = { :ios => \"<version>\" }" >&2
+  if [ ! -f "$podspec" ]; then
+    echo "ERROR: missing $podspec" >&2
     return 1
   fi
-  echo "$target"
+
+  found="$(sed -n 's/^[[:space:]]*s\.platforms[[:space:]]*=.*:ios[[:space:]]*=>[[:space:]]*"\([0-9][0-9]*\(\.[0-9][0-9]*\)\{1,2\}\)".*/\1/p' "$podspec")"
+  count="$(printf '%s' "$found" | grep -c . || true)"
+  if [ "$count" != 1 ]; then
+    echo "ERROR: expected $podspec to declare s.platforms = { :ios => \"<major>.<minor>\" } once, and found $count such lines" >&2
+    return 1
+  fi
+  echo "$found"
 }
 
 # newer_version <a> <b>
@@ -173,7 +186,9 @@ assert_archive_min_os() {
       echo "  ($(echo "$offenders" | wc -l | tr -d ' ') in total)" >&2
       echo "An application that supports iOS $ceiling links them with a warning for each." >&2
       echo "IPHONEOS_DEPLOYMENT_TARGET must reach every compiler in the build, the C" >&2
-      echo "one included." >&2
+      echo "one included. Or the objects are older than the target: cargo does not" >&2
+      echo "rebuild a Rust crate when the variable changes, so a target directory (or a" >&2
+      echo "CI cache of one) built for a newer iOS keeps those objects. Run cargo clean." >&2
       return 1
       ;;
     2)

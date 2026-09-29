@@ -263,11 +263,26 @@ Three things hold the invariant:
   package one that is too new. An archive it could not read fails the same
   way: one with no stamp in it, and one `otool` read part of before giving
   up.
-- `scripts/tests/test-ios-min-os.sh`, at the repository root, runs on every
-  pull request. The gate needs `otool`, so in CI it runs only where the
-  library is built, which is a release. The test covers what can go wrong
-  without one: the parser, the podspec reader, a failing `otool`, and that
-  the build script still calls the gate on all three archives.
+- The gate needs `otool`, so in CI it runs where the library is built on a
+  Mac: in a release, on all three archives, and in the `Swift Package` job,
+  on the simulator archive of every pull request.
+  `scripts/tests/test-ios-min-os.sh`, at the repository root, runs on every
+  pull request on Linux. It covers what can go wrong without `otool`: the
+  parser, the podspec reader, a failing `otool`, and that the build script
+  still calls the gate on all three archives.
+
+The podspec has one reader, `ios_deployment_target` in
+`bindings/react-native/scripts/shared/xcframework.sh`.
+`scripts/ios-deployment-target.sh` calls it for the Swift package and its CI
+job. It takes the line only when it is there once, with a version of two or
+three components. Two readers with two rules disagreed on some podspecs, and
+the release would have built for a number the package refused.
+
+A target directory built for one deployment target keeps its Rust objects
+when the target changes, because cargo does not rebuild a crate for a new
+value of the variable. Only the C compiled through `cc-rs` is redone. A
+lowered target therefore fails the gate on Rust objects until `cargo clean`,
+locally or in a CI cache.
 
 ## Testing
 

@@ -3,11 +3,13 @@
 # Print the oldest iOS the SDK supports: the pod's deployment target, read
 # out of the podspec.
 #
-# The podspec is where the number lives. Whatever else needs it, the Swift
-# package's manifest and the build of the library inside it, asks here and
-# does not write it down again: a second copy is a number somebody raises in
-# one place, and a package that promises a system its library was not built
-# for.
+# The podspec is where the number lives, and `ios_deployment_target` in
+# bindings/react-native/scripts/shared/xcframework.sh is the one thing that
+# reads it. The release build of the library calls that function directly.
+# This script calls the same function for everything that is not a sourced
+# shell script: the Swift package's manifest and the CI job that builds the
+# library for it. A second parser here would be a second rule for one line,
+# and the two would disagree on some podspec.
 #
 # Usage:
 #   bash scripts/ios-deployment-target.sh
@@ -19,21 +21,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${PACKAGE_SOURCE_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-PODSPEC="$ROOT/bindings/react-native/MeshSdk.podspec"
 
-[ -f "$PODSPEC" ] || {
-  echo "ERROR: missing $PODSPEC" >&2
-  exit 1
-}
+# The function comes from this checkout, the podspec from ROOT: a fixture
+# tree holds a podspec and not the build scripts.
+# shellcheck source=../bindings/react-native/scripts/shared/xcframework.sh
+source "$SCRIPT_DIR/../bindings/react-native/scripts/shared/xcframework.sh"
 
-# One line, of one shape. Two would be a question with no answer here, and
-# the first of them is not an answer.
-FOUND="$(sed -n 's/^[[:space:]]*s\.platforms[[:space:]]*=.*:ios[[:space:]]*=>[[:space:]]*"\([0-9][0-9]*\.[0-9][0-9.]*\)".*/\1/p' "$PODSPEC")"
-COUNT="$(printf '%s' "$FOUND" | grep -c . || true)"
-
-if [ "$COUNT" != 1 ]; then
-  echo "ERROR: expected $PODSPEC to declare s.platforms = { :ios => \"<version>\" } once, and found $COUNT such lines" >&2
-  exit 1
-fi
-
-echo "$FOUND"
+ios_deployment_target "$ROOT/bindings/react-native/MeshSdk.podspec"
