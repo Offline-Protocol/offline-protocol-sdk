@@ -67,14 +67,19 @@ cargo bench --package offline-protocol-bench
 # halves; nothing else in the workspace compiles without `std`, so a stray
 # `use std::` in one of them only fails here. So does an mls-rs error
 # formatted with `{}`: mls-rs implements Display only under std.
-rustup target add thumbv8m.main-none-eabihf
-for crate in offline-protocol-core offline-protocol-sealed; do
-    cargo clippy -p "$crate" --no-default-features \
-        --target thumbv8m.main-none-eabihf -- -D warnings
+# CI gates four targets: the Cortex-M33, RISC-V with atomics (ESP32-C6/H2),
+# and two with no compare-and-swap at all (ESP32-C3/C2 and Cortex-M0).
+TARGETS="thumbv8m.main-none-eabihf riscv32imac-unknown-none-elf riscv32imc-unknown-none-elf thumbv6m-none-eabi"
+rustup target add $=TARGETS    # zsh; in bash drop the `=`
+for target in $=TARGETS; do
+    for crate in offline-protocol-core offline-protocol-sealed; do
+        cargo clippy -p "$crate" --no-default-features \
+            --target "$target" -- -D warnings
+    done
+    # The leaf crate needs a getrandom backend selected; the firmware registers one.
+    cargo clippy -p offline-protocol-leaf --no-default-features \
+        --features bare-metal-rng --target "$target" -- -D warnings
 done
-# The leaf crate needs a getrandom backend selected; the firmware registers one.
-cargo clippy -p offline-protocol-leaf --no-default-features \
-    --features bare-metal-rng --target thumbv8m.main-none-eabihf -- -D warnings
 ./tools/embedded-footprint/measure.sh    # flash/RAM cost of the protocol layer
 ```
 
@@ -196,6 +201,12 @@ These fail silently if broken. Each is documented in full where it is linked.
   the same two traps as core (local dependency declarations, no bare
   `use std::`), gated by the same `embedded-core` CI job
   ([ADR 0022](docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md)).
+- **`offline-protocol-leaf` names `Arc` in `src/shared.rs` only.** A target
+  with no compare-and-swap (ESP32-C3, Cortex-M0) has no `alloc::sync`, and a
+  host always does, so a direct import compiles and tests green everywhere a
+  developer works. `only_one_file_names_the_counted_pointer` refuses it on the
+  host and the `embedded-core` job on the targets
+  ([ADR 0021](docs/adr/0021-a-leaf-node-speaks-mls.md#the-store-handle-follows-the-target)).
 - **Never write a second envelope codec, address derivation, canonical signing
   payload, ratchet constant, 1:1 control-frame prefix literal, key package
   payload or identity assertion split.** Each exists once, in `offline-protocol-sealed`;
