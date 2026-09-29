@@ -232,9 +232,10 @@ These fail silently if broken. Each is documented in full where it is linked.
   the same two traps as core (local dependency declarations, no bare
   `use std::`), gated by the same `embedded-core` CI job
   ([ADR 0022](docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md)).
-- **`offline-protocol-leaf` names `Arc` in `src/shared.rs` only.** A target
-  with no compare-and-swap (ESP32-C3, Cortex-M0) has no `alloc::sync`, and a
-  host always does, so a direct import compiles and tests green everywhere a
+- **`offline-protocol-leaf` reaches `alloc::sync` in `src/shared.rs` only.**
+  Every other file takes `Arc` from `crate::shared`. A target with no
+  compare-and-swap (ESP32-C3, Cortex-M0) has no `alloc::sync`, and a host
+  always does, so a direct import compiles and tests green everywhere a
   developer works. `only_one_file_names_the_counted_pointer` refuses it on the
   host and the `embedded-core` job on the targets
   ([ADR 0021](docs/adr/0021-a-leaf-node-speaks-mls.md#the-store-handle-follows-the-target)).
