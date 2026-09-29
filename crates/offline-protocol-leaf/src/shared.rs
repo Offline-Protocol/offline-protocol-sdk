@@ -24,8 +24,10 @@
 //! allocation and one copy of the store value, once, at boot. It takes that
 //! route on every target, so the host tests run the code a device runs.
 //!
-//! On a target with atomics [`SharedStore`] is `std::sync::Arc<dyn LeafStore>`
-//! exactly, and code that builds one with `Arc::new` keeps compiling.
+//! On a target with atomics [`SharedStore`] is `alloc::sync::Arc<dyn LeafStore>`,
+//! which is `std::sync::Arc` wherever `std` exists, so code that builds one with
+//! `Arc::new` keeps compiling there. On a target without, only [`shared_store`]
+//! builds one.
 //!
 //! # What a target without compare-and-swap owes
 //!
@@ -91,22 +93,66 @@ mod tests {
         );
     }
 
+    /// The import shapes that name `alloc::sync` or its pointer, including the
+    /// ones rustfmt leaves on one line (`sync::Arc}`) or nests
+    /// (`sync::{Arc, Weak}`). `std::sync::Mutex` in the `std`-only test store
+    /// is legitimate and matches none of them.
+    fn names_the_counted_pointer(line: &str) -> bool {
+        let line = line.trim_start();
+        !line.starts_with("//")
+            && ["alloc::sync", "sync::Arc", "sync::Weak", "sync::{"]
+                .iter()
+                .any(|pattern| line.contains(pattern))
+    }
+
+    fn rust_files(dir: &std::path::Path, found: &mut Vec<PathBuf>) {
+        for path in fs::read_dir(dir)
+            .expect("src is readable")
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+        {
+            if path.is_dir() {
+                rust_files(&path, found);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                found.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn the_guard_sees_every_import_shape() {
+        for shape in [
+            "use alloc::sync::Arc;",
+            "    sync::Arc,",
+            "use alloc::{string::String, sync::Arc};",
+            "use alloc::{sync::{Arc, Weak}, vec::Vec};",
+            "let store: alloc::sync::Arc<dyn LeafStore>;",
+        ] {
+            assert!(names_the_counted_pointer(shape), "missed: {shape}");
+        }
+        for fine in [
+            "use std::sync::Mutex;",
+            "use crate::shared::Arc;",
+            "// alloc::sync is not available here",
+        ] {
+            assert!(!names_the_counted_pointer(fine), "false alarm: {fine}");
+        }
+    }
+
     #[test]
     fn only_one_file_names_the_counted_pointer() {
         let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-        let offenders: Vec<String> = fs::read_dir(&src)
-            .expect("src is readable")
-            .filter_map(|entry| entry.ok().map(|e| e.path()))
-            .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        let mut files = Vec::new();
+        rust_files(&src, &mut files);
+        assert!(!files.is_empty(), "the guard found no source to read");
+
+        let offenders: Vec<String> = files
+            .iter()
             .filter(|path| path.file_name().is_some_and(|name| name != "shared.rs"))
             .filter_map(|path| {
-                let text = fs::read_to_string(&path).ok()?;
-                let named = text.lines().any(|line| {
-                    let line = line.trim_start();
-                    !line.starts_with("//")
-                        && (line.contains("alloc::sync") || line.contains("sync::Arc,"))
-                });
-                named.then(|| format!("{}", path.display()))
+                let text = fs::read_to_string(path).ok()?;
+                text.lines()
+                    .any(names_the_counted_pointer)
+                    .then(|| format!("{}", path.display()))
             })
             .collect();
 

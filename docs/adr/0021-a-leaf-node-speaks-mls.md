@@ -238,7 +238,8 @@ those the handle is `portable_atomic_util::Arc`, which is what mls-rs already
 does for its own handles, and one module, `shared`, is the only place that
 chooses. The two are distinct types, so the crate exports `SharedStore` and a
 `shared_store` constructor rather than asking callers to name either. Where
-atomics exist, `SharedStore` is exactly `std::sync::Arc<dyn LeafStore>`.
+atomics exist, `SharedStore` is `alloc::sync::Arc<dyn LeafStore>`, the same type
+as `std::sync::Arc` wherever `std` is present.
 
 Two limits come with it. No atomics backend is chosen by this crate, because
 which one is sound is a fact about the chip, so a firmware on those parts links

@@ -16,12 +16,15 @@ Like [`offline-protocol-core`](https://crates.io/crates/offline-protocol-core) a
 | Chip family | Rust target | This crate compiles | Inside an esp-hal 1.2.2 firmware |
 |---|---|---|---|
 | Cortex-M33 (for example Silicon Labs xG24) | `thumbv8m.main-none-eabihf` | Yes | Not applicable |
-| ESP32-C6, ESP32-H2 | `riscv32imac-unknown-none-elf` | Yes | Type-checks |
-| ESP32-C3, ESP32-C2 | `riscv32imc-unknown-none-elf` | Yes | Refused: mls-rs and esp-hal select conflicting portable-atomic backends |
+| ESP32-C6, ESP32-H2 | `riscv32imac-unknown-none-elf` | Yes | Type-checks (checked by hand) |
+| ESP32-C3, ESP32-C2 | `riscv32imc-unknown-none-elf` | Yes | Refused: mls-rs and esp-hal select conflicting portable-atomic backends (checked by hand) |
 | Cortex-M0 and M0+ (for example RP2040) | `thumbv6m-none-eabi` | Yes | Not applicable |
-| ESP32, ESP32-S3, ESP32-S2 | Xtensa, outside rustup | Not tried | Not tried |
+| ESP32, ESP32-S3 | Xtensa, outside rustup | Not tried | Not tried |
+| ESP32-S2 | Xtensa, outside rustup | Not tried | Not tried; expected to hit the same refusal, since it has no compare-and-swap and esp-hal selects the same backend for it |
 
 The ESP32-C3, ESP32-C2 and Cortex-M0 targets have no atomic compare-and-swap, so on them the firmware must link a [critical-section](https://crates.io/crates/critical-section) implementation. Build the store handle with `shared_store`, which works on every target.
+
+The last column was checked once by hand, with a scratch firmware crate that depends on esp-hal 1.2.2 and on this crate, running `cargo check`. CI does not repeat it. The third column is what CI gates.
 
 Compiling is all this table claims. Nothing here has been linked into a firmware image or run on a board, and a device still owes a radio, a flash driver behind `LeafStore`, a hardware entropy source behind `getrandom`, and a time source at pairing.
 

@@ -69,9 +69,12 @@ cargo bench --package offline-protocol-bench
 # formatted with `{}`: mls-rs implements Display only under std.
 # CI gates four targets: the Cortex-M33, RISC-V with atomics (ESP32-C6/H2),
 # and two with no compare-and-swap at all (ESP32-C3/C2 and Cortex-M0).
-TARGETS="thumbv8m.main-none-eabihf riscv32imac-unknown-none-elf riscv32imc-unknown-none-elf thumbv6m-none-eabi"
-rustup target add $=TARGETS    # zsh; in bash drop the `=`
-for target in $=TARGETS; do
+# CI also runs `cargo build` on each, because clippy never reaches the atomics
+# fallbacks' inline assembly; swap `clippy` for `build` to match it exactly.
+TARGETS=(thumbv8m.main-none-eabihf riscv32imac-unknown-none-elf
+         riscv32imc-unknown-none-elf thumbv6m-none-eabi)
+rustup target add "${TARGETS[@]}"
+for target in "${TARGETS[@]}"; do
     for crate in offline-protocol-core offline-protocol-sealed; do
         cargo clippy -p "$crate" --no-default-features \
             --target "$target" -- -D warnings
