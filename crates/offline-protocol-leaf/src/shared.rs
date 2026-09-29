@@ -13,9 +13,10 @@
 //! developer owns and nowhere a device runs: a host always has atomics, so an
 //! `alloc::sync` import anywhere else in this crate compiles, passes every
 //! test, and breaks only the bare-metal targets. `only_one_file_names_the_counted_pointer`
-//! in this module refuses any route to `alloc::sync` outside this file on the
-//! host (a path, an import in any form, a glob over `alloc`, or a renamed
-//! `alloc`), and the `embedded-core` CI job refuses it on the targets.
+//! in this module refuses, on the host, any path or import through
+//! `alloc::sync` outside this file (relative to the crate root or not), any
+//! glob over `alloc`, and any rename of `alloc`. The `embedded-core` CI job
+//! refuses a direct import on the targets.
 //!
 //! # Building a handle
 //!
@@ -139,7 +140,9 @@ mod tests {
                 i += 1;
             } else if c == '\'' {
                 if next == Some('\\') {
-                    i += 2;
+                    // Skip the quote, the backslash and the escaped character,
+                    // which may itself be a quote: `'\''`.
+                    i += 3;
                     while i < chars.len() && chars[i] != '\'' {
                         i += 1;
                     }
@@ -159,7 +162,7 @@ mod tests {
                     i += 1;
                 }
                 let word: String = chars[begin..i].iter().collect();
-                let raw_prefix = word == "r" || word == "br";
+                let raw_prefix = word == "r" || word == "br" || word == "cr";
                 let hashes = chars[i..].iter().take_while(|&&h| h == '#').count();
                 if raw_prefix && chars.get(i + hashes) == Some(&'"') {
                     // A raw string: skip to the quote followed by as many hashes.
@@ -262,9 +265,9 @@ mod tests {
     /// modules and are never reported, and neither is a mention in a comment
     /// or a literal.
     ///
-    /// This matches the class rather than a list of line shapes. The first two
-    /// versions of this guard matched shapes, and each missed one rustfmt or a
-    /// person could write (`sync as s`, `sync::*`, a multi-line group).
+    /// This matches the class rather than a list of line shapes. The first
+    /// version of this guard matched shapes, and each round of review found one
+    /// it missed (`sync::Arc}`, `sync as s`, `sync::*`).
     fn counted_pointer_paths(src: &str) -> Vec<String> {
         let tokens = tokens(src);
         let mut imports = Vec::new();
@@ -282,6 +285,16 @@ mod tests {
             {
                 aliases.push(rest[4].clone());
             }
+        }
+        // `crate::alloc`, `self::alloc` and `super::alloc` reach the same crate
+        // through the root's `extern crate alloc;`, so a relative prefix is
+        // dropped before the first segment is compared.
+        for (path, _) in imports.iter_mut() {
+            let relative = path
+                .iter()
+                .take_while(|segment| matches!(segment.as_str(), "crate" | "self" | "super"))
+                .count();
+            path.drain(..relative);
         }
         // `use alloc as heap;` and `use alloc::{self as heap};` rename it too,
         // and a rename of a rename counts, so loop until nothing new appears.
@@ -308,6 +321,17 @@ mod tests {
             .filter(|(path, _)| path.len() >= 2 && through_sync(&path[0], &path[1]))
             .map(|(path, _)| format!("use {}", path.join("::")))
             .collect();
+        // A rename of `alloc` is itself reported: made in one file it is
+        // visible in every other (through the extern prelude or a crate-level
+        // `use`), and this scan reads one file at a time, so it cannot follow
+        // the new name across files. `as _` names nothing and is fine.
+        offenders.extend(
+            aliases
+                .iter()
+                .skip(1)
+                .filter(|alias| alias.as_str() != "_")
+                .map(|alias| format!("alloc renamed to {alias}")),
+        );
         offenders.extend(
             tokens
                 .windows(3)
@@ -355,6 +379,15 @@ mod tests {
             "fn f<'a>(x: &'a str) -> &'a str { x }\nuse alloc::sync::Arc;",
             "const S: &[u8] = b\"x\"; use alloc::sync::Arc;",
             "const R: &str = r#\"a \" b\"#; use alloc::sync::Arc;",
+            "const C: &CStr = cr#\"a \" b\"#; use alloc::sync::Arc;",
+            "f('\\'','\"'); use alloc::sync::Arc; g('\"');",
+            "use crate::alloc::{string::String, sync::Arc};",
+            "use super::alloc::{sync::Arc};",
+            "use crate::alloc::*;",
+            "let store: crate::alloc::sync::Arc<dyn LeafStore>;",
+            "use crate::alloc as heap;",
+            "extern crate alloc as heap;",
+            "pub(crate) use alloc as mem;",
         ] {
             assert!(!counted_pointer_paths(code).is_empty(), "missed: {code}");
         }
@@ -371,6 +404,8 @@ mod tests {
             "const R: &str = r#\"use alloc::sync::Arc;\"#;",
             "let sync = true; call(a, sync); file.sync_all();",
             "mod sync { pub struct Arc; } use self::sync::Arc;",
+            "extern crate alloc; extern crate alloc as _;",
+            "let c = '\\''; let d = '\\\\'; let e = b'\\\\';",
         ] {
             assert_eq!(
                 counted_pointer_paths(code),
