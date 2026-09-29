@@ -3,7 +3,6 @@
 use alloc::{
     format,
     string::{String, ToString},
-    sync::Arc,
     vec,
     vec::Vec,
 };
@@ -22,6 +21,7 @@ use crate::error::{LeafError, Result};
 use crate::frames;
 use crate::identity::{build_client, Identity};
 use crate::keypkg;
+use crate::shared::{Arc, SharedStore};
 use crate::store::{
     LeafStore, KEY_TYPE_GROUP_EPOCH, KEY_TYPE_GROUP_STATE, KEY_TYPE_KEY_PACKAGE, KEY_TYPE_PEER,
     KEY_TYPE_PEER_INDEX,
@@ -220,7 +220,7 @@ impl LeafDevice {
     /// Draws from the `getrandom` backend the firmware registered. Refuses if
     /// the store already holds an identity, because replacing one changes the
     /// device's address and silently orphans every peer paired with it.
-    pub fn provision(store: Arc<dyn LeafStore>, app_id: &str) -> Result<Self> {
+    pub fn provision(store: SharedStore, app_id: &str) -> Result<Self> {
         let identity = Identity::provision(&store)?;
         Ok(Self {
             store,
@@ -230,7 +230,7 @@ impl LeafDevice {
     }
 
     /// Loads a device that was provisioned earlier.
-    pub fn resume(store: Arc<dyn LeafStore>, app_id: &str) -> Result<Self> {
+    pub fn resume(store: SharedStore, app_id: &str) -> Result<Self> {
         let identity = Identity::resume(&store)?;
         Ok(Self {
             store,
@@ -240,7 +240,7 @@ impl LeafDevice {
     }
 
     /// Loads a device, provisioning one on first boot.
-    pub fn open(store: Arc<dyn LeafStore>, app_id: &str) -> Result<Self> {
+    pub fn open(store: SharedStore, app_id: &str) -> Result<Self> {
         match Self::resume(Arc::clone(&store), app_id) {
             Err(LeafError::NotProvisioned) => Self::provision(store, app_id),
             other => other,

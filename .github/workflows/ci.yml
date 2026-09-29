@@ -204,14 +204,14 @@ jobs:
         run: cargo check --workspace --all-targets --locked
 
   embedded-core:
-    name: Embedded core (thumbv8m)
+    name: Embedded core (bare metal)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: thumbv8m.main-none-eabihf
+          targets: thumbv8m.main-none-eabihf,riscv32imac-unknown-none-elf,riscv32imc-unknown-none-elf,thumbv6m-none-eabi
           components: clippy, llvm-tools
 
       - uses: Swatinem/rust-cache@v2
@@ -284,6 +284,38 @@ jobs:
           --no-default-features --features bare-metal-rng
           --locked --target thumbv8m.main-none-eabihf
           -- -D warnings
+
+      # The same three crates beyond the Cortex-M33. `riscv32imac` stands for
+      # ESP32-C6 and ESP32-H2. The other two are the processors with no atomic
+      # compare-and-swap at all: `riscv32imc` for ESP32-C3 and ESP32-C2,
+      # `thumbv6m` for every Cortex-M0. On those `alloc::sync` does not exist,
+      # so an `Arc` imported from it compiles on every host and in every test
+      # and fails only here. `build` runs as well as `clippy` because the
+      # atomics fallbacks are partly inline assembly, which only code
+      # generation reaches.
+      #
+      # What this does not prove: nothing is linked into an image and nothing
+      # runs on a board. ESP32-C3 and ESP32-C2 also cannot be built on esp-hal
+      # today, whatever this crate does: mls-rs selects portable-atomic's
+      # `critical-section` backend on them, esp-hal selects
+      # `unsafe-assume-single-core`, and portable-atomic refuses the pair.
+      - name: Build and clippy the bare-metal crates on RISC-V and Cortex-M0
+        run: |
+          set -euo pipefail
+          for target in riscv32imac-unknown-none-elf riscv32imc-unknown-none-elf thumbv6m-none-eabi; do
+            for crate in offline-protocol-core offline-protocol-sealed offline-protocol-leaf; do
+              features=()
+              if [ "$crate" = offline-protocol-leaf ]; then
+                features=(--features bare-metal-rng)
+              fi
+              echo "::group::$crate on $target"
+              cargo build --package "$crate" --no-default-features ${features[@]+"${features[@]}"} \
+                --locked --target "$target"
+              cargo clippy --package "$crate" --no-default-features ${features[@]+"${features[@]}"} \
+                --locked --target "$target" -- -D warnings
+              echo "::endgroup::"
+            done
+          done
 
       - name: Build the leaf node standalone with default features
         run: cargo build --package offline-protocol-leaf --locked

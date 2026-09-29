@@ -15,6 +15,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **The leaf node builds for ESP32 RISC-V parts and for Cortex-M0.**
+  `offline-protocol-leaf` now compiles, and CI lints it, for
+  `riscv32imac-unknown-none-elf` (ESP32-C6, ESP32-H2),
+  `riscv32imc-unknown-none-elf` (ESP32-C3, ESP32-C2) and `thumbv6m-none-eabi`
+  (every Cortex-M0), beside the Cortex-M33. The last two have no atomic
+  compare-and-swap, so a firmware on them must link a critical-section
+  implementation. The crate exports `SharedStore` and `shared_store` for the
+  store handle; where atomics exist `SharedStore` is `Arc<dyn LeafStore>`, so
+  existing code is unchanged. This is a compile result only: nothing has run
+  on an Espressif board, the Xtensa chips were not tried, and ESP32-C3 and
+  ESP32-C2 cannot yet be built on esp-hal, because mls-rs and esp-hal select
+  portable-atomic backends that refuse to coexist.
 - **A send can name the application it is for.** `SendMessageOptions` and
   `MediaSendOptions` take an optional `app_id` (React Native: `appId` on
   `sendMessage` and `sendMedia`), stamped on that message or on every chunk of

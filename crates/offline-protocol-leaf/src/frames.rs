@@ -67,7 +67,6 @@
 use alloc::{
     format,
     string::{String, ToString},
-    sync::Arc,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use offline_protocol_core::{
@@ -81,6 +80,7 @@ use offline_protocol_sealed::{
 
 use crate::error::{LeafError, Result};
 use crate::identity::{self, Identity};
+use crate::shared::Arc;
 use crate::store::{LeafStore, KEY_TYPE_IDENTITY};
 
 const KEY_ID_COUNTER: &str = "send_counter";

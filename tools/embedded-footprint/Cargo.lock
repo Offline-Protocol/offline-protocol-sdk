@@ -768,6 +768,7 @@ dependencies = [
  "mls-rs-crypto-rustcrypto",
  "offline-protocol-core",
  "offline-protocol-sealed",
+ "portable-atomic-util",
  "serde",
  "serde_json",
  "thiserror",

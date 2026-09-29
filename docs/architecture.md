@@ -139,6 +139,11 @@ Persist-before-emit is enforced structurally rather than documented: every
 operation that advances the ratchet writes before it returns a frame, because a
 state rolled back by a power cut reuses an AEAD nonce.
 
+**Bare metal**: CI builds and lints it for a Cortex-M33, for ESP32-C6 and
+ESP32-H2, and for the two classes with no compare-and-swap (ESP32-C3 and
+Cortex-M0), where the store handle comes from `portable-atomic-util`. See the
+crate README for what that does and does not prove.
+
 **Safety**: `#![deny(unsafe_code)]`
 
 **Dependencies**: `offline-protocol-core`, `offline-protocol-sealed`, mls-rs.

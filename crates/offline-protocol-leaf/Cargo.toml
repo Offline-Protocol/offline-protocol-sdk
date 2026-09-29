@@ -88,6 +88,19 @@ zeroize = { version = "1", default-features = false }
 # Optional and off by default: see the `bare-metal-rng` feature above.
 getrandom = { version = "0.2", default-features = false, optional = true }
 
+# A processor without compare-and-swap (ESP32-C3, ESP32-C2, every Cortex-M0)
+# has no `alloc::sync`, so the reference-counted store handle comes from here
+# instead, which is what the pinned mls-rs does for its own handles. Without
+# this table the crate does not build on those targets at all.
+#
+# No atomics backend is chosen here, on purpose. Which one is sound is a fact
+# about the chip and the firmware, so the firmware selects it, as
+# portable-atomic asks of libraries. The pinned mls-rs selects
+# `critical-section` on these targets regardless, so a firmware must link a
+# critical-section implementation.
+[target.'cfg(not(target_has_atomic = "ptr"))'.dependencies]
+portable-atomic-util = { version = "0.2", default-features = false, features = ["alloc"] }
+
 # The phone side, so the tests are a real OpenMLS peer talking to this
 # crate's mls-rs one rather than this crate talking to itself. `cargo test`
 # here is the only place in the workspace where the two implementations meet
