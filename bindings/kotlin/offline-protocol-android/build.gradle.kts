@@ -239,6 +239,25 @@ dependencies {
     testImplementation(atTheModulesVersion("org.json:json", "testImplementation"))
 }
 
+// The notices the Rust library's licenses ask to travel with it, packed at
+// the root of the AAR, as the Swift package carries them at its root. Read
+// from the repository root, not copied: a copy is a notice someone updates in
+// one place. scripts/check_android_aar.py refuses an AAR without them.
+val legalFiles = listOf("LICENSE", "LICENSE-COMMERCIAL.md", "THIRD-PARTY-NOTICES.md", "EXPORT.md")
+val repositoryRoot = layout.projectDirectory.dir("../../..")
+
+legalFiles.forEach { name ->
+    require(repositoryRoot.file(name).asFile.isFile) {
+        "legalFiles names $name, which is not at ${repositoryRoot.asFile}"
+    }
+}
+
+tasks.withType<com.android.build.gradle.tasks.BundleAar>().configureEach {
+    from(repositoryRoot) {
+        include(legalFiles)
+    }
+}
+
 // A repository wants a javadoc jar beside the sources. The documentation is
 // in the sources.
 val emptyJavadocJar = tasks.register<org.gradle.jvm.tasks.Jar>("emptyJavadocJar") {

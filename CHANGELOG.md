@@ -160,7 +160,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   published yet. What is public in them is what the React Native module
   happened to need public, not a chosen API, and on iOS that leaves out the
   storage providers, so an application cannot construct the built-in stores
-  there.
+  there. Both carry the license, the commercial license, the third-party
+  notices and the export notice.
 - **Three iOS suites run for the first time.** The mesh controller, the BLE
   discovery bootstrap policy and the error mapping suites are excluded from
   the SwiftPM test harness, and nothing else ran them. They run in the Swift

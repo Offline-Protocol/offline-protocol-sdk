@@ -62,6 +62,11 @@ REQUIRED_RULES = (
     "-dontwarn com.google.errorprone.annotations.**",
 )
 
+# The notices the Rust library's licenses ask to travel with it, at the root
+# of the AAR. The Swift package carries the same four at its root, and a test
+# compares this with that list and with the library's build file.
+LEGAL_FILES = ("LICENSE", "LICENSE-COMMERCIAL.md", "THIRD-PARTY-NOTICES.md", "EXPORT.md")
+
 # The ABIs the module builds. A test compares this with its build file.
 ABIS = ("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
 NATIVE_LIBRARY = "libuniffi_offline_protocol.so"
@@ -168,6 +173,14 @@ def check(aar_bytes, require_natives):
         for tag, name in REQUIRED_IN_MANIFEST:
             if name not in declared(manifest, tag, package):
                 problems.append(f"the manifest does not declare {name}")
+
+    # Held to always, not only for a release: the build packs them into every
+    # AAR, so one without them is a build that stopped doing it.
+    for name in LEGAL_FILES:
+        if name not in names:
+            problems.append(f"it holds no {name} at its root")
+        elif not aar.read(name).strip():
+            problems.append(f"its {name} is empty")
 
     if "proguard.txt" not in names:
         problems.append("it holds no proguard.txt, so an application's R8 strips the FFI")

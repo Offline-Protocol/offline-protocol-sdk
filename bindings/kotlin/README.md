@@ -28,6 +28,7 @@ is read from the module:
 | The rules an application's R8 needs | The module's `consumer-rules.pro` |
 | The native libraries | `bindings/react-native/android/src/main/jniLibs` |
 | The Android Gradle Plugin and Kotlin | The test harness, `bindings/react-native/android-ci-harness/build.gradle` |
+| `LICENSE`, `LICENSE-COMMERCIAL.md`, `THIRD-PARTY-NOTICES.md`, `EXPORT.md` | The repository root, packed at the root of the AAR, as the Swift package carries them |
 
 Each is read strictly: from a line that declares it, which has to be there
 exactly once. A version in a comment is not a declaration, and two

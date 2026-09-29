@@ -53,6 +53,8 @@ def aar(classes=None, manifest=MANIFEST, rules=RULES, natives=None, drop=(), ext
         "proguard.txt": rules,
         "R.txt": "",
     }
+    for name in check_android_aar.LEGAL_FILES:
+        entries[name] = f"the {name} text"
     for abi, libraries in (natives or {}).items():
         for library in libraries:
             entries[f"jni/{abi}/{library}"] = b"elf"
@@ -103,6 +105,20 @@ class CheckTests(unittest.TestCase):
         problems = check(aar(classes=WITH + nested), require_natives=False)
         for name in nested:
             self.assertProblem(problems, name)
+
+    def test_each_legal_file_is_required(self):
+        for name in check_android_aar.LEGAL_FILES:
+            problems = check(aar(drop=(name,)), require_natives=False)
+            self.assertProblem(problems, f"it holds no {name} at its root")
+
+    def test_an_empty_legal_file_is_refused(self):
+        problems = check(aar(extra={"LICENSE": "  \n"}), require_natives=False)
+        self.assertProblem(problems, "its LICENSE is empty")
+
+    # A notice one directory down is not the one a reader of the AAR finds.
+    def test_a_legal_file_below_the_root_is_not_at_the_root(self):
+        built = aar(drop=("EXPORT.md",), extra={"legal/EXPORT.md": "text"})
+        self.assertProblem(check(built, require_natives=False), "it holds no EXPORT.md at its root")
 
     # A class that only shares a prefix with one of them is the library's own.
     def test_a_class_that_shares_a_prefix_is_not_refused(self):
@@ -313,6 +329,20 @@ class MirrorTests(unittest.TestCase):
             removed += re.findall(r'"([^"]+)"', block.group(1))
         self.assertEqual(
             sorted(removed), sorted(name for _, name in check_android_aar.FORBIDDEN_IN_MANIFEST)
+        )
+
+    def test_the_legal_files_are_the_swift_package_s(self):
+        script = (REPO / "scripts/assemble-swift-package.sh").read_text()
+        block = re.search(r"^LEGAL_FILES=\((.*?)\)$", script, flags=re.M)
+        self.assertIsNotNone(block, "the assemble script no longer declares LEGAL_FILES")
+        self.assertEqual(sorted(block.group(1).split()), sorted(check_android_aar.LEGAL_FILES))
+
+    def test_the_legal_files_are_the_build_file_s(self):
+        build = (REPO / "bindings/kotlin/offline-protocol-android/build.gradle.kts").read_text()
+        block = re.search(r"val legalFiles = listOf\((.*?)\)", build, flags=re.S)
+        self.assertIsNotNone(block, "the build file no longer declares legalFiles as a listOf")
+        self.assertEqual(
+            sorted(re.findall(r'"([^"]+)"', block.group(1))), sorted(check_android_aar.LEGAL_FILES)
         )
 
     def test_the_abis_are_the_module_s(self):

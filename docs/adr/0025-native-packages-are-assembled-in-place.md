@@ -90,6 +90,10 @@ that does not exist yet.
   tag must never move, because Swift Package Manager records the revision
   behind each version and refuses one that changed, and a version on a Maven
   repository is permanent. A bad release is answered by the next one.
+- A release AAR carries the four legal files the Swift package carries
+  (`LICENSE`, `LICENSE-COMMERCIAL.md`, `THIRD-PARTY-NOTICES.md`,
+  `EXPORT.md`). Both packages hold the Rust library, and the notices are
+  what its licenses ask to travel with it.
 - On iOS the storage providers are internal, so the Swift package needs a
   public entry point before an application can use the built-in stores. On
   Android they can be constructed, and everything that was public in the
