@@ -32,3 +32,10 @@
 
 # JNA references java.awt, which does not exist on Android.
 -dontwarn java.awt.**
+
+# Tink, which androidx.security:security-crypto brings for MlsSecureStorage,
+# annotates its API with Error Prone's annotations and does not ship them.
+# R8 treats a class it cannot find as an error, so without this an
+# application that minifies cannot build its release at all, unless some
+# other dependency happens to bring the annotations.
+-dontwarn com.google.errorprone.annotations.**
