@@ -15131,6 +15131,29 @@ mod tests {
         found
     }
 
+    /// No Android bridge source calls `java.time`.
+    ///
+    /// `minSdk` is 24 and `java.time` exists from API 26. On API 24 or 25 a
+    /// call throws `NoClassDefFoundError`, an `Error`, which passes through
+    /// the `catch (e: Exception)` these call sites are written with. Nothing
+    /// else would say so: the unit suite runs on a JVM that has `java.time`,
+    /// the build does not run Android lint, and desugaring would be every
+    /// application's switch to throw, not this library's. `RelayTimestamps`
+    /// parses ISO-8601 by hand for exactly this reason.
+    #[test]
+    fn android_bridge_sources_never_call_java_time() {
+        let callers: Vec<String> = rn_android_kotlin_sources()
+            .into_iter()
+            .filter(|(_, code)| code.contains("java.time"))
+            .map(|(path, _)| path)
+            .collect();
+        assert!(
+            callers.is_empty(),
+            "{callers:?} call java.time, which needs API 26 while minSdk is 24; \
+             parse by hand as RelayTimestamps does"
+        );
+    }
+
     /// Nothing that blocks on the network shares the thread `stop()` waits on.
     ///
     /// A background caller's `runSync` wait is deliberately unbounded — it is

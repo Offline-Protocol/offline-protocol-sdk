@@ -219,7 +219,7 @@ without the headless wake service and the `WAKE_LOCK` permission that only
 React Native's headless task needs. That task fails when either entry is
 missing, because a renamed entry would otherwise ship under its new name.
 
-Five things about it are easy to get wrong:
+Six things about it are easy to get wrong:
 
 - **It is built by the toolchain the module's tests run on, not by the
   newest.** Kotlin refuses metadata more than one version ahead of the
@@ -242,6 +242,11 @@ Five things about it are easy to get wrong:
   when the application sets `MESH_WAKE_ENABLED`, and that class is not in the
   library. Set in a native application, the start finds no such service, and
   the keep-alive stops when the wake budget runs out.
+- **Nothing calls `java.time`.** It needs API 26 and `minSdk` is 24, and on
+  API 24 or 25 the call throws an `Error` that a `catch (e: Exception)` does
+  not catch. The unit suite runs on a JVM that has it, so
+  `android_bridge_sources_never_call_java_time` in the uniffi crate is what
+  refuses one. `RelayTimestamps` parses ISO-8601 by hand.
 
 The `Android Library` job runs the unit suite, and checks that it ran:
 Gradle succeeds on a test task that found no test. It writes the library out

@@ -170,6 +170,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **Relay timestamps parse on Android 7.** The Android bridge parsed them
+  with `java.time.Instant`, which exists from Android 8 (API 26), while the
+  SDK supports Android 7 (API 24). On Android 7 the call threw
+  `NoClassDefFoundError`, which the surrounding `catch (e: Exception)` does
+  not catch, for a legacy relay message and an ISO-8601 last-seen timestamp.
+  An application that enables core library desugaring was not affected. The
+  timestamp is now parsed without `java.time`, with the answers `Instant`
+  gave, and a Rust guard refuses a new `java.time` call in the bridge. Not
+  run on an Android 7 device.
 - **The iOS deployment target has one reader.** The release build and the
   Swift package read the podspec with two parsers that disagreed on a bare
   major version, a trailing dot and a second declaration. There is one now,
