@@ -15,6 +15,54 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **A local API guide and two client examples.** `docs/local-api.md` is
+  the guide to running the SDK as a service several local applications
+  share; `bindings/python/examples/local_api_client.py` (Python) and
+  `examples/local-api/client.mjs` (Node 22, no dependencies) each show
+  `hello`, `subscribe`, a send with its delivery event, a document edit read
+  back, and the one-shot idiom. The Python suite runs both against an
+  in-process server, the Node one when `node` is on the path.
+- **The Python reference server for the local API.**
+  `offline_protocol_sdk.local_api` and the `offline-protocol-service` command
+  front one engine for any number of local applications over JSON-RPC 2.0 on
+  a WebSocket, on an owner-only Unix domain socket by default or on loopback
+  TCP with a per-launch token. The server owns the run loop and the drain;
+  a client declares its application id once in `hello`, every send is
+  stamped with it, and every event is relayed as the engine serialised it to
+  the clients the chapter's rules select (by application id, by an
+  identifier the server issued, or to everyone), with the stamped inbound
+  events held for an application whose client is away. The method table is
+  generated from the interface definition and checked in
+  (`local_api/table.py`), every declaration is classified as exposed or
+  platform-only in `dispatch.py`, and a Rust guard in the FFI crate holds
+  the chapter, the definition and that classification to one another, so
+  an unclassified method is a failing test rather than a method every local
+  application can reach. Optional rules from one JSON file: a space
+  allow-list and method denials per application id, which once configured
+  refuse a `hello` under an id no rule names. A test over two servers on
+  one host exchanges a message over the peer-stream transport.
+- **The local API chapter.** `docs/spec/local-api.md` specifies how one
+  server process fronts one engine for several local applications: JSON-RPC
+  2.0 over a WebSocket on a Unix domain socket by default (TCP on loopback
+  with a per-launch token as the opt-in), a `hello` that declares the
+  client's application id once and stamps it on every send, and the events
+  relayed unchanged as notifications. It is the first complete catalogue of
+  the engine's events: all seventy-five tags with their fields and the
+  vocabularies of the enum-valued ones, and how each is routed (by
+  application id, by an identifier the server issued, or to everyone). The
+  method table partitions the interface definition into the 126 methods a
+  client may call and the 92 platform operations it never can, including the
+  run loop and the drain, which the server owns because the engine delivers
+  a message only when something drains. Errors keep the engine's
+  twenty-five-variant taxonomy: the JSON-RPC code is the variant's position
+  in the append-only enum. There is no HTTP request path: the pinned
+  WebSocket library drops any non-`GET` handshake without a response, which
+  the chapter records so it is not re-added. `docs/bridges/local-api.md`
+  states which shared bridge rules the server inherits and the new rule that
+  a Rust guard pins the three tables to the definition, the engine and the
+  reference server. Nothing ships in this entry but the contract; the
+  reference server follows it.
+
 - **Custody v1.** A device can now hold a neighbour's replication frames for
   hours instead of the five seconds a forwarder gives them
   (`docs/spec/custody.md`), off by default. `ProtocolConfig::custody`

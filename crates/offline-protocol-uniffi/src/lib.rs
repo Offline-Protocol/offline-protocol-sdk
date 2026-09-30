@@ -19500,4 +19500,245 @@ mod tests {
             );
         }
     }
+
+    /// The local API chapter, the interface definition and the reference
+    /// server's dispatch table name every declaration exactly once, and the
+    /// chapter's catalogue names every event tag the engine can emit
+    /// (docs/bridges/local-api.md, rule L1).
+    ///
+    /// Three claims that rot silently: a method added to the definition and
+    /// to neither table is one no client can find, or one the reference
+    /// server exposes without the contract saying so; an event added to the
+    /// engine and not to the catalogue is one no client is written for.
+    /// The chapter states the row shapes this reads; changing one of its
+    /// headings is a change to this guard.
+    #[test]
+    fn local_api_tables_partition_the_definition() {
+        use std::collections::BTreeSet;
+
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let sources = [
+            manifest.join("../../docs/spec/local-api.md"),
+            manifest.join("../../bindings/python/offline_protocol_sdk/local_api/dispatch.py"),
+            manifest.join("../offline-protocol/src/events.rs"),
+        ];
+        let mut texts = Vec::new();
+        for path in &sources {
+            // The guard applies in the repo checkout; skip when the docs or
+            // bindings tree is not present (a vendored crate).
+            let Ok(text) = std::fs::read_to_string(path) else {
+                eprintln!(
+                    "repository tree not present, skipping the local API guard for {}",
+                    path.display()
+                );
+                return;
+            };
+            texts.push(text);
+        }
+        let (chapter, dispatch, events_rs) = (&texts[0], &texts[1], &texts[2]);
+        let udl = include_str!("offline_protocol.udl");
+
+        // The definition, by wire name: engine and namespace methods bare,
+        // `services.` and `data.` for the two objects.
+        let stripped: String = udl
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut udl_names = BTreeSet::new();
+        for (opener, prefix) in [
+            ("interface OfflineProtocol {", ""),
+            ("interface MeshServices {", "services."),
+            ("interface DataStore {", "data."),
+            ("namespace offline_protocol {", ""),
+        ] {
+            let body = stripped
+                .split_once(opener)
+                .unwrap_or_else(|| panic!("{opener} missing from the UDL"))
+                .1
+                .split_once("\n};")
+                .expect("unterminated block")
+                .0;
+            for statement in body.split(';') {
+                let mut rest = statement.trim();
+                if rest.is_empty() {
+                    continue;
+                }
+                let mut named = None;
+                if let Some(after) = rest.strip_prefix('[') {
+                    let (attrs, tail) = after.split_once(']').expect("unterminated attribute");
+                    if let Some(name) = attrs.split("Name=").nth(1) {
+                        named = Some(name.trim().split(',').next().unwrap().trim().to_string());
+                    }
+                    rest = tail.trim();
+                }
+                let head = rest.split('(').next().expect("a declaration").trim();
+                let name = if head == "constructor" {
+                    named.unwrap_or_else(|| "constructor".to_string())
+                } else {
+                    head.rsplit(char::is_whitespace).next().unwrap().to_string()
+                };
+                assert!(
+                    udl_names.insert(format!("{prefix}{name}")),
+                    "{prefix}{name} declared twice"
+                );
+            }
+        }
+        assert!(
+            udl_names.len() > 200,
+            "UDL scan looks broken: {}",
+            udl_names.len()
+        );
+
+        // The chapter's two method tables and its catalogue.
+        let section = |start: &str, end: &str| -> &str {
+            chapter
+                .split_once(start)
+                .unwrap_or_else(|| panic!("heading {start:?} missing from the chapter"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("heading {end:?} missing from the chapter"))
+                .0
+        };
+        let first_cell = |line: &str| -> String {
+            line.trim_start_matches('|')
+                .split('|')
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        let backticked = |cell: &str| -> Vec<String> {
+            cell.split('`')
+                .skip(1)
+                .step_by(2)
+                .map(str::to_string)
+                .collect()
+        };
+        let chapter_exposed: BTreeSet<String> =
+            section("## Method table", "## Platform operations")
+                .lines()
+                .filter(|l| l.starts_with("| `"))
+                .map(|l| backticked(&first_cell(l))[0].clone())
+                .collect();
+        let chapter_platform: BTreeSet<String> =
+            section("## Platform operations", "## Event catalogue")
+                .lines()
+                .filter(|l| l.starts_with("| `"))
+                .flat_map(|l| backticked(&first_cell(l)))
+                .collect();
+        let catalogue: BTreeSet<String> = section("### The catalogue", "### Shapes")
+            .lines()
+            .filter(|l| l.starts_with("| `"))
+            .map(|l| backticked(&first_cell(l))[0].clone())
+            .collect();
+
+        let both: Vec<_> = chapter_exposed.intersection(&chapter_platform).collect();
+        assert!(both.is_empty(), "in both chapter tables: {both:?}");
+        let classified: BTreeSet<String> =
+            chapter_exposed.union(&chapter_platform).cloned().collect();
+        let unclassified: Vec<_> = udl_names.difference(&classified).collect();
+        assert!(
+            unclassified.is_empty(),
+            "declarations in neither chapter table (classify each as exposed or platform): {unclassified:?}"
+        );
+        let phantom: Vec<_> = classified.difference(&udl_names).collect();
+        assert!(
+            phantom.is_empty(),
+            "chapter names not in the definition: {phantom:?}"
+        );
+
+        // The reference server's classification is the chapter's.
+        let quoted = |marker: &str| -> BTreeSet<String> {
+            dispatch
+                .split_once(marker)
+                .unwrap_or_else(|| panic!("{marker:?} missing from dispatch.py"))
+                .1
+                .split_once("\n)")
+                .expect("unterminated set")
+                .0
+                .split('"')
+                .skip(1)
+                .step_by(2)
+                .map(str::to_string)
+                .collect()
+        };
+        let dispatch_exposed = quoted("EXPOSED: frozenset[str] = frozenset(");
+        let dispatch_platform = quoted("PLATFORM: frozenset[str] = frozenset(");
+        assert_eq!(
+            dispatch_exposed, chapter_exposed,
+            "dispatch.py EXPOSED differs from the chapter's method table"
+        );
+        assert_eq!(
+            dispatch_platform, chapter_platform,
+            "dispatch.py PLATFORM differs from the chapter's platform table"
+        );
+
+        // Every `Event` variant is a catalogue row, and every row a variant.
+        // The scan is the one `react_native_types_cover_all_event_variants`
+        // uses: variant names at 4-space indent inside `pub enum Event`.
+        let snake = |name: &str| -> String {
+            let mut out = String::new();
+            for (i, ch) in name.chars().enumerate() {
+                if ch.is_ascii_uppercase() {
+                    if i > 0 {
+                        out.push('_');
+                    }
+                    out.push(ch.to_ascii_lowercase());
+                } else {
+                    out.push(ch);
+                }
+            }
+            out
+        };
+        let mut rust_tags = BTreeSet::new();
+        let mut in_enum = false;
+        let mut depth = 0usize;
+        for line in events_rs.lines() {
+            if !in_enum {
+                if line.starts_with("pub enum Event {") {
+                    in_enum = true;
+                    depth = 1;
+                }
+                continue;
+            }
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") || trimmed.starts_with("#[") {
+                continue;
+            }
+            if depth == 1
+                && line.starts_with("    ")
+                && !line.starts_with("     ")
+                && trimmed
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_uppercase())
+            {
+                let name: String = trimmed
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect();
+                rust_tags.insert(snake(&name));
+            }
+            depth += line.matches('{').count();
+            depth = depth.saturating_sub(line.matches('}').count());
+            if depth == 0 {
+                break;
+            }
+        }
+        assert!(
+            rust_tags.len() >= 60,
+            "enum scan looks broken: {}",
+            rust_tags.len()
+        );
+        let missing: Vec<_> = rust_tags.difference(&catalogue).collect();
+        assert!(
+            missing.is_empty(),
+            "event tags missing from the chapter's catalogue: {missing:?}"
+        );
+        let extra: Vec<_> = catalogue.difference(&rust_tags).collect();
+        assert!(
+            extra.is_empty(),
+            "catalogue rows that are not Event variants: {extra:?}"
+        );
+    }
 }
