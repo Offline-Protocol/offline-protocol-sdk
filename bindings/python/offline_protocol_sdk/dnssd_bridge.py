@@ -577,19 +577,25 @@ class DnsSdBridge:
         return True
 
     async def sweep(self, now: float | None = None) -> None:
-        """Drop every listed entry older than the time to live, then
-        re-resolve every browsed name whose last resolve attempt is older
-        than half of it, listed or not. The periodic task calls this; a
-        test calls it with a clock of its own."""
+        """Re-resolve every browsed name whose last resolve attempt is older
+        than half the time to live, listed or not, then drop every listed
+        entry still older than the whole of it. The periodic task calls
+        this; a test calls it with a clock of its own.
+
+        Resolve first. The sweep runs at half the time to live, so one
+        missed window puts the next attempt on the drop boundary; dropping
+        first would show the application an empty list during that resolve
+        and announce the same record a second time when it answers, where
+        an answer refreshes the entry and shows nothing."""
         current = time.monotonic() if now is None else now
-        for name, entry in list(self._lan.items()):
-            if current - entry.seen_at >= self._ttl:
-                self._lan.pop(name, None)
         for name, attempted_at in list(self._browsed.items()):
             if current - attempted_at < self._ttl / 2 or name not in self._browsed:
                 continue
             self._browsed[name] = current
             await self._resolve_and_import(name, now=current)
+        for name, entry in list(self._lan.items()):
+            if current - entry.seen_at >= self._ttl:
+                self._lan.pop(name, None)
 
     async def _sweep_forever(self) -> None:
         while self._running:

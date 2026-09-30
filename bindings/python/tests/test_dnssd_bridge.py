@@ -721,6 +721,41 @@ class TestLifetime:
         await bridge.sweep(now=base + 102.0)
         assert len(bridge.lan_services()) == 1 and len(events) == 1
 
+    async def test_a_resolve_that_answers_on_the_drop_boundary_refreshes_rather_than_re_announces(
+        self, services, events
+    ):
+        # The sweep runs at half the ttl, so one missed window puts the next
+        # attempt on the drop boundary. The sweep resolves before it drops:
+        # the application never sees an empty list during that resolve, and
+        # the answer is a refresh, not a second announcement.
+        class Observing(FakeBackend):
+            def __init__(self, bridge_ref: list[DnsSdBridge]) -> None:
+                super().__init__()
+                self.listed_during_resolve: list[int] = []
+                self.bridge_ref = bridge_ref
+
+            async def resolve(self, name: str, timeout_ms: int) -> bytes | None:
+                self.listed_during_resolve.append(len(self.bridge_ref[0].lan_services()))
+                return await super().resolve(name, timeout_ms)
+
+        holder: list[DnsSdBridge] = []
+        backend = Observing(holder)
+        bridge = DnsSdBridge(services, on_event=events.append, backend=backend, publish=False, ttl=100.0)
+        holder.append(bridge)
+        await bridge.start(address=OUR_ADDRESS)
+        try:
+            bridge.import_txt(PEER_NAME, peer_txt(), now=0.0)
+            assert len(events) == 1
+            await bridge.sweep(now=50.0)  # one missed window: no answer
+            assert len(bridge.lan_services()) == 1
+            backend.txt_by_name[PEER_NAME] = peer_txt()  # the neighbour answers again
+            await bridge.sweep(now=100.0)  # the drop boundary
+            assert backend.listed_during_resolve == [1, 1], "listed throughout, never emptied first"
+            assert len(bridge.lan_services()) == 1
+            assert len(events) == 1, "an answer on the boundary is a refresh, not a second announcement"
+        finally:
+            await bridge.stop()
+
     async def test_a_resolve_that_lands_after_the_instance_is_gone_lists_nothing(self, services, events):
         class SlowBackend(FakeBackend):
             def __init__(self) -> None:
