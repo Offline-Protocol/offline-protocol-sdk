@@ -68,8 +68,9 @@ cargo bench --package offline-protocol-bench
 # halves; nothing else in the workspace compiles without `std`, so a stray
 # `use std::` in one of them only fails here. So does an mls-rs error
 # formatted with `{}`: mls-rs implements Display only under std.
-# CI gates four targets: the Cortex-M33, RISC-V with atomics (ESP32-C6/H2),
-# and two with no compare-and-swap at all (ESP32-C3/C2 and Cortex-M0).
+# CI gates four bare-metal targets: the Cortex-M33, RISC-V with atomics
+# (ESP32-C6/H2), and two with no compare-and-swap at all (ESP32-C3/C2 and
+# Cortex-M0), plus WASI for the leaf (below).
 # CI also runs `cargo build` on each, because clippy never reaches the atomics
 # fallbacks' inline assembly; swap `clippy` for `build` to match it exactly.
 TARGETS=(thumbv8m.main-none-eabihf riscv32imac-unknown-none-elf
@@ -84,6 +85,16 @@ for target in "${TARGETS[@]}"; do
     cargo clippy -p offline-protocol-leaf --no-default-features \
         --features bare-metal-rng --target "$target" -- -D warnings
 done
+# WASI: the leaf's no_std half with NO bare-metal-rng (the target selects
+# getrandom's `random_get` backend ahead of any feature) and its std half
+# through the host shim example. wasm32-unknown-unknown is not claimed: there
+# mls-rs enables getrandom's `js` feature, which shadows a host-registered
+# backend, so a green build proves nothing about a non-browser host.
+rustup target add wasm32-wasip1
+cargo build -p offline-protocol-leaf --no-default-features --target wasm32-wasip1
+cargo clippy -p offline-protocol-leaf --no-default-features \
+    --target wasm32-wasip1 -- -D warnings
+cargo build -p offline-protocol-leaf --example wasi_host_shim --target wasm32-wasip1
 ./tools/embedded-footprint/measure.sh    # flash/RAM cost of the protocol layer
 ```
 
