@@ -296,6 +296,37 @@ public class BleManager: NSObject, TransportManager {
             }
         }
     )
+    /// Per-recipient NOTIFY outbound queue: the peripheral-role twin of
+    /// `outboundFragments`, with the same cap, high-water mark and whole-queue
+    /// overflow policy. It used to be a plain dictionary that the drain filled
+    /// with no backpressure and trimmed oldest-first, which is the fragment-
+    /// tearing loss `OutboundFragmentQueue` documents, on the topology (Android
+    /// central, iOS peripheral) where every iOS egress takes this path.
+    ///
+    /// Not single-owner like `outboundFragments`: the drain enqueues on
+    /// `fragmentQueue`, synchronously, so the `isBackedUp` it reads next counts
+    /// the fragment it just added; `pumpNotifyOutbound` flushes on main, where
+    /// `updateValue` must run. That split is safe because main is the only
+    /// flusher, and `flush` takes each recipient's queue out under the lock and
+    /// puts the unsent remainder back ahead of anything enqueued meanwhile, so a
+    /// recipient's stream stays in order.
+    private lazy var notifyFragments = OutboundFragmentQueue(
+        maxPerPeer: MAX_PENDING_FRAGMENTS_PER_PEER,
+        timeout: PENDING_OUTBOUND_FRAGMENT_TIMEOUT,
+        onDropped: { [weak self] recipientId, reason, count in
+            guard let self = self else { return }
+            if reason == .expired {
+                if self.logThrottler.shouldLog(key: "notify_fragments_expired_\(recipientId)", interval: 10) {
+                    self.emitDiagnostic("warning", "NOTIFY outbound fragments expired",
+                                        context: ["recipientId": recipientId, "dropped": count])
+                }
+            } else {
+                self.emitDiagnostic("warning", "NOTIFY outbound queue capped, discarding queue",
+                                    context: ["recipientId": recipientId, "dropped": count,
+                                              "max": self.MAX_PENDING_FRAGMENTS_PER_PEER])
+            }
+        }
+    )
     private struct MeshObservation {
         let advertisement: MeshAdvertisementData
         let rssi: Int?
@@ -323,14 +354,12 @@ public class BleManager: NSObject, TransportManager {
     //
     // `subscribedCentralsById` is guarded by `notifyLock` so the fragment drain
     // (fragmentQueue) can test notify-reachability while CoreBluetooth's peripheral
-    // delegates (main queue) mutate it. The `notifyOutbound` queue and the actual
-    // `peripheralManager.updateValue` call stay main-queue-only — CBPeripheralManager
-    // must be driven from its delegate queue (init'd with `queue: nil` ⇒ main) — so
-    // the drain hands fragments to the main-queue pump via `enqueueNotifyOutbound`.
+    // delegates (main queue) mutate it. The `peripheralManager.updateValue` call
+    // stays main-queue-only, because CBPeripheralManager must be driven from its
+    // delegate queue (init'd with `queue: nil`, so main), and the drain enqueues into
+    // `notifyFragments` and hands the send to the main-queue pump.
     private let notifyLock = NSLock()
     private var subscribedCentralsById: [UUID: CBCentral] = [:]
-    /// Per-recipient NOTIFY outbound queue, drained by `pumpNotifyOutbound`. Main-queue only.
-    private var notifyOutbound: [String: [(data: Data, timestamp: Date)]] = [:]
     private var lastMeshAdvertisement: MeshAdvertisementData?
 
     // Logging & monitoring
@@ -697,6 +726,7 @@ public class BleManager: NSObject, TransportManager {
         peripheralRSSI.removeAll()
         inboundFragments.clear()
         outboundFragments.clear()
+        notifyFragments.clear()
         // Then chase the clear on the owning queue. The clears above are
         // immediate (nothing here waits on `fragmentQueue`), but a fragment
         // block dispatched just before this point still runs AFTER them and
@@ -710,9 +740,11 @@ public class BleManager: NSObject, TransportManager {
         // a deallocating object is a hard abort (see BRIDGE_MAINTENANCE.md).
         let inbound = inboundFragments
         let outbound = outboundFragments
+        let notify = notifyFragments
         fragmentQueue.async {
             inbound.clear()
             outbound.clear()
+            notify.clear()
         }
         lastSeenMeshAdvertisements.removeAll()
         unknownBootstrapAttempts.removeAll()
@@ -728,7 +760,6 @@ public class BleManager: NSObject, TransportManager {
         notifyLock.lock()
         subscribedCentralsById.removeAll()
         notifyLock.unlock()
-        notifyOutbound.removeAll()
 
         pendingRestoredPeripherals = [:]
 
@@ -1601,6 +1632,13 @@ public class BleManager: NSObject, TransportManager {
                     if self.notifyTarget(for: recipientId) != nil {
                         self.enqueueNotifyOutbound(recipientId: recipientId, data: data)
                         consecutiveSkips = 0
+                        // The same backpressure as the central path below:
+                        // the transmit queue drains far slower than this loop
+                        // pulls, and past the cap the queue is discarded.
+                        if self.notifyFragments.isBackedUp(recipientId) {
+                            hitBackpressure = true
+                            break
+                        }
                         continue
                     }
                     self.enqueuePendingOutboundFragment(recipientId: recipientId, data: data)
@@ -1649,7 +1687,22 @@ public class BleManager: NSObject, TransportManager {
                     // already discovered, a reconnect that never completes),
                     // and without one the other peers' fragments sit in Rust
                     // behind this one. The re-drain scheduled below is the
-                    // floor under those.
+                    // floor under those; the refused direct send further down
+                    // arms it too, so the floor is there before this queue
+                    // reaches the mark.
+                    //
+                    // The mark is checked after the enqueue because the pop is
+                    // destructive and nothing can hand a fragment back to Rust,
+                    // so each drain that meets a stalled peer at the head adds
+                    // one fragment past it. The headroom to the cap is a budget
+                    // of such drains, not a guarantee: a peer stalled while
+                    // other peers keep drains coming can still reach the cap,
+                    // and the whole-queue discard is then the intended outcome.
+                    // Those fragments were headed for the 30 s expiry anyway,
+                    // which drops them fragment by fragment and can tear a
+                    // message; the discard never does. Holding the fragment
+                    // back in Swift instead would trade that for every other
+                    // peer waiting behind a stalled one.
                     if self.outboundFragments.isBackedUp(recipientId) {
                         hitBackpressure = true
                         break
@@ -1663,6 +1716,11 @@ public class BleManager: NSObject, TransportManager {
                     self.emitDiagnostic("debug", "Fragment sent successfully", context: ["recipientId": recipientId])
                 } else {
                     self.enqueuePendingOutboundFragment(recipientId: recipientId, data: data)
+                    // A refused write whose wake-up never comes (a missing
+                    // characteristic, a link that dropped) must not wait for
+                    // the queue to reach the mark before the re-drain floor
+                    // is armed. Android does the same.
+                    hitBackpressure = true
                     break
                 }
             }
@@ -1670,7 +1728,7 @@ public class BleManager: NSObject, TransportManager {
             // One pending re-drain at most, however many drains hit the mark
             // before it fires. Cleared on fragmentQueue ahead of the drain it
             // triggers (serial, FIFO), so a drain that backs up again re-arms.
-            // ponytail: fixed interval, no ladder. A peer stalled with no
+            // Deliberately a fixed interval with no ladder. A peer stalled with no
             // wake-up costs one drain a second until its fragments expire or
             // it disconnects; add Android's BackpressureRetryPolicy if that
             // shows up.
@@ -1732,24 +1790,15 @@ public class BleManager: NSObject, TransportManager {
         return nil
     }
 
-    /// Hands a fragment to the main-queue NOTIFY pump. Safe to call from the
-    /// fragment drain (`fragmentQueue`): the queue mutation and `updateValue` run on
-    /// main, where CBPeripheralManager lives. FIFO is preserved because `main.async`
-    /// is ordered and the drain pulls fragments from Rust in order.
+    /// Queues a fragment for the NOTIFY pump and wakes it. Called from the
+    /// fragment drain, on `fragmentQueue`: the enqueue is synchronous so the
+    /// drain's `isBackedUp` check counts it, and the `updateValue` runs on main,
+    /// where CBPeripheralManager lives. FIFO is preserved because the drain pulls
+    /// fragments from Rust in order and only main flushes.
     private func enqueueNotifyOutbound(recipientId: String, data: Data) {
+        notifyFragments.enqueue(recipientId, data)
         DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            var queue = self.notifyOutbound[recipientId] ?? []
-            queue.append((data: data, timestamp: Date()))
-            if queue.count > self.MAX_PENDING_FRAGMENTS_PER_PEER {
-                let overflow = queue.count - self.MAX_PENDING_FRAGMENTS_PER_PEER
-                queue.removeFirst(overflow)
-                self.emitDiagnostic("warning", "NOTIFY outbound queue capped, dropping oldest",
-                                    context: ["recipientId": recipientId, "dropped": overflow,
-                                              "max": self.MAX_PENDING_FRAGMENTS_PER_PEER])
-            }
-            self.notifyOutbound[recipientId] = queue
-            self.pumpNotifyOutbound()
+            self?.pumpNotifyOutbound()
         }
     }
 
@@ -1760,36 +1809,27 @@ public class BleManager: NSObject, TransportManager {
     /// backpressure the write path already honours. Main-queue only.
     private func pumpNotifyOutbound() {
         guard let pm = peripheralManager, let characteristic = messageCharacteristic else { return }
-        let now = Date()
-        for recipientId in Array(notifyOutbound.keys) {
-            guard var queue = notifyOutbound[recipientId] else { continue }
-            queue = queue.filter { now.timeIntervalSince($0.timestamp) < PENDING_OUTBOUND_FRAGMENT_TIMEOUT }
-            guard let central = notifyTarget(for: recipientId) else {
-                // No longer notify-reachable. Drop the queued fragments; the
-                // reliability layer (MLS Welcome retransmit / RetryQueue) re-drives
-                // delivery over whatever path is available next.
-                notifyOutbound.removeValue(forKey: recipientId)
-                continue
+        // No longer notify-reachable. Drop the queued fragments; the reliability
+        // layer (MLS Welcome retransmit / RetryQueue) re-drives delivery over
+        // whatever path is available next.
+        for recipientId in notifyFragments.recipientIds() where notifyTarget(for: recipientId) == nil {
+            notifyFragments.removeAll(recipientId)
+        }
+        // A `false` return means the shared transmit queue is full for the whole
+        // peripheral, not just this central, so every later send is refused
+        // without asking and waits for the ready callback.
+        var transmitQueueFull = false
+        notifyFragments.flush { recipientId, data in
+            guard !transmitQueueFull, let central = notifyTarget(for: recipientId) else {
+                return false
             }
-            var transmitQueueFull = false
-            while let head = queue.first {
-                if pm.updateValue(head.data, for: characteristic, onSubscribedCentrals: [central]) {
-                    queue.removeFirst()
-                    meshController.markPeerActive(recipientId)
-                    meshController.markPeerActive(deviceId)
-                } else {
-                    transmitQueueFull = true
-                    break
-                }
+            if pm.updateValue(data, for: characteristic, onSubscribedCentrals: [central]) {
+                meshController.markPeerActive(recipientId)
+                meshController.markPeerActive(deviceId)
+                return true
             }
-            if queue.isEmpty {
-                notifyOutbound.removeValue(forKey: recipientId)
-            } else {
-                notifyOutbound[recipientId] = queue
-            }
-            // A `false` return means the shared transmit queue is full for the whole
-            // peripheral, not just this central — stop and wait for the ready callback.
-            if transmitQueueFull { break }
+            transmitQueueFull = true
+            return false
         }
     }
 
@@ -4227,7 +4267,7 @@ extension BleManager: CBPeripheralManagerDelegate {
         // The NOTIFY link to this peer is gone: drop anything queued for it and
         // re-report the per-peer MTU (now only a central-write link, if any, binds).
         if let deviceId = deviceId {
-            notifyOutbound.removeValue(forKey: deviceId)
+            notifyFragments.removeAll(deviceId)
             reflectEgressMtu(forDeviceId: deviceId)
         }
     }
@@ -4247,6 +4287,11 @@ extension BleManager: CBPeripheralManagerDelegate {
     @objc(peripheralManagerIsReadyToUpdateSubscribers:)
     public func peripheralManagerIsReady(toUpdateSubscribers peripheral: CBPeripheralManager) {
         pumpNotifyOutbound()
+        // The drain stops pulling from Rust once a NOTIFY queue reaches its
+        // mark; the pump that just ran is what brings it back under, so this is
+        // that stop's wake-up, as peripheralIsReady(toSendWriteWithoutResponse:)
+        // is for the central path.
+        drainAndSendFragments()
     }
 }
 

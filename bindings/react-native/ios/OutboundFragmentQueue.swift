@@ -22,6 +22,14 @@ import Foundation
 /// both run on the main queue, where a hop onto the owning queue would mean
 /// the very `dispatch_sync` this class exists to delete.
 ///
+/// One instance departs from that: `BleManager.notifyFragments`, the NOTIFY
+/// egress queue, is enqueued on `fragmentQueue` and flushed on main, because
+/// `CBPeripheralManager.updateValue` must run on main while the drain has to
+/// count what it just enqueued. It passes no `queueCheck`. The split holds
+/// because main is its only flusher, and `flush` takes each recipient's queue
+/// out under the lock and puts the unsent remainder back ahead of anything
+/// enqueued meanwhile.
+///
 /// The `NSLock` exists so **readers on other threads** — chiefly the metrics
 /// refresher — can take a snapshot without `dispatch_sync`-ing onto the
 /// owning queue, which is what made main-thread readers inherit the latency
