@@ -4842,7 +4842,7 @@ impl OfflineProtocol {
     // PEER-STREAM TRANSPORT OPERATIONS (the `wifi_direct` slot)
     //
     // A byte stream the platform established to one peer: a Wi-Fi Direct
-    // group socket, a Multipeer session, a TCP connection over a LAN or a
+    // group socket, a TCP connection over a LAN, over AWDL, or over a
     // routed mesh. `docs/spec/stream-framing.md` is the contract. The
     // platform frames (`u32` big-endian length plus body), exchanges the
     // identity assertion as the first frame in each direction, and announces
@@ -16500,7 +16500,7 @@ mod tests {
             (
                 "ios/WifiDirectManager.swift",
                 "the resume drain",
-                "browser?.startBrowsingForPeers() drainAndSendMessages()",
+                "onLinkQueueSync { startBrowsing() } drainAndSendMessages()",
             ),
             // --- an explicit start() means "run" ---------------------------
             (
@@ -16876,12 +16876,6 @@ mod tests {
                  defer { stateLock.unlock() } _state = newState }",
             ),
             (
-                "the session accessor",
-                "private var session: MCSession? { get { stateLock.lock(); \
-                 defer { stateLock.unlock() }; return _session } set { stateLock.lock(); \
-                 defer { stateLock.unlock() }; _session = newValue } }",
-            ),
-            (
                 // The proved peers moved to `PeerStreamLinks`, whose own lock
                 // is held to the same rule by
                 // `react_native_peer_stream_links_never_call_the_core`.
@@ -16906,8 +16900,8 @@ mod tests {
 
         let acquisitions = code.matches("stateLock.lock()").count();
         assert_eq!(
-            acquisitions, 6,
-            "ios/WifiDirectManager.swift: expected the 6 pinned stateLock acquisitions; found \
+            acquisitions, 4,
+            "ios/WifiDirectManager.swift: expected the 4 pinned stateLock acquisitions; found \
              {acquisitions}. A new one is not wrong, but it is unreviewed — pin its body above \
              so it cannot grow a call into the core unnoticed."
         );
@@ -17004,12 +16998,13 @@ mod tests {
 
     /// Two orderings in the peer-stream managers that no test can run.
     ///
-    /// iOS `stop()` forgets the session before it ends every link. The
-    /// state-change and data callbacks check `self.session === session` on
-    /// the link queue, so a `.connected` already queued then finds nothing; forgotten after
-    /// `endAll()`, it created a link in the emptied table that `start()`
-    /// never clears, and a remote that kept its MCPeerID met a stale refused
-    /// link on the next session.
+    /// iOS `stop()` forgets the listener, the browser and every stream before
+    /// it ends every link. Each Network framework callback checks, on the link
+    /// queue, that its object is still the manager's, so a `.ready` already
+    /// queued then finds nothing; forgotten after `endAll()`, a stream that
+    /// became ready in between was announced into the emptied table, and the
+    /// core held a link to a stream that was about to be cancelled. The
+    /// Multipeer manager this replaced lost a remote exactly that way.
     ///
     /// Android resets the redial delay on a new connection after a
     /// disconnect (group owners nearly always share one address, so the
@@ -17021,10 +17016,12 @@ mod tests {
         let swift = rn_source_code_only("ios/WifiDirectManager.swift");
         assert!(
             swift.contains(
-                "let old = session session = nil onLinkQueueSync { peers.endAll() } \
-                 old?.disconnect()"
+                "onLinkQueueSync { generation += 1 \
+                 let old = (listener: listener, browser: browser, streams: streams) \
+                 listener = nil browser = nil streams = [] adverts = [:] dialing = [] \
+                 redialDelay = [:] peers.endAll() old.listener?.cancel()"
             ),
-            "ios/WifiDirectManager.swift: stop() must clear the session before endAll()"
+            "ios/WifiDirectManager.swift: stop() must forget every stream before endAll()"
         );
         let kotlin =
             rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
@@ -17160,10 +17157,12 @@ mod tests {
                     // The losing kind of a duplicate announces nothing and
                     // reports nothing: the held stream keeps the address.
                     "if announcement.refused { link.refused = true disconnect(handle)",
-                    // A late disconnect from a replaced session must not end
-                    // the same MCPeerID's link in the new one.
-                    "case .notConnected: guard self.session === session else { return } \
-                     self.peers.ended(peerID)",
+                    // A late callback from a stream stop() forgot must not
+                    // reach the session: every stream event checks first.
+                    "guard let self = self, let stream = stream, self.streams.contains(stream) \
+                     else { return } switch newState { case .ready: self.peers.connected(stream)",
+                    "case .failed, .cancelled: self.end(stream)",
+                    "guard streams.remove(stream) != nil else { return } peers.ended(stream)",
                     "if announcement.firstForAddress { host.peerStreamConnected(address) }",
                     "case .deliver(let address, let payload): \
                      host.peerStreamReceived(address, payload)",
@@ -17175,7 +17174,9 @@ mod tests {
                     "return Data(try protocolInstance.identityAssertion(signedData: []))",
                     "switch PeerStreamFraming.unframe(message, \
                      preamble: link.preamble.awaitingPreamble)",
-                    "private let SERVICE_TYPE = \"offlineprotocol\"",
+                    "static let SERVICE_TYPE = \"_offlineprotocol._tcp\"",
+                    // The chapter's TXT rule: `txtvers=1` first.
+                    "var entries = [\"txtvers=1\"]",
                 ][..],
             ),
             (
@@ -17272,23 +17273,38 @@ mod tests {
             "PeerStreamSession.swift must unframe in exactly one place, received(_:from:)"
         );
 
-        // The iOS MCPeerID is minted per start(). `PeerStreamSession` keys a
-        // peer's state by it, and one id for the manager's lifetime let a
-        // remote's clean stop/start reconnect under a handle that still said
-        // its preamble was sent: no preamble went out, and the remote refused
-        // us at its deadline.
+        // Every inbound byte on iOS goes through the reader, which refuses a
+        // prefix out of bounds before buffering the body, and then through
+        // the session, once per frame. A second path to `peers.received`
+        // would be one that skipped the reader's bound.
+        let ios_manager = rn_source_code_only("ios/WifiDirectManager.swift");
         assert!(
-            swift.contains("let peerId = MCPeerID(displayName: deviceId) session = MCSession("),
-            "ios/WifiDirectManager.swift: start() must mint the MCPeerID it builds the session on"
+            ios_manager.contains(
+                "for result in stream.reader.append(content) { switch result { \
+                 case .success(let frame): self.peers.received(frame, from: stream)"
+            ),
+            "ios/WifiDirectManager.swift: every received chunk must go through PeerStreamReader"
         );
-        assert!(
-            !swift.contains("private let peerId: MCPeerID")
-                && !swift.contains("private var peerId: MCPeerID"),
-            "ios/WifiDirectManager.swift: the MCPeerID must not outlive one start()"
+        assert_eq!(
+            ios_manager.matches("peers.received(").count(),
+            1,
+            "ios/WifiDirectManager.swift: expected exactly one call into the session per frame"
         );
+        // A stream handle is its own identity, never a value that a later
+        // stream could share: the Multipeer manager keyed its peers by an id
+        // that survived a restart, and a reconnect then met state that said
+        // its preamble was already sent.
         assert!(
-            swift.contains("guard peerID != session.myPeerID else { return }"),
-            "ios/WifiDirectManager.swift: the browser must skip itself by the session's own id"
+            ios_manager
+                .contains("static func == (lhs: Stream, rhs: Stream) -> Bool { lhs === rhs }"),
+            "ios/WifiDirectManager.swift: a Stream must compare by identity"
+        );
+        // Our own advert is skipped by the address it carries.
+        assert!(
+            ios_manager.contains(
+                "let local = protocolInstance.localAddress(), address != local else { continue }"
+            ),
+            "ios/WifiDirectManager.swift: the browser must skip our own address"
         );
 
         // A group client redials the owner the group has NOW. On a group

@@ -106,7 +106,7 @@ Pod::Spec.new do |s|
   }
 
   # System libraries and frameworks
-  s.frameworks = "Foundation", "CoreBluetooth", "MultipeerConnectivity"
+  s.frameworks = "Foundation", "CoreBluetooth", "Network"
 
   # React Native dependency
   s.dependency "React-Core"
