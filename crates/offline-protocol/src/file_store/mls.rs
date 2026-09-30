@@ -122,6 +122,19 @@ enum Probe {
     NoneOpened,
 }
 
+/// What one record file turned out to be.
+///
+/// A file that could not be read is not a file that did not open. Folding
+/// the two together sent a permission or disk error to the operator as "does
+/// not open under this store key", and counted it towards refusing the key.
+enum Opened {
+    Record(String, String),
+    /// Removed between the listing and the read.
+    Absent,
+    /// Read, and does not authenticate under this key and name.
+    DoesNotOpen,
+}
+
 impl SealedFileMlsStorage {
     /// Opens (creating if needed) the store at `<root>/<namespace>/`, sealed
     /// under the key `provider` supplies.
@@ -346,16 +359,40 @@ impl SealedFileMlsStorage {
             .map(Zeroizing::new)
     }
 
-    /// Opens one record file into its `(key_type, key_id)`, or `None` when it
-    /// does not authenticate under this key and name. The value is not
+    /// Opens one record file into its `(key_type, key_id)`. An error is a
+    /// read that failed, never a record that does not open. The value is not
     /// copied: the only plaintext is the zeroizing buffer, dropped here.
-    fn open_record(&self, path: &Path, name: &str) -> Option<(String, String)> {
-        let BoundedRead::Bytes(raw) = records::read_bounded(path, MAX_SEALED_BYTES).ok()? else {
-            return None;
+    fn open_record(&self, path: &Path, name: &str) -> std::io::Result<Opened> {
+        let raw = match records::read_bounded(path, MAX_SEALED_BYTES)? {
+            BoundedRead::Bytes(raw) => raw,
+            BoundedRead::Absent => return Ok(Opened::Absent),
+            BoundedRead::Oversized => return Ok(Opened::DoesNotOpen),
         };
-        let plain = self.open_sealed(name, &raw)?;
-        let header = records::parse_header(&plain)?;
-        Some((header.key_type, header.key_id))
+        let opened = self
+            .open_sealed(name, &raw)
+            .and_then(|plain| records::parse_header(&plain))
+            .map_or(Opened::DoesNotOpen, |header| {
+                Opened::Record(header.key_type, header.key_id)
+            });
+        Ok(opened)
+    }
+
+    /// Whether this is the first listing to warn about `path` since the file
+    /// there was last written or removed.
+    fn first_listing_warning(&self, path: &Path) -> bool {
+        self.listing_warned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(path.to_path_buf())
+    }
+
+    /// Forgets that a listing warned about `path`, once the file there has
+    /// been written or removed: a record damaged again later is news.
+    fn forget_listing_warning(&self, path: &Path) {
+        self.listing_warned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(path);
     }
 
     /// Proves the store key against the check file, minting the file on a
@@ -397,7 +434,7 @@ impl SealedFileMlsStorage {
         // path. A check that does not open with no records to prove anything
         // stays a refusal; there is nothing sealed to lose, and the operator
         // can remove the check file to start the store afresh.
-        match self.probe_existing_records().map_err(io)? {
+        match self.probe_existing_records()? {
             Probe::Opened => {
                 if check_present {
                     tracing::warn!(
@@ -422,11 +459,23 @@ impl SealedFileMlsStorage {
         records::write_atomic(&self.directory, &path, &sealed).map_err(io)
     }
 
-    fn probe_existing_records(&self) -> std::io::Result<Probe> {
+    /// Tries up to [`KEY_CHECK_PROBE_LIMIT`] records against the store key.
+    ///
+    /// A record that cannot be read says nothing about the key, so it is
+    /// skipped rather than counted against it, and a readable record later in
+    /// the walk can still prove the key. Only when none opens is a read
+    /// failure the answer, naming the record: refusing the key as wrong over
+    /// a permission error would send the operator after the wrong fault.
+    fn probe_existing_records(&self) -> Result<Probe, FileStoreError> {
+        let directory_error = |source| FileStoreError::Io {
+            path: self.directory.clone(),
+            source,
+        };
         let mut probe = Probe::NoRecords;
         let mut tried = 0usize;
-        for type_entry in std::fs::read_dir(&self.directory)? {
-            let type_entry = type_entry?;
+        let mut unreadable: Option<FileStoreError> = None;
+        for type_entry in std::fs::read_dir(&self.directory).map_err(directory_error)? {
+            let type_entry = type_entry.map_err(directory_error)?;
             let is_type_dir = type_entry
                 .file_name()
                 .to_str()
@@ -435,27 +484,48 @@ impl SealedFileMlsStorage {
             if !is_type_dir {
                 continue;
             }
+            let type_directory = type_entry.path();
             records::for_each_entry(
-                &type_entry.path(),
+                &type_directory,
                 ENTRY_PREFIX,
                 KEY_CHECK_PROBE_LIMIT,
                 |path, name| {
                     if matches!(probe, Probe::Opened) || tried >= KEY_CHECK_PROBE_LIMIT {
                         return;
                     }
-                    tried += 1;
-                    probe = if self.open_record(path, name).is_some() {
-                        Probe::Opened
-                    } else {
-                        Probe::NoneOpened
-                    };
+                    match self.open_record(path, name) {
+                        Ok(Opened::Record(..)) => {
+                            tried += 1;
+                            probe = Probe::Opened;
+                        }
+                        Ok(Opened::DoesNotOpen) => {
+                            tried += 1;
+                            probe = Probe::NoneOpened;
+                        }
+                        // Removed meanwhile: not a record.
+                        Ok(Opened::Absent) => {}
+                        Err(source) => {
+                            unreadable.get_or_insert(FileStoreError::Io {
+                                path: path.to_path_buf(),
+                                source,
+                            });
+                        }
+                    }
                 },
-            )?;
+            )
+            .map_err(|source| FileStoreError::Io {
+                path: type_directory.clone(),
+                source,
+            })?;
             if matches!(probe, Probe::Opened) || tried >= KEY_CHECK_PROBE_LIMIT {
                 break;
             }
         }
-        Ok(probe)
+        match (probe, unreadable) {
+            (Probe::Opened, _) => Ok(Probe::Opened),
+            (_, Some(err)) => Err(err),
+            (probe, None) => Ok(probe),
+        }
     }
 }
 
@@ -495,8 +565,11 @@ impl MlsStorage for SealedFileMlsStorage {
         records::private_mkdir(&directory)
             .map_err(|err| StorageError::StoreFailed(err.to_string()))?;
         self.swept.sweep_once(&directory);
-        records::write_atomic(&directory, &directory.join(&name), &sealed)
-            .map_err(|err| StorageError::StoreFailed(err.to_string()))
+        let path = directory.join(&name);
+        records::write_atomic(&directory, &path, &sealed)
+            .map_err(|err| StorageError::StoreFailed(err.to_string()))?;
+        self.forget_listing_warning(&path);
+        Ok(())
     }
 
     fn load(&self, key_type: &str, key_id: &str) -> StorageResult<Option<Vec<u8>>> {
@@ -537,9 +610,10 @@ impl MlsStorage for SealedFileMlsStorage {
             .lock
             .open()
             .ok_or_else(|| StorageError::DeleteFailed(self.closed()))?;
-        records::remove(&self.entry_path(key_type, key_id))
-            .map(|_| ())
-            .map_err(|err| StorageError::DeleteFailed(err.to_string()))
+        let path = self.entry_path(key_type, key_id);
+        records::remove(&path).map_err(|err| StorageError::DeleteFailed(err.to_string()))?;
+        self.forget_listing_warning(&path);
+        Ok(())
     }
 
     fn list_keys(&self, key_type: &str) -> StorageResult<Vec<String>> {
@@ -553,21 +627,30 @@ impl MlsStorage for SealedFileMlsStorage {
             ENTRY_PREFIX,
             records::MAX_LISTED_ENTRIES,
             |path, name| match self.open_record(path, name) {
-                Some((record_type, record_id)) if record_type == key_type => {
+                Ok(Opened::Record(record_type, record_id)) if record_type == key_type => {
                     keys.insert(record_id);
+                }
+                // Deleted since the directory was read: not a record.
+                Ok(Opened::Absent) => {}
+                // Left out of the listing, and named with the real cause. A
+                // listing that failed outright on one unreadable file would
+                // stop an engine from finding any of its groups.
+                Err(err) => {
+                    if self.first_listing_warning(path) {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %err,
+                            "sealed MLS record could not be read; left out of the listing"
+                        );
+                    }
                 }
                 // The listing is how the engine finds its groups, so a record
                 // skipped here is one the engine never learns it had. Same
                 // level and same path as `load` reports: names are keyed
                 // digests, and the path is the only way to find the file.
                 // Once per file per store: listings are frequent.
-                _ => {
-                    let first = self
-                        .listing_warned
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(path.to_path_buf());
-                    if first {
+                Ok(Opened::Record(..) | Opened::DoesNotOpen) => {
+                    if self.first_listing_warning(path) {
                         tracing::warn!(
                             path = %path.display(),
                             "sealed MLS record does not open under this store key; \
@@ -954,6 +1037,184 @@ mod tests {
             .lock()
             .expect("memo")
             .contains(&damaged));
+    }
+
+    /// A record written or removed after a listing warned about it is a new
+    /// file: damaged again later, it is warned about again.
+    #[test]
+    fn a_record_rewritten_after_a_warning_is_warned_about_again() {
+        let root = TempRoot::new("mls-list-rewarn");
+        let store = open(&root, 1);
+        store.store("group_state", "a", b"one").expect("store");
+        let damaged = store.entry_path("group_state", "a");
+        let damage = || {
+            let mut bytes = std::fs::read(&damaged).expect("read");
+            bytes[SEALED_MAGIC.len() + NONCE_BYTES] ^= 1;
+            std::fs::write(&damaged, bytes).expect("write");
+        };
+        damage();
+
+        let _callsite = listing_warning_callsite();
+        let warnings = Warnings::default();
+        let _default = tracing::dispatcher::set_default(&tracing::Dispatch::new(warnings.clone()));
+        tracing::callsite::rebuild_interest_cache();
+        let path = damaged.display().to_string();
+        let named = || {
+            warnings
+                .0
+                .lock()
+                .expect("warnings")
+                .iter()
+                .filter(|w| w.contains(&path))
+                .count()
+        };
+
+        assert!(store.list_keys("group_state").expect("list").is_empty());
+        assert_eq!(named(), 1);
+
+        store.store("group_state", "a", b"again").expect("store");
+        damage();
+        assert!(store.list_keys("group_state").expect("list").is_empty());
+        assert_eq!(
+            named(),
+            2,
+            "a rewritten record damaged again was not reported"
+        );
+
+        store.delete("group_state", "a").expect("delete");
+        assert!(
+            !store
+                .listing_warned
+                .lock()
+                .expect("memo")
+                .contains(&damaged),
+            "a removed record's warning is still remembered"
+        );
+    }
+
+    /// Makes `path` unreadable, or answers false where the test runs with
+    /// the power to read it anyway.
+    #[cfg(unix)]
+    fn make_unreadable(path: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        std::fs::read(path).is_err()
+    }
+
+    #[cfg(unix)]
+    fn make_readable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    }
+
+    /// A record that cannot be read is not evidence against the store key.
+    /// Counted as one that does not open, a permission error on the only
+    /// record refused the right key as a wrong one.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_record_is_an_io_error_not_a_wrong_key() {
+        let root = TempRoot::new("mls-unreadable-probe");
+        let (check, record) = {
+            let store = open(&root, 1);
+            store.store("group_state", "a", b"one").expect("store");
+            (
+                store.directory().join(KEY_CHECK_FILE),
+                store.entry_path("group_state", "a"),
+            )
+        };
+        std::fs::remove_file(&check).expect("remove check");
+        if !make_unreadable(&record) {
+            return;
+        }
+        let outcome = SealedFileMlsStorage::open(root.path(), &namespace(), &key(1));
+        make_readable(&record);
+        match outcome {
+            Err(FileStoreError::Io { path, .. }) => {
+                assert_eq!(path, record, "the error does not name the record");
+            }
+            Err(other) => panic!("expected an I/O error naming the record, got {other}"),
+            Ok(_) => panic!("an unreadable record proved the key"),
+        }
+        assert!(
+            !check.exists(),
+            "no key check was minted on an unread record"
+        );
+        open(&root, 1);
+        assert!(check.exists(), "once readable, the record proves the key");
+    }
+
+    /// An unreadable record does not stand in the way of a readable one that
+    /// proves the key, whichever the directory lists first.
+    ///
+    /// File names are keyed digests, so the order the probe meets records in
+    /// is not the test's to choose. Four of five are unreadable, so a probe
+    /// that stopped at the first unreadable record fails here on most runs.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_record_does_not_hide_one_that_proves_the_key() {
+        let root = TempRoot::new("mls-unreadable-beside-good");
+        let ids = ["a", "b", "c", "d", "e"];
+        let (check, unreadable) = {
+            let store = open(&root, 1);
+            for id in ids {
+                store.store("group_state", id, b"value").expect("store");
+            }
+            (
+                store.directory().join(KEY_CHECK_FILE),
+                ids[1..]
+                    .iter()
+                    .map(|id| store.entry_path("group_state", id))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        std::fs::remove_file(&check).expect("remove check");
+        if !unreadable.iter().all(|path| make_unreadable(path)) {
+            unreadable.iter().for_each(|path| make_readable(path));
+            return;
+        }
+        let outcome = SealedFileMlsStorage::open(root.path(), &namespace(), &key(1));
+        unreadable.iter().for_each(|path| make_readable(path));
+        outcome.expect("a readable record proves the key");
+        assert!(check.exists(), "the key check is rebuilt");
+    }
+
+    /// The listing names a read failure as one, not as a record sealed under
+    /// another key, and still returns the records it could read.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_record_is_listed_as_unreadable() {
+        let root = TempRoot::new("mls-unreadable-list");
+        let store = open(&root, 1);
+        store.store("group_state", "a", b"one").expect("store");
+        store.store("group_state", "b", b"two").expect("store");
+        let record = store.entry_path("group_state", "a");
+        if !make_unreadable(&record) {
+            return;
+        }
+
+        let _callsite = listing_warning_callsite();
+        let warnings = Warnings::default();
+        let _default = tracing::dispatcher::set_default(&tracing::Dispatch::new(warnings.clone()));
+        tracing::callsite::rebuild_interest_cache();
+
+        let listed = store.list_keys("group_state");
+        make_readable(&record);
+        assert_eq!(listed.expect("list"), vec!["b"]);
+        let path = record.display().to_string();
+        let said: Vec<String> = warnings
+            .0
+            .lock()
+            .expect("warnings")
+            .iter()
+            .filter(|w| w.contains(&path))
+            .cloned()
+            .collect();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].contains("could not be read") && !said[0].contains("store key"),
+            "the warning blames the key for a read failure: {}",
+            said[0]
+        );
     }
 
     /// Nothing to write down in a record's name, so the error must carry the
