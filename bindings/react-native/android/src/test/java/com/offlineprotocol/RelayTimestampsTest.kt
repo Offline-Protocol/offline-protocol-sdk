@@ -88,6 +88,38 @@ class RelayTimestampsTest {
         assertNull(RelayTimestamps.parseToMsOrNull("2024-01-01T00:00:00+0530"))
     }
 
+    /** Each field's own bound, one at a time: every other field is valid. */
+    @Test
+    fun refusesAFieldOutOfItsRange() {
+        assertNull(RelayTimestamps.parseToMsOrNull("2024-01-01T00:60:00Z"))
+        assertNull(RelayTimestamps.parseToMsOrNull("2024-01-01T00:00:60Z"))
+        assertNull(RelayTimestamps.parseToMsOrNull("2024-01-01T00:00:00+24:00"))
+        assertNull(RelayTimestamps.parseToMsOrNull("2024-01-01T00:00:00+05:60"))
+        // The largest value of each is still read.
+        assertEquals(
+            1704153599000L,
+            RelayTimestamps.parseToMsOrNull("2024-01-01T23:59:59Z")
+        )
+        assertEquals(
+            1704067200000L - (23 * 3600L + 59 * 60L) * 1000L,
+            RelayTimestamps.parseToMsOrNull("2024-01-01T00:00:00+23:59")
+        )
+    }
+
+    /**
+     * Where this parts from `Instant.parse`, which accepted each of these. RFC 3339
+     * refuses hour 24 and an empty fraction, and allows lowercase `t`/`z` and
+     * a leap second; this refuses all of them, and no relay sends any.
+     */
+    @Test
+    fun refusesWhatInstantAcceptedAndNoRelaySends() {
+        assertNull(RelayTimestamps.parseToMsOrNull("2024-01-01T24:00:00Z"))
+        assertNull(RelayTimestamps.parseToMsOrNull("2024-01-01T00:00:00.Z"))
+        assertNull(RelayTimestamps.parseToMsOrNull("2024-01-01t00:00:00Z"))
+        assertNull(RelayTimestamps.parseToMsOrNull("2024-01-01T00:00:00z"))
+        assertNull(RelayTimestamps.parseToMsOrNull("2016-12-31T23:59:60Z"))
+    }
+
     @Test
     fun epochSecondsAreScaledToMilliseconds() {
         // ~2024-07 as epoch seconds; without the heuristic this would render

@@ -50,7 +50,7 @@ final class RelayTimestampsTests: XCTestCase {
 
     // No zone: a local time, which names no instant. The Kotlin twin also
     // refuses an impossible date, 24:00 and an offset without a colon, which
-    // Foundation's formatter accepts. That difference predates both suites.
+    // Foundation's formatter accepts. No relay sends any of the three.
     func testRefusesATimeWithNoZone() {
         XCTAssertNil(RelayTimestamps.parseToMsOrNull("2024-01-01T00:00:00"))
     }

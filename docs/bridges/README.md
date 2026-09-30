@@ -411,10 +411,13 @@ binary and empty values, overwrite semantics, delete idempotence, key-type
 isolation, listing accuracy, composed and long key ids, large records, and
 delete completeness. Each check exists because that defect is invisible
 until data is missing. The suite writes only under its own probe key types
-and deletes everything it wrote, which keeps a live store intact only if the
-backend keeps key types apart: on one that merges them, listing a probe key
-type names real records too, and the suite's cleanup deletes what it lists.
-Probe a new backend on a scratch instance until it is green.
+and deletes everything it wrote. That keeps a live store intact only if the
+backend keeps key types apart, since on one that merges them, listing a
+probe key type names real records too. So isolation is checked first, with
+point writes and point deletes of ids nothing else uses, including a probe
+type that ends like another (the SDK's own key types are related that way),
+and a failure ends the run before anything is listed and deleted. Probe a
+new backend on a scratch instance until it is green all the same.
 
 Green on either suite is not a persistence test. Every check runs against one
 open instance, so a backend that forgets everything on reopen, or that

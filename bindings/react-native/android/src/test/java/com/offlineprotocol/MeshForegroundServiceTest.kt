@@ -417,6 +417,23 @@ class MeshForegroundServiceTest {
     }
 
     @Test
+    fun `a wake service that resolves but does not start stops at once`() {
+        // The service is declared, so it resolves, and the platform still
+        // starts nothing: `startService` answers null. Robolectric's never
+        // does, so the start goes through the seam.
+        optInToWake()
+        declareWakeService()
+
+        val service = createService()
+        service.startWakeService = { null }
+        val result = service.onStartCommand(null, 0, 1)
+
+        assertEquals(Service.START_NOT_STICKY, result)
+        assertTrue(shadowOf(service).isForegroundStopped)
+        assertTrue(shadowOf(service).isStoppedBySelf)
+    }
+
+    @Test
     fun `the wake watchdog stops the keep-alive when no host arrives`() {
         optInToWake()
         declareWakeService()

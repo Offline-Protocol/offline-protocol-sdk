@@ -15135,11 +15135,12 @@ mod tests {
     ///
     /// `minSdk` is 24 and `java.time` exists from API 26. On API 24 or 25 a
     /// call throws `NoClassDefFoundError`, an `Error`, which passes through
-    /// the `catch (e: Exception)` these call sites are written with. Nothing
-    /// else would say so: the unit suite runs on a JVM that has `java.time`,
-    /// the build does not run Android lint, and desugaring would be every
+    /// the `catch (e: Exception)` these call sites are written with. The unit
+    /// suite runs on a JVM that has `java.time`, and desugaring would be every
     /// application's switch to throw, not this library's. `RelayTimestamps`
-    /// parses ISO-8601 by hand for exactly this reason.
+    /// parses ISO-8601 by hand for exactly this reason. The Android Library
+    /// CI job runs lint's NewApi check, which covers every newer API; this
+    /// guard keeps the one that already shipped from coming back without it.
     #[test]
     fn android_bridge_sources_never_call_java_time() {
         let callers: Vec<String> = rn_android_kotlin_sources()
@@ -15151,6 +15152,26 @@ mod tests {
             callers.is_empty(),
             "{callers:?} call java.time, which needs API 26 while minSdk is 24; \
              parse by hand as RelayTimestamps does"
+        );
+    }
+
+    /// The Android relay timestamp parser matches ASCII digits only.
+    ///
+    /// On Android a regex `\d` is ICU's and matches every Unicode decimal
+    /// digit, and `toInt()` then reads them as their values, so a timestamp
+    /// written in Arabic-Indic digits would parse. The unit suite runs on a
+    /// JVM, where `\d` is ASCII, so no Kotlin test can see the difference.
+    #[test]
+    fn android_relay_timestamps_match_ascii_digits_only() {
+        let code =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/RelayTimestamps.kt");
+        assert!(
+            code.contains("[0-9]{4}"),
+            "RelayTimestamps.kt: expected the date-time pattern spelled with [0-9]"
+        );
+        assert!(
+            !code.contains("\\d"),
+            "RelayTimestamps.kt: `\\d` is any Unicode digit on Android; use [0-9]"
         );
     }
 
@@ -16667,6 +16688,43 @@ mod tests {
             "expected the connect and disconnect edges to be the only status flips inside \
              closures; found {closure_flips} — if another was added, confine it the same way \
              and pin it above"
+        );
+    }
+
+    /// Two orderings in the peer-stream managers that no test can run.
+    ///
+    /// iOS `stop()` forgets the session before it ends every link. The
+    /// state-change and data callbacks check `self.session === session` on
+    /// the link queue, so a `.connected` already queued then finds nothing; forgotten after
+    /// `endAll()`, it created a link in the emptied table that `start()`
+    /// never clears, and a remote that kept its MCPeerID met a stale refused
+    /// link on the next session.
+    ///
+    /// Android resets the redial delay on a new connection after a
+    /// disconnect (group owners nearly always share one address, so the
+    /// comparison is with the null the disconnect leaves). The delay doubles
+    /// per failed dial, so without the reset a new group's first failed dial
+    /// waited out the previous group's backoff.
+    #[test]
+    fn react_native_peer_stream_managers_forget_the_session_first_and_reset_on_a_new_group() {
+        let swift = rn_source_code_only("ios/WifiDirectManager.swift");
+        assert!(
+            swift.contains(
+                "let old = session session = nil onLinkQueueSync { peers.endAll() } \
+                 old?.disconnect()"
+            ),
+            "ios/WifiDirectManager.swift: stop() must clear the session before endAll()"
+        );
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        assert!(
+            kotlin.contains(
+                "val previousOwner = groupOwnerAddress isGroupOwner = it.isGroupOwner \
+                 groupOwnerAddress = it.groupOwnerAddress?.hostAddress \
+                 if (groupOwnerAddress != previousOwner) { \
+                 reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS) }"
+            ),
+            "android/.../WifiDirectManager.kt: a new connection must reset the redial delay"
         );
     }
 

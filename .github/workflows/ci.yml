@@ -555,8 +555,9 @@ jobs:
       # The gate reads a real archive with otool, so it runs where the iOS
       # library is built: in a release, on all three archives, and in the
       # Swift Package job below, on the simulator archive of every pull
-      # request. This drives everything in it that is text handling, with a
-      # stand-in for otool, on a runner that has none.
+      # request. This drives everything in it that is text handling, and the
+      # packaging function the gate sits inside, with stand-ins for otool,
+      # lipo and xcodebuild, on a runner that has none of them.
       - name: Test the iOS deployment-target gate
         run: bash scripts/tests/test-ios-min-os.sh
 
@@ -821,7 +822,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-swift-package
+          # The deployment target is the podspec's, and cargo does not rebuild
+          # a Rust crate when IPHONEOS_DEPLOYMENT_TARGET changes. Without the
+          # hash a lowered target restores objects stamped for the old one, and
+          # the minimum-OS gate fails on them with no cargo clean to reach. It
+          # goes in shared-key: rust-cache ignores `key` when shared-key is set.
+          shared-key: ci-swift-package-${{ hashFiles('bindings/react-native/MeshSdk.podspec') }}
 
       # One simulator slice, for the architecture of this runner. The release
       # builds the device slice and both simulator architectures.
@@ -988,6 +994,13 @@ jobs:
           gradle --no-daemon --stacktrace -PVERSION_NAME=0.0.0
           :offline-protocol-android:testDebugUnitTest
           :offline-protocol-android:publishAllPublicationsToStagingRepository
+
+      # A call to an API newer than minSdk passes every JVM test and throws on
+      # an older phone. Lint's NewApi check is the only thing that sees the
+      # class, and the library build runs it alone (see its lint block).
+      - name: Lint the library for calls newer than minSdk
+        working-directory: bindings/kotlin
+        run: gradle --no-daemon --stacktrace -PVERSION_NAME=0.0.0 :offline-protocol-android:lintDebug
 
       # Gradle succeeds on a test task that found no test. The sources are
       # read from another directory, so that is one wrong path away.

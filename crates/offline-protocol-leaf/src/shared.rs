@@ -18,6 +18,12 @@
 //! glob over `alloc`, and any rename of `alloc`. The `embedded-core` CI job
 //! refuses a direct import on the targets.
 //!
+//! The scan reads one file's tokens and cannot see three routes: an import
+//! through a module of this crate that re-exports `alloc`, a glob over such a
+//! module, and a path a macro assembles. None of them is written in this
+//! crate, and a new one would be, visibly, a module that re-exports `alloc`
+//! or a macro that pastes a path together.
+//!
 //! # Building a handle
 //!
 //! [`shared_store`] is the portable way. The replacement pointer cannot turn
@@ -388,6 +394,10 @@ mod tests {
             "use crate::alloc as heap;",
             "extern crate alloc as heap;",
             "pub(crate) use alloc as mem;",
+            // A raw identifier is the same name.
+            "use alloc::r#sync::Arc;",
+            // A raw byte string ends at its quote and hashes, not the first quote.
+            "const B: &[u8] = br#\"a \" b\"#; use alloc::sync::Arc;",
         ] {
             assert!(!counted_pointer_paths(code).is_empty(), "missed: {code}");
         }
@@ -406,6 +416,10 @@ mod tests {
             "mod sync { pub struct Arc; } use self::sync::Arc;",
             "extern crate alloc; extern crate alloc as _;",
             "let c = '\\''; let d = '\\\\'; let e = b'\\\\';",
+            // An escaped quote does not end a string.
+            "const S: &str = \"\\\" use alloc::sync::Arc; \\\"\";",
+            // A block comment ends at its own close, not the first `*/`.
+            "/* a /* b */ use alloc::sync::Arc; */",
         ] {
             assert_eq!(
                 counted_pointer_paths(code),

@@ -61,7 +61,10 @@ namespace offline_protocol {
     // — swappability that cannot be verified is a promise, not a property.
     //
     // The suite writes only under its own probe key types and deletes
-    // everything it wrote, so it is safe against a live store.
+    // everything it wrote. Key-type isolation is checked first, with point
+    // writes and deletes, and a failure ends the run before anything is
+    // listed and deleted, so a backend that merges key types keeps its real
+    // records. Probe a new backend on a scratch instance until it is green.
     string run_storage_conformance(ProtocolStateStorageProvider storage);
 };
 
@@ -1618,19 +1621,21 @@ interface OfflineProtocol {
     // (the message names the path), a wrong key, or a key check that cannot
     // prove the key. After both opened: protocol state that belongs with
     // another MLS store. The first open of a pair binds the two with one
-    // pairing id, and later opens compare the ids; when either store holds
-    // no id, the state root is asked whether its sealed records open under
-    // this MLS store's record key. That is another identity's state, and the engine deletes what its
-    // restore reads of it, queued and parked messages among them. A refusal
+    // pairing id, and later opens compare the ids. When either store holds
+    // no id, or the ids differ, the state root is asked whether its sealed
+    // records open under this MLS store's record key, and one that opens
+    // admits it. State that belongs with another MLS store is refused
+    // because the engine deletes what its restore reads of it, queued and
+    // parked messages among them. A refusal
     // after the MLS store opened leaves its directory, lock file and key
     // check, and no record, so the first refusal above still applies to a
     // retry.
     //
     // A damaged record key is not refused, on the launch that finds it or
-    // on any launch after while the MLS root keeps its pairing file. Nothing opens the state sealed under it again, so
-    // a refusal would save no record, and the engine's new key and its
-    // settlement of that state as failed is how the application learns
-    // which messages were lost. What that launch cannot delete stays sealed
+    // on any launch after while the MLS root keeps its pairing file.
+    // Nothing opens the state sealed under it again, so a refusal would save
+    // no record, and the engine's new key and its settlement of that state
+    // as failed is how the application learns which messages were lost. What that launch cannot delete stays sealed
     // under the lost key, and the pairing ids, not those records, say the
     // state is still this identity's.
     //

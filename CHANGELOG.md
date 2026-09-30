@@ -70,8 +70,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   record proves the key; a damaged check over an empty store fails with
   `FileStoreError::KeyCheckUnverifiable`, naming the file to remove. The
   sealed store never deletes a record on a read; a damaged one is reported
-  as `CorruptedData` naming its file, and one the listing skips is logged,
-  once per store, as a warning naming its file. Each store holds an
+  as `CorruptedData` naming its file, and one the listing skips is logged
+  as a warning naming its file, once until that file is written or removed.
+  A record that cannot be read is reported as a read failure, never as one
+  sealed under another key, and never counts towards refusing the store key. Each store holds an
   exclusive lock on its directory while open, so a second engine over the
   same directories fails with `FileStoreError::InUse` instead of silently
   diverging the MLS state. `close()` on either store releases its directory
@@ -120,8 +122,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   failed nor a first write that failed can disarm it); a state root that
   holds records and belongs with another MLS store (an identity is in
   place, but not the one that wrote the state), decided by the pairing ids
-  the two stores' first open wrote, and for a state root never bound by
-  whether its sealed records open under this MLS store's record key; an
+  the two stores' first open wrote, and for a state root never bound, or
+  bound to another id, by whether its sealed records open under this MLS
+  store's record key, which only this identity's do; an
   account directory that cannot be read, which is never taken for empty;
   and roots that are one directory
   or one inside the other, compared as spelled before anything is created
@@ -171,15 +174,26 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **The storage conformance suite no longer deletes a merging backend's
+  records.** `runStorageConformance` cleaned up its probe records by listing
+  a probe key type and deleting what it listed, before any check had run.
+  On a backend that merges key types, or lists them by the tail of the name,
+  that listing names real records too, and the cleanup deleted them. The
+  suite now checks key-type isolation first, with point writes and point
+  deletes only, and a failure ends the run there with that one check
+  reported. A run that passes it still has thirteen checks, under the same
+  names.
 - **Relay timestamps parse on Android 7.** The Android bridge parsed them
   with `java.time.Instant`, which exists from Android 8 (API 26), while the
   SDK supports Android 7 (API 24). On Android 7 the call threw
   `NoClassDefFoundError`, which the surrounding `catch (e: Exception)` does
   not catch, for a legacy relay message and an ISO-8601 last-seen timestamp.
   An application that enables core library desugaring was not affected. The
-  timestamp is now parsed without `java.time`, with the answers `Instant`
-  gave, and a Rust guard refuses a new `java.time` call in the bridge. Not
-  run on an Android 7 device.
+  timestamp is now parsed without `java.time`, as RFC 3339, and gives the
+  answers `Instant` gave for every timestamp a relay sends. At the edges it
+  is stricter than `Instant`: hour 24, a fraction with no digits, lowercase
+  `t` or `z` and a leap second are refused. A Rust guard refuses a new
+  `java.time` call in the bridge. Not run on an Android 7 device.
 - **An opted-in mesh wake with no wake service stops at once.** A sticky
   restart that wakes JavaScript started the wake service by name, and
   `startService` returns null rather than throwing when no such service is

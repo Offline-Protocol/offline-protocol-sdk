@@ -61,12 +61,7 @@ static_lib_for() {
   fi
 }
 
-echo "Checking the deployment target of every object..."
-assert_archive_min_os "$(static_lib_for aarch64-apple-ios)" "$IOS_DEPLOYMENT_TARGET"
-assert_archive_min_os "$(static_lib_for aarch64-apple-ios-sim)" \
-  "$(arm64_simulator_ceiling "$IOS_DEPLOYMENT_TARGET")"
-assert_archive_min_os "$(static_lib_for x86_64-apple-ios)" "$IOS_DEPLOYMENT_TARGET"
-
+# Packaging checks every archive against the deployment target first.
 echo "Packaging the XCFramework..."
 
 # Why an XCFramework, and why both slices share one archive basename: see
@@ -75,7 +70,8 @@ package_xcframework \
   "$OUTPUT_DIR" \
   "$(static_lib_for aarch64-apple-ios)" \
   "$(static_lib_for aarch64-apple-ios-sim)" \
-  "$(static_lib_for x86_64-apple-ios)"
+  "$(static_lib_for x86_64-apple-ios)" \
+  "$IOS_DEPLOYMENT_TARGET"
 
 # Generate bindings — all languages, not just Swift: they are one artifact set
 # off one UDL (see scripts/generate-bindings.sh).

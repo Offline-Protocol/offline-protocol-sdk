@@ -8,17 +8,25 @@
 //! merely somewhere else.
 //!
 //! Ownership is recorded, not inferred. The first open of a pair writes one
-//! random pairing id into both stores, the MLS store first. A later open
-//! compares the two ids, and nothing the engine does to its record key
-//! changes them. Asking the sealed records instead
-//! ([`FileProtocolStateStorage::sealed_state`]) cannot tell another
-//! identity's state from this identity's state under a record key the engine
-//! had to regenerate: records sealed under the lost key outlive the launch
-//! that regenerated it (documents are read lazily, and each restore walk
-//! stops at its delete allowance), and the next launch finds records that do
-//! not open under a usable key. That reading refused the same identity over
-//! its own roots. It remains only as the fallback for a state store that was
-//! never bound.
+//! random pairing id into both stores, the protocol-state store first (see
+//! [`bind`] for why that order). A later open compares the two ids, and
+//! nothing the engine does to its record key changes them.
+//!
+//! The records alone ([`FileProtocolStateStorage::sealed_state`]) cannot
+//! tell another identity's state from this identity's state under a record
+//! key the engine had to regenerate: records sealed under the lost key
+//! outlive the launch that regenerated it (documents are read lazily, and
+//! each restore walk stops at its delete allowance), and the next launch
+//! finds records that do not open under a usable key. That reading refused
+//! the same identity over its own roots, so it decides only where the ids
+//! cannot: a store that holds no readable id, and ids that differ.
+//!
+//! Where the ids differ, only a sealed record that opens under this MLS
+//! store's record key admits the state, since only this identity's records
+//! open under it. That is the MLS store that lost its pairing file and was
+//! bound again beside another state root. The state root then takes the
+//! MLS store's id, so two state roots can carry one id; each still belongs
+//! to that identity.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -164,8 +172,11 @@ impl FileStorePair {
 /// Whether the state store belongs with the MLS store.
 ///
 /// Decided by the pairing ids when both stores hold one: equal ids belong
-/// together, and a state store bound to another id belongs with another MLS
-/// store. When the MLS store holds no readable id (never bound, restored from
+/// together. A state store bound to another id belongs with another MLS
+/// store unless one of its sealed records opens under this MLS store's
+/// record key, which only this identity's records do: an MLS store that lost
+/// its pairing file and was bound again beside another state root still
+/// owns the state root it started with. When the MLS store holds no readable id (never bound, restored from
 /// a backup older than its binding, the file removed or damaged), or the
 /// state store holds none, the sealed records decide: another identity's
 /// records still open under no key this store holds.
@@ -183,7 +194,15 @@ fn ownership(
 ) -> Result<SealedState, FileStoreError> {
     match (state.pairing()?, pairing) {
         (Some(bound), StoredPairing::Present(ours)) if bound == *ours => Ok(SealedState::Opens),
-        (Some(_), StoredPairing::Present(_)) => Ok(SealedState::Foreign),
+        // A record that opens is proof no id can overrule. Anything short of
+        // it stays another MLS store's: records that do not open, a damaged
+        // record key, and unsealed records alone, which prove nothing.
+        (Some(_), StoredPairing::Present(_)) => Ok(match state.sealed_state(secure)? {
+            SealedState::Opens => SealedState::Opens,
+            SealedState::Empty | SealedState::Foreign | SealedState::KeyDamaged => {
+                SealedState::Foreign
+            }
+        }),
         (Some(_), StoredPairing::Absent | StoredPairing::Damaged) | (None, _) => {
             state.sealed_state(secure)
         }
@@ -393,7 +412,7 @@ mod tests {
         }
     }
 
-    /// The first open binds both stores to one id, the MLS store first, and
+    /// The first open binds both stores to one id, the state store first, and
     /// neither pairing file is a record: the probes that decide whether a new
     /// identity may start still see an empty pair.
     #[test]
@@ -552,6 +571,111 @@ mod tests {
         assert!(matches!(err, FileStoreError::Io { .. }), "{err}");
 
         open(&roots).expect("the next open admits the pair and binds it");
+    }
+
+    /// Gives the MLS store a record key and seals one record under it in the
+    /// state store, as the engine does.
+    fn seal_one_record(pair: &FileStorePair, key: [u8; 32]) {
+        use crate::protocol::storage_keys::{STATE_RECORD_KEY, STATE_RECORD_KEY_ID};
+        pair.secure
+            .store(STATE_RECORD_KEY, STATE_RECORD_KEY_ID, &key)
+            .expect("a record key");
+        let key_type = crate::protocol::sealed_state_key_types()
+            .next()
+            .expect("a sealed category");
+        let sealed = crate::protocol::state_crypto::StateRecordCipher::new(&key)
+            .seal(key_type, "parked", b"ours")
+            .expect("seal");
+        pair.state
+            .store(key_type, "parked", &sealed)
+            .expect("a sealed record");
+    }
+
+    /// An id mismatch is not the last word when a record opens. The MLS
+    /// store lost its pairing file and was bound again beside a fresh state
+    /// root; its first state root, put back, holds records only this
+    /// identity's record key opens, and it is admitted and bound again.
+    #[test]
+    fn a_state_root_whose_records_open_is_admitted_over_an_id_mismatch() {
+        let ours = roots("pair-mismatch-opens");
+        let pair = open(&ours).expect("open");
+        pair.secure
+            .store("identity", "self", b"ours")
+            .expect("an identity");
+        seal_one_record(&pair, [5; 32]);
+        let pairing_file = pair.secure.directory().join(PAIRING_FILE);
+        pair.close();
+        std::fs::remove_file(&pairing_file).expect("lose the MLS pairing file");
+
+        let elsewhere = TempRoot::new("pair-mismatch-elsewhere");
+        let rebound = FileStorePair::open(
+            ours.keys.path(),
+            elsewhere.path(),
+            &namespace(),
+            &StaticStoreKey::new([4; 32]),
+        )
+        .expect("bound beside a fresh state root");
+        let StoredPairing::Present(new_id) = rebound.secure.pairing().unwrap() else {
+            panic!("bound again");
+        };
+        rebound.close();
+        assert_ne!(
+            FileProtocolStateStorage::open(ours.state.path(), &namespace())
+                .and_then(|state| {
+                    let id = state.pairing();
+                    state.close();
+                    id
+                })
+                .expect("the first state root"),
+            Some(new_id),
+            "the first state root still carries the old id"
+        );
+
+        let pair = open(&ours).expect("its own records open under its record key");
+        assert_eq!(pair.state.pairing().unwrap(), Some(new_id), "bound again");
+    }
+
+    /// A state store with no record is admitted beside an MLS store bound to
+    /// another id, and takes that id: the ids alone would call it another
+    /// MLS store's, and it has nothing to lose to anyone.
+    #[test]
+    fn a_state_store_with_no_record_is_rebound_beside_another_bound_mls_store() {
+        let theirs = roots("pair-empty-bound-theirs");
+        open(&theirs).expect("their pair").close();
+        let ours = roots("pair-empty-bound-ours");
+        open(&ours).expect("our pair").close();
+
+        let pair = FileStorePair::open(
+            theirs.keys.path(),
+            ours.state.path(),
+            &namespace(),
+            &StaticStoreKey::new([4; 32]),
+        )
+        .expect("no record to lose");
+        let StoredPairing::Present(id) = pair.secure.pairing().unwrap() else {
+            panic!("bound");
+        };
+        assert_eq!(pair.state.pairing().unwrap(), Some(id));
+    }
+
+    /// A reinstall: the state root is gone and made again beside an MLS root
+    /// that is still bound. The new state store takes the MLS store's id, or
+    /// every later open would judge the pair by its records alone.
+    #[test]
+    fn a_state_root_made_again_takes_the_bound_mls_id() {
+        let roots = roots("pair-reinstall");
+        let pair = open(&roots).expect("open");
+        pair.secure
+            .store("identity", "self", b"ours")
+            .expect("an identity");
+        let StoredPairing::Present(id) = pair.secure.pairing().unwrap() else {
+            panic!("bound");
+        };
+        pair.close();
+        std::fs::remove_dir_all(roots.state.path()).expect("remove the state root");
+
+        let pair = open(&roots).expect("reopen over a new state root");
+        assert_eq!(pair.state.pairing().unwrap(), Some(id));
     }
 
     /// A pairing file that no longer opens names no state store. The pair

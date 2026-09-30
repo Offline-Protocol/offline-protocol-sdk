@@ -428,9 +428,13 @@ and binds the two so a later open knows they belong together (see
   a store sealed under another identity's record key. `FileStorePair`
   records which MLS store a state store belongs with: its first open writes
   one random pairing id into both (`mls-store.pair`, sealed under the store
-  key, and `state-store.pair`, in the clear), the MLS store first, and a
-  later open compares them. Neither file is a record, and a binding's
-  provider never reads them.
+  key, and `state-store.pair`, in the clear), the state store first, so a
+  crash between the two writes leaves the MLS store with no id rather than
+  two stores on different ones. A later open compares them. Where they
+  differ, a sealed record that opens under this MLS store's record key
+  still admits the state root, since only this identity's records open under
+  it; nothing less does. Neither file is a record, and a binding's provider
+  never reads them.
 - **The records alone cannot settle ownership.**
   `FileProtocolStateStorage::sealed_state` asks the sealed records whether
   they open under the MLS store's record key, without changing either
