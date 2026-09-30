@@ -202,15 +202,36 @@ assert_archive_min_os() {
   esac
 }
 
-# package_xcframework <output_dir> <device_a> <sim_arm64_a> <sim_x86_64_a>
+# package_xcframework <output_dir> <device_a> <sim_arm64_a> <sim_x86_64_a> <deployment_target>
 #
-# Stages the device archive and a fat simulator archive under one shared
-# basename, then builds <output_dir>/offline_protocol_uniffi.xcframework.
+# Checks every archive against the deployment target, then stages the device
+# archive and a fat simulator archive under one shared basename and builds
+# <output_dir>/offline_protocol_uniffi.xcframework.
+#
+# The gate is here, not beside the call, so the pod's XCFramework cannot be
+# packaged without it: a gate the caller has to remember was pinned by the
+# order of lines in the build script, and most edits that broke it kept the
+# order. scripts/package-swiftpm-xcframework.sh, which packages the Swift
+# package's XCFramework, does not come through here; the Swift Package CI
+# job calls assert_archive_min_os on its archive itself.
+# scripts/tests/test-ios-min-os.sh drives this function with stand-ins for
+# otool, lipo and xcodebuild.
 package_xcframework() {
   local output_dir="$1"
   local device_lib="$2"
   local sim_arm64_lib="$3"
   local sim_x86_64_lib="$4"
+  local deployment_target="${5:-}"
+
+  if [ -z "$deployment_target" ]; then
+    echo "ERROR: package_xcframework needs the deployment target to check the archives against" >&2
+    return 1
+  fi
+
+  echo "Checking the deployment target of every object..."
+  assert_archive_min_os "$device_lib" "$deployment_target" || return 1
+  assert_archive_min_os "$sim_arm64_lib" "$(arm64_simulator_ceiling "$deployment_target")" || return 1
+  assert_archive_min_os "$sim_x86_64_lib" "$deployment_target" || return 1
 
   local xcframework="$output_dir/offline_protocol_uniffi.xcframework"
 

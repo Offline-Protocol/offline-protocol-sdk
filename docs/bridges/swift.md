@@ -259,17 +259,22 @@ Three things hold the invariant:
 - `bindings/react-native/scripts/build-uniffi-ios.sh` reads the target out of
   the podspec and exports it before it builds. The number is written once, in
   the podspec. The SDK's own Rust code is compiled for it too.
-- After the build, the script reads every object in every slice and refuses to
-  package one that is too new. An archive it could not read fails the same
-  way: one with no stamp in it, and one `otool` read part of before giving
-  up.
+- `package_xcframework` reads every object in every slice before it packages
+  anything, and refuses an archive that holds one too new. An archive it
+  could not read fails the same way: one with no stamp in it, and one
+  `otool` read part of before giving up. The check is inside the packaging
+  function, not beside the call, so the pod's XCFramework cannot be packaged
+  without it. The Swift package's XCFramework is built by
+  `scripts/package-swiftpm-xcframework.sh`, which does not check; the
+  `Swift Package` job runs the check on its archive as a step of its own.
 - The gate needs `otool`, so in CI it runs where the library is built on a
   Mac: in a release, on all three archives, and in the `Swift Package` job,
   on the simulator archive of every pull request.
   `scripts/tests/test-ios-min-os.sh`, at the repository root, runs on every
   pull request on Linux. It covers what can go wrong without `otool`: the
-  parser, the podspec reader, a failing `otool`, and that the build script
-  still calls the gate on all three archives.
+  parser, the podspec reader, a failing `otool`, and the packaging function
+  itself, driven with stand-ins for `otool`, `lipo` and `xcodebuild`: each
+  archive is held to its own ceiling, and a refused one packages nothing.
 
 The podspec has one reader, `ios_deployment_target` in
 `bindings/react-native/scripts/shared/xcframework.sh`.
@@ -281,8 +286,10 @@ the release would have built for a number the package refused.
 A target directory built for one deployment target keeps its Rust objects
 when the target changes, because cargo does not rebuild a crate for a new
 value of the variable. Only the C compiled through `cc-rs` is redone. A
-lowered target therefore fails the gate on Rust objects until `cargo clean`,
-locally or in a CI cache.
+lowered target therefore fails the gate on Rust objects until `cargo clean`.
+Both CI caches that hold iOS objects, the `Swift Package` job's and the
+release's, add the podspec's hash to their key, so a changed target starts
+from a cold cache there.
 
 ## Testing
 

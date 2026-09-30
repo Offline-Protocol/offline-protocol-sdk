@@ -555,8 +555,9 @@ jobs:
       # The gate reads a real archive with otool, so it runs where the iOS
       # library is built: in a release, on all three archives, and in the
       # Swift Package job below, on the simulator archive of every pull
-      # request. This drives everything in it that is text handling, with a
-      # stand-in for otool, on a runner that has none.
+      # request. This drives everything in it that is text handling, and the
+      # packaging function the gate sits inside, with stand-ins for otool,
+      # lipo and xcodebuild, on a runner that has none of them.
       - name: Test the iOS deployment-target gate
         run: bash scripts/tests/test-ios-min-os.sh
 
