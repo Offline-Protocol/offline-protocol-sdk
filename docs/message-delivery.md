@@ -241,6 +241,15 @@ When the outbox is full, the oldest entry is evicted with a terminal `message_fa
 
 **Important**: When a message storage backend is configured, regular-message outbox entries are persisted and restored on the next `start()` with a refreshed delivery window. Media chunks are never persisted — an interrupted transfer surfaces as `media_resend_required` instead. See [Client-Side Persistence](#client-side-persistence) for the app-side layer.
 
+**Custody does not change any of this.** A neighbour holding one of this
+device's replication frames in custody ([spec](spec/custody.md)) is an
+additional holder of the frame, never its owner: the outbox entry, its
+lifetime, the acknowledgement tracking and the retry ladder are untouched by a
+deposit and untouched by the custodian's receipt. The receipt only stops this
+device from asking the same custodian again while the hold lasts. Whichever
+path carries the frame, delivery is settled by the recipient's acknowledgement
+and nothing else.
+
 ## Unreachable Recipients: Parking
 
 When the internet relay reports a recipient unreachable for an in-flight regular message (its `recipient_unreachable` delivery verdict), the message does not burn its ACK retry budget against a peer that is provably offline. Instead it is **parked**:

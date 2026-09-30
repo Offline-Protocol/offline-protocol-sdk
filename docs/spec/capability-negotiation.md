@@ -10,7 +10,7 @@ Peers advertise what they can parse in the key package payload, the body of a
 | `wire_versions` | Hop-local | Which frame encodings we may emit to this peer | JSON only |
 | `env_versions` | End to end | Which `__MLS_ENC__` payload forms we may emit | Legacy JSON envelope only |
 | `rich_versions` | End to end | Whether we may seal a `__RICH_V1__` body, and the v2 media envelope | Plain text only, extras dropped |
-| `data_versions` | End to end | Whether we may send `__DATA_V1__` document sync frames, and which document encoding they carry. Entry 1 is 1:1 replication; entry 2 additionally means the peer intercepts these frames inside a *group* ciphertext; entry 3 additionally means the peer speaks the blob-fetch frames and routes a data-purposed media transfer into its document layer; entry 4 additionally means the peer reads the removals a version offer carries; entry 5 additionally means it answers inside the interest an offer declares; entry 6 additionally means it carries attachment bytes inside a group | No replication with that peer |
+| `data_versions` | End to end | Whether we may send `__DATA_V1__` document sync frames, and which document encoding they carry. Entry 1 is 1:1 replication; entry 2 additionally means the peer intercepts these frames inside a *group* ciphertext; entry 3 additionally means the peer speaks the blob-fetch frames and routes a data-purposed media transfer into its document layer; entry 4 additionally means the peer reads the removals a version offer carries; entry 5 additionally means it answers inside the interest an offer declares; entry 6 additionally means it carries attachment bytes inside a group; entry 7 additionally means it parses the custody receipt, so a custodian may answer its deposits | No replication with that peer |
 | `ctrl_versions` | End to end | Which control-frame signing payload we build for this peer. Entry 2 means the peer verifies `offline-ctrl-v2`, which binds the frame's timestamp | Build `offline-ctrl-v1`, which states no freshness |
 | `nostr_pubkey` | End to end | Which key metadata is sealed to on the Nostr path | Seal to the publicly computable key |
 
@@ -113,6 +113,25 @@ instead of leaving an application waiting out the silence timeout for an
 answer that was never coming. A requester MUST refuse only on knowledge: a
 member this device has never exchanged key packages with is the ordinary
 case, and reading its absence as incapacity would refuse every such fetch.
+
+Entry 7 gates one frame in one direction. A peer that advertises it parses
+the `__CUSTODY_RECEIPT__` control frame ([Custody](custody.md)), so a
+custodian that accepted one of its replication frames may answer with a
+receipt. A custodian MUST NOT send a receipt to a peer without it: the peer
+does not know the prefix as a control frame, so with encryption on it refuses
+the receipt as inbound plaintext and records a security refusal, and on a
+plaintext-only deployment it shows the receipt to its user as a message. The
+gate exists to keep a helpful neighbour from ever causing either. It gates
+nothing else. A deposit request is a metadata key an unaware receiver ignores, so a
+depositor MAY write it toward any neighbour, and acceptance of a deposit is
+decided by the custodian's quotas, never by this entry. It lives in the
+replication family rather than in a list of its own because custody carries
+replication frames only: a device that does not replicate has nothing to
+deposit and nothing to hold, and a separate list would add a key package
+field, which is a codec change with vectors, to state what the family
+already scopes. It has no attested sibling, because the receipt is a 1:1
+control frame between neighbours and a group inviter has nothing to say
+about one.
 
 Entry 2 has a second source, because members of a group never exchange key
 packages with each other: a group inviter MAY attest it for a member on the

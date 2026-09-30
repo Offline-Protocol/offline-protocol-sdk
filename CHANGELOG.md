@@ -15,6 +15,95 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **A local API guide and two client examples.** `docs/local-api.md` is
+  the guide to running the SDK as a service several local applications
+  share; `bindings/python/examples/local_api_client.py` (Python) and
+  `examples/local-api/client.mjs` (Node 22, no dependencies) each show
+  `hello`, `subscribe`, a send with its delivery event, a document edit read
+  back, and the one-shot idiom. The Python suite runs both against an
+  in-process server, the Node one when `node` is on the path.
+- **The Python reference server for the local API.**
+  `offline_protocol_sdk.local_api` and the `offline-protocol-service` command
+  front one engine for any number of local applications over JSON-RPC 2.0 on
+  a WebSocket, on an owner-only Unix domain socket by default or on loopback
+  TCP with a per-launch token. The server owns the run loop and the drain;
+  a client declares its application id once in `hello`, every send is
+  stamped with it, and every event is relayed as the engine serialised it to
+  the clients the chapter's rules select (by application id, by an
+  identifier the server issued, or to everyone), with the stamped inbound
+  events held for an application whose client is away. The method table is
+  generated from the interface definition and checked in
+  (`local_api/table.py`), every declaration is classified as exposed or
+  platform-only in `dispatch.py`, and a Rust guard in the FFI crate holds
+  the chapter, the definition and that classification to one another, so
+  an unclassified method is a failing test rather than a method every local
+  application can reach. Optional rules from one JSON file: a space
+  allow-list and method denials per application id, which once configured
+  refuse a `hello` under an id no rule names. A test over two servers on
+  one host exchanges a message over the peer-stream transport.
+- **The local API chapter.** `docs/spec/local-api.md` specifies how one
+  server process fronts one engine for several local applications: JSON-RPC
+  2.0 over a WebSocket on a Unix domain socket by default (TCP on loopback
+  with a per-launch token as the opt-in), a `hello` that declares the
+  client's application id once and stamps it on every send, and the events
+  relayed unchanged as notifications. It is the first complete catalogue of
+  the engine's events: all seventy-five tags with their fields and the
+  vocabularies of the enum-valued ones, and how each is routed (by
+  application id, by an identifier the server issued, or to everyone). The
+  method table partitions the interface definition into the 126 methods a
+  client may call and the 92 platform operations it never can, including the
+  run loop and the drain, which the server owns because the engine delivers
+  a message only when something drains. Errors keep the engine's
+  twenty-five-variant taxonomy: the JSON-RPC code is the variant's position
+  in the append-only enum. There is no HTTP request path: the pinned
+  WebSocket library drops any non-`GET` handshake without a response, which
+  the chapter records so it is not re-added. `docs/bridges/local-api.md`
+  states which shared bridge rules the server inherits and the new rule that
+  a Rust guard pins the three tables to the definition, the engine and the
+  reference server. Nothing ships in this entry but the contract; the
+  reference server follows it.
+
+- **Custody v1.** A device can now hold a neighbour's replication frames for
+  hours instead of the five seconds a forwarder gives them
+  (`docs/spec/custody.md`), off by default. `ProtocolConfig::custody`
+  (`custody` in every binding) switches it on and sets the hold and the
+  quotas; the hold is validated strictly shorter than the outbox lifetime. The
+  depositor's engine writes the one-hop request on its own sealed `delta`,
+  `snap`, `vv` and `blob_gone` frames when it offers them to neighbours, from
+  the plaintext it retains for re-sealing and never after a restart; every
+  forwarder strips the request from a third-party frame it transmits. A
+  custodian judges a frame at the drop point, after the forwarding identifier
+  is released, so it never blanks its own route; answers a depositor that
+  advertises `data_versions` entry 7 with the signed `__CUSTODY_RECEIPT__`
+  once, over the arrival link; redelivers on neighbour discovery through a
+  dedicated governor intake, at most once per neighbour per hold and straight
+  to the recipient when it appears; expires records in wall time against the
+  hold in force; and keeps them sealed under the new `custody_entries` storage
+  category, restored at launch. A receipt settles nothing. `custody_stats()`
+  (`get_custody_stats()` over the FFI) reports the counters, every refusal
+  reason included, and `erase_custody()` drops every record; the data-layer
+  wipe calls it. The receipt body has frozen vectors at
+  `crates/offline-protocol/tests/data/custody-receipt-v1.vectors.json`.
+
+- **The custody chapter.** `docs/spec/custody.md` specifies how a device
+  holds a neighbour's replication frame for hours instead of the five
+  seconds a forwarder gives it today: an explicit deposit in which the
+  depositor asserts the class and this version carries only `delta`, `snap`,
+  `vv` and `blob_gone`; a signed receipt that settles nothing; a hold that is
+  validated strictly shorter than the outbox lifetime, because a custodian
+  holds ciphertext it cannot re-seal; acceptance only for what the mesh could
+  not forward, at the point where the forwarding identifier is already
+  released, so a custodian never blanks its own route; redelivery as an
+  ordinary forward; entry and byte quotas per depositor with a stranger tier
+  of zero; and an erase of its own, because no global wipe exists. The
+  control-message registry and the engine's prefix list reserve
+  `__CUSTODY_RECEIPT__`, the wire-format chapter reserves the metadata key
+  `__custody`, and `data_versions` gains entry 7 for the receipt. The threat
+  model gains R19 (custody-borne re-key pressure), R20 (a custodian retains
+  third-party routing metadata) and R21 (deposit spam). Nothing ships in this
+  entry but the contract and the reservations; the store, the quotas and the
+  receipt follow it, and custody stays off until they do.
+
 - **The leaf node builds for ESP32 RISC-V parts and for Cortex-M0.**
   `offline-protocol-leaf` now compiles, and CI lints it, for
   `riscv32imac-unknown-none-elf` (ESP32-C6, ESP32-H2),
@@ -196,6 +285,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   version is opaque, and the peer-tracking hook is `on_neighbor_discovered`.
 
 ### Fixed
+
+- **The iOS config readers read `0` and `1` as numbers.** The Foundation-only
+  readers behind `meshRelay` and `custody` excluded JSON booleans with an
+  `is Bool` test that Swift also answers true for the numbers 0 and 1, so a
+  `fanout: 1`, an `activityIdleWindows: 1` or a `jitterMinMs: 0` written from
+  React Native reached the core as unset and the dial silently stayed at its
+  default. Both readers now exclude booleans by their CoreFoundation type.
 
 - **The storage conformance suite no longer deletes a merging backend's
   records.** `runStorageConformance` cleaned up its probe records by listing

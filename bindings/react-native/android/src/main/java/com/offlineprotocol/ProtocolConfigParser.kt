@@ -1,6 +1,7 @@
 package com.offlineprotocol
 
 import org.json.JSONObject
+import uniffi.offline_protocol.CustodyConfig
 import uniffi.offline_protocol.MeshRelayConfig
 import uniffi.offline_protocol.OverflowPolicy
 import uniffi.offline_protocol.ProtocolConfig
@@ -187,6 +188,38 @@ internal object ProtocolConfigParser {
             )
         }
 
+        // Custody section (nested home under `custody`). Absent stays absent
+        // all the way to the core, whose default is off: every field is
+        // nullable and null means "keep the Rust default", so this parser
+        // never states a default of its own. Mirrors CustodyConfigReader.swift;
+        // keep the read order in sync. Widths are coerced before the unsigned
+        // conversion for the reason the mesh block gives, and an overflow
+        // policy spelled in a way this build does not know stays null rather
+        // than becoming a default chosen here.
+        val custodyJson = json.optJSONObject("custody")
+        val custody = custodyJson?.let { section ->
+            fun uLong(vararg keys: String): ULong? =
+                section.optLongCompat(*keys)?.coerceAtLeast(0L)?.toULong()
+            val overflowRaw = section.optStringCompat("overflowPolicy", "overflow_policy")
+            val overflow = when (overflowRaw?.lowercase()) {
+                "drop_newest", "dropnewest" -> OverflowPolicy.DROP_NEWEST
+                "drop_oldest", "dropoldest" -> OverflowPolicy.DROP_OLDEST
+                else -> null
+            }
+
+            CustodyConfig(
+                enabled = section.optBooleanCompat("enabled"),
+                holdMs = uLong("holdMs", "hold_ms"),
+                maxEntriesPerDepositor = uLong("maxEntriesPerDepositor", "max_entries_per_depositor"),
+                maxBytesPerDepositor = uLong("maxBytesPerDepositor", "max_bytes_per_depositor"),
+                maxEntries = uLong("maxEntries", "max_entries"),
+                maxBytes = uLong("maxBytes", "max_bytes"),
+                strangerMaxEntries = uLong("strangerMaxEntries", "stranger_max_entries"),
+                strangerMaxBytes = uLong("strangerMaxBytes", "stranger_max_bytes"),
+                overflowPolicy = overflow
+            )
+        }
+
         // Data layer section (nested home under `data`, both cases). Same
         // rule as meshRelay: absent stays absent, so the Rust default is the
         // only default. The flag is read out of the section rather than as a
@@ -244,7 +277,8 @@ internal object ProtocolConfigParser {
             compactEnvelopeEnabled = compactEnvelopeEnabled,
             richPayloadEnabled = richPayloadEnabled,
             cryptoRecoveryEnabled = cryptoRecoveryEnabled,
-            meshRelay = meshRelay
+            meshRelay = meshRelay,
+            custody = custody
         )
 
         // Assigned only when the app actually sent it. Writing

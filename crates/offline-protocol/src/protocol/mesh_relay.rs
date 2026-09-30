@@ -61,6 +61,8 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::time::{Duration, Instant};
 
+use super::custody::CUSTODY_META_KEY;
+
 /// Hop budget a forwarded frame is clamped to under normal density.
 pub const DEFAULT_RELAY_MAX_TTL: u8 = 8;
 
@@ -314,6 +316,19 @@ pub struct PendingRelay {
     pub arrival_peer: Option<String>,
     /// When it becomes eligible to transmit.
     pub due_at: Instant,
+    /// The class token the frame carried as a deposit request on arrival
+    /// (`docs/spec/custody.md`). Kept here because the forwarded copy has
+    /// the key stripped, and the drop point needs it to judge the frame for
+    /// custody. `None` on a frame that asked for nothing.
+    pub custody_request: Option<String>,
+    /// For a held frame being redelivered: the one neighbor it is
+    /// transmitted to, never through target selection. `None` on an
+    /// ordinary forward. A forward carrying this is a *marked* forward: the
+    /// drop point returns it to the custody store instead of judging it, and
+    /// neither the overdue cut-off nor a refused requeue touches the
+    /// suppression cache for it, because the held intake never recorded its
+    /// id there.
+    pub custody_target: Option<String>,
 }
 
 /// Running totals, for telemetry and for tests that assert a flood stayed
@@ -804,6 +819,10 @@ impl MeshRelayGovernor {
             }
         }
 
+        // The deposit request, read before the hop rewrite strips it from the
+        // copy that travels on. Only the drop point acts on it.
+        let custody_request = message.metadata.get(CUSTODY_META_KEY).cloned();
+
         // Hop accounting. The arriving budget is clamped to what our own policy
         // would have issued before it is spent, so an inflated claim buys at
         // most this one hop.
@@ -829,10 +848,54 @@ impl MeshRelayGovernor {
             message: forwarded,
             arrival_peer: arrival_peer.map(str::to_string),
             due_at,
+            custody_request,
+            custody_target: None,
         });
         self.counters.queued = self.counters.queued.saturating_add(1);
 
         RelayAdmission::Queued
+    }
+
+    /// Queues a held frame for redelivery toward one neighbor: the dedicated
+    /// intake custody uses instead of [`Self::admit`]
+    /// (`docs/spec/custody.md`, "Redelivery").
+    ///
+    /// The ordinary intake would refuse or mangle a held frame in three
+    /// ways, and this one skips exactly those: it does not consult the
+    /// suppression cache, which would refuse a second re-origination toward
+    /// another neighbor within the cache's window; it does not spend a hop,
+    /// because the custodian is the same forwarder it was when the frame
+    /// arrived and the frame goes out with the hop fields it was stored
+    /// with; and it does not charge the arrival peer's rate hours after that
+    /// peer sent anything. It still takes the queue capacity (evicting a
+    /// lower-priority forward as `admit` would) and the per-neighbor rate
+    /// toward the target, and the send budget is checked at release like
+    /// every other forward.
+    ///
+    /// Nothing is recorded in the suppression cache, so a refusal here and
+    /// an abandonment later both leave the cache exactly as they found it.
+    /// Refusals are not counted: the frame is still held, and the caller
+    /// tries again when the neighbor next appears.
+    pub fn admit_held(
+        &mut self,
+        message: Message,
+        target: &str,
+        now: Instant,
+    ) -> Result<(), RelayRejection> {
+        if !self.take_peer_token(target, now) {
+            return Err(RelayRejection::PeerRateLimited);
+        }
+        if self.pending.len() >= self.config.queue_capacity && !self.evict_for(&message, now) {
+            return Err(RelayRejection::QueueFull);
+        }
+        self.pending.push(PendingRelay {
+            message,
+            arrival_peer: None,
+            due_at: now,
+            custody_request: None,
+            custody_target: Some(target.to_string()),
+        });
+        Ok(())
     }
 
     /// Returns the forwards whose delay has elapsed, removing them from the
@@ -856,10 +919,27 @@ impl MeshRelayGovernor {
     /// back with [`Self::requeue`] rather than drop it — the id is already
     /// recorded as handled here, so dropping it would lose this copy *and*
     /// refuse the copies and retransmissions that follow.
+    #[cfg(test)]
     pub fn take_due(&mut self, now: Instant) -> Vec<PendingRelay> {
+        self.release_due(now).0
+    }
+
+    /// [`Self::take_due`], also handing back the forwards it abandoned.
+    ///
+    /// The second list is the drop point (`docs/spec/custody.md`, "What a
+    /// custodian does on arrival"). An ordinary forward in it waited past
+    /// [`RELAY_QUEUE_MAX_OVERDUE`] without reaching a link, its id has
+    /// already been released from the suppression cache here, and custody
+    /// may take it on. A marked held forward (`custody_target` set) in it is
+    /// returned to the custody store by the caller; this never touches the
+    /// suppression cache for one, because the held intake never recorded its
+    /// id there, and releasing it would at best be a no-op and at worst
+    /// release an entry the depositor's own retransmission legitimately holds.
+    pub fn release_due(&mut self, now: Instant) -> (Vec<PendingRelay>, Vec<PendingRelay>) {
         self.seen.expire(now);
 
         let mut due = Vec::new();
+        let mut abandoned = Vec::new();
         let mut keep: Vec<PendingRelay> = Vec::with_capacity(self.pending.len());
 
         for relay in std::mem::take(&mut self.pending) {
@@ -869,12 +949,17 @@ impl MeshRelayGovernor {
             }
 
             if now.saturating_duration_since(relay.due_at) > RELAY_QUEUE_MAX_OVERDUE {
-                // Never made it onto a link, so its id must not stay
-                // suppressed: the sender's retransmissions carry the same id,
-                // and refusing them would close this route for the whole
-                // retention window over a few seconds of congestion.
-                self.seen.forget(&relay.message.id.as_str());
-                self.counters.abandoned_overdue = self.counters.abandoned_overdue.saturating_add(1);
+                if relay.custody_target.is_none() {
+                    // Never made it onto a link, so its id must not stay
+                    // suppressed: the sender's retransmissions carry the same
+                    // id, and refusing them would close this route for the
+                    // whole retention window over a few seconds of
+                    // congestion.
+                    self.seen.forget(&relay.message.id.as_str());
+                    self.counters.abandoned_overdue =
+                        self.counters.abandoned_overdue.saturating_add(1);
+                }
+                abandoned.push(relay);
                 continue;
             }
 
@@ -887,7 +972,7 @@ impl MeshRelayGovernor {
         }
 
         self.pending = keep;
-        due
+        (due, abandoned)
     }
 
     /// Whether any budget remains to forward right now.
@@ -973,19 +1058,46 @@ impl MeshRelayGovernor {
     /// instead of being retried forever.
     ///
     /// Refused only if the queue has filled meanwhile, which is the same
-    /// bound every other queued frame is subject to.
-    pub fn requeue(&mut self, relay: PendingRelay) {
+    /// bound every other queued frame is subject to. A marked held forward
+    /// refused room is handed back rather than dropped: the custody store
+    /// still holds the frame, so nothing is lost, and its id was never
+    /// recorded in the suppression cache, so nothing is released. The
+    /// caller returns it to the store; `None` means the frame was requeued
+    /// or, for an ordinary forward, dropped.
+    pub fn requeue(&mut self, relay: PendingRelay) -> Option<PendingRelay> {
         if self.pending.len() >= self.config.queue_capacity {
+            if relay.custody_target.is_some() {
+                return Some(relay);
+            }
             // Refused room on the way back, so this frame is being dropped
             // having reached nobody. Release its id for the same reason the
             // overdue cut-off does — a copy behind it, or the sender's own
             // retransmission, is now the only way it travels.
             self.seen.forget(&relay.message.id.as_str());
             self.counters.queue_full = self.counters.queue_full.saturating_add(1);
-            return;
+            return None;
         }
         self.counters.requeued = self.counters.requeued.saturating_add(1);
         self.pending.push(relay);
+        None
+    }
+
+    /// Drops every marked held forward from the queue, leaving the ordinary
+    /// ones. For the custody erase: a frame queued for redelivery seconds
+    /// before the erase must not go out after it.
+    pub fn drop_held(&mut self) {
+        self.pending.retain(|relay| relay.custody_target.is_none());
+    }
+
+    /// Whether `message_id` is recorded as handled in the suppression cache.
+    ///
+    /// For the tests that pin custody and the cache disjoint: a custodian
+    /// that both held a frame and suppressed its own forwarding of the
+    /// depositor's retransmissions would be a black hole on exactly the
+    /// route now known to be slow.
+    #[cfg(test)]
+    pub fn is_suppressed(&self, message_id: &str) -> bool {
+        self.seen.contains(message_id)
     }
 
     /// Records an id as handled without queueing a forward for it.
@@ -1171,6 +1283,15 @@ impl MeshRelayGovernor {
         // past this hop.
         forwarded.ttl = remaining;
         let _ = forwarded.increment_hop();
+        // Every device that transmits a third-party frame strips the deposit
+        // request from the copy it transmits, custody-enabled or not
+        // (`docs/spec/custody.md`, "What a forwarder does"). The key is
+        // unsigned metadata outside the sealed body, so nothing else stops
+        // it travelling on; left in place, a two-hop network deposits a
+        // frame at a custodian that never saw its sender, and a zone holds
+        // every frame everywhere. Only the outer metadata is touched, never
+        // `content`.
+        forwarded.metadata.remove(CUSTODY_META_KEY);
         Some(forwarded)
     }
 
@@ -2509,5 +2630,213 @@ mod tests {
         // scratch rather than promoting on stale traffic.
         assert_eq!(gov.observe_activity(start + Duration::from_secs(22)), None);
         assert!(!gov.is_active_relay());
+    }
+
+    // ====================================================================
+    // Custody: the held-frame intake and the drop point
+    // ====================================================================
+
+    /// A frame carrying a deposit request, as a depositor offers it.
+    fn deposit_frame() -> Message {
+        let mut msg = frame();
+        msg.metadata
+            .insert(CUSTODY_META_KEY.to_string(), "data".to_string());
+        msg
+    }
+
+    #[test]
+    fn a_forwarder_strips_the_deposit_request_and_the_drop_point_keeps_it() {
+        // The key is unsigned metadata outside the sealed body, so nothing
+        // but this strip keeps a deposit to one hop: left in place, a two-hop
+        // network deposits a frame at a custodian that never saw its sender.
+        let mut gov = governor();
+        let msg = deposit_frame();
+        assert_eq!(
+            gov.admit(&msg, Some("alice"), 3, false),
+            RelayAdmission::Queued
+        );
+
+        let (due, abandoned) = gov.release_due(Instant::now());
+        assert!(abandoned.is_empty());
+        let relay = &due[0];
+        assert!(
+            !relay.message.metadata.contains_key(CUSTODY_META_KEY),
+            "the copy that travels on carries no request"
+        );
+        assert_eq!(
+            relay.custody_request.as_deref(),
+            Some("data"),
+            "the request is kept beside the copy, for the drop point alone"
+        );
+        assert_eq!(
+            relay.custody_target, None,
+            "an ordinary forward is not marked"
+        );
+        assert_eq!(
+            relay.message.content, msg.content,
+            "only the outer metadata is touched"
+        );
+    }
+
+    #[test]
+    fn an_abandoned_forward_is_handed_to_the_drop_point_with_its_id_released() {
+        let mut gov = governor();
+        let msg = deposit_frame();
+        gov.admit(&msg, Some("alice"), 3, false);
+        let (due, _) = gov.release_due(Instant::now());
+        gov.requeue(due.into_iter().next().unwrap());
+
+        let later = Instant::now() + RELAY_QUEUE_MAX_OVERDUE + Duration::from_millis(1);
+        let (due, abandoned) = gov.release_due(later);
+        assert!(due.is_empty());
+        assert_eq!(
+            abandoned.len(),
+            1,
+            "the drop point sees the abandoned forward"
+        );
+        assert_eq!(abandoned[0].custody_request.as_deref(), Some("data"));
+        assert!(
+            !gov.is_suppressed(&msg.id.as_str()),
+            "released before custody judges it, so a custodian never blanks its own route"
+        );
+        assert_eq!(gov.counters().abandoned_overdue, 1);
+    }
+
+    #[test]
+    fn the_held_intake_skips_suppression_and_hop_accounting() {
+        let mut gov = governor();
+        let msg = frame_with(3, MessagePriority::Medium);
+
+        // The ordinary path has handled this id: a copy would be refused.
+        assert_eq!(
+            gov.admit(&msg, Some("alice"), 3, false),
+            RelayAdmission::Queued
+        );
+        let (due, _) = gov.release_due(Instant::now());
+        assert_eq!(due.len(), 1);
+        assert_eq!(
+            gov.admit(&msg, Some("alice"), 3, false),
+            RelayAdmission::Rejected(RelayRejection::AlreadySeen)
+        );
+
+        // The held intake queues it anyway, toward one neighbor, with the hop
+        // fields exactly as handed in.
+        let held = due.into_iter().next().unwrap().message;
+        let hop_before = held.hop_count.value();
+        let ttl_before = held.ttl.value();
+        gov.admit_held(held, "dave", Instant::now())
+            .expect("queued");
+        let (due, _) = gov.release_due(Instant::now());
+        assert_eq!(due.len(), 1);
+        let relay = &due[0];
+        assert_eq!(relay.custody_target.as_deref(), Some("dave"));
+        assert_eq!(relay.arrival_peer, None);
+        assert_eq!(relay.message.hop_count.value(), hop_before, "no hop spent");
+        assert_eq!(relay.message.ttl.value(), ttl_before, "no budget spent");
+
+        // And it recorded nothing: the cache is exactly as it was.
+        let seen_before = gov.seen.len();
+        gov.admit_held(relay.message.clone(), "erin", Instant::now())
+            .expect("queued");
+        assert_eq!(gov.seen.len(), seen_before);
+    }
+
+    #[test]
+    fn a_marked_forward_never_touches_the_suppression_cache() {
+        let mut gov = governor();
+        let msg = frame();
+        // The depositor's own retransmission is legitimately handled: taken
+        // on, released to the radio, and its id recorded for the window.
+        gov.admit(&msg, Some("alice"), 3, false);
+        let (due, _) = gov.release_due(Instant::now());
+        assert_eq!(due.len(), 1, "transmitted");
+        assert!(gov.is_suppressed(&msg.id.as_str()));
+
+        // A held copy of the same id, abandoned: the ordinary entry stays.
+        gov.admit_held(msg.clone(), "dave", Instant::now())
+            .expect("queued");
+        let later = Instant::now() + RELAY_QUEUE_MAX_OVERDUE + Duration::from_millis(1);
+        let (_, abandoned) = gov.release_due(later);
+        let held: Vec<_> = abandoned
+            .iter()
+            .filter(|r| r.custody_target.is_some())
+            .collect();
+        assert_eq!(held.len(), 1);
+        assert!(
+            gov.is_suppressed(&msg.id.as_str()),
+            "abandoning a marked forward releases nothing"
+        );
+        // Nor does refusing it room on the way back.
+        let counters_before = gov.counters().clone();
+        let mut full = MeshRelayGovernor::with_config(
+            "relay-node",
+            MeshRelayConfig {
+                queue_capacity: 1,
+                ..immediate_config()
+            },
+        );
+        full.admit(&frame(), Some("alice"), 3, false);
+        let returned = full.requeue(PendingRelay {
+            message: frame(),
+            arrival_peer: None,
+            due_at: Instant::now(),
+            custody_request: None,
+            custody_target: Some("dave".to_string()),
+        });
+        assert!(returned.is_some(), "handed back to the custody store");
+        assert_eq!(full.counters().queue_full, 0, "not counted as a loss");
+        assert_eq!(
+            gov.counters().abandoned_overdue,
+            counters_before.abandoned_overdue
+        );
+    }
+
+    #[test]
+    fn dropping_held_forwards_leaves_the_ordinary_ones_queued() {
+        let mut gov = governor();
+        gov.admit(&frame(), Some("alice"), 3, false);
+        gov.admit_held(frame(), "dave", Instant::now())
+            .expect("queued");
+        gov.admit_held(frame(), "erin", Instant::now())
+            .expect("queued");
+        assert_eq!(gov.pending_len(), 3);
+
+        gov.drop_held();
+
+        assert_eq!(gov.pending_len(), 1);
+        let (due, _) = gov.release_due(Instant::now());
+        assert_eq!(due.len(), 1);
+        assert!(due[0].custody_target.is_none());
+    }
+
+    #[test]
+    fn the_held_intake_still_takes_the_queue_and_the_neighbor_rate() {
+        let mut gov = MeshRelayGovernor::with_config(
+            "relay-node",
+            MeshRelayConfig {
+                queue_capacity: 1,
+                peer_burst: 1.0,
+                peer_rate_per_sec: 0.0001,
+                ..immediate_config()
+            },
+        );
+        let now = Instant::now();
+        gov.admit_held(frame(), "dave", now)
+            .expect("first one queues");
+        assert_eq!(
+            gov.admit_held(frame(), "erin", now).err(),
+            Some(RelayRejection::QueueFull),
+            "a full queue is a full queue"
+        );
+        let (due, _) = gov.release_due(now);
+        assert_eq!(due.len(), 1);
+        assert_eq!(
+            gov.admit_held(frame(), "dave", now).err(),
+            Some(RelayRejection::PeerRateLimited),
+            "one neighbor's share is spent"
+        );
+        // Erin's share went with the refusal above, as it does on the
+        // ordinary path; a neighbor nobody has charged still admits one.
+        assert!(gov.admit_held(frame(), "frank", now).is_ok());
     }
 }

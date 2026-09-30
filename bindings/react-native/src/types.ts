@@ -228,6 +228,107 @@ export interface MeshRelayStats {
 }
 
 /**
+ * Custody: holding a neighbour's replication frames for hours instead of the
+ * seconds a forwarder gives them (docs/spec/custody.md).
+ *
+ * Off by default, and every dial is the custodian's. Every field is optional
+ * and an omitted one keeps the core's default rather than being restated by
+ * the bridge; the default that matters most is `enabled: false`, and a
+ * literal written here would keep every app that omits the section on it
+ * after the release that ever flips it. The core validates the bounds: the
+ * hold strictly shorter than the outbox lifetime, positive session-tier caps,
+ * a byte cap that admits one replication frame, and a stranger tier that is
+ * both zero or both set. Applied at construction; there is no runtime update.
+ */
+export interface CustodyConfig {
+  /** Whether this device accepts deposits. The off switch (default: false) */
+  enabled?: boolean;
+  /**
+   * How long an accepted frame is held, in ms (default: 21600000, six hours).
+   * Judged in wall time against the value in force at each sweep, so lowering
+   * it expires records already held.
+   */
+  holdMs?: number;
+  /** Held frames one depositor with an established session may have at once (default: 64) */
+  maxEntriesPerDepositor?: number;
+  /** Bytes one depositor with an established session may have at once (default: 2 MiB) */
+  maxBytesPerDepositor?: number;
+  /** Held frames across every depositor (default: 512) */
+  maxEntries?: number;
+  /** Bytes across every depositor (default: 16 MiB) */
+  maxBytes?: number;
+  /**
+   * Held frames one proven peer without a session may have at once
+   * (default: 0, which refuses such peers). Set together with
+   * `strangerMaxBytes` or not at all.
+   */
+  strangerMaxEntries?: number;
+  /** Bytes one proven peer without a session may have at once (default: 0) */
+  strangerMaxBytes?: number;
+  /**
+   * What happens when a budget is full: evict the oldest held frame to admit
+   * the new one, or refuse the new one (default: `drop_oldest`).
+   */
+  overflowPolicy?: 'drop_oldest' | 'drop_newest';
+}
+
+/**
+ * What this device has done as a custodian and as a depositor, and what it
+ * is holding right now. See `getCustodyStats()`.
+ *
+ * `held` and `heldBytes` are gauges. Everything else is cumulative since
+ * start-up or the last `eraseCustody()`, so a rate is a difference between
+ * two reads. Every refusal reason in the acceptance table has a counter, so
+ * "custody is off" can be told from "nobody asked".
+ */
+export interface CustodyStats {
+  /** Frames in custody right now */
+  held: number;
+  /** Bytes in custody right now */
+  heldBytes: number;
+  /** Deposits accepted */
+  accepted: number;
+  /** Held frames handed to their recipient directly, and released */
+  delivered: number;
+  /** Held frames re-originated toward a neighbour that is not the recipient */
+  reOriginated: number;
+  /** Held frames dropped at the end of their hold */
+  expired: number;
+  /** Deposits of an identifier already held: not stored, not answered */
+  duplicates: number;
+  /** Held frames evicted to admit a newer deposit under drop-oldest */
+  evicted: number;
+  /** Receipts put on the arrival link */
+  receiptsSent: number;
+  /** Receipts not sent: the depositor does not parse them, the link was gone, or this device cannot sign */
+  receiptsDropped: number;
+  /** Receipts this device received for an entry still in its outbox */
+  receiptsReceived: number;
+  /** Receipts this device received naming nothing in its outbox, or that it could not parse */
+  receiptsIgnored: number;
+  /** Refused: custody is off */
+  refusedDisabled: number;
+  /** Refused: no deposit request on the frame */
+  refusedNoRequest: number;
+  /** Refused: unknown class token */
+  refusedUnknownClass: number;
+  /** Refused: not a sealed frame */
+  refusedNotSealed: number;
+  /** Refused: the arrival link was not identified */
+  refusedUnprovenPeer: number;
+  /** Refused: the sender is not the peer the frame arrived from */
+  refusedNotDepositor: number;
+  /** Refused: a peer without a session while the stranger tier is closed */
+  refusedStranger: number;
+  /** Refused: the depositor's budget is full */
+  refusedDepositorFull: number;
+  /** Refused: the global budget is full */
+  refusedStoreFull: number;
+  /** Refused: the battery is below the relay floor */
+  refusedBattery: number;
+}
+
+/**
  * Deduplicator statistics for monitoring
  */
 export interface DedupStats {
@@ -779,6 +880,13 @@ export interface ProtocolConfig {
    * `getMeshRelayTunables()`.
    */
   meshRelay?: MeshRelayConfig;
+  /**
+   * Custody: whether this device holds a neighbour's replication frames for
+   * hours, and under what quotas (docs/spec/custody.md). Off by default, and
+   * an omitted field keeps the core's default rather than being restated
+   * here. Applied at construction; there is no runtime update.
+   */
+  custody?: CustodyConfig;
   /** Relay configuration (optional) */
   relay?: RelayConfig;
   /** Network configuration (optional) */

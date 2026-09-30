@@ -14,13 +14,14 @@
 mod host_log;
 
 use offline_protocol::{
-    AppState as CoreAppState, EstablishmentState as CoreEstablishmentState, Event as CoreEvent,
-    GatewayCarrier, MediaSendOptions as CoreMediaSendOptions,
-    MeshRelayConfig as CoreMeshRelayConfig, MeshRelayStats as CoreMeshRelayStats,
-    MlsVerbosity as CoreMlsVerbosity, NetworkVisualizer, OfflineProtocol as CoreProtocol,
-    OverflowPolicy as CoreOverflowPolicy, PendingQueueConfig as CorePendingQueueConfig,
-    PresenceStatus as CorePresenceStatus, ProtocolConfig as CoreConfig,
-    ProtocolStateError as CoreProtocolStateError, ProtocolStateResult as CoreProtocolStateResult,
+    AppState as CoreAppState, CustodyConfig as CoreCustodyConfig, CustodyStats as CoreCustodyStats,
+    EstablishmentState as CoreEstablishmentState, Event as CoreEvent, GatewayCarrier,
+    MediaSendOptions as CoreMediaSendOptions, MeshRelayConfig as CoreMeshRelayConfig,
+    MeshRelayStats as CoreMeshRelayStats, MlsVerbosity as CoreMlsVerbosity, NetworkVisualizer,
+    OfflineProtocol as CoreProtocol, OverflowPolicy as CoreOverflowPolicy,
+    PendingQueueConfig as CorePendingQueueConfig, PresenceStatus as CorePresenceStatus,
+    ProtocolConfig as CoreConfig, ProtocolStateError as CoreProtocolStateError,
+    ProtocolStateResult as CoreProtocolStateResult,
     ProtocolStateStorage as CoreProtocolStateStorage, SendMessageOptions as CoreSendMessageOptions,
     TelemetryConfig as CoreTelemetryConfig, TelemetryHost as CoreTelemetryHost,
     TelemetryOs as CoreTelemetryOs, TelemetryPipe as CoreTelemetryPipe,
@@ -2019,6 +2020,9 @@ pub struct ProtocolConfig {
     /// Mesh forwarding tunables. `None` (and any `None` field inside it)
     /// leaves the core default alone — see [`MeshRelayConfig`].
     pub mesh_relay: Option<MeshRelayConfig>,
+    /// Custody dials. `None` (and any `None` field inside it) leaves the core
+    /// default alone, which is off. See [`CustodyConfig`].
+    pub custody: Option<CustodyConfig>,
     /// Whether the replicated-document layer accepts work (default off). See
     /// the UDL dictionary and `DataConfig::enabled` for semantics.
     pub data_enabled: bool,
@@ -2094,6 +2098,147 @@ pub struct MeshRelayStats {
     pub hop_limit_reached: u64,
     pub reach_clamped: u64,
     pub dropped_for_capacity: u64,
+}
+
+/// Custody dials, every field optional (`docs/spec/custody.md`).
+///
+/// Absent means "leave the core default alone", for the reason
+/// [`MeshRelayConfig`] gives: the defaults live in the core and nowhere else,
+/// and a partial section from an app moves only the dials it names.
+#[derive(Debug, Clone, Default)]
+pub struct CustodyConfig {
+    pub enabled: Option<bool>,
+    pub hold_ms: Option<u64>,
+    pub max_entries_per_depositor: Option<u64>,
+    pub max_bytes_per_depositor: Option<u64>,
+    pub max_entries: Option<u64>,
+    pub max_bytes: Option<u64>,
+    pub stranger_max_entries: Option<u64>,
+    pub stranger_max_bytes: Option<u64>,
+    pub overflow_policy: Option<OverflowPolicy>,
+}
+
+impl CustodyConfig {
+    /// Lays the fields the caller actually set over the core defaults, with
+    /// the same saturating `u64` to `usize` conversion [`MeshRelayConfig`]
+    /// uses, for the same 32-bit reason.
+    fn overlay(self, base: CoreCustodyConfig) -> CoreCustodyConfig {
+        fn to_usize(value: u64) -> usize {
+            usize::try_from(value).unwrap_or(usize::MAX)
+        }
+
+        CoreCustodyConfig {
+            enabled: self.enabled.unwrap_or(base.enabled),
+            hold_ms: self.hold_ms.unwrap_or(base.hold_ms),
+            max_entries_per_depositor: self
+                .max_entries_per_depositor
+                .map(to_usize)
+                .unwrap_or(base.max_entries_per_depositor),
+            max_bytes_per_depositor: self
+                .max_bytes_per_depositor
+                .map(to_usize)
+                .unwrap_or(base.max_bytes_per_depositor),
+            max_entries: self.max_entries.map(to_usize).unwrap_or(base.max_entries),
+            max_bytes: self.max_bytes.map(to_usize).unwrap_or(base.max_bytes),
+            stranger_max_entries: self
+                .stranger_max_entries
+                .map(to_usize)
+                .unwrap_or(base.stranger_max_entries),
+            stranger_max_bytes: self
+                .stranger_max_bytes
+                .map(to_usize)
+                .unwrap_or(base.stranger_max_bytes),
+            overflow_policy: match self.overflow_policy {
+                Some(OverflowPolicy::DropOldest) => CoreOverflowPolicy::DropOldest,
+                Some(OverflowPolicy::DropNewest) => CoreOverflowPolicy::DropNewest,
+                None => base.overflow_policy,
+            },
+        }
+    }
+}
+
+/// What this device has done as a custodian and as a depositor, and what it
+/// is holding right now. See the UDL dictionary for each counter.
+#[derive(Debug, Clone)]
+pub struct CustodyStats {
+    pub held: u64,
+    pub held_bytes: u64,
+    pub accepted: u64,
+    pub delivered: u64,
+    pub re_originated: u64,
+    pub expired: u64,
+    pub duplicates: u64,
+    pub evicted: u64,
+    pub receipts_sent: u64,
+    pub receipts_dropped: u64,
+    pub receipts_received: u64,
+    pub receipts_ignored: u64,
+    pub refused_disabled: u64,
+    pub refused_no_request: u64,
+    pub refused_unknown_class: u64,
+    pub refused_not_sealed: u64,
+    pub refused_unproven_peer: u64,
+    pub refused_not_depositor: u64,
+    pub refused_stranger: u64,
+    pub refused_depositor_full: u64,
+    pub refused_store_full: u64,
+    pub refused_battery: u64,
+}
+
+impl From<CoreCustodyStats> for CustodyStats {
+    /// Destructured for the reason [`MeshRelayStats`] is: a counter added to
+    /// the core must break this build rather than stop at the FFI boundary.
+    fn from(stats: CoreCustodyStats) -> Self {
+        let CoreCustodyStats {
+            held,
+            held_bytes,
+            accepted,
+            delivered,
+            re_originated,
+            expired,
+            duplicates,
+            evicted,
+            receipts_sent,
+            receipts_dropped,
+            receipts_received,
+            receipts_ignored,
+            refused_disabled,
+            refused_no_request,
+            refused_unknown_class,
+            refused_not_sealed,
+            refused_unproven_peer,
+            refused_not_depositor,
+            refused_stranger,
+            refused_depositor_full,
+            refused_store_full,
+            refused_battery,
+        } = stats;
+
+        Self {
+            held,
+            held_bytes,
+            accepted,
+            delivered,
+            re_originated,
+            expired,
+            duplicates,
+            evicted,
+            receipts_sent,
+            receipts_dropped,
+            receipts_received,
+            receipts_ignored,
+            refused_disabled,
+            refused_no_request,
+            refused_unknown_class,
+            refused_not_sealed,
+            refused_unproven_peer,
+            refused_not_depositor,
+            refused_stranger,
+            refused_depositor_full,
+            refused_store_full,
+            refused_battery,
+        }
+    }
 }
 
 impl MeshRelayConfig {
@@ -2288,6 +2433,9 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.security.control_freshness_enforced = config.control_freshness_enforced;
         if let Some(mesh_relay) = config.mesh_relay {
             core_config.mesh_relay = mesh_relay.overlay(core_config.mesh_relay);
+        }
+        if let Some(custody) = config.custody {
+            core_config.custody = custody.overlay(core_config.custody);
         }
         core_config.data.enabled = config.data_enabled;
         core_config
@@ -6177,6 +6325,20 @@ impl OfflineProtocol {
         protocol.mesh_relay_config().into()
     }
 
+    /// What this device holds for its neighbours and has done as a depositor
+    /// (`docs/spec/custody.md`). Read through to the core.
+    pub fn get_custody_stats(&self) -> CustodyStats {
+        let protocol = self.lock_inner_recovering();
+        protocol.custody_stats().into()
+    }
+
+    /// Drops every held frame and resets the custody counters. The data
+    /// layer's `wipe_all` calls the same erase; this is the standalone verb.
+    pub fn erase_custody(&self) -> Result<(), ProtocolError> {
+        let mut protocol = self.lock_inner_recovering();
+        protocol.erase_custody().map_err(ProtocolError::from)
+    }
+
     /// Gets the number of pending ACKs.
     pub fn get_pending_ack_count(&self) -> u64 {
         let protocol = self.lock_inner_recovering();
@@ -8147,6 +8309,7 @@ mod tests {
     fn create_test_config() -> ProtocolConfig {
         ProtocolConfig {
             mesh_relay: None,
+            custody: None,
             data_enabled: false,
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
@@ -8185,6 +8348,7 @@ mod tests {
     fn create_ble_only_config() -> ProtocolConfig {
         ProtocolConfig {
             mesh_relay: None,
+            custody: None,
             data_enabled: false,
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
@@ -8500,6 +8664,7 @@ mod tests {
     fn create_reticulum_config() -> ProtocolConfig {
         ProtocolConfig {
             mesh_relay: None,
+            custody: None,
             data_enabled: false,
             binary_wire_enabled: true,
             nostr_sealing_enabled: true,
@@ -18166,6 +18331,371 @@ mod tests {
         }
     }
 
+    // ====================================================================
+    // Custody: the config section and the counters across the bridges
+    // ====================================================================
+
+    /// Omitting the custody section, or sending one with nothing set, must
+    /// leave every core default alone, off included.
+    #[test]
+    fn an_absent_custody_section_keeps_every_core_default() {
+        let defaults = CoreCustodyConfig::default();
+
+        let core: CoreConfig = create_test_config().into();
+        assert_eq!(core.custody, defaults);
+        assert!(!core.custody.enabled, "the core's default is off");
+
+        let mut config = create_test_config();
+        config.custody = Some(CustodyConfig::default());
+        let core: CoreConfig = config.into();
+        assert_eq!(core.custody, defaults);
+    }
+
+    /// A partial section must move exactly the fields it names: switching
+    /// custody on is the ordinary case, and it must not reset a quota.
+    #[test]
+    fn a_partial_custody_section_moves_only_what_it_names() {
+        let defaults = CoreCustodyConfig::default();
+
+        let mut config = create_test_config();
+        config.custody = Some(CustodyConfig {
+            enabled: Some(true),
+            hold_ms: Some(3_600_000),
+            ..CustodyConfig::default()
+        });
+        let core: CoreConfig = config.into();
+
+        assert!(core.custody.enabled);
+        assert_eq!(core.custody.hold_ms, 3_600_000);
+        assert_eq!(
+            core.custody.max_entries_per_depositor,
+            defaults.max_entries_per_depositor
+        );
+        assert_eq!(core.custody.max_bytes, defaults.max_bytes);
+        assert_eq!(
+            core.custody.stranger_max_entries,
+            defaults.stranger_max_entries
+        );
+        assert_eq!(core.custody.overflow_policy, defaults.overflow_policy);
+    }
+
+    /// Every dial must survive the trip, set to values distinct from the
+    /// defaults and from each other, so a field wired to the wrong source or
+    /// dropped entirely fails here rather than in an app.
+    #[test]
+    fn every_custody_dial_survives_the_round_trip() {
+        let mut config = create_test_config();
+        config.custody = Some(CustodyConfig {
+            enabled: Some(true),
+            hold_ms: Some(1_800_000),
+            max_entries_per_depositor: Some(11),
+            max_bytes_per_depositor: Some(131_072),
+            max_entries: Some(77),
+            max_bytes: Some(4_194_304),
+            stranger_max_entries: Some(3),
+            stranger_max_bytes: Some(65_536),
+            overflow_policy: Some(OverflowPolicy::DropNewest),
+        });
+        let core: CoreConfig = config.into();
+
+        assert!(core.custody.enabled);
+        assert_eq!(core.custody.hold_ms, 1_800_000);
+        assert_eq!(core.custody.max_entries_per_depositor, 11);
+        assert_eq!(core.custody.max_bytes_per_depositor, 131_072);
+        assert_eq!(core.custody.max_entries, 77);
+        assert_eq!(core.custody.max_bytes, 4_194_304);
+        assert_eq!(core.custody.stranger_max_entries, 3);
+        assert_eq!(core.custody.stranger_max_bytes, 65_536);
+        assert_eq!(core.custody.overflow_policy, CoreOverflowPolicy::DropNewest);
+        core.validate()
+            .expect("a complete, consistent section validates");
+    }
+
+    /// Every custody dial must be readable by every layer that carries it, in
+    /// both spellings each bridge accepts, and no layer may restate a default.
+    ///
+    /// The same failure the mesh-relay guard pins, with a sharper default: a
+    /// bridge that wrote `enabled: false` for an app that omitted the section
+    /// would keep every such app off after the release that ever flips the
+    /// core's default, with no error anywhere.
+    #[test]
+    fn every_bridge_reads_the_custody_config_section() {
+        fn code_only(source: &str) -> String {
+            source
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with("//") && !l.starts_with('*') && !l.starts_with("/*"))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        fn slice_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            let after = source
+                .split_once(start)
+                .unwrap_or_else(|| panic!("expected {start:?} in source"))
+                .1;
+            after
+                .split_once(end)
+                .unwrap_or_else(|| panic!("expected {end:?} after {start:?}"))
+                .0
+        }
+
+        fn camel(snake: &str) -> String {
+            let mut out = String::new();
+            let mut upper = false;
+            for c in snake.chars() {
+                if c == '_' {
+                    upper = true;
+                } else if upper {
+                    out.extend(c.to_uppercase());
+                    upper = false;
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        }
+
+        let rn_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            let path = rn_dir.join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+
+        // camelCase, in UDL order.
+        const FIELDS: &[&str] = &[
+            "enabled",
+            "holdMs",
+            "maxEntriesPerDepositor",
+            "maxBytesPerDepositor",
+            "maxEntries",
+            "maxBytes",
+            "strangerMaxEntries",
+            "strangerMaxBytes",
+            "overflowPolicy",
+        ];
+
+        let udl = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/offline_protocol.udl"),
+        )
+        .expect("read udl");
+        let udl_fields: Vec<String> = slice_between(&udl, "dictionary CustodyConfig {", "};")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .filter_map(|l| l.trim_end_matches(';').split_whitespace().nth(1))
+            .map(camel)
+            .collect();
+        assert_eq!(
+            udl_fields, FIELDS,
+            "CustodyConfig gained or lost a field in the UDL. Add it to FIELDS *and* to both \
+             bridge parsers, the TypeScript interface and the JS transform, or an app setting \
+             it is silently ignored"
+        );
+        assert!(
+            udl.contains("CustodyConfig? custody = null;"),
+            "the UDL must default the section to null: absent means off, and only the core \
+             may say so"
+        );
+
+        let swift = code_only(&read("ios/CustodyConfigReader.swift"));
+        let kotlin = code_only(slice_between(
+            &read("android/src/main/java/com/offlineprotocol/ProtocolConfigParser.kt"),
+            "val custodyJson =",
+            "val config = ProtocolConfig(",
+        ));
+        let types_ts = code_only(slice_between(
+            &read("src/types.ts"),
+            "export interface CustodyConfig {",
+            "}",
+        ));
+        let index_ts = code_only(slice_between(
+            &read("src/index.ts"),
+            "if (this.config.custody) {",
+            "nativeConfig.custody = custodyConfig;",
+        ));
+
+        for field in FIELDS {
+            let snake = {
+                let mut out = String::new();
+                for c in field.chars() {
+                    if c.is_uppercase() {
+                        out.push('_');
+                        out.extend(c.to_lowercase());
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out
+            };
+
+            assert!(
+                swift.contains(&format!("\"{field}\"")),
+                "CustodyConfigReader.swift must read `{field}`"
+            );
+            assert!(
+                kotlin.contains(&format!("\"{field}\"")),
+                "ProtocolConfigParser.kt must read `{field}`"
+            );
+            if snake != *field {
+                assert!(
+                    swift.contains(&format!("\"{snake}\"")),
+                    "CustodyConfigReader.swift must also accept the snake_case `{snake}`"
+                );
+                assert!(
+                    kotlin.contains(&format!("\"{snake}\"")),
+                    "ProtocolConfigParser.kt must also accept the snake_case `{snake}`"
+                );
+            }
+            assert!(
+                types_ts.contains(&format!("{field}?:")),
+                "types.ts CustodyConfig must declare `{field}?:`, or no app can set it"
+            );
+            assert!(
+                index_ts.contains(&format!("{field}: this.config.custody.{field}")),
+                "index.ts must forward `{field}` to the native payload, or it never leaves JS"
+            );
+        }
+
+        // No layer restates a default. The Swift reader resolves nothing, the
+        // Kotlin block leaves every field nullable, and the JS transform
+        // forwards what the app wrote; a literal in any of them is a second
+        // copy of a core default, free to drift.
+        assert!(
+            !swift.contains("?? "),
+            "CustodyConfigReader.swift must not fill a field in with a literal"
+        );
+        assert!(
+            !kotlin.contains("?: false") && !kotlin.contains("?: 0") && !kotlin.contains("?: true"),
+            "the Kotlin custody block must not restate a default as a literal"
+        );
+        assert!(
+            kotlin.contains("else -> null") && !kotlin.contains("else -> OverflowPolicy"),
+            "an overflow policy spelling the Kotlin block does not know must stay null, \
+             never become a default chosen in the parser"
+        );
+        assert!(
+            !index_ts.contains("?? "),
+            "the JS transform must not restate a custody default"
+        );
+    }
+
+    /// Every custody counter must be reported by both native modules and
+    /// declared in the TypeScript interface, or apps read a number that is
+    /// never populated.
+    #[test]
+    fn react_native_bridges_report_every_custody_counter() {
+        fn code_only(source: &str) -> String {
+            source
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.starts_with("//") && !l.starts_with('*') && !l.starts_with("/*"))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        fn slice_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            let after = source
+                .split_once(start)
+                .unwrap_or_else(|| panic!("expected {start:?} in source"))
+                .1;
+            after
+                .split_once(end)
+                .unwrap_or_else(|| panic!("expected {end:?} after {start:?}"))
+                .0
+        }
+
+        let rn_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            let path = rn_dir.join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+
+        let udl = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/offline_protocol.udl"),
+        )
+        .expect("read udl");
+        let fields: Vec<String> = slice_between(&udl, "dictionary CustodyStats {", "};")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .filter_map(|l| l.trim_end_matches(';').split_whitespace().nth(1))
+            .map(|snake| {
+                let mut out = String::new();
+                let mut upper = false;
+                for c in snake.chars() {
+                    if c == '_' {
+                        upper = true;
+                    } else if upper {
+                        out.extend(c.to_uppercase());
+                        upper = false;
+                    } else {
+                        out.push(c);
+                    }
+                }
+                out
+            })
+            .collect();
+        assert_eq!(
+            fields.len(),
+            22,
+            "CustodyStats gained or lost a counter in the UDL; check both native modules and \
+             the TypeScript interface, and update this count"
+        );
+        assert_eq!(fields[0], "held");
+        assert_eq!(fields[fields.len() - 1], "refusedBattery");
+
+        let kotlin = code_only(slice_between(
+            &read("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"),
+            "fun getCustodyStats(",
+            "promise.resolve(map)",
+        ));
+        let swift = code_only(slice_between(
+            &read("ios/OfflineProtocolModule.swift"),
+            "func getCustodyStats(",
+            "resolver(statsDict)",
+        ));
+        let types_ts = code_only(slice_between(
+            &read("src/types.ts"),
+            "export interface CustodyStats {",
+            "}",
+        ));
+
+        for field in &fields {
+            assert!(
+                kotlin.contains(&format!("\"{field}\"")),
+                "OfflineProtocolModule.kt getCustodyStats must report `{field}`"
+            );
+            assert!(
+                swift.contains(&format!("\"{field}\"")),
+                "OfflineProtocolModule.swift getCustodyStats must report `{field}`"
+            );
+            assert!(
+                types_ts.contains(&format!("{field}:")),
+                "types.ts CustodyStats must declare `{field}:`, or no app can read it"
+            );
+        }
+
+        // The erase verb crosses every layer too.
+        assert!(read("ios/OfflineProtocolModule.m").contains("RCT_EXTERN_METHOD(eraseCustody:"));
+        assert!(read("ios/OfflineProtocolModule.swift").contains("func eraseCustody("));
+        assert!(
+            read("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt")
+                .contains("fun eraseCustody(")
+        );
+        assert!(read("src/index.ts").contains("OfflineProtocolNativeModule.eraseCustody()"));
+    }
+
     /// battery/relay fields used to be missing from the FFI shape, so *any*
     /// runtime DORS update silently reset them to 20/30/4 — including one that
     /// meant to change something else.
@@ -18969,5 +19499,246 @@ mod tests {
                 "the map_set comment in the UDL does not mention the {kind} kind"
             );
         }
+    }
+
+    /// The local API chapter, the interface definition and the reference
+    /// server's dispatch table name every declaration exactly once, and the
+    /// chapter's catalogue names every event tag the engine can emit
+    /// (docs/bridges/local-api.md, rule L1).
+    ///
+    /// Three claims that rot silently: a method added to the definition and
+    /// to neither table is one no client can find, or one the reference
+    /// server exposes without the contract saying so; an event added to the
+    /// engine and not to the catalogue is one no client is written for.
+    /// The chapter states the row shapes this reads; changing one of its
+    /// headings is a change to this guard.
+    #[test]
+    fn local_api_tables_partition_the_definition() {
+        use std::collections::BTreeSet;
+
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let sources = [
+            manifest.join("../../docs/spec/local-api.md"),
+            manifest.join("../../bindings/python/offline_protocol_sdk/local_api/dispatch.py"),
+            manifest.join("../offline-protocol/src/events.rs"),
+        ];
+        let mut texts = Vec::new();
+        for path in &sources {
+            // The guard applies in the repo checkout; skip when the docs or
+            // bindings tree is not present (a vendored crate).
+            let Ok(text) = std::fs::read_to_string(path) else {
+                eprintln!(
+                    "repository tree not present, skipping the local API guard for {}",
+                    path.display()
+                );
+                return;
+            };
+            texts.push(text);
+        }
+        let (chapter, dispatch, events_rs) = (&texts[0], &texts[1], &texts[2]);
+        let udl = include_str!("offline_protocol.udl");
+
+        // The definition, by wire name: engine and namespace methods bare,
+        // `services.` and `data.` for the two objects.
+        let stripped: String = udl
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut udl_names = BTreeSet::new();
+        for (opener, prefix) in [
+            ("interface OfflineProtocol {", ""),
+            ("interface MeshServices {", "services."),
+            ("interface DataStore {", "data."),
+            ("namespace offline_protocol {", ""),
+        ] {
+            let body = stripped
+                .split_once(opener)
+                .unwrap_or_else(|| panic!("{opener} missing from the UDL"))
+                .1
+                .split_once("\n};")
+                .expect("unterminated block")
+                .0;
+            for statement in body.split(';') {
+                let mut rest = statement.trim();
+                if rest.is_empty() {
+                    continue;
+                }
+                let mut named = None;
+                if let Some(after) = rest.strip_prefix('[') {
+                    let (attrs, tail) = after.split_once(']').expect("unterminated attribute");
+                    if let Some(name) = attrs.split("Name=").nth(1) {
+                        named = Some(name.trim().split(',').next().unwrap().trim().to_string());
+                    }
+                    rest = tail.trim();
+                }
+                let head = rest.split('(').next().expect("a declaration").trim();
+                let name = if head == "constructor" {
+                    named.unwrap_or_else(|| "constructor".to_string())
+                } else {
+                    head.rsplit(char::is_whitespace).next().unwrap().to_string()
+                };
+                assert!(
+                    udl_names.insert(format!("{prefix}{name}")),
+                    "{prefix}{name} declared twice"
+                );
+            }
+        }
+        assert!(
+            udl_names.len() > 200,
+            "UDL scan looks broken: {}",
+            udl_names.len()
+        );
+
+        // The chapter's two method tables and its catalogue.
+        let section = |start: &str, end: &str| -> &str {
+            chapter
+                .split_once(start)
+                .unwrap_or_else(|| panic!("heading {start:?} missing from the chapter"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("heading {end:?} missing from the chapter"))
+                .0
+        };
+        let first_cell = |line: &str| -> String {
+            line.trim_start_matches('|')
+                .split('|')
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        let backticked = |cell: &str| -> Vec<String> {
+            cell.split('`')
+                .skip(1)
+                .step_by(2)
+                .map(str::to_string)
+                .collect()
+        };
+        let chapter_exposed: BTreeSet<String> =
+            section("## Method table", "## Platform operations")
+                .lines()
+                .filter(|l| l.starts_with("| `"))
+                .map(|l| backticked(&first_cell(l))[0].clone())
+                .collect();
+        let chapter_platform: BTreeSet<String> =
+            section("## Platform operations", "## Event catalogue")
+                .lines()
+                .filter(|l| l.starts_with("| `"))
+                .flat_map(|l| backticked(&first_cell(l)))
+                .collect();
+        let catalogue: BTreeSet<String> = section("### The catalogue", "### Shapes")
+            .lines()
+            .filter(|l| l.starts_with("| `"))
+            .map(|l| backticked(&first_cell(l))[0].clone())
+            .collect();
+
+        let both: Vec<_> = chapter_exposed.intersection(&chapter_platform).collect();
+        assert!(both.is_empty(), "in both chapter tables: {both:?}");
+        let classified: BTreeSet<String> =
+            chapter_exposed.union(&chapter_platform).cloned().collect();
+        let unclassified: Vec<_> = udl_names.difference(&classified).collect();
+        assert!(
+            unclassified.is_empty(),
+            "declarations in neither chapter table (classify each as exposed or platform): {unclassified:?}"
+        );
+        let phantom: Vec<_> = classified.difference(&udl_names).collect();
+        assert!(
+            phantom.is_empty(),
+            "chapter names not in the definition: {phantom:?}"
+        );
+
+        // The reference server's classification is the chapter's.
+        let quoted = |marker: &str| -> BTreeSet<String> {
+            dispatch
+                .split_once(marker)
+                .unwrap_or_else(|| panic!("{marker:?} missing from dispatch.py"))
+                .1
+                .split_once("\n)")
+                .expect("unterminated set")
+                .0
+                .split('"')
+                .skip(1)
+                .step_by(2)
+                .map(str::to_string)
+                .collect()
+        };
+        let dispatch_exposed = quoted("EXPOSED: frozenset[str] = frozenset(");
+        let dispatch_platform = quoted("PLATFORM: frozenset[str] = frozenset(");
+        assert_eq!(
+            dispatch_exposed, chapter_exposed,
+            "dispatch.py EXPOSED differs from the chapter's method table"
+        );
+        assert_eq!(
+            dispatch_platform, chapter_platform,
+            "dispatch.py PLATFORM differs from the chapter's platform table"
+        );
+
+        // Every `Event` variant is a catalogue row, and every row a variant.
+        // The scan is the one `react_native_types_cover_all_event_variants`
+        // uses: variant names at 4-space indent inside `pub enum Event`.
+        let snake = |name: &str| -> String {
+            let mut out = String::new();
+            for (i, ch) in name.chars().enumerate() {
+                if ch.is_ascii_uppercase() {
+                    if i > 0 {
+                        out.push('_');
+                    }
+                    out.push(ch.to_ascii_lowercase());
+                } else {
+                    out.push(ch);
+                }
+            }
+            out
+        };
+        let mut rust_tags = BTreeSet::new();
+        let mut in_enum = false;
+        let mut depth = 0usize;
+        for line in events_rs.lines() {
+            if !in_enum {
+                if line.starts_with("pub enum Event {") {
+                    in_enum = true;
+                    depth = 1;
+                }
+                continue;
+            }
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") || trimmed.starts_with("#[") {
+                continue;
+            }
+            if depth == 1
+                && line.starts_with("    ")
+                && !line.starts_with("     ")
+                && trimmed
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_uppercase())
+            {
+                let name: String = trimmed
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric())
+                    .collect();
+                rust_tags.insert(snake(&name));
+            }
+            depth += line.matches('{').count();
+            depth = depth.saturating_sub(line.matches('}').count());
+            if depth == 0 {
+                break;
+            }
+        }
+        assert!(
+            rust_tags.len() >= 60,
+            "enum scan looks broken: {}",
+            rust_tags.len()
+        );
+        let missing: Vec<_> = rust_tags.difference(&catalogue).collect();
+        assert!(
+            missing.is_empty(),
+            "event tags missing from the chapter's catalogue: {missing:?}"
+        );
+        let extra: Vec<_> = catalogue.difference(&rust_tags).collect();
+        assert!(
+            extra.is_empty(),
+            "catalogue rows that are not Event variants: {extra:?}"
+        );
     }
 }

@@ -500,7 +500,7 @@ impl OfflineProtocol {
     ///
     /// Takes its own battery reading; the per-tick caller already holds one and
     /// uses [`Self::battery_allows_relaying_with`] instead.
-    fn battery_allows_relaying(&self) -> bool {
+    pub(super) fn battery_allows_relaying(&self) -> bool {
         let (_statuses, available) = self.transport_manager.snapshot_status_and_available();
         let (battery_level, is_charging) =
             crate::telemetry::aggregator::device_battery_from_available(
@@ -554,7 +554,23 @@ impl OfflineProtocol {
     /// to the peer that wrote it. A frame whose recipient is a neighbor of ours
     /// is handed straight to them instead — the shortest path we can see.
     pub(super) fn flush_mesh_relays(&mut self) {
-        let due = self.mesh_relay.take_due(Instant::now());
+        self.flush_mesh_relays_at(Instant::now());
+    }
+
+    /// [`Self::flush_mesh_relays`] at a given instant, so a test can walk a
+    /// forward past the overdue cut-off without waiting it out.
+    pub(super) fn flush_mesh_relays_at(&mut self, now: Instant) {
+        let (due, abandoned) = self.mesh_relay.release_due(now);
+
+        // The drop point (`docs/spec/custody.md`): an ordinary forward here
+        // waited past the overdue cut-off without reaching a link, and its
+        // id is already released from the suppression cache; custody may
+        // take it on. A marked held forward goes back to the store, unjudged
+        // and uncounted.
+        for relay in abandoned {
+            self.judge_at_drop_point(relay);
+        }
+
         if due.is_empty() {
             return;
         }
@@ -571,30 +587,48 @@ impl OfflineProtocol {
             let message_id = message.id.as_str();
             let hop_count = message.hop_count.value();
             let remaining_ttl = message.ttl.value();
-
-            let mut exclude: Vec<&str> = vec![message.sender.as_str()];
-            if let Some(peer) = relay.arrival_peer.as_deref() {
-                exclude.push(peer);
-            }
-            let onward = self.mesh_relay.select_targets(
-                neighbors
-                    .iter()
-                    .map(|n| (n.peer_id.as_str(), n.link_quality())),
-                &exclude,
-                &message_id,
-            );
-
-            // If the destination is one of our own neighbors, hand it over
-            // directly: no fan-out is worth more than arriving. Should that
-            // link fail between choosing it and writing to it, fall back to
-            // carrying it onward rather than dropping a frame we could still
-            // move.
-            let targets = if neighbors.iter().any(|n| n.peer_id == recipient) {
-                let mut ordered = vec![recipient.clone()];
-                ordered.extend(onward.into_iter().filter(|peer| peer != &recipient));
-                ordered
+            let held = relay.custody_target.is_some();
+            let cause = if held {
+                "custody_redelivery"
             } else {
-                onward
+                "forward"
+            };
+
+            let targets = if let Some(target) = relay.custody_target.as_deref() {
+                // A held frame goes to the one neighbor it was queued toward,
+                // never through target selection: a fan-out here would defeat
+                // at most once per neighbor. Gone from range, it goes nowhere
+                // and back to the store below.
+                if neighbors.iter().any(|n| n.peer_id == target) {
+                    vec![target.to_string()]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                let mut exclude: Vec<&str> = vec![message.sender.as_str()];
+                if let Some(peer) = relay.arrival_peer.as_deref() {
+                    exclude.push(peer);
+                }
+                let onward = self.mesh_relay.select_targets(
+                    neighbors
+                        .iter()
+                        .map(|n| (n.peer_id.as_str(), n.link_quality())),
+                    &exclude,
+                    &message_id,
+                );
+
+                // If the destination is one of our own neighbors, hand it over
+                // directly: no fan-out is worth more than arriving. Should that
+                // link fail between choosing it and writing to it, fall back to
+                // carrying it onward rather than dropping a frame we could still
+                // move.
+                if neighbors.iter().any(|n| n.peer_id == recipient) {
+                    let mut ordered = vec![recipient.clone()];
+                    ordered.extend(onward.into_iter().filter(|peer| peer != &recipient));
+                    ordered
+                } else {
+                    onward
+                }
             };
             let deliver_direct = targets.first() == Some(&recipient);
 
@@ -606,11 +640,13 @@ impl OfflineProtocol {
                 // the frame is still worth carrying.
                 debug!(
                     message_id = %message.id,
+                    cause,
                     "No onward neighbor for this frame"
                 );
             }
 
             let mut delivered_to = 0usize;
+            let mut reached_recipient = false;
             for target in &targets {
                 // Each link this frame crosses is one transmission against the
                 // device's ceiling. Running out mid-fan-out stops the fan-out
@@ -631,10 +667,12 @@ impl OfflineProtocol {
                         // journey; the remaining neighbors are only a fallback
                         // for that link failing.
                         if deliver_direct && target == &recipient {
+                            reached_recipient = true;
                             debug!(
                                 message_id = %message.id,
                                 next_hop = %target,
                                 transport = ?transport,
+                                cause,
                                 "Delivered to its recipient directly"
                             );
                             break;
@@ -645,6 +683,7 @@ impl OfflineProtocol {
                             transport = ?transport,
                             hop_count,
                             remaining_ttl,
+                            cause,
                             "Forwarded frame to neighbor"
                         );
                     }
@@ -674,11 +713,20 @@ impl OfflineProtocol {
             // thing that still remembers it. It keeps its due time, so one that
             // stays stuck is abandoned by the overdue cut-off rather than
             // retried forever.
+            //
+            // A held frame refused room on the way back goes to the custody
+            // store instead: the store still holds it, nothing is lost, and
+            // its id was never recorded here.
             if delivered_to == 0 {
-                self.mesh_relay.requeue(relay);
+                if let Some(returned) = self.mesh_relay.requeue(relay) {
+                    self.return_held_to_store(returned);
+                }
                 continue;
             }
 
+            if held {
+                self.record_custody_transmission(&relay, reached_recipient);
+            }
             self.mesh_relay.record_forwarded();
             self.emit_event(Event::message_relayed(
                 message.id.as_str(),
