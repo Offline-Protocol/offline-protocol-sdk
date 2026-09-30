@@ -17018,8 +17018,8 @@ mod tests {
             swift.contains(
                 "onLinkQueueSync { generation += 1 \
                  let old = (listener: listener, browser: browser, streams: streams) \
-                 listener = nil browser = nil streams = [] adverts = [:] dialing = [] \
-                 redialDelay = [:] peers.endAll() old.listener?.cancel()"
+                 listener = nil browser = nil streams = [] adverts = [:] dialPolicy.reset() \
+                 peers.endAll() old.listener?.cancel()"
             ),
             "ios/WifiDirectManager.swift: stop() must forget every stream before endAll()"
         );

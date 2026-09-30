@@ -35,8 +35,8 @@ import Network
 ///   the browser reports that as a diagnostic instead of failing silently.
 /// - Both ends of a pair may dial. Which of two streams for one address is
 ///   kept is decided by `PeerStreamLinks`, the same way on both ends, so the
-///   lower address dials at once and the higher waits `HIGHER_ADDRESS_DIAL_DELAY`
-///   to see whether the lower one reached it first. Without the wait every
+///   lower address dials at once and the higher waits
+///   `PeerStreamDialPolicy.higherAddressDelay` to see whether the lower one reached it first. Without the wait every
 ///   first contact would open two streams and close one.
 ///
 /// Everything Network framework calls back with, and every per-stream step,
@@ -71,11 +71,6 @@ public class WifiDirectManager: NSObject, TransportManager {
     private let PREAMBLE_TIMEOUT: TimeInterval = 10.0
     /// Open streams, proved or not. Android's `Limits.maxStreams`.
     private static let MAX_STREAMS = 16
-    /// How long the higher address of a pair waits before dialing, so that
-    /// the lower one's stream, which would win, usually arrives first.
-    private static let HIGHER_ADDRESS_DIAL_DELAY: TimeInterval = 5.0
-    private static let REDIAL_INITIAL_DELAY: TimeInterval = 1.0
-    private static let REDIAL_MAX_DELAY: TimeInterval = 60.0
     /// A listener or browser that failed is rebuilt after this long.
     private static let REBUILD_DELAY: TimeInterval = 5.0
     /// Android's `Limits`: queued bytes toward one peer beyond which a body
@@ -140,9 +135,8 @@ public class WifiDirectManager: NSObject, TransportManager {
     private var streams = Set<Stream>()
     /// The endpoint each advertised address is reachable at, while it is.
     private var adverts: [String: NWEndpoint] = [:]
-    /// Addresses with an outbound stream open or a dial scheduled.
-    private var dialing = Set<String>()
-    private var redialDelay: [String: TimeInterval] = [:]
+    /// When to dial each advertised address, and when to dial it again.
+    private var dialPolicy = PeerStreamDialPolicy()
     /// Bumped by every start() and stop(), so a timer armed for one run finds
     /// nothing to act on in the next.
     private var generation = 0
@@ -304,8 +298,7 @@ public class WifiDirectManager: NSObject, TransportManager {
             browser = nil
             streams = []
             adverts = [:]
-            dialing = []
-            redialDelay = [:]
+            dialPolicy.reset()
 
             // Report every proved peer lost while the core still holds its
             // link, before the layer goes down, on linkQueue so no delivery
@@ -554,7 +547,10 @@ public class WifiDirectManager: NSObject, TransportManager {
                 // the lower one dials at once and the higher gives it time.
                 let weAreLower = PeerStreamLinks<Stream>.newStreamWins(
                     outbound: true, localAddress: local, peer: address)
-                scheduleDial(address, after: weAreLower ? 0 : Self.HIGHER_ADDRESS_DIAL_DELAY)
+                if let delay = dialPolicy.discovered(
+                    address, weAreLower: weAreLower, held: peers.handle(for: address) != nil) {
+                    scheduleDial(address, after: delay)
+                }
             case .removed(let result):
                 if let address = Self.advertisedAddress(result) {
                     adverts.removeValue(forKey: address)
@@ -571,9 +567,8 @@ public class WifiDirectManager: NSObject, TransportManager {
         return address
     }
 
+    /// Arms a dial `dialPolicy` decided on.
     private func scheduleDial(_ address: String, after delay: TimeInterval) {
-        guard !dialing.contains(address), peers.handle(for: address) == nil else { return }
-        dialing.insert(address)
         let expected = generation
         linkQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self = self, self.generation == expected else { return }
@@ -586,7 +581,7 @@ public class WifiDirectManager: NSObject, TransportManager {
     private func dial(_ address: String) {
         guard !isPaused, let endpoint = adverts[address], peers.handle(for: address) == nil,
               streams.count < Self.MAX_STREAMS else {
-            dialing.remove(address)
+            dialPolicy.abandoned(address)
             return
         }
         let stream = Stream(
@@ -640,7 +635,7 @@ public class WifiDirectManager: NSObject, TransportManager {
                     }
                 }
                 if let address = stream.dialed, self.peers.handle(for: address) == stream {
-                    self.redialDelay.removeValue(forKey: address)
+                    self.dialPolicy.proved(address)
                 }
             }
             if isComplete || error != nil {
@@ -660,11 +655,10 @@ public class WifiDirectManager: NSObject, TransportManager {
         peers.ended(stream)
         stream.writes.reset()
         stream.connection.cancel()
-        guard let address = stream.dialed else { return }
-        dialing.remove(address)
-        guard adverts[address] != nil else { return }
-        let delay = redialDelay[address] ?? Self.REDIAL_INITIAL_DELAY
-        redialDelay[address] = min(delay * 2, Self.REDIAL_MAX_DELAY)
+        guard let address = stream.dialed,
+              let delay = dialPolicy.ended(
+                address, advertised: adverts[address] != nil,
+                held: peers.handle(for: address) != nil) else { return }
         scheduleDial(address, after: delay)
     }
 

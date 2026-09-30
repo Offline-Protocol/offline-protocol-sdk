@@ -270,3 +270,67 @@ final class PeerStreamSession<Handle: Hashable> {
         host?.peerStreamDiagnostic("warning", "Peer stream refused", ["reason": reason])
     }
 }
+
+/// When to dial an advertised address, and when to dial it again.
+///
+/// Foundation-only so `PeerStreamDialPolicyTests` drives it without a
+/// network; `WifiDirectManager` owns the timers and the connections and asks
+/// this for every decision. Not thread-safe: the manager calls it from its one
+/// serial queue.
+///
+/// The ladder climbs only on a redial this returns. It used to climb on every
+/// end of an outbound stream, before the check that declines a redial for an
+/// address another stream holds, so the higher address of a pair, whose dial
+/// loses to the lower's stream on every first contact, climbed a step per
+/// lost race and waited out a long delay the first time it truly had to
+/// reconnect.
+struct PeerStreamDialPolicy {
+    /// How long the higher address of a pair waits before dialing, so that
+    /// the lower one's stream, which both ends keep, usually arrives first.
+    static let higherAddressDelay: TimeInterval = 5.0
+    static let redialInitialDelay: TimeInterval = 1.0
+    static let redialMaxDelay: TimeInterval = 60.0
+
+    /// Addresses with a dial scheduled or an outbound stream open.
+    private var dialing = Set<String>()
+    private var redialDelay: [String: TimeInterval] = [:]
+
+    /// A peer advertised `address`. The delay to dial after, or nil when no
+    /// dial is due: one is already under way, or a stream holds the address.
+    mutating func discovered(_ address: String, weAreLower: Bool, held: Bool) -> TimeInterval? {
+        return schedule(address, held: held, after: weAreLower ? 0 : Self.higherAddressDelay)
+    }
+
+    /// An outbound stream toward `address` ended. The delay to redial after,
+    /// or nil when the advert is gone or another stream holds the address.
+    mutating func ended(_ address: String, advertised: Bool, held: Bool) -> TimeInterval? {
+        dialing.remove(address)
+        guard advertised else { return nil }
+        let delay = redialDelay[address] ?? Self.redialInitialDelay
+        guard schedule(address, held: held, after: delay) != nil else { return nil }
+        redialDelay[address] = min(delay * 2, Self.redialMaxDelay)
+        return delay
+    }
+
+    /// A scheduled dial opened nothing (the advert went, the address is now
+    /// held, the transport paused, or the stream budget is spent).
+    mutating func abandoned(_ address: String) {
+        dialing.remove(address)
+    }
+
+    /// An outbound stream toward `address` proved it: the ladder starts over.
+    mutating func proved(_ address: String) {
+        redialDelay.removeValue(forKey: address)
+    }
+
+    mutating func reset() {
+        dialing = []
+        redialDelay = [:]
+    }
+
+    private mutating func schedule(_ address: String, held: Bool, after delay: TimeInterval) -> TimeInterval? {
+        guard !held, !dialing.contains(address) else { return nil }
+        dialing.insert(address)
+        return delay
+    }
+}

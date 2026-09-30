@@ -101,8 +101,11 @@ final class PeerStreamReader {
         guard !refused else { return [] }
         buffer.append(chunk)
         var out: [Result<Data, PeerStreamRefusal>] = []
-        while buffer.count >= PeerStreamFraming.prefixBytes {
-            let start = buffer.startIndex
+        // Frames are read at an offset and the buffer compacted once at the
+        // end. Compacting per frame re-copied the rest of the buffer each
+        // time, so a chunk of many small frames cost its size squared.
+        var start = buffer.startIndex
+        while buffer.endIndex - start >= PeerStreamFraming.prefixBytes {
             let length = UInt32(buffer[start]) << 24 | UInt32(buffer[start + 1]) << 16
                 | UInt32(buffer[start + 2]) << 8 | UInt32(buffer[start + 3])
             // The floor is `unframe`'s to check, which knows the position.
@@ -112,10 +115,13 @@ final class PeerStreamReader {
                 out.append(.failure(refusal))
                 return out
             }
-            let total = PeerStreamFraming.prefixBytes + Int(length)
-            guard buffer.count >= total else { break }
-            out.append(.success(Data(buffer.prefix(total))))
-            buffer = Data(buffer.dropFirst(total))
+            let end = start + PeerStreamFraming.prefixBytes + Int(length)
+            guard buffer.endIndex >= end else { break }
+            out.append(.success(Data(buffer[start..<end])))
+            start = end
+        }
+        if start != buffer.startIndex {
+            buffer = Data(buffer[start...])
         }
         return out
     }

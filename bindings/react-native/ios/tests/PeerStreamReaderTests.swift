@@ -41,6 +41,17 @@ final class PeerStreamReaderTests: XCTestCase {
         XCTAssertEqual(frames(reader.append(Data(tail))), [three])
     }
 
+    func testManySmallFramesInOneChunkWithAPartialTail() {
+        let bodies = (0..<500).map { Data(repeating: UInt8($0 % 251), count: 150) }
+        let framed = bodies.map(frame)
+        var chunk = framed.reduce(Data(), +)
+        let tail = frame(Data("tail".utf8))
+        chunk.append(tail.prefix(3))
+        let reader = PeerStreamReader()
+        XCTAssertEqual(frames(reader.append(chunk)), framed)
+        XCTAssertEqual(frames(reader.append(Data(tail.dropFirst(3)))), [tail])
+    }
+
     func testAFrameOfExactlyTheCeilingIsRead() {
         let whole = frame(Data(count: PeerStreamFraming.maxBodyBytes))
         let out = PeerStreamReader().append(whole)

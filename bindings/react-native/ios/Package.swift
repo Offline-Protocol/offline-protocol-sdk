@@ -132,6 +132,7 @@ let package = Package(
                 "NostrQueryTrackerTests.swift",
                 "OutboundFragmentQueueTests.swift",
                 "PeerIdentityBindingTests.swift",
+                "PeerStreamDialPolicyTests.swift",
                 "PeerStreamFramingTests.swift",
                 "PeerStreamReaderTests.swift",
                 "PeerStreamSessionTests.swift",
