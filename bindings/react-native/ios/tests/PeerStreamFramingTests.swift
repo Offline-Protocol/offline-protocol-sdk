@@ -229,20 +229,34 @@ final class PeerStreamFramingTests: XCTestCase {
 
     private let a = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
     private let b = "off1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqn8antf"
+    /// This device, lower than both, so the streams it opens win.
+    private let me = "off1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+
+    private func announce(
+        _ links: PeerStreamLinks<String>, _ handle: String, _ address: String,
+        outbound: Bool = true
+    ) -> PeerStreamLinks<String>.Announcement {
+        links.announce(handle, address: address, outbound: outbound, localAddress: me)
+    }
 
     func testTheFirstStreamForAnAddressIsAnnounced() {
         let links = PeerStreamLinks<String>()
         XCTAssertTrue(links.isEmpty)
-        XCTAssertEqual(links.announce("s1", address: a), .init(firstForAddress: true, superseded: nil))
+        XCTAssertEqual(announce(links, "s1", a), .init(firstForAddress: true, superseded: nil))
         XCTAssertEqual(links.handle(for: a), "s1")
         XCTAssertFalse(links.isEmpty)
     }
 
+    func testTheFirstStreamIsAnnouncedWhicheverKindItIs() {
+        let links = PeerStreamLinks<String>()
+        XCTAssertEqual(announce(links, "in", a, outbound: false), .init(firstForAddress: true, superseded: nil))
+    }
+
     func testANewerStreamSupersedesAndTheCoreSeesOneAnnouncementAndOneLoss() {
         let links = PeerStreamLinks<String>()
-        _ = links.announce("old", address: a)
+        _ = announce(links, "old", a)
 
-        let second = links.announce("new", address: a)
+        let second = announce(links, "new", a)
         XCTAssertFalse(second.firstForAddress, "a second announcement would tell the core nothing new")
         XCTAssertEqual(second.superseded, "old")
         XCTAssertEqual(links.handle(for: a), "new")
@@ -257,23 +271,62 @@ final class PeerStreamFramingTests: XCTestCase {
         XCTAssertTrue(links.isEmpty)
     }
 
+    func testASecondStreamOfTheLosingKindIsRefusedAndTheHeldOneStays() {
+        let links = PeerStreamLinks<String>()
+        _ = announce(links, "out", a)
+        XCTAssertEqual(
+            announce(links, "in", a, outbound: false),
+            .init(firstForAddress: false, superseded: nil, refused: true))
+        XCTAssertEqual(links.handle(for: a), "out")
+        XCTAssertNil(links.remove("in"), "a refused stream was never announced")
+        XCTAssertEqual(links.remove("out"), a)
+    }
+
+    func testTheWinningKindIsWhateverTheLowerAddressOpened() {
+        // Python's `_new_stream_wins`, case for case (ADR 0026).
+        XCTAssertTrue(PeerStreamLinks<String>.newStreamWins(outbound: true, localAddress: me, peer: a))
+        XCTAssertFalse(PeerStreamLinks<String>.newStreamWins(outbound: false, localAddress: me, peer: a))
+        XCTAssertFalse(PeerStreamLinks<String>.newStreamWins(outbound: true, localAddress: a, peer: me))
+        XCTAssertTrue(PeerStreamLinks<String>.newStreamWins(outbound: false, localAddress: a, peer: me))
+        XCTAssertTrue(PeerStreamLinks<String>.newStreamWins(outbound: true, localAddress: b, peer: a),
+                      "b sorts below a at the first differing character")
+        XCTAssertFalse(PeerStreamLinks<String>.newStreamWins(outbound: true, localAddress: nil, peer: a))
+        XCTAssertFalse(PeerStreamLinks<String>.newStreamWins(outbound: false, localAddress: nil, peer: a))
+    }
+
+    func testBothEndsOfAPairKeepTheSameStream() {
+        // `mine` is the stream the lower address (me) opened; `theirs` the
+        // other. Each end sees one as outbound and the other as inbound.
+        for firstArrives in ["mine", "theirs"] {
+            let low = PeerStreamLinks<String>()
+            let high = PeerStreamLinks<String>()
+            let order = firstArrives == "mine" ? ["mine", "theirs"] : ["theirs", "mine"]
+            for stream in order {
+                _ = low.announce(stream, address: a, outbound: stream == "mine", localAddress: me)
+                _ = high.announce(stream, address: me, outbound: stream == "theirs", localAddress: a)
+            }
+            XCTAssertEqual(low.handle(for: a), "mine", firstArrives)
+            XCTAssertEqual(high.handle(for: me), "mine", firstArrives)
+        }
+    }
+
     func testAStreamThatNeverProvedAPeerReportsNothing() {
         XCTAssertNil(PeerStreamLinks<String>().remove("never-announced"))
     }
 
     func testAStreamIsReportedLostOnce() {
         let links = PeerStreamLinks<String>()
-        _ = links.announce("s1", address: a)
+        _ = announce(links, "s1", a)
         XCTAssertEqual(links.remove("s1"), a)
         XCTAssertNil(links.remove("s1"))
     }
 
     func testASecondAnnouncementForOneStreamIsANoOp() {
         let links = PeerStreamLinks<String>()
-        _ = links.announce("s1", address: a)
-        XCTAssertEqual(links.announce("s1", address: a), .init(firstForAddress: false, superseded: nil))
+        _ = announce(links, "s1", a)
+        XCTAssertEqual(announce(links, "s1", a), .init(firstForAddress: false, superseded: nil))
         // Another address is refused the same way, and the first stays held.
-        XCTAssertEqual(links.announce("s1", address: b), .init(firstForAddress: false, superseded: nil))
+        XCTAssertEqual(announce(links, "s1", b), .init(firstForAddress: false, superseded: nil))
         XCTAssertEqual(links.handle(for: a), "s1")
         XCTAssertNil(links.handle(for: b))
         XCTAssertEqual(links.remove("s1"), a)
@@ -282,17 +335,17 @@ final class PeerStreamFramingTests: XCTestCase {
 
     func testAddressesAreIndependent() {
         let links = PeerStreamLinks<String>()
-        _ = links.announce("s1", address: a)
-        XCTAssertEqual(links.announce("s2", address: b), .init(firstForAddress: true, superseded: nil))
+        _ = announce(links, "s1", a)
+        XCTAssertEqual(announce(links, "s2", b), .init(firstForAddress: true, superseded: nil))
         XCTAssertEqual(links.remove("s1"), a)
         XCTAssertEqual(links.handle(for: b), "s2")
     }
 
     func testRemoveAllReturnsOnlyTheLiveStreams() {
         let links = PeerStreamLinks<String>()
-        _ = links.announce("old", address: a)
-        _ = links.announce("new", address: a)
-        _ = links.announce("s2", address: b)
+        _ = announce(links, "old", a)
+        _ = announce(links, "new", a)
+        _ = announce(links, "s2", b)
         let live = links.removeAll().map { "\($0.handle)=\($0.address)" }
         XCTAssertEqual(Set(live), ["new=\(a)", "s2=\(b)"])
         XCTAssertTrue(links.isEmpty)
@@ -301,8 +354,8 @@ final class PeerStreamFramingTests: XCTestCase {
 
     func testReAnnouncingAStreamIsANoOp() {
         let links = PeerStreamLinks<String>()
-        _ = links.announce("s1", address: a)
-        XCTAssertEqual(links.announce("s1", address: a), .init(firstForAddress: false, superseded: nil))
+        _ = announce(links, "s1", a)
+        XCTAssertEqual(announce(links, "s1", a), .init(firstForAddress: false, superseded: nil))
         XCTAssertEqual(links.handle(for: a), "s1")
     }
 }

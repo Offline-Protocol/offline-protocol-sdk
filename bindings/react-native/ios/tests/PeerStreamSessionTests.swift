@@ -2,15 +2,15 @@
 // PeerStreamSessionTests.swift
 //
 // Drives PeerStreamSession with string handles, a fake carrier and a manual
-// clock: the iOS Wi-Fi Direct manager's per-peer behaviour without a
-// Multipeer session, which no CI runner has. Mirrors android's
-// PeerStreamSocketsTest, keep in sync.
+// clock: the iOS peer-stream manager's per-peer behaviour without a radio,
+// which no CI runner has. A handle that starts with `out` is a stream this
+// side opened. Mirrors android's PeerStreamSocketsTest, keep in sync.
 //
 // The verifier is a stand-in (the real one is Rust, needs the native library,
 // and is tested against the identity assertion vectors in Rust): an
 // "assertion" here is a `peer-…` address in ASCII, zero-padded to the 96-byte
 // floor, and nothing else verifies. What a test cannot see is the manager's
-// session handling (advertising, browsing, inviting), which needs a device.
+// connection handling (advertising, browsing, dialing), which needs a device.
 // The device run is recorded in the PR (docs/bridges C9).
 //
 
@@ -85,7 +85,8 @@ final class PeerStreamSessionTests: XCTestCase {
                 self.sent.append((handle, frame))
             },
             disconnect: { [unowned self] handle in self.disconnected.append(handle) },
-            schedule: { [unowned self] delay, block in self.timers.append((delay, block)) }
+            schedule: { [unowned self] delay, block in self.timers.append((delay, block)) },
+            isOutbound: { $0.hasPrefix("out") }
         )
     }
 
@@ -242,21 +243,78 @@ final class PeerStreamSessionTests: XCTestCase {
 
     // MARK: - One announced peer per address
 
-    func testANewerPeerSupersedesWithOneAnnouncementAndOneLoss() {
-        prove("old", as: "peer-b")
-        prove("new", as: "peer-b")
-        XCTAssertEqual(disconnected, ["old"])
+    // This side is peer-a. peer-b is higher, so the streams this side opens
+    // win against it; peer-0 is lower, so its streams win against this side.
+
+    func testANewerStreamOfTheWinningKindSupersedesWithOneAnnouncementAndOneLoss() {
+        // The lower address reconnecting past its own half-open stream.
+        prove("out-old", as: "peer-b")
+        prove("out-new", as: "peer-b")
+        XCTAssertEqual(disconnected, ["out-old"])
         XCTAssertEqual(host.events, ["connected:peer-b"], "no second announcement, no loss")
-        XCTAssertEqual(session.handle(for: "peer-b"), "new")
+        XCTAssertEqual(session.handle(for: "peer-b"), "out-new")
 
         // The superseded peer's late message and its disconnect are silent.
-        session.received(frame(Data("late".utf8)), from: "old")
-        session.ended("old")
+        session.received(frame(Data("late".utf8)), from: "out-old")
+        session.ended("out-old")
         XCTAssertEqual(host.events, ["connected:peer-b"])
 
-        session.received(frame(Data("fresh".utf8)), from: "new")
-        session.ended("new")
+        session.received(frame(Data("fresh".utf8)), from: "out-new")
+        session.ended("out-new")
         XCTAssertEqual(host.events, ["connected:peer-b", "message:peer-b:5", "lost:peer-b"])
+    }
+
+    func testAgainstAHigherAddressOurStreamIsKeptInEitherOrder() {
+        prove("in", as: "peer-b")
+        prove("out", as: "peer-b")
+        XCTAssertEqual(disconnected, ["in"], "ours supersedes theirs")
+        XCTAssertEqual(session.handle(for: "peer-b"), "out")
+
+        session.ended("out")
+        session.ended("in")
+        disconnected = []
+        host.events = []
+
+        prove("out", as: "peer-b")
+        prove("in", as: "peer-b")
+        XCTAssertEqual(disconnected, ["in"], "theirs is refused")
+        XCTAssertEqual(session.handle(for: "peer-b"), "out")
+        XCTAssertEqual(host.events, ["connected:peer-b"])
+    }
+
+    func testAgainstALowerAddressTheirStreamIsKeptInEitherOrder() {
+        prove("out", as: "peer-0")
+        prove("in", as: "peer-0")
+        XCTAssertEqual(disconnected, ["out"], "theirs supersedes ours")
+        XCTAssertEqual(session.handle(for: "peer-0"), "in")
+
+        session.ended("in")
+        session.ended("out")
+        disconnected = []
+        host.events = []
+
+        prove("in", as: "peer-0")
+        prove("out", as: "peer-0")
+        XCTAssertEqual(disconnected, ["out"], "ours is refused")
+        XCTAssertEqual(session.handle(for: "peer-0"), "in")
+        XCTAssertEqual(host.events, ["connected:peer-0"])
+    }
+
+    func testARefusedDuplicateIsSilentAndTheHeldStreamStaysLive() {
+        prove("out", as: "peer-b")
+        prove("in", as: "peer-b")
+        XCTAssertEqual(disconnected, ["in"])
+
+        // Nothing from the refused stream reaches the host, and its end
+        // reports nothing: the address is still held.
+        session.received(frame(Data("late".utf8)), from: "in")
+        session.ended("in")
+        XCTAssertEqual(host.events, ["connected:peer-b"])
+
+        session.received(frame(Data("fresh".utf8)), from: "out")
+        XCTAssertEqual(host.events, ["connected:peer-b", "message:peer-b:5"])
+        fireTimers()
+        XCTAssertEqual(disconnected, ["in"], "the held stream proved itself; no deadline fires")
     }
 
     func testEndAllReportsEachAnnouncedPeerOnce() {

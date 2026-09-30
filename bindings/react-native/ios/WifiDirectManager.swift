@@ -182,7 +182,10 @@ public class WifiDirectManager: NSObject, TransportManager {
             },
             schedule: { [weak self] delay, block in
                 self?.linkQueue.asyncAfter(deadline: .now() + delay, execute: block)
-            }
+            },
+            // Multipeer does not say which side invited. Stop-gap until the
+            // Network-framework manager, which knows, replaces this one.
+            isOutbound: { _ in false }
         )
     }
     

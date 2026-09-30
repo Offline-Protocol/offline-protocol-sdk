@@ -2,15 +2,16 @@
 // PeerStreamSession.swift
 // OfflineProtocol
 //
-// docs/spec/stream-framing.md over a message-oriented carrier: what happens to
-// one connected peer from its first message to its disconnect.
+// docs/spec/stream-framing.md for one connected peer, from its first frame
+// to its disconnect.
 //
-// WifiDirectManager owns the Multipeer session, the advertiser and the
-// browser, and forwards each per-peer event here from its one serial queue.
-// Everything between is here, generic over the carrier's peer handle and
-// behind `PeerStreamHost`, so that PeerStreamSessionTests drives it with
-// string handles and a fake clock, without MultipeerConnectivity or the native
-// library. Mirrors android's PeerStreamSockets.kt, keep in sync.
+// WifiDirectManager owns the listener, the browser and the connections, cuts
+// each stream into frames with `PeerStreamReader`, and forwards each per-peer
+// event here from its one serial queue. Everything between is here, generic
+// over the carrier's peer handle and behind `PeerStreamHost`, so that
+// PeerStreamSessionTests drives it with string handles and a fake clock,
+// without Network framework or the native library. Mirrors android's
+// PeerStreamSockets.kt, keep in sync.
 //
 // The rules, each of which a test pins:
 // - Our preamble goes to a peer as soon as it connects, without waiting for
@@ -19,8 +20,9 @@
 // - The host is told only the address the preamble proved: `peerConnected`
 //   once per address, each body attributed to it, and `peerDisconnected` once,
 //   if and only if the peer still held the address when it ended.
-// - One announced peer per address, newer superseding older, through
-//   `PeerStreamLinks`. A superseded peer is disconnected and reports nothing.
+// - One announced peer per address, through `PeerStreamLinks`: the stream the
+//   lower address opened wins, and the newer of two such. A superseded or
+//   refused peer is disconnected and reports nothing.
 // - Every message is one frame whose prefix equals the rest of the message;
 //   anything else disconnects the peer.
 //
@@ -52,6 +54,7 @@ final class PeerStreamSession<Handle: Hashable> {
     private let send: (Data, Handle) throws -> Void
     private let disconnect: (Handle) -> Void
     private let schedule: (TimeInterval, @escaping () -> Void) -> Void
+    private let isOutbound: (Handle) -> Bool
     private let preambleTimeout: TimeInterval
 
     /// The peers that proved an address. Thread-safe on its own lock, and read
@@ -78,18 +81,24 @@ final class PeerStreamSession<Handle: Hashable> {
     ///   - disconnect: ends one peer's connection. Its own disconnect event
     ///     may follow and finds nothing left to report.
     ///   - schedule: runs a block after a delay on the owner's serial queue.
+    ///   - isOutbound: whether this device opened the handle's stream, which
+    ///     decides which of two streams for one address is kept. A property
+    ///     of the handle rather than of an event, so no event order can get
+    ///     it wrong.
     init(
         host: PeerStreamHost,
         preambleTimeout: TimeInterval = 10.0,
         send: @escaping (Data, Handle) throws -> Void,
         disconnect: @escaping (Handle) -> Void,
-        schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void
+        schedule: @escaping (TimeInterval, @escaping () -> Void) -> Void,
+        isOutbound: @escaping (Handle) -> Bool
     ) {
         self.host = host
         self.preambleTimeout = preambleTimeout
         self.send = send
         self.disconnect = disconnect
         self.schedule = schedule
+        self.isOutbound = isOutbound
     }
 
     // MARK: - Thread-safe reads
@@ -158,7 +167,18 @@ final class PeerStreamSession<Handle: Hashable> {
             // those go out on another queue; a message that reached the peer
             // ahead of our assertion would be refused and the peer lost.
             guard sendPreambleIfNeeded(handle, link) else { return }
-            let announcement = links.announce(handle, address: address)
+            let announcement = links.announce(
+                handle, address: address, outbound: isOutbound(handle),
+                localAddress: host.peerStreamLocalAddress())
+            if announcement.refused {
+                // The losing kind of a second stream for a held address. The
+                // far end computes the same rule and keeps the same stream,
+                // so this closes with no report and the held one is untouched.
+                link.refused = true
+                disconnect(handle)
+                host.peerStreamDiagnostic("info", "Peer stream refused: another stream holds the address", ["address": address])
+                return
+            }
             if let older = announcement.superseded {
                 // Disconnected without a loss report: `links` already moved
                 // the address to this peer, so the older one's end finds

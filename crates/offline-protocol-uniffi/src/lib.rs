@@ -17039,6 +17039,51 @@ mod tests {
         );
     }
 
+    /// The iOS and Python peer-stream managers keep the same one of two
+    /// streams for an address.
+    ///
+    /// Both ends of a pair may dial, and a Python host on a LAN dials every
+    /// peer it discovers, so the choice of which stream to keep is a
+    /// hand-mirrored policy (docs/bridges C5): the stream the lower address
+    /// opened wins. If the two copies drift, an iPhone and a Python host each
+    /// keep the stream the other closes, and the pair reconnects forever,
+    /// with no error on either side (ADR 0026). Pinned as the two lines each
+    /// rule is made of. Android keeps the newer stream instead, because a
+    /// Wi-Fi Direct group has one dialer.
+    #[test]
+    fn ios_and_python_peer_streams_keep_the_same_stream() {
+        let swift = rn_source_code_only("ios/PeerStreamFraming.swift");
+        let python_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bindings/python/offline_protocol_sdk/peer_stream_manager.py");
+        let python = std::fs::read_to_string(&python_path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", python_path.display()));
+
+        for needed in [
+            "guard let local = localAddress else { return false }",
+            "let weOpen = local.utf8.lexicographicallyPrecedes(peer.utf8) \
+             return outbound == weOpen",
+            "if byAddress[address] != nil, \
+             !Self.newStreamWins(outbound: outbound, localAddress: localAddress, peer: address) { \
+             return Announcement(firstForAddress: false, superseded: nil, refused: true) }",
+        ] {
+            assert!(
+                swift.contains(needed),
+                "ios/PeerStreamFraming.swift: the stream the lower address opened must win, \
+                 as in peer_stream_manager.py. Expected to find:\n  {needed}"
+            );
+        }
+        for needed in [
+            "if local is None:\n            # No address of our own to order by; keep what is announced.\n            return False",
+            "we_open = local < peer\n        return new.outbound == we_open",
+        ] {
+            assert!(
+                python.contains(needed),
+                "peer_stream_manager.py: the stream the lower address opened must win, as in \
+                 ios/PeerStreamFraming.swift. Expected to find:\n  {needed}"
+            );
+        }
+    }
+
     /// Wi-Fi Direct hands the core only an address a preamble proved.
     ///
     /// Both managers used to pass a transport-level string, a TCP endpoint on
@@ -17110,7 +17155,11 @@ mod tests {
                     // the core send at once, on another queue.
                     "case .announce(let address): \
                      guard sendPreambleIfNeeded(handle, link) else { return } \
-                     let announcement = links.announce(handle, address: address)",
+                     let announcement = links.announce( handle, address: address, \
+                     outbound: isOutbound(handle), localAddress: host.peerStreamLocalAddress())",
+                    // The losing kind of a duplicate announces nothing and
+                    // reports nothing: the held stream keeps the address.
+                    "if announcement.refused { link.refused = true disconnect(handle)",
                     // A late disconnect from a replaced session must not end
                     // the same MCPeerID's link in the new one.
                     "case .notConnected: guard self.session === session else { return } \

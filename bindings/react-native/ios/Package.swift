@@ -133,6 +133,7 @@ let package = Package(
                 "OutboundFragmentQueueTests.swift",
                 "PeerIdentityBindingTests.swift",
                 "PeerStreamFramingTests.swift",
+                "PeerStreamReaderTests.swift",
                 "PeerStreamSessionTests.swift",
                 "PeripheralRestorationAgeOutPolicyTests.swift",
                 "PresenceWatchPolicyTests.swift",
