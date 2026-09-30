@@ -1226,6 +1226,15 @@ impl OfflineProtocol {
     /// nothing in it re-arms this: only a local commit does, and an import
     /// is never one.
     ///
+    /// The offer is small; what it provokes is not. A receiver answers an
+    /// offer that is not a reply with its complete version list for the
+    /// space, not just the documents named, so one settle costs a whole-space
+    /// counter-offer from the 1:1 peer, or from every member of a group, each
+    /// an addressed frame spending a ratchet generation. That is why it is
+    /// debounced per space rather than sent per commit. Scoping the
+    /// counter-offer to a partial offer's names would cut it, and is a
+    /// protocol change with its own termination argument.
+    ///
     /// Neither consults nor stamps the 30-second offer window. Consulting it
     /// would swallow exactly the offers this exists for: the sweep that set
     /// the window most likely fired when the peer came into range, seconds
@@ -1262,7 +1271,9 @@ impl OfflineProtocol {
             let mut versions = BTreeMap::new();
             for doc in docs {
                 // A document removed since its commit has a floor, which the
-                // next sweep carries; opening it here would bring it back.
+                // next sweep carries. Reading its version would be refused
+                // (a removed name does not open), so skip it here rather
+                // than log that refusal as a failure.
                 if !self.data_holds_doc(&space, &doc) {
                     continue;
                 }

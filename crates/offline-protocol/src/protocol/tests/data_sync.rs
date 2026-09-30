@@ -1255,11 +1255,23 @@ fn a_lost_final_delta_heals_once_local_commits_go_quiet() {
     settle(&mut alice, &mut bob);
     assert_eq!(read(&mut bob, &bob_space, "notes", "b"), None);
 
-    // Brought forward rather than waited out; the tick is the real one.
-    for (due, _) in alice.protocol.data_sync_settle.values_mut() {
-        *due = std::time::Instant::now();
-    }
+    // A 1:1 sync frame is acknowledged, so the retry ladder would heal this
+    // too once the ACK timeout passed. Pinning the one frame the settle
+    // deadline sends, and nothing before it, is what tells the two apart.
     alice.protocol.process().expect("process");
+    assert!(
+        alice.transport.sent_messages().is_empty(),
+        "a settle offer went out before local commits had gone quiet"
+    );
+
+    // Brought forward rather than waited out; the tick is the real one.
+    bring_settle_forward(&mut alice);
+    alice.protocol.process().expect("process");
+    assert_eq!(
+        alice.transport.sent_messages().len(),
+        1,
+        "one quiet period must cost exactly one settle offer"
+    );
     let rounds = settle(&mut alice, &mut bob);
 
     assert_eq!(
@@ -1275,6 +1287,67 @@ fn a_lost_final_delta_heals_once_local_commits_go_quiet() {
     assert!(
         alice.protocol.data_sync_settle.is_empty() && bob.protocol.data_sync_settle.is_empty(),
         "a settle offer outlived its quiet period, or an import armed one"
+    );
+}
+
+/// Make every settle offer `node` holds due now, as if its commits had gone
+/// quiet for the settle delay.
+fn bring_settle_forward(node: &mut Node) {
+    let now = std::time::Instant::now();
+    for (due, _) in node.protocol.data_sync_settle.values_mut() {
+        *due = now;
+    }
+}
+
+#[test]
+fn a_settle_offer_does_not_bring_back_a_document_removed_since_its_commit() {
+    let (mut alice, bob) = pair();
+    let alice_space = Node::space_for(&bob);
+
+    write(&mut alice, &alice_space, "notes", "k", "v");
+    alice
+        .protocol
+        .data_remove_doc(&alice_space, "notes")
+        .expect("remove");
+    alice.transport.clear_sent_messages();
+
+    bring_settle_forward(&mut alice);
+    alice.protocol.process().expect("process");
+
+    assert!(
+        alice.transport.sent_messages().is_empty(),
+        "a settle offer went out naming only a removed document"
+    );
+    assert!(
+        !alice.protocol.data_holds_doc(&alice_space, "notes"),
+        "reading a version to settle re-created the removed document"
+    );
+    assert!(alice.protocol.data_sync_settle.is_empty());
+}
+
+#[test]
+fn a_settle_offer_is_not_sent_once_its_space_stops_replicating() {
+    let (mut alice, bob) = pair();
+    let alice_space = Node::space_for(&bob);
+
+    write(&mut alice, &alice_space, "notes", "k", "v");
+    assert!(
+        !alice.protocol.data_sync_settle.is_empty(),
+        "precondition: the commit has to arm a settle offer"
+    );
+    alice.protocol.block_user(&bob.address).expect("block");
+    alice.transport.clear_sent_messages();
+
+    bring_settle_forward(&mut alice);
+    alice.protocol.process().expect("process");
+
+    assert!(
+        alice.transport.sent_messages().is_empty(),
+        "a settle offer reached a peer the space no longer replicates with"
+    );
+    assert!(
+        alice.protocol.data_sync_settle.is_empty(),
+        "a settle offer with nowhere to go was kept rather than dropped"
     );
 }
 
@@ -1690,8 +1763,17 @@ fn a_wipe_takes_the_replication_bookkeeping_with_it() {
         "precondition: there has to be bookkeeping on disk for a wipe to miss it"
     );
 
+    assert!(
+        !bob.protocol.data_sync_settle.is_empty(),
+        "precondition: the local write has to arm a settle offer"
+    );
+
     bob.protocol.data_wipe_all().expect("wipe");
 
+    assert!(
+        bob.protocol.data_sync_settle.is_empty(),
+        "a settle offer outlived the wipe, and would name documents the wipe erased"
+    );
     assert!(
         bob.state
             .list_keys(storage_keys::DATA_SYNC)
