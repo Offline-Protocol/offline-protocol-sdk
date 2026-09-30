@@ -22,8 +22,8 @@ use crate::protocol::data_sync::{SyncChannel, MAX_GROUP_BLOB_CHUNKS, MAX_SYNC_BL
 use crate::protocol::prefixes::internal_prefixes;
 use crate::protocol::tests::{create_test_config_for_user, id};
 use crate::protocol::types::{
-    DATA_GROUP_BLOB_V1, DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1, DATA_SYNC_V1,
-    DATA_TOMBSTONE_V1,
+    DATA_CUSTODY_V1, DATA_GROUP_BLOB_V1, DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1,
+    DATA_SYNC_V1, DATA_TOMBSTONE_V1,
 };
 use crate::protocol::{OfflineProtocol, TestProtocolStateStorage};
 
@@ -753,7 +753,8 @@ fn the_group_capability_is_advertised_and_recorded() {
             DATA_MEDIA_V1,
             DATA_TOMBSTONE_V1,
             DATA_INTEREST_V1,
-            DATA_GROUP_BLOB_V1
+            DATA_GROUP_BLOB_V1,
+            DATA_CUSTODY_V1
         ],
         "a build that intercepts group frames has to say so, or no peer \
          will ever send it one. The media entry rides the same list and is \

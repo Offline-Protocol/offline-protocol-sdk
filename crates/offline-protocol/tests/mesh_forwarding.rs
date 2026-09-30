@@ -14,7 +14,7 @@
 //!   Reach alone is easy to get by repeating everything endlessly; the counts in
 //!   these tests are what separate a working mesh from one that floods.
 
-use offline_protocol::{Event, OfflineProtocol, ProtocolConfig};
+use offline_protocol::{CustodyConfig, Event, OfflineProtocol, ProtocolConfig};
 use offline_protocol_core::{AppId, Message, UserId};
 use offline_protocol_transport::{mock::MockTransport, Transport, TransportType};
 use std::collections::HashMap;
@@ -32,6 +32,9 @@ struct Neighborhood {
     links: HashMap<String, Vec<String>>,
     /// Every hand-off that has crossed a link, as `(from, to, message_id)`.
     transmissions: Vec<(String, String, String)>,
+    /// The frames themselves, in the same order, for a test that asserts on
+    /// what a device was actually handed rather than only that it was.
+    frames: Vec<(String, String, Message)>,
     /// What each device has surfaced to its app, kept because stepping the
     /// network is what drains it.
     inboxes: HashMap<String, Vec<String>>,
@@ -44,6 +47,7 @@ impl Neighborhood {
             radios: HashMap::new(),
             links: HashMap::new(),
             transmissions: Vec::new(),
+            frames: Vec::new(),
             inboxes: HashMap::new(),
         };
 
@@ -184,6 +188,8 @@ impl Neighborhood {
                 );
                 self.transmissions
                     .push((from.clone(), to.clone(), message.id.as_str()));
+                self.frames
+                    .push((from.clone(), to.clone(), message.clone()));
                 // The receiver sees which link it arrived on, as a radio reports.
                 self.radios[&to].queue_message_from(message, from.clone());
                 moved += 1;
@@ -819,4 +825,142 @@ fn a_frame_claiming_an_absurd_reach_is_cut_down() {
         "a frame claiming 255 hops was passed on with {}",
         onward.ttl.value()
     );
+}
+
+// ============================================================================
+// Custody (docs/spec/custody.md)
+// ============================================================================
+
+/// A device that holds a neighbour's replication frames, admitting strangers
+/// so the deposit below is judged by the quotas rather than refused at the
+/// tier (these devices hold no sessions with each other).
+fn custodian_config(user_id: &str) -> ProtocolConfig {
+    let mut config = default_config(user_id);
+    config.custody = CustodyConfig {
+        enabled: true,
+        stranger_max_entries: 8,
+        stranger_max_bytes: 512 * 1024,
+        ..CustodyConfig::default()
+    };
+    config
+}
+
+/// The frame a depositor offers into custody: its own sealed replication
+/// frame with the class token on it. Built by hand because these devices
+/// hold no sessions; the custodian cannot see inside a sealed frame either
+/// way, and judges the outer message alone.
+fn deposit(from: &str, to: &str) -> Message {
+    let mut frame = message(
+        from,
+        to,
+        &format!(
+            "{}opaque-ciphertext",
+            offline_protocol_sealed::prefixes::ENCRYPTED
+        ),
+    );
+    // The reserved key from the wire-format chapter, as the depositor's
+    // engine writes it; pinned against the engine's constant by its own
+    // tests.
+    frame
+        .metadata
+        .insert("__custody".to_string(), "data".to_string());
+    frame
+}
+
+#[test]
+fn a_deposited_frame_outlives_the_carrier_walking_away() {
+    // The sibling of `a_message_survives_the_carrier_walking_away`. There the
+    // carrier that left took the message with it and the sender's own retry
+    // was the recovery. Here the carrier holds custody: it keeps the frame
+    // past the seconds a forwarder gives it, and delivers it when the
+    // recipient appears, with no help from the sender at all.
+    let mut net = Neighborhood::new(&["alice", "carol"]);
+    net.add_node("bob", custodian_config("bob"));
+    net.link("alice", "bob");
+
+    let frame = deposit("alice", "carol");
+    let frame_id = frame.id.as_str();
+    // Alice hands it over her link to bob, as a depositor does.
+    net.radios["bob"].queue_message_from(frame, "alice".to_string());
+    net.step();
+    assert_eq!(
+        net.node("bob").custody_stats().held,
+        0,
+        "a forward is not a deposit while the mesh can still carry it"
+    );
+
+    // Bob walks out of range of everyone with the frame, and nobody can take
+    // it from him for longer than a forwarder is willing to wait. That wait
+    // is the governor's overdue cut-off, five seconds of wall-clock time,
+    // which is why this test is slower than its neighbours.
+    net.unlink_all("bob");
+    std::thread::sleep(std::time::Duration::from_millis(5_200));
+    net.run_until_quiet(8);
+
+    let stats = net.node("bob").custody_stats();
+    assert_eq!(stats.accepted, 1, "taken into custody at the drop point");
+    assert_eq!(stats.held, 1);
+    assert!(net.inbox("carol").is_empty());
+    assert_eq!(net.deliveries_to("carol", &frame_id), 0);
+
+    // Carol comes into range of bob, and bob alone.
+    net.link("bob", "carol");
+    net.run_until_quiet(8);
+
+    assert_eq!(
+        net.deliveries_to("carol", &frame_id),
+        1,
+        "the custodian delivers the held frame to its recipient, once"
+    );
+    let stats = net.node("bob").custody_stats();
+    assert_eq!(stats.delivered, 1);
+    assert_eq!(
+        stats.held, 0,
+        "delivery to the recipient releases the frame"
+    );
+    let (_, _, delivered) = net
+        .frames
+        .iter()
+        .find(|(from, to, m)| from == "bob" && to == "carol" && m.id.as_str() == frame_id)
+        .expect("crossed the bob-carol link");
+    assert!(
+        !delivered.metadata.contains_key("__custody"),
+        "what the custodian transmits never carries the request"
+    );
+}
+
+#[test]
+fn a_device_with_custody_off_still_strips_the_request_and_holds_nothing() {
+    // Every forwarder strips the request, custody-enabled or not: it is what
+    // keeps a deposit to one hop. And the default is off, so the ordinary
+    // mesh is exactly as it was.
+    let mut net = Neighborhood::new(&["alice", "bob", "dave"]);
+    net.link("alice", "bob");
+    net.link("bob", "dave");
+
+    let frame = deposit("alice", "carol");
+    let frame_id = frame.id.as_str();
+    net.radios["bob"].queue_message_from(frame.clone(), "alice".to_string());
+    net.run_until_quiet(8);
+
+    assert_eq!(
+        net.deliveries_to("dave", &frame_id),
+        1,
+        "carried on as before"
+    );
+    let (_, _, forwarded) = net
+        .frames
+        .iter()
+        .find(|(from, to, m)| from == "bob" && to == "dave" && m.id.as_str() == frame_id)
+        .expect("crossed the bob-dave link");
+    assert!(
+        !forwarded.metadata.contains_key("__custody"),
+        "the request travels exactly one hop"
+    );
+    assert_eq!(
+        forwarded.content, frame.content,
+        "only the outer metadata is touched"
+    );
+    assert_eq!(net.node("bob").custody_stats().held, 0);
+    assert_eq!(net.node("bob").custody_stats().accepted, 0);
 }

@@ -35,6 +35,7 @@ REPO = Path(__file__).resolve().parents[2]
 CORE_DATA = REPO / "crates" / "offline-protocol-core" / "tests" / "data"
 SEALED_DATA = REPO / "crates" / "offline-protocol-sealed" / "tests" / "data"
 TRANSPORT_DATA = REPO / "crates" / "offline-protocol-transport" / "tests" / "data"
+PROTOCOL_DATA = REPO / "crates" / "offline-protocol" / "tests" / "data"
 
 
 # --------------------------------------------------------------------------
@@ -1685,6 +1686,64 @@ def build_gateway_proof_vectors() -> dict:
     }
 
 
+def build_custody_receipt_vectors() -> dict:
+    """The custody receipt body, from docs/spec/custody.md ("The receipt").
+
+    The prefix, then a compact JSON object with the fields `v`, `id` and
+    `hold_ms` in that order. A decoder reads `v` before the body and ignores
+    unknown fields. `hold_ms` is a u64 on the wire; the vectors stay within
+    the double-safe integer range so every JSON decoder can run them.
+    """
+    PREFIX = "__CUSTODY_RECEIPT__"
+    DOUBLE_SAFE_MAX = 2**53 - 1
+
+    def wire(msg_id: str, hold_ms: int) -> str:
+        body = {"v": 1, "id": msg_id, "hold_ms": hold_ms}
+        return PREFIX + json.dumps(body, separators=(",", ":"))
+
+    def frame(name: str, msg_id: str, hold_ms: int) -> dict:
+        return {"name": name, "id": msg_id, "hold_ms": hold_ms, "wire": wire(msg_id, hold_ms)}
+
+    return {
+        "chapter": "docs/spec/custody.md",
+        "prefix": PREFIX,
+        "version": 1,
+        "notes": [
+            "A receipt is the control frame a custodian answers a deposit with: prefix, then a JSON object.",
+            "Fields serialize in the order v, id, hold_ms. A decoder reads v before the body and ignores unknown fields.",
+            "hold_ms is relative to the receipt's own timestamp and a u64 on the wire; the vectors stay within the double-safe integer range so every JSON decoder can run them.",
+            "Every case carries the prefix. Computed by tools/spec-vectors/generate.py from the chapter, independently of the code that pins them.",
+        ],
+        "frames": [
+            frame("six_hour_hold", "7f3a1c2e-4b5d-4e6f-8a9b-0c1d2e3f4a5b", 21_600_000),
+            frame("zero_hold", "a", 0),
+            frame("largest_double_safe_hold", "max", DOUBLE_SAFE_MAX),
+        ],
+        "decode_only": [
+            {
+                "name": "unknown_field_ignored",
+                "wire": PREFIX + '{"v":1,"id":"m1","hold_ms":5,"note":"a future field"}',
+                "id": "m1",
+                "hold_ms": 5,
+            },
+            {
+                "name": "field_order_is_free",
+                "wire": PREFIX + '{"hold_ms":5,"id":"m1","v":1}',
+                "id": "m1",
+                "hold_ms": 5,
+            },
+        ],
+        "rejects": [
+            {"name": "unknown_version", "wire": PREFIX + '{"v":2,"id":"m1","hold_ms":5}'},
+            {"name": "missing_version", "wire": PREFIX + '{"id":"m1","hold_ms":5}'},
+            {"name": "empty_id", "wire": PREFIX + '{"v":1,"id":"","hold_ms":5}'},
+            {"name": "not_an_object", "wire": PREFIX + '[1,"m1",5]'},
+            {"name": "negative_hold", "wire": PREFIX + '{"v":1,"id":"m1","hold_ms":-1}'},
+            {"name": "missing_hold", "wire": PREFIX + '{"v":1,"id":"m1"}'},
+        ],
+    }
+
+
 FILES = [
     (CORE_DATA / "wire-v1.vectors.json", build_wire_vectors),
     (CORE_DATA / "address-v1.vectors.json", build_address_vectors),
@@ -1695,6 +1754,7 @@ FILES = [
     (SEALED_DATA / "key-package-v1.vectors.json", build_key_package_vectors),
     (SEALED_DATA / "identity-assertion-v1.vectors.json", build_identity_assertion_vectors),
     (TRANSPORT_DATA / "stream-framing-v1.vectors.json", build_stream_framing_vectors),
+    (PROTOCOL_DATA / "custody-receipt-v1.vectors.json", build_custody_receipt_vectors),
 ]
 
 

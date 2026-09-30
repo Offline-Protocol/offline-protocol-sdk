@@ -933,6 +933,25 @@ pub(crate) const DATA_INTEREST_V1: u8 = 5;
 /// coming.
 pub(crate) const DATA_GROUP_BLOB_V1: u8 = 6;
 
+/// The custody receipt, advertised in [`KeyPackagePayload::data_versions`]
+/// alongside [`DATA_SYNC_V1`]: the peer parses the `__CUSTODY_RECEIPT__`
+/// control frame, so a custodian that accepted one of its replication frames
+/// may answer with a receipt (`docs/spec/custody.md`).
+///
+/// It gates one frame in one direction and nothing else. A deposit request is
+/// a metadata key an unaware receiver ignores, so a depositor writes it toward
+/// any neighbour, and acceptance is decided by the custodian's quotas. The
+/// gate exists because a peer without the entry does not know the prefix as a
+/// control frame: with encryption on it refuses the receipt as inbound
+/// plaintext and records a security refusal, and on a plaintext-only
+/// deployment it shows the receipt to its user as a message.
+///
+/// In the replication family rather than a list of its own because custody
+/// carries replication frames only. No attested sibling: the receipt is a 1:1
+/// control frame between neighbours, and a group inviter has nothing to say
+/// about one.
+pub(crate) const DATA_CUSTODY_V1: u8 = 7;
+
 /// Rich fields accepted by the `send_message_with` surface. Only ever
 /// delivered inside the sealed [`RichPayloadV1`] body — toward a recipient
 /// that did not advertise [`RICH_PAYLOAD_V1`] they are silently dropped,
@@ -1799,6 +1818,31 @@ fn pending_decrypt_record_version() -> u8 {
     PENDING_DECRYPT_RECORD_VERSION
 }
 
+/// One frame in custody, persisted under [`storage_keys::CUSTODY`].
+///
+/// The frame as it arrived with the deposit request removed and the hop
+/// fields as the forwarding path adjusted them; the depositor, which is both
+/// the frame's sender and the peer it arrived from; the wall-clock acceptance
+/// time in Unix milliseconds, never a monotonic instant; and the class token.
+/// `version` is the same forward-compatibility hinge as
+/// [`PendingDecryptRecord::version`].
+#[derive(Serialize, Deserialize)]
+pub(crate) struct CustodyRecord {
+    #[serde(default = "custody_record_version")]
+    pub(crate) version: u8,
+    pub(crate) depositor: String,
+    pub(crate) message: Message,
+    pub(crate) accepted_at_ms: i64,
+    pub(crate) class: String,
+}
+
+/// The only custody record version this build writes or reads.
+pub(crate) const CUSTODY_RECORD_VERSION: u8 = 1;
+
+fn custody_record_version() -> u8 {
+    CUSTODY_RECORD_VERSION
+}
+
 impl PendingMessage {
     /// Recomputes [`Self::serialized_bytes`] from the current field values.
     ///
@@ -1947,6 +1991,14 @@ pub(crate) mod storage_keys {
     /// per message keyed by message id — the receive-side mirror of
     /// [`PENDING_MESSAGE_ENTRIES`]. See `PendingDecryptRecord`.
     pub const PENDING_DECRYPT_ENTRIES: &str = "pending_decrypt_entries";
+
+    /// Frames held in custody for a neighbour (`docs/spec/custody.md`), one
+    /// record per held frame keyed by its message id. Sealed like the
+    /// pending-decrypt records: other people's ciphertext plus routing
+    /// metadata about them, outliving the process. Post-split only, and
+    /// absent from [`ADOPTABLE_STATE_KEY_TYPES`] for the same reason as
+    /// [`PENDING_DECRYPT_ENTRIES`].
+    pub const CUSTODY: &str = "custody_entries";
     /// Key type for persisted per-peer MLS session confirmation state.
     pub const SESSION_STATES: &str = "session_states";
     /// Key type for persisted per-peer received key packages (survives restart).

@@ -634,6 +634,98 @@ dictionary MeshRelayStats {
     u64 dropped_for_capacity;
 };
 
+// Custody: holding a neighbour's replication frames for hours instead of the
+// seconds a forwarder gives them (docs/spec/custody.md). Off by default, and
+// every dial is the custodian's: a device that never enables it behaves
+// exactly as before. Absent means "keep the core default", like
+// MeshRelayConfig, so a section naming one dial moves only that dial. The
+// core validates the bounds: the hold strictly shorter than
+// retry.outbox_max_lifetime_ms, positive session-tier caps, a byte cap that
+// admits one replication frame at its ceiling, and a stranger tier that is
+// both zero (the default: no deposits from peers without a session) or both
+// set. Applied at construction; there is no runtime update.
+dictionary CustodyConfig {
+    // Whether this device accepts deposits. The off switch.
+    boolean? enabled = null;
+    // How long an accepted frame is held, in milliseconds, judged in wall
+    // time against the value in force at each sweep: lowering it expires
+    // records already held.
+    u64? hold_ms = null;
+    // Held frames one depositor with an established session may have at once.
+    u64? max_entries_per_depositor = null;
+    // Bytes one depositor with an established session may have at once.
+    u64? max_bytes_per_depositor = null;
+    // Held frames across every depositor.
+    u64? max_entries = null;
+    // Bytes across every depositor.
+    u64? max_bytes = null;
+    // Held frames one proven peer without a session may have at once. Zero
+    // means such peers are refused, which is the default.
+    u64? stranger_max_entries = null;
+    // Bytes one proven peer without a session may have at once.
+    u64? stranger_max_bytes = null;
+    // What happens when a budget is full: evict the oldest held frame to
+    // admit the new one, or refuse the new one.
+    OverflowPolicy? overflow_policy = null;
+};
+
+// What this device has done as a custodian and as a depositor, and what it
+// is holding right now (docs/spec/custody.md).
+//
+// `held` and `held_bytes` are gauges. Everything else is cumulative since
+// start-up or the last erase_custody(). Aggregate and never per depositor,
+// because a per-depositor answer would be the quota oracle the chapter
+// refuses to be. Every refusal reason in the acceptance table has a counter,
+// so "custody is off" can be told from "nobody asked".
+dictionary CustodyStats {
+    // Frames in custody right now.
+    u64 held;
+    // Bytes in custody right now.
+    u64 held_bytes;
+    // Deposits accepted.
+    u64 accepted;
+    // Held frames handed to their recipient directly, and released.
+    u64 delivered;
+    // Held frames re-originated toward a neighbour that is not the recipient.
+    u64 re_originated;
+    // Held frames dropped at the end of their hold.
+    u64 expired;
+    // Deposits of an identifier already held: not stored, not answered.
+    u64 duplicates;
+    // Held frames evicted to admit a newer deposit under drop-oldest.
+    u64 evicted;
+    // Receipts put on the arrival link.
+    u64 receipts_sent;
+    // Receipts not sent: the depositor does not parse them, the link was
+    // gone, or this device cannot sign.
+    u64 receipts_dropped;
+    // Receipts this device received for an entry still in its outbox.
+    u64 receipts_received;
+    // Receipts this device received naming nothing in its outbox, or that it
+    // could not parse.
+    u64 receipts_ignored;
+    // Refused: custody is off.
+    u64 refused_disabled;
+    // Refused: no deposit request on the frame.
+    u64 refused_no_request;
+    // Refused: unknown class token.
+    u64 refused_unknown_class;
+    // Refused: not a sealed frame.
+    u64 refused_not_sealed;
+    // Refused: the arrival link was not identified.
+    u64 refused_unproven_peer;
+    // Refused: the sender is not the peer the frame arrived from.
+    u64 refused_not_depositor;
+    // Refused: a peer without a session while the stranger tier is closed.
+    u64 refused_stranger;
+    // Refused: the depositor's budget is full.
+    u64 refused_depositor_full;
+    // Refused: the global budget is full.
+    u64 refused_store_full;
+    // Refused: the battery is below the relay floor.
+    u64 refused_battery;
+};
+
 // ACK configuration
 dictionary AckConfig {
     u64 default_timeout_ms;
@@ -865,6 +957,10 @@ dictionary ProtocolConfig {
     // inside it — see MeshRelayConfig. Applied at construction: the governor
     // takes its snapshot there, and there is no runtime update path.
     MeshRelayConfig? mesh_relay = null;
+    // Whether this device holds a neighbour's replication frames for hours,
+    // and under what quotas (docs/spec/custody.md). Null, and any field left
+    // null inside it, keeps the core default: off. Applied at construction.
+    CustodyConfig? custody = null;
     // Whether the replicated-document layer accepts work. On by default,
     // now that replication has landed: a space replicates with the peer
     // whose address names it, and an application that never opens a store
@@ -1587,6 +1683,17 @@ interface OfflineProtocol {
     // exact thing the optional *input* exists to prevent.
     MeshRelayStats get_mesh_relay_stats();
     MeshRelayTunables get_mesh_relay_tunables();
+
+    // Custody: what this device holds for its neighbours and has done as a
+    // depositor (docs/spec/custody.md). Read through to the core.
+    CustodyStats get_custody_stats();
+    // Drops every held frame and resets the custody counters. Callable on
+    // its own; the data layer's wipe_all() calls it too, because a custody
+    // store that survived a logout would hold other people's traffic past
+    // the point the user asked for erasure. Attempts every record and fails
+    // only when one could not be deleted.
+    [Throws=ProtocolError]
+    void erase_custody();
     
     // ========================================================================
     // MLS (END-TO-END ENCRYPTION) OPERATIONS
