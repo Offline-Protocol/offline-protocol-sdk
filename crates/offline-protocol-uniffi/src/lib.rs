@@ -5023,8 +5023,16 @@ impl OfflineProtocol {
     // ========================================================================
     // RETICULUM TRANSPORT
     // ========================================================================
+    //
+    // The `reticulum_*` names are the transport slot's, after its reference
+    // backbone, and they are the generated API of three bindings. The slot
+    // is the gateway daemon carrier: a bridge speaks the daemon contract
+    // over local IP, and what stands behind the daemon is the gateway's
+    // property, learned here only as a `backbone_<kind>_v1` token that
+    // nothing reads (ADR 0026).
 
-    /// Called by the platform when the Reticulum daemon connection status changes.
+    /// Called by the platform when the gateway daemon connection status
+    /// changes.
     pub fn reticulum_status_changed(&self, is_connected: bool) -> Result<(), ProtocolError> {
         // Atomically read previous state and update in a single lock scope
         let was_connected = {
@@ -5266,7 +5274,10 @@ impl OfflineProtocol {
     }
 
     /// Reticulum: capability tokens from the gateway's `Capabilities` answer
-    /// (e.g. `gateway_v1`, `backbone_reticulum_v1`).
+    /// (e.g. `gateway_v1`, `backbone_reticulum_v1`). A `backbone_<kind>_v1`
+    /// token says what stands behind the daemon; the SDK stores it and
+    /// reads nothing from it, and a kind it does not know is kept like any
+    /// other token.
     ///
     /// The bridge MUST call this before `reticulum_status_changed(true)` on
     /// each attach — the contract's own ordering, so a device never drains
@@ -5287,8 +5298,8 @@ impl OfflineProtocol {
 
     /// Reticulum: gateway-sourced presence for a peer (`PresenceStatus`).
     ///
-    /// `online=true` records the fact against Reticulum and re-drives that
-    /// peer's parked messages **over Reticulum**, because that is the carrier
+    /// `online=true` records the fact against this carrier and re-drives that
+    /// peer's parked messages **over this carrier**, because it is the one
     /// that just proved it can reach them; `online=false` parks pending
     /// welcomes without burning retry budget. Emits `presence_updated` with
     /// `source: reticulum` — except for self, blocked, or empty peer ids,

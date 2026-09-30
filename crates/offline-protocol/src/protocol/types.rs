@@ -40,8 +40,11 @@ pub enum GatewayCarrier {
     /// The internet relay, which implemented every verb before the contract
     /// named them.
     Internet,
-    /// A gateway daemon reached over the Reticulum transport's local IP
-    /// contract.
+    /// A gateway daemon reached over local IP, through the transport slot
+    /// named `Reticulum` after its reference backbone. The variant names
+    /// the carrier, not the backbone: what stands behind the daemon is the
+    /// gateway's property, and this device learns of it only as a
+    /// capability token it never reads (ADR 0026).
     Reticulum,
 }
 

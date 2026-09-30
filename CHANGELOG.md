@@ -282,6 +282,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   package's job. Two mesh controller tests were failing: they registered two
   peers in a mesh with room for four, so the eviction they assert was never
   weighed. They now fill the mesh, as their Kotlin twins have since #120.
+- **The leaf node builds for WASI, and CI gates it.** `offline-protocol-leaf`
+  compiles for `wasm32-wasip1` in both halves: without default features,
+  where `getrandom` reads the runtime's `random_get` and the firmware-style
+  `bare-metal-rng` feature is not used, and with `std` through the new
+  `wasi_host_shim` example, which drives a device from a runtime over its
+  standard streams with the time and the frames supplied by the host. The
+  claim is WASI only: `wasm32-unknown-unknown` is not gated, because there
+  the pinned MLS library enables `getrandom`'s `js` feature ahead of any
+  host-registered backend, so a green build on that target proves nothing
+  about a non-browser host. This is a compile result plus a native run of
+  the shim; nothing has run under a WebAssembly runtime.
+
 - **Services on the LAN, and the first Python service wrappers.** A new
   specification chapter, `docs/spec/dns-sd-mapping.md`, lays a
   `ServiceDescriptor` out as a DNS-SD instance under the subtype
@@ -483,6 +495,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   argument with no default, because the default was the fixed id above.
   `ProtocolManager` already passes it, so only code that builds an
   `InternetManager` directly needs `app_id=`.
+
+- **The backbone is a gateway property.** The gateway contract's backbone
+  section is restated as what any backbone owes a gateway (gateway-to-gateway
+  presence, arbitrary-size framing, a provisioned peer list, a declared rate
+  class), with Reticulum as the reference backbone in a subsection of its
+  own. A gateway advertises each backbone as a `backbone_<kind>_v1`
+  capability token; a client ignores a kind it does not know, a gateway may
+  advertise none, and the token is advisory and never a routing input. A
+  device attaches to one gateway daemon at a time, because every gateway
+  answer is recorded against the one daemon carrier. No frame, verb or
+  token spelling changes: `backbone_reticulum_v1` is the family's first
+  member. The `reticulum_*` entry points keep their names and their doc
+  comments now say what they name, the gateway daemon carrier after its
+  reference backbone. [ADR 0026](docs/adr/0026-the-backbone-is-a-gateway-property.md)
+  records the decision.
 
 ## [0.27.0] — 2026-09-25
 

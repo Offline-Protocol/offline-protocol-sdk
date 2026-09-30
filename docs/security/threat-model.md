@@ -467,10 +467,18 @@ enumeration above and is unchanged.
 
 **Mitigations specified but not enforceable from here**: the per-device and
 per-peer token-bucket budgets against backbone exhaustion are the gateway's own
-to apply, so a device cannot verify that its gateway applies them. This is
-listed apart from the others on purpose: a threat model that reads as
-protection when the protection is somebody else's to implement is the failure
-this document exists to prevent.
+to apply, so a device cannot verify that its gateway applies them. They are
+sized per [rate class](../spec/gateway-contract.md#what-a-backbone-owes-a-gateway):
+a scarce-class backbone (a few bps up to LoRa-class kbps) carries direct
+messages, acknowledgements and control frames and excludes media, and a
+broad one carries what the daemon link accepts under the same budgets. The
+class follows from the kind the gateway advertises, a token the device
+stores and never acts on, so a gateway that applies the wrong class delays
+every device behind it (the latency-and-battery cost above) and changes no
+decision on any of them.
+This is listed apart from the others on purpose: a threat model that reads
+as protection when the protection is somebody else's to implement is the
+failure this document exists to prevent.
 
 **What would close it:** nothing closes the lying-gateway case, because the lie
 is about someone else's state. Provisioning is the real control: gateways are

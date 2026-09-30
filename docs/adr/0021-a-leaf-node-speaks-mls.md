@@ -271,6 +271,13 @@ time source at pairing, durable state before emission, and an entropy source
 that is real. They are written down here because they are invisible in a passing
 build and expensive on a bench.
 
+The same crate is the leaf on a WebAssembly host, on the WASI target only:
+there `getrandom` reads the runtime's `random_get`, so the entropy obligation
+moves to the runtime unchanged. `wasm32-unknown-unknown` is not claimed,
+because on that target the pinned MLS library enables `getrandom`'s `js`
+feature, which is selected ahead of a host-registered backend, so a passing
+build there says nothing about a non-browser host.
+
 Two risks are accepted with open eyes. mls-rs has not had a third-party security
 audit and its only `no_std` crypto provider is the one its own authors label
 experimental; this is a monitored dependency, not a settled one. And an interop

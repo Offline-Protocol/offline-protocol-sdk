@@ -10,6 +10,10 @@
 //! `tools/mls-interop` covers the same pair out of process and pins the
 //! library versions. This file covers the choreography that sits above them:
 //! the gates, the reset sequence, and the persist-before-emit rule.
+//!
+//! Absent on WebAssembly: the phone side does not build there, and the
+//! crate's manifest leaves it out of the WASI configuration for that reason.
+#![cfg(not(target_arch = "wasm32"))]
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
