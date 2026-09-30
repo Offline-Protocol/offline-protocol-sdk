@@ -122,8 +122,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   failed nor a first write that failed can disarm it); a state root that
   holds records and belongs with another MLS store (an identity is in
   place, but not the one that wrote the state), decided by the pairing ids
-  the two stores' first open wrote, and for a state root never bound by
-  whether its sealed records open under this MLS store's record key; an
+  the two stores' first open wrote, and for a state root never bound, or
+  bound to another id, by whether its sealed records open under this MLS
+  store's record key, which only this identity's do; an
   account directory that cannot be read, which is never taken for empty;
   and roots that are one directory
   or one inside the other, compared as spelled before anything is created
