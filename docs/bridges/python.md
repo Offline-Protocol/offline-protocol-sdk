@@ -272,6 +272,69 @@ Releasing the file stores does not depend on any of this. `close()` asks
 the core to release them (`close_file_stores`), and the directories are free
 when it returns, whatever still refers to the manager.
 
+## P11. A gateway session is announced only once it is bound, and a frame is settled only on its verdict
+
+`GatewayManager` is the host's client for the gateway-daemon contract
+([the chapter](../spec/gateway-contract.md)) behind the slot the FFI names
+`reticulum`: newline-delimited JSON over TCP to a daemon on local IP. Two
+things it promises, and the shape that keeps each:
+
+**The carrier is offered to the core only for a session the gateway bound
+to this device's address.** `reticulum_status_changed(True)` is called from
+one place, on `StatusUpdate(connected)`, and only after the gateway's
+`AddressDeclared` echoed the address `local_address()` holds. The
+`Capabilities` frame is handed to the core as it arrives, and the contract
+puts it before the announcement, so on a conforming gateway the core knows
+what the gateway can do before the flush the announcement triggers. A
+session announced before it is bound is closed rather than kept: it is verdict-only on the gateway's side, so
+nothing addressed to this device would ever arrive over it, and a transport
+that can only refuse must not be offered to the selector. An echo of
+someone else's address, a refused declaration, a challenge that is not 32
+bytes, or a gateway that says nothing for ten seconds each cost the
+connection, and the reconnect ladder decides when to try again. The ladder
+resets only on a bound and announced session, never on the TCP open: reset
+there, a refusing gateway was retried at the floor forever with a signature
+spent per turn. The declaration itself comes from the core
+(`gateway_address_declaration`); the module names no signing domain, and a
+Rust guard reads it to keep that true.
+
+**The socket write is not the outcome.** Every `SendMessage` carries the
+core's message id and is held in a verdict tracker until the gateway's
+`MessageSent` or `DeliveryError` names it; only then is
+`reticulum_confirm_sent` or `reticulum_send_failed_with_reason` called.
+Confirming on the write is what the first clients of this contract did,
+and it is why `recipient_unreachable`, the one verdict that parks a message
+and offers it to the mesh, never reached the core from them. Verdicts are
+correlated by id, never by order, because a gateway answers submissions as
+their routing resolves. At most eight frames are unanswered at once, an id
+already in flight is not sent again when the core re-queues it, and every
+outstanding id is settled exactly once: a duplicate verdict is ignored, a
+connection that closes fails what it carried with `Connection lost`, and a
+gateway silent for sixty seconds has the frame failed under
+`gateway_silent`, which the core reads as a retry. Sixty is chosen to stay
+under the core's own 120 s pending-confirmation expiry; the Rust guard
+`gateway_manager_constants_match_across_both_bridges` reads the Python
+policy beside the two mobile ones and holds that relationship.
+
+This is the first client on this carrier to read the two optional verdict
+flags. `stored` on a `DeliveryError` is reported as `relay_stored`,
+`pushed` on a `MessageSent` as `relay_pushed`, and both together as
+`relay_pushed_stored`: the relay client's own mapping, so a gateway with a
+mailbox or a push parks a plain message the way the relay does and
+fast-fails nothing the push may have delivered. Each flag is a statement
+about the one frame the verdict names, never about the recipient.
+
+The decisions and frame shapes are pure functions in
+`gateway_attach_policy.py`, `gateway_verdict_tracker.py` and
+`presence_watch_policy.py`, ports of the Swift files of the same names,
+with no socket and no core; `test_gateway_attach_policy.py` and
+`test_presence_watch_policy.py` pin their hand-mirrored constants as
+literals (C5, the seventh and eighth sets). `test_gateway_manager.py`
+drives the manager against a fake daemon on a real loopback socket and
+pins the attach order, the correlation, the flags and what a dead
+connection owes. No daemon has been run against it; a conforming daemon is
+a deployment this repository does not ship.
+
 ## Testing
 
 ```bash

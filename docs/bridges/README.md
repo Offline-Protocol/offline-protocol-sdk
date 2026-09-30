@@ -187,28 +187,36 @@ than the engine hands every silent-relay resolution to the sweep instead of to
 the bridge that knows which relays replied. Nothing on either side of the
 boundary would show that, so the guard asserts the ordering too.
 
-**The gateway attach constants** are the seventh: the Swift and Kotlin
-`GatewayAttachPolicy` each hold the protocol version, the challenge length, the
-attach and verdict timeouts, the in-flight cap and the presence-peer cap, and a
-Rust guard reads both sources. Like the Nostr deadline, one of these is pinned
-for a *relationship* as well as a spelling: the 60s verdict timeout has to stay
-below the core's 120s pending-confirmation expiry, because two clocks describe
-the same frame and if the bridge's were the longer one the core would settle the
-frame first and the verdict would then land on an id it had already moved past.
+**The gateway attach constants** are the seventh: the Swift, Kotlin and Python
+`GatewayAttachPolicy` (`gateway_attach_policy.py` in Python) each hold the
+protocol version, the challenge length, the attach and verdict timeouts, the
+line cap, the address-echo bound, the in-flight cap and the presence-peer cap,
+and a Rust guard reads all three sources. Like the Nostr deadline, one of
+these is pinned for a *relationship* as well as a spelling: the 60s verdict
+timeout has to stay below the core's 120s pending-confirmation expiry, because
+two clocks describe the same frame and if the client's were the longer one the
+core would settle the frame first and the verdict would then land on an id it
+had already moved past. Python also pins its spellings per language, in
+`test_gateway_attach_policy.py`, for the reason the relay domain does below;
+the relationship it cannot pin, because the core's constant is not visible
+from Python, so that one stays with the Rust guard.
 
 The signing domain is deliberately **not** in this list, though the relay's is.
 The gateway proof commits only this device's own address, so it is built and
-signed in the core and pinned by a conformance vector CI executes; no bridge
+signed in the core and pinned by a conformance vector CI executes; no client
 holds a copy of the layout, and there is nothing to mirror. A `GatewayAttachPolicy`
 that grew one would be reintroducing the problem the relay's copy already is,
-which is why a sibling guard asserts neither bridge, nor either policy, contains the domain string.
+which is why a sibling guard asserts that no manager and no policy, in any of
+the three languages, contains the domain string.
 
 **The presence-watch defaults** are the eighth, and were unpinned for as long as
 they have existed: `PresenceWatchPolicy`'s idle TTL, per-tick query cap and tick
-interval are hand-mirrored in Swift and Kotlin, and both the relay and gateway
-managers now drive from them. A tick interval that drifted apart would give the
-two platforms different presence latency, which reads in the field as a device
-problem rather than as a constant.
+interval are hand-mirrored in Swift, Kotlin and Python
+(`presence_watch_policy.py`), and the relay and gateway managers drive from
+them. A tick interval that drifted apart would give the platforms different
+presence latency, which reads in the field as a device problem rather than as
+a constant. The Rust guard reads all three; Python pins its three as literals
+too.
 
 **The iOS selector table** is the ninth, and the only one that is not a
 constant. `OfflineProtocolModule.m` mirrors every `@objc` method of
@@ -603,7 +611,7 @@ found by the first application to update.
 |---------|------|
 | Swift | The manual Objective-C bridge kept in step with every `@objc` method; secure storage backed by Keychain; a live-instance check before emitting; the telemetry session boundary inside a background task (C12); a Multipeer manager that announces a peer only under the address its preamble proved, one per address (S8) |
 | Kotlin | Secure storage backed by Keystore; no blocking work on the main looper; awareness that platform callbacks arrive on binder threads; the telemetry session boundary from an `Application.ActivityLifecycleCallbacks` watcher, never `onHostPause` (C12); a Wi-Fi Direct manager that announces a peer only under the address its preamble proved, one per address (K8) |
-| Python | Nothing platform-specific; it is the thinnest binding and therefore the best place to smoke-test an ABI change; a re-entrant lock on the generated callback handle map, installed at import, because the collector can free a core object inside a callback lookup and the core's drop then asks for that lock again (P10); the host platform for telemetry from `platform`; a BLE peripheral that serves the address and the core-built identity assertion, and a central that verifies before it announces (P8); a peer-stream manager that announces a host only under the address its preamble proved, and keeps one announced stream per address (P9) |
+| Python | Nothing platform-specific; it is the thinnest binding and therefore the best place to smoke-test an ABI change; a re-entrant lock on the generated callback handle map, installed at import, because the collector can free a core object inside a callback lookup and the core's drop then asks for that lock again (P10); the host platform for telemetry from `platform`; a BLE peripheral that serves the address and the core-built identity assertion, and a central that verifies before it announces (P8); a peer-stream manager that announces a host only under the address its preamble proved, and keeps one announced stream per address (P9); a gateway-daemon client that announces a session only once the gateway bound it to this device's address, and settles a frame only on the gateway's verdict, never on the write (P11) |
 | TypeScript | Config normalization, event typing kept in step with the core, no assumption that a native method exists in an older binary, and no telemetry lifecycle code of its own |
 
 A storage adapter written in any of them owes the same thing: a green

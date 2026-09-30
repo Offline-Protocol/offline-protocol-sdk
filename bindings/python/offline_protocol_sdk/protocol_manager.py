@@ -36,6 +36,7 @@ from .offline_protocol import (
 )
 from .ble_manager import BleManager
 from .ble_peripheral import BlePeripheral
+from .gateway_manager import GatewayManager
 from .internet_manager import InternetManager
 from .peer_stream_manager import PeerStreamManager
 from .secure_storage import SecureStorage
@@ -116,12 +117,21 @@ class _NostrTransportCallbackImpl(NostrTransportCallback):
 
 
 class _ReticulumTransportCallbackImpl(ReticulumTransportCallback):
-    """Stub — no desktop Reticulum manager; apps driving Reticulum manually
-    must call ``protocol.set_reticulum_transport_callback()`` with their own
-    impl."""
+    """Forwards the ``reticulum`` slot's wake to :class:`GatewayManager`.
+
+    The core fires it when a frame is queued for this carrier; the manager
+    drains only once the gateway has bound the session, so a wake for an
+    unattached manager is one drain that returns at once. An application
+    that drives the slot itself replaces this through
+    ``protocol.set_reticulum_transport_callback``.
+    """
+
+    def __init__(self, manager: GatewayManager | None) -> None:
+        self._manager = manager
 
     def on_messages_available(self) -> None:
-        pass
+        if self._manager is not None:
+            self._manager.on_messages_available()
 
 
 #: Where :class:`ProtocolManager` finds the sealed MLS store's root when
@@ -418,6 +428,15 @@ class ProtocolManager:
         if getattr(config, "wifi_direct_enabled", False):
             self.peer_stream = PeerStreamManager(self._protocol)
 
+        # The gateway-daemon client behind the `reticulum` slot: TCP to a
+        # daemon built to the gateway contract, attached with a signed
+        # address declaration, each send settled on the gateway's verdict.
+        # Configured and started by the caller after `start()`, once this
+        # device has an address to declare; stopped here.
+        self.gateway: GatewayManager | None = None
+        if getattr(config, "reticulum_enabled", False):
+            self.gateway = GatewayManager(self._protocol, device_id)
+
         # Processing loop task
         self._process_task: asyncio.Task[None] | None = None
         self._running = False
@@ -490,7 +509,7 @@ class ProtocolManager:
 
         self._reticulum_cb: _ReticulumTransportCallbackImpl | None = None
         if getattr(self._config, "reticulum_enabled", False):
-            self._reticulum_cb = _ReticulumTransportCallbackImpl()
+            self._reticulum_cb = _ReticulumTransportCallbackImpl(self.gateway)
             self._protocol.set_reticulum_transport_callback(self._reticulum_cb)
 
         # Keep strong references to all objects passed to the Rust/UniFFI
@@ -653,6 +672,8 @@ class ProtocolManager:
             await self.internet.stop()
         if self.peer_stream is not None:
             await self.peer_stream.stop()
+        if self.gateway is not None:
+            await self.gateway.stop()
 
         # Give the telemetry pipe its final flush while the process is still
         # ours to block: the pipe would also stop when the protocol is
@@ -702,12 +723,12 @@ class ProtocolManager:
     def _release_callbacks(self) -> None:
         """Replaces the callbacks that can reach this manager with inert ones.
 
-        The core holds every registered callback. The BLE and peer-stream
-        callbacks hold their managers, the event callback holds the
+        The core holds every registered callback. The BLE, peer-stream and
+        gateway callbacks hold their managers, the event callback holds the
         application's handler (often a bound method of the object that owns
         this manager, or a closure over it), and an application that drives
-        Nostr or Reticulum itself registers its own callback, which needs
-        the core to drain it. Each of those reaches
+        Nostr or the gateway slot itself registers its own callback, which
+        needs the core to drain it. Each of those reaches
         the core again, and the cycle runs through Rust, so Python's
         collector cannot see it, let alone break it: without this a stopped
         manager is never freed. With the file stores that is not a leak but
@@ -727,7 +748,7 @@ class ProtocolManager:
                 _WifiDirectTransportCallbackImpl(None),
             ),
             (core.set_nostr_transport_callback, _NostrTransportCallbackImpl()),
-            (core.set_reticulum_transport_callback, _ReticulumTransportCallbackImpl()),
+            (core.set_reticulum_transport_callback, _ReticulumTransportCallbackImpl(None)),
         ):
             try:
                 register(inert)

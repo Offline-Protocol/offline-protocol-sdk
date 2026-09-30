@@ -12310,20 +12310,55 @@ mod tests {
         );
         // The policies too, because that is where a copy of the layout would
         // land: they are the testable half, and the relay's copy lives in its
-        // policy for exactly that reason.
-        let swift_policy = rn_source_code_only("ios/GatewayAttachPolicy.swift");
-        let kotlin_policy =
-            rn_source_code_only("android/src/main/java/com/offlineprotocol/GatewayAttachPolicy.kt");
+        // policy for exactly that reason. All six files are read raw, with
+        // their comments kept, unlike the shape pins above: the rule is that
+        // the string is absent from the file entirely, and a comment quoting
+        // the domain is the first step to a copy of the layout. The Python
+        // manager gets the declaration from the core the same way the two
+        // bridges do.
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let read_raw = |root: &str, rel: &str| -> String {
+            let path = manifest.join(root).join(rel);
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        };
+        let rn = "../../bindings/react-native";
+        let py = "../../bindings/python";
+        let python_manager = read_raw(py, "offline_protocol_sdk/gateway_manager.py");
+        assert!(
+            python_manager.contains("self._protocol.gateway_address_declaration("),
+            "gateway_manager.py must get its declaration from the core"
+        );
         for (name, code) in [
-            ("swift", &swift),
-            ("kotlin", &kotlin),
-            ("swift policy", &swift_policy),
-            ("kotlin policy", &kotlin_policy),
+            ("swift", read_raw(rn, "ios/ReticulumManager.swift")),
+            (
+                "kotlin",
+                read_raw(
+                    rn,
+                    "android/src/main/java/com/offlineprotocol/ReticulumManager.kt",
+                ),
+            ),
+            (
+                "swift policy",
+                read_raw(rn, "ios/GatewayAttachPolicy.swift"),
+            ),
+            (
+                "kotlin policy",
+                read_raw(
+                    rn,
+                    "android/src/main/java/com/offlineprotocol/GatewayAttachPolicy.kt",
+                ),
+            ),
+            ("python manager", python_manager),
+            (
+                "python policy",
+                read_raw(py, "offline_protocol_sdk/gateway_attach_policy.py"),
+            ),
         ] {
             assert!(
                 !code.contains("offline-gateway-addr-v1"),
-                "{name} must not carry the signing domain — the payload is built once, in the \
-                 core, where a conformance vector pins it"
+                "{name} must not carry the signing domain, in code or in a comment: the payload \
+                 is built once, in the core, where a conformance vector pins it"
             );
         }
 
@@ -12693,67 +12728,97 @@ mod tests {
         );
     }
 
-    /// The gateway constants agree across both bridges, and the verdict
+    /// The gateway constants agree across all three clients, and the verdict
     /// timeout stays under the core's own expiry.
     ///
-    /// Two hand-mirrored constant sets with no compiler between them, in the
-    /// C5 mould. The relationship matters more than the numbers: two clocks
-    /// describe the same frame, and if the bridge's were the longer one the
-    /// core would expire the frame first and the verdict would then settle an
-    /// id it had already moved past.
+    /// Three hand-mirrored constant sets with no compiler between them, in
+    /// the C5 mould. The relationship matters more than the numbers: two
+    /// clocks describe the same frame, and if the client's were the longer
+    /// one the core would expire the frame first and the verdict would then
+    /// settle an id it had already moved past. Python's pytest pins its
+    /// spellings as literals too; what only this guard can hold is the
+    /// relationship, because the core's constant is not visible from
+    /// Python.
     #[test]
     fn gateway_manager_constants_match_across_both_bridges() {
         let swift = rn_source_code_only("ios/GatewayAttachPolicy.swift");
         let kotlin =
             rn_source_code_only("android/src/main/java/com/offlineprotocol/GatewayAttachPolicy.kt");
 
-        // The bridge's verdict timeout, as spelled in the Swift policy. Named
-        // once so the relationship assertion below derives its number from
-        // the same spelling the pin checks, rather than from a second literal
-        // that would agree with itself.
+        // The Python policy is read as line-anchored module constants, not
+        // flattened text (see `python_module_constants`). The value is what
+        // the file says, so the relationship below is read from the file,
+        // not from a spelling this test chose.
+        let python_constant =
+            python_module_constants("offline_protocol_sdk/gateway_attach_policy.py");
+
+        // The client's verdict timeout, as spelled in each mobile policy.
+        // Named once so the relationship assertion below derives its number
+        // from the same spelling the pin checks, rather than from a second
+        // literal that would agree with itself.
         const SWIFT_VERDICT_TIMEOUT_DECL: &str = "VERDICT_TIMEOUT: TimeInterval = 60.0";
         const KOTLIN_VERDICT_TIMEOUT_DECL: &str = "VERDICT_TIMEOUT_MS = 60_000L";
 
-        // (name, swift spelling, kotlin spelling)
-        let pairs: [(&str, &str, &str); 8] = [
+        // (name, swift spelling, kotlin spelling, python name, python value)
+        let pairs: [(&str, &str, &str, &str, &str); 8] = [
             (
                 "protocol version",
                 "PROTOCOL_VERSION = 1",
                 "PROTOCOL_VERSION = 1",
+                "PROTOCOL_VERSION",
+                "1",
             ),
             (
                 "challenge length",
                 "CHALLENGE_LENGTH = 32",
                 "CHALLENGE_LENGTH = 32",
+                "CHALLENGE_LENGTH",
+                "32",
             ),
             (
                 "attach timeout",
                 "ATTACH_TIMEOUT: TimeInterval = 10.0",
                 "ATTACH_TIMEOUT_MS = 10_000L",
+                "ATTACH_TIMEOUT",
+                "10.0",
             ),
             (
                 "verdict timeout",
                 SWIFT_VERDICT_TIMEOUT_DECL,
                 KOTLIN_VERDICT_TIMEOUT_DECL,
+                "VERDICT_TIMEOUT",
+                "60.0",
             ),
             (
                 "line cap",
                 "MAX_LINE_BYTES = 1 << 20",
                 "MAX_LINE_BYTES = 1 shl 20",
+                "MAX_LINE_BYTES",
+                "1 << 20",
             ),
             (
                 "address echo bound",
                 "MAX_ADDRESS_BYTES = 128",
                 "MAX_ADDRESS_BYTES = 128",
+                "MAX_ADDRESS_BYTES",
+                "128",
             ),
-            ("in flight cap", "MAX_IN_FLIGHT = 8", "MAX_IN_FLIGHT = 8"),
+            (
+                "in flight cap",
+                "MAX_IN_FLIGHT = 8",
+                "MAX_IN_FLIGHT = 8",
+                "MAX_IN_FLIGHT",
+                "8",
+            ),
             (
                 "presence peers",
                 "MAX_PRESENCE_PEERS = 64",
                 "MAX_PRESENCE_PEERS = 64",
+                "MAX_PRESENCE_PEERS",
+                "64",
             ),
         ];
-        for (name, swift_decl, kotlin_decl) in pairs {
+        for (name, swift_decl, kotlin_decl, python_name, python_value) in pairs {
             assert!(
                 swift.contains(swift_decl),
                 "GatewayAttachPolicy.swift must declare the {name} as `{swift_decl}`"
@@ -12761,6 +12826,11 @@ mod tests {
             assert!(
                 kotlin.contains(kotlin_decl),
                 "GatewayAttachPolicy.kt must declare the {name} as `{kotlin_decl}`"
+            );
+            assert_eq!(
+                python_constant(python_name),
+                python_value,
+                "gateway_attach_policy.py must declare the {name} as `{python_name} = {python_value}`"
             );
         }
 
@@ -12775,20 +12845,30 @@ mod tests {
             "MAX_CAPABILITY_TOKEN_BYTES = {}",
             offline_protocol::MAX_RELAY_CAPABILITY_TOKEN_BYTES
         );
-        assert!(
-            swift.contains(&tokens_decl)
-                && swift.contains(&bytes_decl)
-                && kotlin.contains(&tokens_decl)
-                && kotlin.contains(&bytes_decl),
-            "both bridges must bound capabilities the way the core does: expected `{tokens_decl}` \
-             and `{bytes_decl}` in each policy"
+        for (name, code) in [("swift", &swift), ("kotlin", &kotlin)] {
+            assert!(
+                code.contains(&tokens_decl) && code.contains(&bytes_decl),
+                "the {name} policy must bound capabilities the way the core does: expected \
+                 `{tokens_decl}` and `{bytes_decl}`"
+            );
+        }
+        assert_eq!(
+            python_constant("MAX_CAPABILITY_TOKENS"),
+            offline_protocol::MAX_RELAY_CAPABILITIES.to_string(),
+            "gateway_attach_policy.py must bound capability tokens the way the core does"
+        );
+        assert_eq!(
+            python_constant("MAX_CAPABILITY_TOKEN_BYTES"),
+            offline_protocol::MAX_RELAY_CAPABILITY_TOKEN_BYTES.to_string(),
+            "gateway_attach_policy.py must bound capability token bytes the way the core does"
         );
 
         // The relationship the numbers exist to hold, read from both ends:
         // the core's clock on the same frame is the transport crate's own
-        // constant, and the bridge's is parsed out of the spelling pinned
-        // above. Two test-local literals here would agree with each other
-        // whatever either side changed to.
+        // constant, and the client's is parsed out of the spelling pinned
+        // above (Swift, Kotlin) or out of the file itself (Python). Two
+        // test-local literals here would agree with each other whatever
+        // either side changed to.
         let swift_verdict_timeout_secs = SWIFT_VERDICT_TIMEOUT_DECL
             .rsplit('=')
             .next()
@@ -12806,12 +12886,16 @@ mod tests {
             })
             .map(|ms| ms / 1000.0)
             .expect("the pinned Kotlin spelling ends in a millisecond count");
+        let python_verdict_timeout_secs = python_constant("VERDICT_TIMEOUT")
+            .parse::<f64>()
+            .expect("gateway_attach_policy.py's VERDICT_TIMEOUT is a number of seconds");
         let core_pending_confirmation_secs =
             offline_protocol_transport::constants::RETICULUM_PENDING_CONFIRMATION_TIMEOUT_SECS
                 as f64;
         for (name, bridge_secs) in [
             ("Swift", swift_verdict_timeout_secs),
             ("Kotlin", kotlin_verdict_timeout_secs),
+            ("Python", python_verdict_timeout_secs),
         ] {
             assert!(
                 bridge_secs < core_pending_confirmation_secs,
@@ -12822,33 +12906,41 @@ mod tests {
         }
     }
 
-    /// The presence-watch defaults agree across both bridges.
+    /// The presence-watch defaults agree across all three clients.
     ///
     /// Three hand-mirrored numbers with no pin at all until now: the relay
     /// managers have carried them since presence watching shipped, and the
-    /// gateway managers now carry them too. A tick interval that drifted apart
-    /// would give the two platforms different presence latency, which reads as
-    /// a device problem rather than a constant.
+    /// gateway managers now carry them too, the Python one included. A tick
+    /// interval that drifted apart would give the platforms different
+    /// presence latency, which reads as a device problem rather than a
+    /// constant.
     #[test]
     fn presence_watch_defaults_match_across_both_bridges() {
         let swift = rn_source_code_only("ios/PresenceWatchPolicy.swift");
         let kotlin =
             rn_source_code_only("android/src/main/java/com/offlineprotocol/PresenceWatchPolicy.kt");
+        // Line-anchored module constants, as the gateway guard reads them:
+        // a docstring or a comment cannot start a line at column zero with
+        // the name and an equals sign.
+        let python = python_module_constants("offline_protocol_sdk/presence_watch_policy.py");
 
         assert!(
             swift.contains("defaultIdleTtlMs: Int64 = 10 * 60_000")
-                && kotlin.contains("DEFAULT_IDLE_TTL_MS = 10 * 60_000L"),
-            "the idle TTL must match across both bridges"
+                && kotlin.contains("DEFAULT_IDLE_TTL_MS = 10 * 60_000L")
+                && python("DEFAULT_IDLE_TTL_MS") == "10 * 60_000",
+            "the idle TTL must match across all three clients"
         );
         assert!(
             swift.contains("defaultMaxQueriesPerTick = 10")
-                && kotlin.contains("DEFAULT_MAX_QUERIES_PER_TICK = 10"),
-            "the per-tick query cap must match across both bridges"
+                && kotlin.contains("DEFAULT_MAX_QUERIES_PER_TICK = 10")
+                && python("DEFAULT_MAX_QUERIES_PER_TICK") == "10",
+            "the per-tick query cap must match across all three clients"
         );
         assert!(
             swift.contains("defaultTickInterval: TimeInterval = 20.0")
-                && kotlin.contains("DEFAULT_TICK_INTERVAL_MS = 20_000L"),
-            "the tick interval must match across both bridges"
+                && kotlin.contains("DEFAULT_TICK_INTERVAL_MS = 20_000L")
+                && python("DEFAULT_TICK_INTERVAL") == "20.0",
+            "the tick interval must match across all three clients"
         );
     }
 
@@ -12888,6 +12980,41 @@ mod tests {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    /// The Python counterpart of [`rn_source_code_only`], for module
+    /// constants: reads a file under `bindings/python` and returns a lookup
+    /// from a constant's name to the value the file assigns it.
+    ///
+    /// A module constant is a line that begins at column zero with the name,
+    /// ` = ` and the value. Nothing else can start a line that way: a
+    /// docstring line, a comment, an indented use inside a function. That is
+    /// what makes this a pin on the assignment rather than on a sentence
+    /// about it, which a flattened-text search could not tell apart. The
+    /// lookup panics on a name declared zero or several times, and the read
+    /// panics on a missing file, for the reason the React Native reader
+    /// does.
+    fn python_module_constants(rel: &str) -> impl Fn(&str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/python");
+        let path = path.join(rel);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let rel = rel.to_string();
+        move |name: &str| -> String {
+            let prefix = format!("{name} = ");
+            let values: Vec<&str> = source
+                .lines()
+                .filter_map(|line| line.strip_prefix(&prefix))
+                .map(str::trim)
+                .collect();
+            assert_eq!(
+                values.len(),
+                1,
+                "{rel} must declare `{name}` exactly once at module level, found {}",
+                values.len()
+            );
+            values[0].to_string()
+        }
     }
 
     /// The BLE discovery gate: a peer is announced only under an address it
