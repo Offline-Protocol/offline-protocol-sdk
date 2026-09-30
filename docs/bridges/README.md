@@ -283,7 +283,7 @@ the inclusive 1 MiB ceiling and the 96-byte preamble floor of
 `peer_stream_manager.py`, beside the transport crate's constants. Every
 language pins them the per-language way, as literals in a suite CI executes,
 and each suite also replays the chapter's vector file, so a drift on one side
-fails that side's tests. The Multipeer service type `offlineprotocol` is the
+fails that side's tests. The iOS service type `_offlineprotocol._tcp` is the
 one piece pinned by a Rust guard instead,
 `react_native_wifi_direct_announces_only_proved_addresses`, because the iOS
 manager that holds it is excluded from the SwiftPM harness. A drifted
@@ -609,7 +609,7 @@ found by the first application to update.
 
 | Binding | Owes |
 |---------|------|
-| Swift | The manual Objective-C bridge kept in step with every `@objc` method; secure storage backed by Keychain; a live-instance check before emitting; the telemetry session boundary inside a background task (C12); a Multipeer manager that announces a peer only under the address its preamble proved, one per address (S8) |
+| Swift | The manual Objective-C bridge kept in step with every `@objc` method; secure storage backed by Keychain; a live-instance check before emitting; the telemetry session boundary inside a background task (C12); a Network-framework peer-stream manager that announces a peer only under the address its preamble proved, one per address (S8) |
 | Kotlin | Secure storage backed by Keystore; no blocking work on the main looper; awareness that platform callbacks arrive on binder threads; the telemetry session boundary from an `Application.ActivityLifecycleCallbacks` watcher, never `onHostPause` (C12); a Wi-Fi Direct manager that announces a peer only under the address its preamble proved, one per address (K8) |
 | Python | Nothing platform-specific; it is the thinnest binding and therefore the best place to smoke-test an ABI change; a re-entrant lock on the generated callback handle map, installed at import, because the collector can free a core object inside a callback lookup and the core's drop then asks for that lock again (P10); the host platform for telemetry from `platform`; a BLE peripheral that serves the address and the core-built identity assertion, and a central that verifies before it announces (P8); a peer-stream manager that announces a host only under the address its preamble proved, and keeps one announced stream per address (P9); a gateway-daemon client that announces a session only once the gateway bound it to this device's address, and settles a frame only on the gateway's verdict, never on the write (P11) |
 | TypeScript | Config normalization, event typing kept in step with the core, no assumption that a native method exists in an older binary, and no telemetry lifecycle code of its own |

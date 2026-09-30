@@ -203,41 +203,50 @@ exemption list. It is pinned against literals in `RelayAnswerPrefixesTests.swift
 
 See [C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language).
 
-## S8. A Multipeer peer's verdict is its preamble, not its connect
+## S8. A peer stream's verdict is its preamble, not its connect
 
-`WifiDirectManager` fills the peer-stream slot with MultipeerConnectivity,
-framed as [the chapter](../spec/stream-framing.md) specifies. A connected
-peer is announced to the core only under the address
-`verifyIdentityAssertion` derived from its first message, and only then:
-never on connect, never under `MCPeerID.displayName` (the remote's profile,
-commonly a shared constant), and never from the `addr` in its discovery info,
-which is only a claim the preamble must match.
+`WifiDirectManager` fills the peer-stream slot with TCP streams over Network
+framework, framed as [the chapter](../spec/stream-framing.md) specifies, and
+found through DNS-SD `_offlineprotocol._tcp` on the network or over AWDL
+([ADR 0027](../adr/0027-ios-peer-streams-ride-network-framework.md)). A
+connected peer is announced to the core only under the address
+`verifyIdentityAssertion` derived from its first frame, and only then: never
+on connect, and never from the `addr` in its TXT record, which is only a
+claim the preamble must match.
 
-The rules live in `PeerStreamSession`, Foundation-only and generic over the
-peer handle, and the manager forwards every per-peer event to it on one serial
-queue. That queue is the invariant, for two reasons. A peer's first message
-can arrive before this side's connect callback, and a message must never be
-delivered after the peer's loss report, because the core re-adds a neighbour
-on any inbound body. The manager used to hop state changes onto main and
-messages onto another queue, which allowed both.
+The rules live in two Foundation-only pieces. `PeerStreamReader` cuts the
+stream into whole frames and refuses a prefix out of bounds before it
+buffers a byte of the body. `PeerStreamSession`, generic over the stream
+handle, owns the preamble, the frame rules and every call to the core. The
+manager starts its listener, its browser and every connection on one serial
+queue, and forwards every per-stream event from there. That queue is the
+invariant, for two reasons: a stream's first frame must not overtake its
+connect, and a frame must never be delivered after the peer's loss report,
+because the core re-adds a neighbour on any inbound body. Every callback
+checks that its listener, browser or stream is still the manager's, and
+`stop()` forgets all three before it reports every peer lost.
 
-Local policy differs from Python's P9 on purpose. When a second peer proves
-an address already announced, the newer supersedes the older, which is
-disconnected with no loss report: Multipeer peers do not both dial, and the
-duplicate is almost always the same device back under a new `MCPeerID`. The
-manager mints its `MCPeerID` in every `start()` so that holds for a clean
-stop and start too: the session's per-peer state is keyed by that id, and a
-reused one could meet a new connect with state that says our preamble was
-already sent.
-There is no write queue or deadline here, because the session queues and
-retries its own reliable sends. Each message is one whole frame, and one
-whose prefix disagrees with its length is refused, since there is no stream
-position to resynchronise on.
+Both ends of a pair browse, so both can dial. Of two streams for one
+address, the one the lower address opened is kept, and the newer of two
+such, the Python manager's rule, so an iPhone and a host agree on the same
+stream ([P9](python.md#p9-a-socket-clients-verdict-is-the-preamble-not-the-connect)). The lower address dials at once, and the
+higher waits five seconds for the lower one's stream to arrive. A refused
+duplicate closes with no loss report. A stream handle is a new object per
+connection, never an id a later stream could share: the Multipeer manager
+this replaced keyed its peers by an id that survived a restart, and a
+reconnect met state that said its preamble was already sent.
 
-`PeerStreamSessionTests` drives it with string handles, a fake session and a
-manual clock, and `PeerStreamFramingTests` replays the chapter's vectors. The
-manager's session handling (advertise, browse, invite) is not covered in CI
-(C9).
+Writes follow Android's bounds: a body is dropped (the core retries it) when
+more than 4 MiB is queued toward a peer whose oldest write has been
+outstanding for two seconds, and a write outstanding for thirty seconds ends
+the stream. Every stream carries TCP keepalive with the Python manager's
+timers. At most sixteen streams are open. A local-network denial is reported
+as a diagnostic naming `NSBonjourServices`.
+
+`PeerStreamSessionTests` drives the session with string handles, a fake
+carrier and a manual clock, `PeerStreamReaderTests` the reader with every
+chunking, and `PeerStreamFramingTests` replays the chapter's vectors. The
+manager's own handling (advertise, browse, dial) is not covered in CI (C9).
 
 ## S9. Every object is built for the pod's deployment target
 

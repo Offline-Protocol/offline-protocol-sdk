@@ -173,7 +173,11 @@ kept (two hosts that each list the other open toward each other at once, and
 without a shared rule each would keep what the other discards, forever), and
 between two of the winning kind the newer supersedes the older (the lower
 address reconnecting must not be blocked by its own half-open stream). Either
-way the core sees one announcement and one loss per address.
+way the core sees one announcement and one loss per address. The iOS manager
+keeps the same stream by the same rule, because an iPhone and a host on one
+LAN both dial; `ios_and_python_peer_streams_keep_the_same_stream` pins the
+two copies together
+([ADR 0027](../adr/0027-ios-peer-streams-ride-network-framework.md)).
 
 The tie-break gives the higher address no such way past a stale stream: its
 reconnect is the losing kind for as long as the lower side holds a stream it

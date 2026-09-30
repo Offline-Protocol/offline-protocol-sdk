@@ -501,15 +501,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   core, whatever `appId` the app had configured. They now stamp the
   configured id.
 - **The mobile peer-stream managers carry traffic.** Android's Wi-Fi Direct
-  manager and iOS's Multipeer manager used to drop every inbound frame and
+  manager and iOS's peer-stream manager used to drop every inbound frame and
   announce no peer, because nothing on the wire said who a peer was. Both now
   exchange the identity preamble from
   [the stream chapter](docs/spec/stream-framing.md): each side sends its
   assertion first, checks the peer's with `verifyIdentityAssertion`, and
   announces the peer only under the address it proved. A peer that sends
   anything else first, or nothing for ten seconds, is disconnected unannounced.
-  One peer is announced per address, and a newer connection for the same
-  address replaces the older one without a loss event. A peer is reported
+  One peer is announced per address, and of two connections for the same
+  address one is closed without a loss event (on Android the newer is kept,
+  on iOS the one the lower address opened; see Changed). A peer is reported
   lost exactly once, and no message is delivered after that report.
 - **Android Wi-Fi Direct framing faults.** The reader refused a message of
   exactly 1 MiB, and after refusing a length it read the skipped body as the
@@ -569,14 +570,27 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   short throttle while the user edits, at most about twice a second, and once
   more when editing stops.
 
-- **iOS: the Multipeer service type is `offlineprotocol`.** It was
-  `offline-proto`. An app that enables the `wifiDirect` transport on iOS must
-  list both `_offlineprotocol._tcp` and `_offlineprotocol._udp` under
-  `NSBonjourServices` in its `Info.plist`, or iOS blocks discovery with no
-  error. Its discovery info now carries `txtvers` and `addr` instead of the
-  app's `profile`. An iPhone on this release and one on an earlier release do
-  not see each other over Multipeer. Neither carried traffic before, so no
-  working path is lost.
+- **iOS: the peer-stream slot runs on Network framework, not
+  MultipeerConnectivity.** The `wifiDirect` transport on iOS now opens TCP
+  streams with `NWListener`, `NWBrowser` and `NWConnection`, over the local
+  network or, with no shared network, over AWDL, so two iPhones still reach
+  each other with no access point. It advertises and browses
+  `_offlineprotocol._tcp` with `txtvers=1` and `addr`, the record the Python
+  `PeerStreamManager` uses, so an iPhone and a host on one LAN now find and
+  talk to each other. Breaking for apps: an iPhone on this release does not
+  see one on 0.27 or earlier over this slot; `NSBonjourServices` needs only
+  `_offlineprotocol._tcp` (the `_udp` entry can go), and
+  `NSLocalNetworkUsageDescription` is still required. A denied local-network
+  permission is now reported as an `error` diagnostic instead of failing
+  silently. The seven-peer cap Multipeer imposed is gone; at most sixteen
+  streams are open. The hop is plain TCP, as on Android and Python, where
+  Multipeer encrypted it; payloads are sealed either way. Both ends of a pair
+  now dial, and of two streams for one address both keep the one the lower
+  address opened, the Python manager's rule
+  ([ADR 0027](docs/adr/0027-ios-peer-streams-ride-network-framework.md)).
+  The podspec links `Network` in place of `MultipeerConnectivity`. This
+  replaces the unreleased Multipeer service-type change, which never
+  shipped.
 
 - **Python: `InternetManager` requires `app_id`.** It is now a keyword-only
   argument with no default, because the default was the fixed id above.

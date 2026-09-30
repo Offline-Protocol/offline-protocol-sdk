@@ -283,7 +283,7 @@ final class PeerStreamFramingTests: XCTestCase {
     }
 
     func testTheWinningKindIsWhateverTheLowerAddressOpened() {
-        // Python's `_new_stream_wins`, case for case (ADR 0026).
+        // Python's `_new_stream_wins`, case for case (ADR 0027).
         XCTAssertTrue(PeerStreamLinks<String>.newStreamWins(outbound: true, localAddress: me, peer: a))
         XCTAssertFalse(PeerStreamLinks<String>.newStreamWins(outbound: false, localAddress: me, peer: a))
         XCTAssertFalse(PeerStreamLinks<String>.newStreamWins(outbound: true, localAddress: a, peer: me))

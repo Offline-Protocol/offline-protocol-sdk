@@ -25,7 +25,7 @@ Available transport mechanisms.
 pub enum TransportType {
     Internet,    // Online connectivity (unlimited range)
     BLE,         // Bluetooth Low Energy mesh (50-100m)
-    WiFiDirect,  // Peer-stream slot: Wi-Fi Direct on Android, Multipeer on iOS, a socket on hosts (spec/stream-framing.md)
+    WiFiDirect,  // Peer-stream slot: Wi-Fi Direct on Android, a TCP stream over a LAN or AWDL on iOS, a socket on hosts (spec/stream-framing.md)
     Reticulum,   // Reticulum mesh (LoRa, TCP, UDP, serial, I2P)
     Nostr,       // Nostr relay (censorship-resistant WebSocket relays)
 }

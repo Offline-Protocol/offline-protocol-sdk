@@ -3,8 +3,9 @@
 ## What this chapter is for
 
 A peer stream is a byte stream the platform established to exactly one other
-device: a Wi-Fi Direct group socket on Android, a Multipeer session on iOS, a
-TCP connection over a LAN or over a routed mesh on a host. To the protocol
+device: a Wi-Fi Direct group socket on Android, a TCP connection over a LAN
+or over AWDL (Apple's peer-to-peer Wi-Fi) on iOS, a TCP connection over a LAN
+or over a routed mesh on a host. To the protocol
 engine these are one transport, registered in the slot the FFI names
 `wifi_direct` for historical reasons, and this chapter is what makes them one:
 it specifies the only two things a stream does not get from its platform for
@@ -150,7 +151,7 @@ one, read off the prefix instead of measured after the fact.
 The prefix is big-endian because the one shipped implementation of this
 framing already was: Android's `DataOutputStream.writeInt` writes network
 order, and the Android manager was written against it. A carrier that is
-already message-oriented, such as a Multipeer session, delivers whole messages
+already message-oriented delivers whole messages
 and needs no prefix to find a boundary; it still wraps each message as one
 frame, so that one receive path serves every carrier and the ceiling is read
 off the same four bytes everywhere, and a message whose prefix disagrees
@@ -220,15 +221,18 @@ The bounds this gives a receiver are the ones that matter. Memory per stream
 is at most one body in flight, `DEFAULT_MAX_MESSAGE_SIZE + 4` bytes, because a
 frame is read whole before the next prefix. The number of streams a receiver
 accepts, and the preamble deadline, are local policy, and a conforming
-implementation chooses its own. The mobile managers use ten seconds and, on
-Android, sixteen open sockets; the Python manager's choices are in its bridge
-rules. Which of two streams for one address to keep is policy too, and the
-implementations differ for a reason: the Python manager keeps the stream
-opened by the lower address, because two hosts that each list the other dial
-at once and must agree without talking, while the mobile managers keep the
-newer, because on a phone the duplicate is almost always the same peer
-reconnecting past a half-open stream, and neither Wi-Fi Direct nor Multipeer
-has both ends dial.
+implementation chooses its own. The mobile managers use ten seconds and
+sixteen open streams; the Python manager's choices are in its bridge rules.
+Which of two streams for one address to keep is policy too, and the
+implementations differ for a reason. The Python and iOS managers keep the
+stream opened by the lower address, and the newer of two such, because both
+ends of a pair dial and must agree without talking: a host dials every peer
+it lists or discovers, and an iPhone dials every peer it discovers
+([ADR 0027](../adr/0027-ios-peer-streams-ride-network-framework.md)). The two
+must compute the rule alike, or an iPhone and a host each keep the stream the
+other closes and reconnect forever. The Android manager keeps the newer,
+because a Wi-Fi Direct group has one dialer, and on a phone the duplicate is
+almost always the same peer reconnecting past a half-open stream.
 
 ## Finding a peer on a LAN
 
@@ -240,14 +244,13 @@ allows) and a TXT record whose first entry is `txtvers=1` and which carries
 `addr=<off1…>`, the advertiser's canonical address.
 
 A framework that publishes DNS-SD on the implementation's behalf is bound by
-the same rule. A Multipeer advertiser MUST use the service type
-`offlineprotocol`, which the framework publishes as `_offlineprotocol._tcp`
-and which fits its fifteen-character limit, and SHOULD carry `addr` in the
-discovery dictionary it advertises. Multipeer publishes the type over both
-TCP and UDP, so an app's `NSBonjourServices` must list
-`_offlineprotocol._tcp` and `_offlineprotocol._udp`, or iOS local-network
-privacy blocks discovery without an error. The iOS manager once advertised
-`offline-proto`, which no documented entry named.
+the same rule, and MUST NOT publish `_offlineprotocol._tcp` for a service
+that does not speak this chapter: a browser that finds the record dials it.
+The iOS manager publishes the record itself through Network framework, so an
+app's `NSBonjourServices` must list `_offlineprotocol._tcp`, or iOS
+local-network privacy blocks discovery. The iOS manager once used
+MultipeerConnectivity, which published the same type in front of its own
+protocol, so a host on the same LAN found an iPhone it could not speak to.
 
 The `addr` entry is a hint the preamble proves. It tells a browser which
 device it is about to connect to, so the derived address of the preamble can
@@ -281,7 +284,7 @@ is where a message body is handed upward attributed to it,
 `wifi_direct_get_next_message()` is where outbound bodies are drained,
 addressed by `recipient_id`, and `wifi_direct_peer_disconnected(peer_id)`
 reports the end of an announced stream. The name is debt, recorded rather
-than paid: a Wi-Fi Direct group socket, a Multipeer session, a LAN socket
+than paid: a Wi-Fi Direct group socket, an AWDL stream, a LAN socket
 and a routed-mesh socket are the same thing to the engine, a stream to one
 peer whose identity the platform proved, and renaming the slot is a separate
 breaking change with an alias period.

@@ -106,7 +106,7 @@ final class MeshController {
             appId: "my-ios-app",
             profile: "user123",
             bleEnabled: true,
-            wifiDirectEnabled: false,   // the peer-stream slot; Multipeer on iOS
+            wifiDirectEnabled: false,   // the peer-stream slot; TCP over a LAN or AWDL on iOS
             internetEnabled: true,
             reticulumEnabled: false,
             nostrEnabled: false,
@@ -423,27 +423,32 @@ benign reading.
 ## Platform Limitations
 
 iOS has no Wi-Fi Direct API. The `wifiDirect` transport slot is the
-[peer-stream](spec/stream-framing.md) slot, and on iOS it is filled by
-MultipeerConnectivity. Each peer proves its address with the identity
-preamble before anything it sends reaches the protocol, and a peer that does
-not prove one is disconnected. To enable it, list both Multipeer service
-types in `Info.plist`, or iOS local-network privacy blocks discovery with no
-error:
+[peer-stream](spec/stream-framing.md) slot, and on iOS it is filled by TCP
+streams over Network framework, on the local network or, with no shared
+network, over AWDL (Apple's peer-to-peer Wi-Fi). Each peer proves its address
+with the identity preamble before anything it sends reaches the protocol, and
+a peer that does not prove one is disconnected. To enable it, list the
+service type in `Info.plist` and describe the local-network use, or iOS
+local-network privacy blocks discovery; the SDK reports a denial as an
+`error` diagnostic:
 
 ```xml
 <key>NSBonjourServices</key>
 <array>
     <string>_offlineprotocol._tcp</string>
-    <string>_offlineprotocol._udp</string>
 </array>
+<key>NSLocalNetworkUsageDescription</key>
+<string>Finds and talks to nearby devices running this app</string>
 ```
 
-Multipeer peers are other iOS devices only; it does not interoperate with
-Android's Wi-Fi Direct. Available transports:
+The slot reaches other iPhones and, on a shared network, hosts running the
+Python binding's `PeerStreamManager`. It does not interoperate with
+Android's Wi-Fi Direct, and an SDK from 0.27 or earlier, which used
+MultipeerConnectivity, does not see it. Available transports:
 - Bluetooth Low Energy
 - Internet
 - Reticulum and Nostr
-- The peer-stream slot through Multipeer
+- The peer-stream slot through Network framework
 
 ## Performance
 

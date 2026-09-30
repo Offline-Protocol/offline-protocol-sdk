@@ -148,7 +148,7 @@ message only toward an address a stream has proved. Every bundled manager
 on this slot once its stream proves the address, and never before.
 
 **Use Case**: A byte stream the platform established to exactly one peer: a
-Wi-Fi Direct group socket, a Multipeer session, a TCP connection over a LAN or
+Wi-Fi Direct group socket, a TCP connection over a LAN, over AWDL, or over
 a routed mesh. Higher bandwidth than BLE, whole messages in one write.
 
 **Files**:
@@ -175,10 +175,13 @@ transport.
   Wi-Fi Direct settings (or by another app) is joined when
   `WIFI_P2P_CONNECTION_CHANGED_ACTION` reports it, and a client reconnects
   to its group owner while the group lasts.
-- iOS: `MultipeerConnectivity`, which fills this slot on iOS, with
-  `PeerStreamSession` for the per-peer rules. Each message is one frame, and
-  the service type is `offlineprotocol`, so an app lists
-  `_offlineprotocol._tcp` and `_offlineprotocol._udp` in `NSBonjourServices`.
+- iOS: Network framework TCP streams, on the LAN or over AWDL, with
+  `PeerStreamReader` cutting frames and `PeerStreamSession` for the
+  per-stream rules. It advertises and browses `_offlineprotocol._tcp` with
+  `addr=`, the same record hosts use, so an app lists `_offlineprotocol._tcp`
+  in `NSBonjourServices`. Of two streams for one address it keeps the one
+  the lower address opened
+  ([ADR 0027](adr/0027-ios-peer-streams-ride-network-framework.md)).
 - Hosts: any TCP socket; DNS-SD `_offlineprotocol._tcp` with `addr=` is the
   LAN discovery hint the chapter specifies. The Python binding ships one:
   `PeerStreamManager` (`bindings/python/offline_protocol_sdk/peer_stream_manager.py`),

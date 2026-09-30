@@ -101,8 +101,8 @@ exactly these `data` fields, and nothing else:
 | `mesh_session_summary` | `session_duration_s`, `routing_switches`, `routing_escalations`, `escalation_reasons` (six buckets), `mls_session_ready_latency_p50_ms` (absent when no handshake paired), `mls_encryption_used_count` | Computed on the device at each session boundary |
 
 `transport_time_ms.wifi_direct` is the dwell time of the peer-stream slot on
-every platform, not only Wi-Fi Direct: a Multipeer session on iOS and a LAN or
-routed-mesh stream on a host are the same transport to the engine
+every platform, not only Wi-Fi Direct: a LAN or AWDL stream on iOS and a LAN
+or routed-mesh stream on a host are the same transport to the engine
 ([peer-stream framing](spec/stream-framing.md)), so their time lands under the
 slot's historical key. Renaming the key is part of renaming the slot, a
 separate breaking change.

@@ -17044,7 +17044,7 @@ mod tests {
     /// hand-mirrored policy (docs/bridges C5): the stream the lower address
     /// opened wins. If the two copies drift, an iPhone and a Python host each
     /// keep the stream the other closes, and the pair reconnects forever,
-    /// with no error on either side (ADR 0026). Pinned as the two lines each
+    /// with no error on either side (ADR 0027). Pinned as the two lines each
     /// rule is made of. Android keeps the newer stream instead, because a
     /// Wi-Fi Direct group has one dialer.
     #[test]

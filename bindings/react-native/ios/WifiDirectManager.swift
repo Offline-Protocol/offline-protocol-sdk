@@ -5,7 +5,7 @@
 // The iOS peer-stream transport: TCP streams over Network framework, found
 // through DNS-SD, on the infrastructure network or over AWDL (Apple's
 // peer-to-peer Wi-Fi) when there is none. The name is the engine slot's, not
-// the radio's: iOS has no Wi-Fi Direct API (ADR 0026).
+// the radio's: iOS has no Wi-Fi Direct API (ADR 0027).
 //
 
 import Foundation
@@ -212,7 +212,7 @@ public class WifiDirectManager: NSObject, TransportManager {
 
     /// TCP with keepalive, over AWDL as well as the infrastructure network.
     /// The one place a carrier is chosen: Wi-Fi Aware, when it comes, starts
-    /// here (ADR 0026). Keepalive is the Python manager's: a stream whose peer
+    /// here (ADR 0027). Keepalive is the Python manager's: a stream whose peer
     /// died idle ends within about thirty seconds, which is what lets the
     /// losing kind of reconnect through once the stale winner is gone.
     private static func makeParameters() -> NWParameters {
