@@ -98,6 +98,36 @@ await pm.peer_stream.start()
 A peer is announced only under the address its preamble proves, and
 `pm.stop()` stops the stream layer with everything else.
 
+### Services, and services on the LAN
+
+`Services` wraps the generated `MeshServices` and keeps the one thing the
+engine cannot give back: the list of what this node registered. `respond`
+refuses a status the engine would refuse (`ok`, `not_found` and `error` are
+the whole set) with the reason instead of an opaque core error.
+
+```python
+from offline_protocol_sdk.services import Services
+from offline_protocol_sdk.dnssd_bridge import DnsSdBridge
+
+services = Services(pm.protocol)
+services.register("weather.v1", "2.0", {"format": "json"})   # before or after pm.start()
+
+# Publish this node's registrations on the LAN and import the neighbours'.
+# Needs: pip install 'offline-protocol-sdk[lan]'
+bridge = DnsSdBridge(services, on_event=handle_event)
+await bridge.start(address=pm.local_address, port=pm.peer_stream.listen_port)
+...
+await bridge.stop()   # before pm.stop()
+```
+
+A LAN import arrives at `handle_event` as a `service_discovered` event with
+`source: "lan"` and is kept in `bridge.lan_services()`; it is an unsigned
+claim by whoever answered on the segment, never a discovery, and the bridge
+never registers it with the engine. Registrations that do not fit the record
+(a service id over 200 bytes, a capability key DNS-SD cannot carry, a record
+over 1300 bytes) are kept on the mesh and not published, with a warning. The
+mapping is [docs/spec/dns-sd-mapping.md](../../docs/spec/dns-sd-mapping.md).
+
 ## Architecture
 
 ```
@@ -109,6 +139,8 @@ offline_protocol_sdk/
 ├── gateway_manager.py       # Gateway-daemon client over TCP (the reticulum slot)
 ├── gateway_attach_policy.py # Its decisions and frame shapes, socket-free
 ├── gateway_verdict_tracker.py, presence_watch_policy.py
+├── services.py              # Service registry wrappers with the copy the engine lacks
+├── dnssd_bridge.py          # Services on the LAN: publish own, import neighbours' (optional extra `lan`)
 ├── ble_manager.py           # BLE transport (bleak library)
 ├── secure_storage.py        # MLS key storage (keyring library)
 ├── state_storage.py         # Restartable protocol state (application data)
@@ -432,3 +464,15 @@ Both license texts, along with `THIRD-PARTY-NOTICES.md`, are also installed with
 package under `offline_protocol_sdk-<version>.dist-info/licenses/`. The links above are
 absolute because this file is the PyPI long description, and PyPI does not resolve
 repository-relative links.
+
+### Optional dependencies
+
+`THIRD-PARTY-NOTICES.md` covers the Rust crates compiled into the native
+library. The `lan` extra (`pip install 'offline-protocol-sdk[lan]'`) adds two
+runtime dependencies that pip installs from PyPI and that are never
+redistributed in this wheel: [python-zeroconf](https://pypi.org/project/zeroconf/)
+(LGPL-2.1-or-later), used by `peer_stream_manager.py` and `dnssd_bridge.py`
+for DNS-SD, and [ifaddr](https://pypi.org/project/ifaddr/) (MIT), used to
+list the interface addresses a record publishes. Both are imported only when a
+manager or bridge is asked to advertise or discover; the base install imports
+neither.

@@ -259,6 +259,14 @@ and carries no meaning; an implementation SHOULD NOT put the address there,
 since the TXT entry already carries it and one copy is one place to get it
 wrong.
 
+A record that carries a `sid` entry is not a peer hint. It is a service
+instance under the [DNS-SD mapping](dns-sd-mapping.md), published under the
+subtype `_svc._sub` of this type and listed under the base type as well by
+responders that follow RFC 6763 section 7.1. It names the same host and the
+same address as the peer record, so a browser that took it as one would open
+a second connector to one host per service published there. A browser
+looking for peers MUST ignore any record that carries `sid`.
+
 What a device advertises on a LAN is visible to every device on it. That is
 the same exposure as a Bluetooth LE advertisement, and the same answer: the
 address is public by design, and what it does not reveal (who the human is,
