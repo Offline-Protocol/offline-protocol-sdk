@@ -59,12 +59,13 @@ _svc._sub._offlineprotocol._tcp.<domain>
 ```
 
 and a browser looking for services browses that subtype. RFC 6763 section
-7.1 lists a subtyped instance under its base type as well, and a responder
-that follows it answers a browse of the base type with service instances,
-which is why invariant 5 exists and why a peer browser keys on the `sid`
-entry rather than on the name it was browsing. A responder that lists the
-instance under the subtype only is conforming too; a browser MUST NOT rely
-on either behaviour.
+7.1 defines a subtype as an additional PTR to an instance that is listed
+under its parent type, so a responder that follows it answers a browse of
+the base type with service instances as well, which is why invariant 5
+exists and why a peer browser keys on the `sid` entry rather than on the
+name it was browsing. Some responders answer only the subtype browse
+(python-zeroconf indexes an instance under the one type it was registered
+with); a browser MUST NOT rely on either behaviour.
 
 The domain is `local.` on a multicast LAN. Nothing here depends on it.
 
@@ -109,12 +110,28 @@ The record is a sequence of `key=value` strings in this order:
 | `sid=<service_id>` | The descriptor's `service_id`, as UTF-8 | Yes |
 | `ver=<version>` | The descriptor's `version`, as UTF-8; the engine does not parse it and neither does this mapping | Yes, possibly empty |
 | `addr=<off1…>` | The publisher's canonical address, which is what a `service_discovered` event names as `provider_peer_id` | Yes |
-| `c.<key>=<value>` | One string per capability, keys in byte order, so that one descriptor is one record | Zero or more |
+| `c.<key>=<value>` | One string per capability, keys in the byte order of their lower-case form, so that one descriptor is one record | Zero or more |
+
+Keys are case-insensitive, as RFC 6763 section 6.4 makes every TXT key:
+`SID` is `sid`, and `c.Foo` and `c.foo` are one key. A reader folds a key
+to lower case before it looks the key up, so an imported capability key is
+the publisher's key in lower case. A publisher whose descriptor holds two
+capability keys that are one key under case folding MUST refuse the
+descriptor rather than publish either or both (invariant 4): a record with
+one of them dropped is a different claim, and a record with both is the
+duplicate below.
 
 A reader MUST ignore a record whose `txtvers` is not `1`, and MUST ignore a
 record missing `sid` or `addr`, or whose `addr` is not an address. Unknown
-keys are ignored. A key that appears twice makes the record malformed and it
-is ignored whole.
+keys are ignored. A key that appears twice, under case folding, makes the
+record malformed and it is ignored whole. RFC 6763 section 6.4 has a client
+keep the first of a duplicated key and ignore the rest; this mapping is
+stricter about what it accepts as its own record, in the way it is about
+`txtvers`: a publisher under this chapter never emits a duplicate, and two
+readers that kept different occurrences would disagree on which address a
+record claims, so a duplicate marks a record that is not this mapping's. A
+reader that applies the RFC's rule instead keeps the first occurrence and
+never the last.
 
 ### Bounds
 
@@ -163,12 +180,33 @@ own record coming back.
 A DNS-SD record has the lifetime its publisher gave it, and a responder that
 dies without a goodbye leaves its records to age out in every browser's cache,
 which for the PTR is 75 minutes by RFC 6762 section 10. An importer therefore
-owes the application a shorter liveness rule of its own: an entry is kept
-while the instance still resolves, re-resolved at half the importer's time to
-live, and removed from the application-level registry when it has not resolved
-within that time to live or when the browser reports the instance gone,
-whichever is first. Removal is the shadow registry's `unregister`; it never
-reaches the engine, because the engine never held the entry.
+owes the application a shorter liveness rule of its own, and it keeps two
+sets to hold it:
+
+- **The browsed set** is every instance name the browser has reported and
+  not yet reported gone. A name enters it when the browser reports the
+  instance and leaves it only when the browser reports the instance gone.
+  The importer re-resolves every browsed name at half its time to live,
+  whether the name is listed or not.
+- **The listed set** is what the application sees: every browsed name whose
+  record resolved and was well formed within the importer's time to live.
+  An entry leaves it when it has not resolved within that time, or when the
+  browser reports the instance gone, whichever is first.
+
+The two sets are kept apart because a browser reports an instance once: it
+reports the instance again only when its own cache has forgotten the record,
+which for the PTR is the 75 minutes above. An importer that stopped
+re-resolving a name when the name left the listed set would lose a
+neighbour that missed one resolve window until that cache turned over.
+
+Delivery to the application is therefore at least once: an entry that
+expires from the listed set and resolves again is announced again, with the
+same event. An application that keys its own state on `(address,
+service_id)` sees the second announcement as a refresh.
+
+Removal is the importer dropping the entry from its own registry; it never
+calls `unregister_service`: the engine never held the entry, and the id may
+be one this node offers itself.
 
 Nothing on the mesh side has a lifetime: a mesh registration stands until it
 is unregistered, and a mesh discovery response is a point-in-time answer with
