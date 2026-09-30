@@ -18,6 +18,16 @@ final class MeshRelayConfigReaderTests: XCTestCase {
         return MeshRelayConfigReader.read(raw)
     }
 
+    func testZeroAndOneAreNumbersNotBooleans() throws {
+        // Swift bridges the numbers 0 and 1 to Bool, so an `is Bool` exclusion
+        // read `fanout: 1` and `activityIdleWindows: 1` as unset, and the app's
+        // dial silently stayed at the default.
+        let values = try XCTUnwrap(try read(#"{"appId":"app","meshRelay":{"fanout":1,"activityIdleWindows":1,"jitterMinMs":0}}"#))
+        XCTAssertEqual(values.fanout, 1)
+        XCTAssertEqual(values.activityIdleWindows, 1)
+        XCTAssertEqual(values.jitterMinMs, 0)
+    }
+
     func testSectionIsAbsentWhenOmitted() throws {
         // Nil, not an object of nils: the module passes nil across the FFI and
         // the core keeps every default untouched.

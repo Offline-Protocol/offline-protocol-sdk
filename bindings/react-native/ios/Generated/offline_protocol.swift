@@ -1323,6 +1323,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func endTelemetrySession() 
     
+    func eraseCustody() throws 
+    
     func establishSecureSession(peerId: String) throws  -> MlsWelcomeMessage?
     
     func finalizeFile(fileId: String) throws 
@@ -1344,6 +1346,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func getBatteryLevel()  -> UInt8?
     
     func getBlockedUsers() throws  -> [String]
+    
+    func getCustodyStats()  -> CustodyStats
     
     func getDedupStats()  -> DedupStats
     
@@ -1883,6 +1887,13 @@ open func endTelemetrySession()  {try! rustCall() {
 }
 }
     
+open func eraseCustody()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_erase_custody(
+            self.uniffiCloneHandle(),$0
+    )
+}
+}
+    
 open func establishSecureSession(peerId: String)throws  -> MlsWelcomeMessage?  {
     return try  FfiConverterOptionTypeMlsWelcomeMessage.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_establish_secure_session(
@@ -1974,6 +1985,14 @@ open func getBatteryLevel() -> UInt8?  {
 open func getBlockedUsers()throws  -> [String]  {
     return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_blocked_users(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func getCustodyStats() -> CustodyStats  {
+    return try!  FfiConverterTypeCustodyStats_lift(try! rustCall() {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_custody_stats(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -3346,6 +3365,218 @@ public func FfiConverterTypeBleFragment_lift(_ buf: RustBuffer) throws -> BleFra
 #endif
 public func FfiConverterTypeBleFragment_lower(_ value: BleFragment) -> RustBuffer {
     return FfiConverterTypeBleFragment.lower(value)
+}
+
+
+public struct CustodyConfig: Equatable, Hashable {
+    public var enabled: Bool?
+    public var holdMs: UInt64?
+    public var maxEntriesPerDepositor: UInt64?
+    public var maxBytesPerDepositor: UInt64?
+    public var maxEntries: UInt64?
+    public var maxBytes: UInt64?
+    public var strangerMaxEntries: UInt64?
+    public var strangerMaxBytes: UInt64?
+    public var overflowPolicy: OverflowPolicy?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(enabled: Bool? = nil, holdMs: UInt64? = nil, maxEntriesPerDepositor: UInt64? = nil, maxBytesPerDepositor: UInt64? = nil, maxEntries: UInt64? = nil, maxBytes: UInt64? = nil, strangerMaxEntries: UInt64? = nil, strangerMaxBytes: UInt64? = nil, overflowPolicy: OverflowPolicy? = nil) {
+        self.enabled = enabled
+        self.holdMs = holdMs
+        self.maxEntriesPerDepositor = maxEntriesPerDepositor
+        self.maxBytesPerDepositor = maxBytesPerDepositor
+        self.maxEntries = maxEntries
+        self.maxBytes = maxBytes
+        self.strangerMaxEntries = strangerMaxEntries
+        self.strangerMaxBytes = strangerMaxBytes
+        self.overflowPolicy = overflowPolicy
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension CustodyConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCustodyConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CustodyConfig {
+        return
+            try CustodyConfig(
+                enabled: FfiConverterOptionBool.read(from: &buf), 
+                holdMs: FfiConverterOptionUInt64.read(from: &buf), 
+                maxEntriesPerDepositor: FfiConverterOptionUInt64.read(from: &buf), 
+                maxBytesPerDepositor: FfiConverterOptionUInt64.read(from: &buf), 
+                maxEntries: FfiConverterOptionUInt64.read(from: &buf), 
+                maxBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                strangerMaxEntries: FfiConverterOptionUInt64.read(from: &buf), 
+                strangerMaxBytes: FfiConverterOptionUInt64.read(from: &buf), 
+                overflowPolicy: FfiConverterOptionTypeOverflowPolicy.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CustodyConfig, into buf: inout [UInt8]) {
+        FfiConverterOptionBool.write(value.enabled, into: &buf)
+        FfiConverterOptionUInt64.write(value.holdMs, into: &buf)
+        FfiConverterOptionUInt64.write(value.maxEntriesPerDepositor, into: &buf)
+        FfiConverterOptionUInt64.write(value.maxBytesPerDepositor, into: &buf)
+        FfiConverterOptionUInt64.write(value.maxEntries, into: &buf)
+        FfiConverterOptionUInt64.write(value.maxBytes, into: &buf)
+        FfiConverterOptionUInt64.write(value.strangerMaxEntries, into: &buf)
+        FfiConverterOptionUInt64.write(value.strangerMaxBytes, into: &buf)
+        FfiConverterOptionTypeOverflowPolicy.write(value.overflowPolicy, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCustodyConfig_lift(_ buf: RustBuffer) throws -> CustodyConfig {
+    return try FfiConverterTypeCustodyConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCustodyConfig_lower(_ value: CustodyConfig) -> RustBuffer {
+    return FfiConverterTypeCustodyConfig.lower(value)
+}
+
+
+public struct CustodyStats: Equatable, Hashable {
+    public var held: UInt64
+    public var heldBytes: UInt64
+    public var accepted: UInt64
+    public var delivered: UInt64
+    public var reOriginated: UInt64
+    public var expired: UInt64
+    public var duplicates: UInt64
+    public var evicted: UInt64
+    public var receiptsSent: UInt64
+    public var receiptsDropped: UInt64
+    public var receiptsReceived: UInt64
+    public var receiptsIgnored: UInt64
+    public var refusedDisabled: UInt64
+    public var refusedNoRequest: UInt64
+    public var refusedUnknownClass: UInt64
+    public var refusedNotSealed: UInt64
+    public var refusedUnprovenPeer: UInt64
+    public var refusedNotDepositor: UInt64
+    public var refusedStranger: UInt64
+    public var refusedDepositorFull: UInt64
+    public var refusedStoreFull: UInt64
+    public var refusedBattery: UInt64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(held: UInt64, heldBytes: UInt64, accepted: UInt64, delivered: UInt64, reOriginated: UInt64, expired: UInt64, duplicates: UInt64, evicted: UInt64, receiptsSent: UInt64, receiptsDropped: UInt64, receiptsReceived: UInt64, receiptsIgnored: UInt64, refusedDisabled: UInt64, refusedNoRequest: UInt64, refusedUnknownClass: UInt64, refusedNotSealed: UInt64, refusedUnprovenPeer: UInt64, refusedNotDepositor: UInt64, refusedStranger: UInt64, refusedDepositorFull: UInt64, refusedStoreFull: UInt64, refusedBattery: UInt64) {
+        self.held = held
+        self.heldBytes = heldBytes
+        self.accepted = accepted
+        self.delivered = delivered
+        self.reOriginated = reOriginated
+        self.expired = expired
+        self.duplicates = duplicates
+        self.evicted = evicted
+        self.receiptsSent = receiptsSent
+        self.receiptsDropped = receiptsDropped
+        self.receiptsReceived = receiptsReceived
+        self.receiptsIgnored = receiptsIgnored
+        self.refusedDisabled = refusedDisabled
+        self.refusedNoRequest = refusedNoRequest
+        self.refusedUnknownClass = refusedUnknownClass
+        self.refusedNotSealed = refusedNotSealed
+        self.refusedUnprovenPeer = refusedUnprovenPeer
+        self.refusedNotDepositor = refusedNotDepositor
+        self.refusedStranger = refusedStranger
+        self.refusedDepositorFull = refusedDepositorFull
+        self.refusedStoreFull = refusedStoreFull
+        self.refusedBattery = refusedBattery
+    }
+
+    
+}
+
+#if compiler(>=6)
+extension CustodyStats: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeCustodyStats: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CustodyStats {
+        return
+            try CustodyStats(
+                held: FfiConverterUInt64.read(from: &buf), 
+                heldBytes: FfiConverterUInt64.read(from: &buf), 
+                accepted: FfiConverterUInt64.read(from: &buf), 
+                delivered: FfiConverterUInt64.read(from: &buf), 
+                reOriginated: FfiConverterUInt64.read(from: &buf), 
+                expired: FfiConverterUInt64.read(from: &buf), 
+                duplicates: FfiConverterUInt64.read(from: &buf), 
+                evicted: FfiConverterUInt64.read(from: &buf), 
+                receiptsSent: FfiConverterUInt64.read(from: &buf), 
+                receiptsDropped: FfiConverterUInt64.read(from: &buf), 
+                receiptsReceived: FfiConverterUInt64.read(from: &buf), 
+                receiptsIgnored: FfiConverterUInt64.read(from: &buf), 
+                refusedDisabled: FfiConverterUInt64.read(from: &buf), 
+                refusedNoRequest: FfiConverterUInt64.read(from: &buf), 
+                refusedUnknownClass: FfiConverterUInt64.read(from: &buf), 
+                refusedNotSealed: FfiConverterUInt64.read(from: &buf), 
+                refusedUnprovenPeer: FfiConverterUInt64.read(from: &buf), 
+                refusedNotDepositor: FfiConverterUInt64.read(from: &buf), 
+                refusedStranger: FfiConverterUInt64.read(from: &buf), 
+                refusedDepositorFull: FfiConverterUInt64.read(from: &buf), 
+                refusedStoreFull: FfiConverterUInt64.read(from: &buf), 
+                refusedBattery: FfiConverterUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: CustodyStats, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.held, into: &buf)
+        FfiConverterUInt64.write(value.heldBytes, into: &buf)
+        FfiConverterUInt64.write(value.accepted, into: &buf)
+        FfiConverterUInt64.write(value.delivered, into: &buf)
+        FfiConverterUInt64.write(value.reOriginated, into: &buf)
+        FfiConverterUInt64.write(value.expired, into: &buf)
+        FfiConverterUInt64.write(value.duplicates, into: &buf)
+        FfiConverterUInt64.write(value.evicted, into: &buf)
+        FfiConverterUInt64.write(value.receiptsSent, into: &buf)
+        FfiConverterUInt64.write(value.receiptsDropped, into: &buf)
+        FfiConverterUInt64.write(value.receiptsReceived, into: &buf)
+        FfiConverterUInt64.write(value.receiptsIgnored, into: &buf)
+        FfiConverterUInt64.write(value.refusedDisabled, into: &buf)
+        FfiConverterUInt64.write(value.refusedNoRequest, into: &buf)
+        FfiConverterUInt64.write(value.refusedUnknownClass, into: &buf)
+        FfiConverterUInt64.write(value.refusedNotSealed, into: &buf)
+        FfiConverterUInt64.write(value.refusedUnprovenPeer, into: &buf)
+        FfiConverterUInt64.write(value.refusedNotDepositor, into: &buf)
+        FfiConverterUInt64.write(value.refusedStranger, into: &buf)
+        FfiConverterUInt64.write(value.refusedDepositorFull, into: &buf)
+        FfiConverterUInt64.write(value.refusedStoreFull, into: &buf)
+        FfiConverterUInt64.write(value.refusedBattery, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCustodyStats_lift(_ buf: RustBuffer) throws -> CustodyStats {
+    return try FfiConverterTypeCustodyStats.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeCustodyStats_lower(_ value: CustodyStats) -> RustBuffer {
+    return FfiConverterTypeCustodyStats.lower(value)
 }
 
 
@@ -5317,12 +5548,13 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var richPayloadEnabled: Bool
     public var cryptoRecoveryEnabled: Bool
     public var meshRelay: MeshRelayConfig?
+    public var custody: CustodyConfig?
     public var dataEnabled: Bool
     public var controlFreshnessEnforced: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, edgeDrivenUnreachableDm: Bool = false, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true, meshRelay: MeshRelayConfig? = nil, dataEnabled: Bool = true, controlFreshnessEnforced: Bool = true) {
+    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, edgeDrivenUnreachableDm: Bool = false, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true, meshRelay: MeshRelayConfig? = nil, custody: CustodyConfig? = nil, dataEnabled: Bool = true, controlFreshnessEnforced: Bool = true) {
         self.appId = appId
         self.profile = profile
         self.bleEnabled = bleEnabled
@@ -5354,6 +5586,7 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.richPayloadEnabled = richPayloadEnabled
         self.cryptoRecoveryEnabled = cryptoRecoveryEnabled
         self.meshRelay = meshRelay
+        self.custody = custody
         self.dataEnabled = dataEnabled
         self.controlFreshnessEnforced = controlFreshnessEnforced
     }
@@ -5403,6 +5636,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 richPayloadEnabled: FfiConverterBool.read(from: &buf), 
                 cryptoRecoveryEnabled: FfiConverterBool.read(from: &buf), 
                 meshRelay: FfiConverterOptionTypeMeshRelayConfig.read(from: &buf), 
+                custody: FfiConverterOptionTypeCustodyConfig.read(from: &buf), 
                 dataEnabled: FfiConverterBool.read(from: &buf), 
                 controlFreshnessEnforced: FfiConverterBool.read(from: &buf)
         )
@@ -5440,6 +5674,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterBool.write(value.richPayloadEnabled, into: &buf)
         FfiConverterBool.write(value.cryptoRecoveryEnabled, into: &buf)
         FfiConverterOptionTypeMeshRelayConfig.write(value.meshRelay, into: &buf)
+        FfiConverterOptionTypeCustodyConfig.write(value.custody, into: &buf)
         FfiConverterBool.write(value.dataEnabled, into: &buf)
         FfiConverterBool.write(value.controlFreshnessEnforced, into: &buf)
     }
@@ -8919,6 +9154,30 @@ fileprivate struct FfiConverterOptionTypeBleFragment: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeCustodyConfig: FfiConverterRustBuffer {
+    typealias SwiftType = CustodyConfig?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeCustodyConfig.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeCustodyConfig.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFileProgress: FfiConverterRustBuffer {
     typealias SwiftType = FileProgress?
 
@@ -9319,6 +9578,30 @@ fileprivate struct FfiConverterOptionTypeMlsVerbosity: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeMlsVerbosity.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeOverflowPolicy: FfiConverterRustBuffer {
+    typealias SwiftType = OverflowPolicy?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeOverflowPolicy.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeOverflowPolicy.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -9753,6 +10036,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session() != 51941) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody() != 5086) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session() != 25919) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -9784,6 +10070,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users() != 24603) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats() != 42535) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats() != 43759) {
