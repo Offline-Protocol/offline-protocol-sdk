@@ -11,12 +11,17 @@ package com.offlineprotocol
  * API 24 or 25 the call throws `NoClassDefFoundError`, which is an `Error`
  * and passes through a `catch (e: Exception)`. Desugaring would have to be
  * switched on by every application, not by this library, so the parse is
- * written out here and behaves the same on every API level. It answers what
- * `Instant.parse` answered for every input the relay sends.
+ * written out here and behaves the same on every API level.
  *
- * Stricter than the Swift twin, as `Instant` was: Foundation's formatter
- * rolls 2023-02-29 over into March and accepts 24:00 and a `+0530` offset,
- * and this refuses all three.
+ * It reads RFC 3339 internet date-time and answers what `Instant.parse`
+ * answered for every timestamp the relay sends. It is not `Instant` at the
+ * edges. It refuses hour 24 and a `.` with no digits after it, which RFC 3339
+ * refuses too, and lowercase `t` or `z` and a leap second `:60`, which RFC
+ * 3339 allows. `Instant.parse` accepted all four. No relay sends any of them.
+ *
+ * Stricter than the Swift twin: Foundation's formatter rolls 2023-02-29 over
+ * into March and accepts 24:00 and a `+0530` offset, and this refuses all
+ * three.
  */
 object RelayTimestamps {
     /**
@@ -30,9 +35,13 @@ object RelayTimestamps {
      * RFC 3339 internet date-time, what the Swift twin's
      * `ISO8601DateFormatter` accepts with `.withInternetDateTime`: a `T`, an
      * optional fraction, and `Z` or a numeric offset.
+     *
+     * `[0-9]`, never `\d`: on Android `\d` is ICU's and matches every Unicode
+     * decimal digit, so `٢٠٢٤` would match here and then parse as 2024. The
+     * JVM the unit tests run on reads `\d` as ASCII and cannot tell.
      */
     private val INTERNET_DATE_TIME = Regex(
-        """(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|([+-])(\d{2}):(\d{2}))"""
+        """([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})(?:\.([0-9]{1,9}))?(Z|([+-])([0-9]{2}):([0-9]{2}))"""
     )
 
     fun parseToMsOrNull(timestampStr: String): Long? {

@@ -15154,6 +15154,26 @@ mod tests {
         );
     }
 
+    /// The Android relay timestamp parser matches ASCII digits only.
+    ///
+    /// On Android a regex `\d` is ICU's and matches every Unicode decimal
+    /// digit, and `toInt()` then reads them as their values, so a timestamp
+    /// written in Arabic-Indic digits would parse. The unit suite runs on a
+    /// JVM, where `\d` is ASCII, so no Kotlin test can see the difference.
+    #[test]
+    fn android_relay_timestamps_match_ascii_digits_only() {
+        let code =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/RelayTimestamps.kt");
+        assert!(
+            code.contains("[0-9]{4}"),
+            "RelayTimestamps.kt: expected the date-time pattern spelled with [0-9]"
+        );
+        assert!(
+            !code.contains("\\d"),
+            "RelayTimestamps.kt: `\\d` is any Unicode digit on Android; use [0-9]"
+        );
+    }
+
     /// Nothing that blocks on the network shares the thread `stop()` waits on.
     ///
     /// A background caller's `runSync` wait is deliberately unbounded — it is
