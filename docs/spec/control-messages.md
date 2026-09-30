@@ -154,6 +154,26 @@ encryption requirement**, so discovery gossip and the application-supplied
 request and response bodies are sent in cleartext. See
 [residual risk R9](../security/threat-model.md#r9-service-discovery-and-service-bodies-are-signed-not-encrypted).
 
+### Custody
+
+| Prefix | Direction | Body |
+|--------|-----------|------|
+| `__CUSTODY_RECEIPT__` | custodian to depositor | JSON `{"v":1,"id":<held frame id>,"hold_ms":<u64>}`. Signature-gated like every control frame; introduces no signing domain of its own |
+
+The receipt is the one frame [Custody](custody.md) adds. It is reserved
+ahead of the implementation on the same terms `__DATA_V1__` was: the name is
+registered before any frame uses it, so no application message sent in the
+meantime can occupy it. A receipt settles nothing and is never routed as an
+acknowledgement; a receiver that reserves the prefix but does not implement
+custody MUST NOT advertise `data_versions` entry 7, and then never receives
+one.
+
+The deposit itself is not a frame and has no prefix. It is the depositor's own
+`__MLS_ENC__` frame carrying the reserved metadata key `__custody`
+([reserved metadata keys](wire-format.md#reserved-metadata-keys)), which every
+forwarder strips from a third-party frame before transmitting it, so a deposit
+travels exactly one hop.
+
 ## Document sync frames
 
 `__DATA_V1__` frames replicate documents. They are specified in their own

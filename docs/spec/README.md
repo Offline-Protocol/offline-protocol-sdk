@@ -25,6 +25,8 @@ document says which reading is normative for the wire.
 | [Peer-stream framing](stream-framing.md) | The preamble that proves a stream's peer, the length-prefixed message frame, and the LAN discovery hint |
 | [Username discovery and invites](username-discovery.md) | The self-certifying invite payload, and the non-authoritative username directory |
 | [The gateway contract](gateway-contract.md) | What a gateway is, the five verbs it implements, the gateway-daemon wire protocol, and the backbone |
+| [The local API](local-api.md) | One server fronting one engine for several local applications: JSON-RPC over a WebSocket, the `hello` handshake, the method and event tables, routing, replay, and the errors |
+| [Custody](custody.md) | Holding a neighbour's replication frame for hours instead of seconds: the deposit, the receipt that settles nothing, the hold, redelivery, quotas and erase |
 | [Conformance](conformance.md) | The two profiles, what every implementation owes, and how the vectors decide it |
 
 ## Conformance vectors
@@ -44,6 +46,7 @@ the crate whose code they pin, so a packaged build carries its own vectors:
 | `crates/offline-protocol-sealed/tests/data/key-package-v1.vectors.json` | [Capability negotiation](capability-negotiation.md) |
 | `crates/offline-protocol-sealed/tests/data/identity-assertion-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md#the-identity-assertion) |
 | `crates/offline-protocol/tests/data/data-sync-v1.vectors.json` | [Document replication](data-sync.md) |
+| `crates/offline-protocol/tests/data/custody-receipt-v1.vectors.json` | [Custody](custody.md) |
 | `crates/offline-protocol-transport/tests/data/ble-framing-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md) |
 | `crates/offline-protocol-transport/tests/data/stream-framing-v1.vectors.json` | [Peer-stream framing](stream-framing.md) |
 | `crates/offline-protocol-transport/tests/data/nip44.vectors.json` | None. These are the NIP-44 spec's own published vectors, vendored for the Nostr carrier's sealing and pinned to the checksum that spec publishes. Transport framing is out of scope here, so there is no chapter for them to pin |

@@ -2251,6 +2251,15 @@ impl OfflineProtocol {
         // logout path, so the records it failed to remove outlive the account
         // that made them, and the application has no symptom to notice it by.
         let mut first_error: Option<String> = None;
+
+        // Custody goes with the documents. A custody store that survived a
+        // logout would hold other people's traffic past the point the user
+        // asked for erasure, and there is no global wipe for it to inherit
+        // (`docs/spec/custody.md`, "Erase"), so this wipe calls its own.
+        if let Err(err) = self.erase_custody() {
+            first_error = Some(err.to_string());
+        }
+
         let mut record_error = |err: crate::protocol_state_storage::ProtocolStateError| {
             if first_error.is_none() {
                 first_error = Some(err.to_string());

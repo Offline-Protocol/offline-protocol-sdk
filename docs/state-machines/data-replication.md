@@ -160,6 +160,7 @@ Triggers, each of which names its cause in the logs:
 | Peer rediscovered on any transport | `peer_rediscovered` | That peer, and groups shared with them |
 | Start-up | `start` | 1:1 spaces only |
 | Group joined, or a member added | `group_joined`, `member_added` | That member |
+| A neighbour appears while a custodian holds a frame for it | `custody_redelivery` ([Custody](../spec/custody.md)) | That frame, transmitted as stored. The custodian starts no exchange: it forwards, it does not offer. At the recipient a redelivered `vv` is answered from live state like any offer, a duplicate `delta` or `snap` is absorbed as already applied, and a `blob_gone` is a floor report |
 
 Offers to one peer are suppressed for 30 seconds after the last one. The
 window delays only the reconciliation sweep: a local change does not wait for
@@ -197,6 +198,15 @@ outcome, including refusal, which is what lets the rungs below it ask freely.
 The end of the ladder is reported rather than logged. `data_doc_unsyncable`
 means two replicas that will not converge while both keep accepting edits, and
 nothing else about that state looks like a problem.
+
+[Custody](../spec/custody.md) makes the bottom rung reachable more often. A
+held `delta` or `snap` arrives hours after it was sealed, which is more time
+for the receiver to have compacted the history it is built on; a stale
+`delta` still has `need_snap` above it, but a stale `snap` refused on trim
+has no rung above it and the replicas stay apart until the next exchange
+from live state. This is one of the two reasons the custody hold is hours
+and not days, and it is why a custody-delivered frame is an ordinary
+forward: the ladder that recovers from it is the one already here.
 
 ## An attachment fetch
 

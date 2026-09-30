@@ -690,6 +690,93 @@ impl std::fmt::Debug for DataConfig {
     }
 }
 
+/// How long a custodian holds a deposited frame by default: six hours.
+///
+/// Hours, not days, because a custodian holds ciphertext it cannot re-seal
+/// (`docs/spec/custody.md`, invariant three): the depositor survives a
+/// session re-key by re-sealing from retained plaintext, and the custodian's
+/// copy has a validity horizon it cannot observe. Strictly under the seven-day
+/// outbox lifetime by a wide margin, so the default configuration validates.
+pub const DEFAULT_CUSTODY_HOLD_MS: u64 = 6 * 60 * 60 * 1000;
+
+/// Held frames one depositor may have in custody at once, by default.
+pub const DEFAULT_CUSTODY_MAX_ENTRIES_PER_DEPOSITOR: usize = 64;
+
+/// Bytes one depositor may have in custody at once, by default: 2 MiB.
+pub const DEFAULT_CUSTODY_MAX_BYTES_PER_DEPOSITOR: usize = 2 * 1024 * 1024;
+
+/// Held frames across every depositor, by default.
+pub const DEFAULT_CUSTODY_MAX_ENTRIES: usize = 512;
+
+/// Bytes across every depositor, by default: 16 MiB.
+pub const DEFAULT_CUSTODY_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// The smallest per-depositor byte budget that admits one replication frame at
+/// its ceiling: 64 KiB.
+///
+/// A Class A frame carries at most 32 KiB of blob
+/// (`data_sync::MAX_SYNC_BLOB_BYTES`), which base64 grows by a third, which
+/// the MLS envelope then encodes again, so a sealed frame at the ceiling is
+/// around 58 KiB of content with the outer message's addresses and metadata
+/// on top. A byte cap below this admits no such frame and refuses every
+/// deposit as `depositor_full`, which is the silent dial the `enabled` switch
+/// exists to replace.
+pub const CUSTODY_MIN_BYTES_PER_DEPOSITOR: usize = 64 * 1024;
+
+/// Custody: holding a neighbour's replication frame for hours instead of the
+/// seconds a forwarder gives it (`docs/spec/custody.md`).
+///
+/// Off by default, and every dial here is the custodian's. A device that
+/// never enables it behaves exactly as before, and a device that enables it
+/// takes on other people's ciphertext under the quotas below. The hold is
+/// validated strictly shorter than `reliability.retry.outbox_max_lifetime_ms`,
+/// because a custodian that outlived the depositor's outbox would deliver
+/// frames whose sender already reported them failed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CustodyConfig {
+    /// Whether this device accepts deposits. The off switch: refusing to hold
+    /// other people's traffic is this dial's job, never a zeroed budget's.
+    pub enabled: bool,
+    /// How long an accepted frame is held, in milliseconds, judged in wall
+    /// time from each record's acceptance timestamp against the value in
+    /// force at the sweep. Lowering it expires records already held.
+    pub hold_ms: u64,
+    /// Held frames one depositor with an established session may have at once.
+    pub max_entries_per_depositor: usize,
+    /// Bytes one depositor with an established session may have at once.
+    pub max_bytes_per_depositor: usize,
+    /// Held frames across every depositor.
+    pub max_entries: usize,
+    /// Bytes across every depositor.
+    pub max_bytes: usize,
+    /// Held frames one proven peer *without* an established session may have
+    /// at once. Zero, the default, means deposits are accepted only from peers
+    /// with a session, which costs a key package exchange and is what makes
+    /// the session tier resistant to an attacker who mints addresses for free.
+    pub stranger_max_entries: usize,
+    /// Bytes one proven peer without an established session may have at once.
+    pub stranger_max_bytes: usize,
+    /// What happens when a budget is full: evict the oldest held frame to
+    /// admit the new one, or refuse the new one.
+    pub overflow_policy: OverflowPolicy,
+}
+
+impl Default for CustodyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hold_ms: DEFAULT_CUSTODY_HOLD_MS,
+            max_entries_per_depositor: DEFAULT_CUSTODY_MAX_ENTRIES_PER_DEPOSITOR,
+            max_bytes_per_depositor: DEFAULT_CUSTODY_MAX_BYTES_PER_DEPOSITOR,
+            max_entries: DEFAULT_CUSTODY_MAX_ENTRIES,
+            max_bytes: DEFAULT_CUSTODY_MAX_BYTES,
+            stranger_max_entries: 0,
+            stranger_max_bytes: 0,
+            overflow_policy: OverflowPolicy::DropOldest,
+        }
+    }
+}
+
 /// Main configuration for the Offline Protocol.
 #[derive(Debug, Clone)]
 pub struct ProtocolConfig {
@@ -773,6 +860,10 @@ pub struct ProtocolConfig {
 
     /// Replicated-document data layer configuration.
     pub data: DataConfig,
+
+    /// Custody: holding a neighbour's replication frames for hours. Off by
+    /// default; see [`CustodyConfig`].
+    pub custody: CustodyConfig,
 }
 
 impl ProtocolConfig {
@@ -796,6 +887,7 @@ impl ProtocolConfig {
             group: GroupConfig::default(),
             security: SecurityConfig::default(),
             data: DataConfig::default(),
+            custody: CustodyConfig::default(),
         }
     }
 
@@ -1134,6 +1226,109 @@ impl ProtocolConfig {
             ));
         }
 
+        self.validate_custody()?;
+
+        Ok(())
+    }
+
+    /// The custody dials (`docs/spec/custody.md`, "Quotas").
+    ///
+    /// A zero hold is refused whatever the switch says: it is not a shorter
+    /// hold, it is a store that expires everything at the first sweep. The
+    /// remaining bounds are checked only while custody is enabled. The
+    /// default hold is six hours, and a disabled section that could refuse a
+    /// configuration whose outbox lifetime is shorter than that would turn
+    /// every such configuration, which today holds nothing, into a startup
+    /// error for a feature it never switched on.
+    fn validate_custody(&self) -> crate::Result<()> {
+        let custody = &self.custody;
+
+        if custody.hold_ms == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "custody.hold_ms must be greater than 0".to_string(),
+            ));
+        }
+
+        if !custody.enabled {
+            return Ok(());
+        }
+
+        // The inversion this refuses is silent: a custodian whose hold
+        // outlives the depositor's outbox keeps bytes whose sender has already
+        // reported the message failed, and delivers a frame to settle an entry
+        // that no longer exists. Nothing at runtime would notice, because the
+        // custodian cannot see the depositor's ladder.
+        let outbox_lifetime_ms = self.reliability.retry.outbox_max_lifetime_ms;
+        if custody.hold_ms >= outbox_lifetime_ms {
+            return Err(crate::Error::InvalidConfiguration(format!(
+                "custody.hold_ms ({}ms) must be strictly shorter than \
+                 retry.outbox_max_lifetime_ms ({}ms): a hold that outlives the outbox \
+                 delivers frames whose sender has already reported them failed",
+                custody.hold_ms, outbox_lifetime_ms,
+            )));
+        }
+
+        // The session tier is the one that admits anything by default, so a
+        // zero there is custody switched on and holding nothing: the silent
+        // dial `enabled` exists to replace.
+        if custody.max_entries_per_depositor == 0 || custody.max_bytes_per_depositor == 0 {
+            return Err(crate::Error::InvalidConfiguration(
+                "custody.max_entries_per_depositor and custody.max_bytes_per_depositor must \
+                 both be greater than 0 while custody is enabled: zero is not a smaller \
+                 quota, it is a store that refuses every deposit"
+                    .to_string(),
+            ));
+        }
+
+        if custody.max_bytes_per_depositor < CUSTODY_MIN_BYTES_PER_DEPOSITOR {
+            return Err(crate::Error::InvalidConfiguration(format!(
+                "custody.max_bytes_per_depositor ({}) must admit one replication frame at \
+                 its ceiling ({} bytes), or every deposit is refused as depositor_full",
+                custody.max_bytes_per_depositor, CUSTODY_MIN_BYTES_PER_DEPOSITOR,
+            )));
+        }
+
+        if custody.max_entries < custody.max_entries_per_depositor
+            || custody.max_bytes < custody.max_bytes_per_depositor
+        {
+            return Err(crate::Error::InvalidConfiguration(
+                "custody.max_entries and custody.max_bytes must each be at least their \
+                 per-depositor sibling, or the per-depositor dial can never be reached"
+                    .to_string(),
+            ));
+        }
+
+        // The stranger tier is off by both dials or on by both. One at zero
+        // with the other positive reads like a narrow allowance and is a
+        // refusal of every stranger, which is the default said in a way an
+        // operator would not recognise as the default.
+        let stranger_on = custody.stranger_max_entries > 0 || custody.stranger_max_bytes > 0;
+        if stranger_on && (custody.stranger_max_entries == 0 || custody.stranger_max_bytes == 0) {
+            return Err(crate::Error::InvalidConfiguration(
+                "custody.stranger_max_entries and custody.stranger_max_bytes must be both \
+                 zero (no stranger deposits) or both greater than 0"
+                    .to_string(),
+            ));
+        }
+
+        if stranger_on && custody.stranger_max_bytes < CUSTODY_MIN_BYTES_PER_DEPOSITOR {
+            return Err(crate::Error::InvalidConfiguration(format!(
+                "custody.stranger_max_bytes ({}) must admit one replication frame at its \
+                 ceiling ({} bytes), or every stranger deposit is refused as depositor_full",
+                custody.stranger_max_bytes, CUSTODY_MIN_BYTES_PER_DEPOSITOR,
+            )));
+        }
+
+        if custody.max_entries < custody.stranger_max_entries
+            || custody.max_bytes < custody.stranger_max_bytes
+        {
+            return Err(crate::Error::InvalidConfiguration(
+                "custody.max_entries and custody.max_bytes must each be at least the \
+                 stranger tier's dial, or that tier can never be reached"
+                    .to_string(),
+            ));
+        }
+
         Ok(())
     }
 }
@@ -1345,6 +1540,13 @@ impl ProtocolConfigBuilder {
         storage: Arc<dyn crate::protocol_state_storage::ProtocolStateStorage>,
     ) -> Self {
         self.config.data.storage = Some(storage);
+        self
+    }
+
+    /// Configures custody: whether this device holds a neighbour's replication
+    /// frames, and under what quotas. See [`CustodyConfig`].
+    pub fn custody(mut self, config: CustodyConfig) -> Self {
+        self.config.custody = config;
         self
     }
 
@@ -2120,5 +2322,148 @@ mod tests {
             out.push(c);
         }
         out
+    }
+
+    // ====================================================================
+    // Custody
+    // ====================================================================
+
+    fn enabled_custody() -> CustodyConfig {
+        CustodyConfig {
+            enabled: true,
+            ..CustodyConfig::default()
+        }
+    }
+
+    #[test]
+    fn custody_is_off_by_default_and_the_default_dials_validate_when_on() {
+        let config = ProtocolConfig::new("app", "user");
+        assert!(!config.custody.enabled);
+        assert_eq!(config.custody.hold_ms, DEFAULT_CUSTODY_HOLD_MS);
+        assert_eq!(config.custody.stranger_max_entries, 0);
+        assert_eq!(config.custody.stranger_max_bytes, 0);
+        config.validate().unwrap();
+
+        let mut on = ProtocolConfig::new("app", "user");
+        on.custody = enabled_custody();
+        on.validate().unwrap();
+        // The reference defaults respect their own bounds.
+        assert!(DEFAULT_CUSTODY_HOLD_MS < on.reliability.retry.outbox_max_lifetime_ms);
+        assert!(DEFAULT_CUSTODY_MAX_BYTES_PER_DEPOSITOR >= CUSTODY_MIN_BYTES_PER_DEPOSITOR);
+    }
+
+    #[test]
+    fn test_config_validation_rejects_a_custody_hold_that_outlives_the_outbox() {
+        // The silent inversion: a custodian whose hold outlives the depositor's
+        // outbox delivers frames whose sender already reported them failed.
+        let mut config = ProtocolConfig::new("app", "user");
+        config.custody = enabled_custody();
+        config.custody.hold_ms = config.reliability.retry.outbox_max_lifetime_ms;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("custody.hold_ms"), "{err}");
+        assert!(err.contains("strictly shorter"), "{err}");
+
+        config.custody.hold_ms = config.reliability.retry.outbox_max_lifetime_ms - 1;
+        config.validate().unwrap();
+
+        // Disabled, the relation is not checked: a section that is off must
+        // not refuse a configuration for a feature it never switched on.
+        config.custody.enabled = false;
+        config.custody.hold_ms = config.reliability.retry.outbox_max_lifetime_ms * 2;
+        config.validate().unwrap();
+
+        // A zero hold is refused whatever the switch says.
+        config.custody.hold_ms = 0;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("custody.hold_ms must be greater than 0"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_config_validation_rejects_custody_dials_that_silently_hold_nothing() {
+        let base = {
+            let mut config = ProtocolConfig::new("app", "user");
+            config.custody = enabled_custody();
+            config
+        };
+
+        let mut zero_entries = base.clone();
+        zero_entries.custody.max_entries_per_depositor = 0;
+        assert!(zero_entries
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("max_entries_per_depositor"));
+
+        let mut zero_bytes = base.clone();
+        zero_bytes.custody.max_bytes_per_depositor = 0;
+        assert!(zero_bytes
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("max_bytes_per_depositor"));
+
+        let mut too_small = base.clone();
+        too_small.custody.max_bytes_per_depositor = CUSTODY_MIN_BYTES_PER_DEPOSITOR - 1;
+        let err = too_small.validate().unwrap_err().to_string();
+        assert!(err.contains("one replication frame"), "{err}");
+
+        let mut inverted = base.clone();
+        inverted.custody.max_entries = inverted.custody.max_entries_per_depositor - 1;
+        assert!(inverted
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("per-depositor sibling"));
+
+        let mut inverted_bytes = base.clone();
+        inverted_bytes.custody.max_bytes = inverted_bytes.custody.max_bytes_per_depositor - 1;
+        assert!(inverted_bytes
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("per-depositor sibling"));
+
+        // Off, none of it is checked.
+        let mut off = zero_entries.clone();
+        off.custody.enabled = false;
+        off.validate().unwrap();
+    }
+
+    #[test]
+    fn test_config_validation_holds_the_stranger_tier_to_both_dials() {
+        let mut config = ProtocolConfig::new("app", "user");
+        config.custody = enabled_custody();
+
+        config.custody.stranger_max_entries = 4;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("both zero"), "{err}");
+
+        config.custody.stranger_max_bytes = CUSTODY_MIN_BYTES_PER_DEPOSITOR - 1;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("stranger_max_bytes"), "{err}");
+
+        config.custody.stranger_max_bytes = CUSTODY_MIN_BYTES_PER_DEPOSITOR;
+        config.validate().unwrap();
+
+        config.custody.stranger_max_entries = config.custody.max_entries + 1;
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("stranger tier"), "{err}");
+    }
+
+    #[test]
+    fn the_custody_builder_setter_reaches_validation() {
+        let err = ProtocolConfig::builder("app", "user")
+            .custody(CustodyConfig {
+                enabled: true,
+                hold_ms: u64::MAX,
+                ..CustodyConfig::default()
+            })
+            .build()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("custody.hold_ms"), "{err}");
     }
 }

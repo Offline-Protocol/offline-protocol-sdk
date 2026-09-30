@@ -23,6 +23,7 @@ Pod::Spec.new do |s|
     "ios/OfflineProtocolModule.{m,swift}",
     "ios/EncryptionConfigReader.swift",
     "ios/MeshRelayConfigReader.swift",
+    "ios/CustodyConfigReader.swift",
     "ios/ProtocolErrorBridge.swift",
     "ios/TransportManager.swift",
     "ios/BleManager.swift",
