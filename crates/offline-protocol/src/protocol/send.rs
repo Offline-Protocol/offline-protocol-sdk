@@ -5700,7 +5700,8 @@ impl OfflineProtocol {
             }
         }
 
-        // Reticulum excluded: LoRa bandwidth (~0.7 KB/s typical) is unsuitable for media transfer.
+        // The daemon carrier is left out of the fallback order: its reference
+        // backbone is scarce-class (gateway-contract.md, rate class).
         for preferred in [
             TransportType::Internet,
             TransportType::WiFiDirect,

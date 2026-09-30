@@ -1383,10 +1383,13 @@ interface OfflineProtocol {
     void reticulum_address_declaration_refused(string reason);
 
     // Reticulum: capability tokens from the gateway's Capabilities answer
-    // (e.g. "gateway_v1", "backbone_reticulum_v1"). MUST be called BEFORE
-    // reticulum_status_changed(true) on each attach — the contract's own
-    // ordering, so a device never drains into a gateway whose features it has
-    // not been told. Wholesale replace; the SDK clears the set itself when
+    // (e.g. "gateway_v1", "backbone_reticulum_v1"). A backbone_<kind>_v1
+    // token says what stands behind the daemon; the SDK stores it and reads
+    // nothing from it, and a kind it does not know is kept like any other
+    // token. MUST be called BEFORE reticulum_status_changed(true) on each
+    // attach: the contract's own ordering, so a device never drains into a
+    // gateway whose features it has not been told. Wholesale replace; the
+    // SDK clears the set itself when
     // the transport drops. Bounded like the relay's (64 tokens of 128 bytes)
     // and kept in its own set, so a token from whatever box is on the venue
     // Wi-Fi cannot open the relay's group-broadcast gate.
@@ -1394,8 +1397,8 @@ interface OfflineProtocol {
     void reticulum_gateway_capabilities(sequence<string> capabilities);
 
     // Reticulum: gateway-sourced presence for a peer (PresenceStatus).
-    // online=true records the fact against Reticulum and re-drives that
-    // peer's parked messages OVER RETICULUM, because that is the carrier that
+    // online=true records the fact against this carrier and re-drives that
+    // peer's parked messages OVER THIS CARRIER, because it is the one that
     // just proved it can reach them; online=false parks pending welcomes
     // without burning retry budget. Emits presence_updated with
     // source: reticulum, except for self, blocked, or empty peer ids.

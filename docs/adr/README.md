@@ -36,6 +36,7 @@ silently undo it. Decisions that follow from the obvious default do not need one
 | [0023](0023-a-control-frame-states-when-it-was-made.md) | A control frame states when it was made | Accepted |
 | [0024](0024-the-sdk-ships-its-own-tls-stack.md) | The SDK ships its own TLS stack for telemetry | Accepted |
 | [0025](0025-native-packages-are-assembled-in-place.md) | Native packages are assembled from the bridge sources in place | Accepted |
+| [0026](0026-the-backbone-is-a-gateway-property.md) | The backbone is a gateway property | Accepted |
 
 ## Format
 
