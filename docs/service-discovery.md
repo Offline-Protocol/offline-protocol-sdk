@@ -8,9 +8,11 @@ Service discovery turns an Offline Protocol mesh into a decentralized service ma
 
 The system has three phases:
 
-1. **Registration** — a node declares what services it offers locally.
-2. **Discovery** — a node broadcasts a query that gossips through the mesh; providers respond directly to the originator.
-3. **Request/Response** — the consumer sends a typed request to a chosen provider and receives a response.
+1. **Registration**: a node declares what services it offers locally.
+2. **Discovery**: a node broadcasts a query that gossips through the mesh; a provider answers the peer it heard the query from, and each hop forwards the answer toward the originator.
+3. **Request/Response**: the consumer sends a typed request to a chosen provider and receives a response.
+
+On a LAN there is a fourth path beside the mesh: a node can publish its registrations as DNS-SD instances and read its neighbours', under the [DNS-SD mapping](spec/dns-sd-mapping.md). A LAN import is unsigned and arrives as a `service_discovered` event with `source: "lan"`; the Python binding ships the bridge (`dnssd_bridge.py`).
 
 ```
 Node A (consumer)                    Mesh                    Node B (provider)
@@ -37,8 +39,8 @@ Every registered service is described by a `ServiceDescriptor`:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `service_id` | `ServiceId` (non-empty string) | Unique identifier, e.g. `"weather.v1"`, `"wiki.first-aid"` |
-| `version` | `String` | Semantic version of the service, e.g. `"2.0"` |
+| `service_id` | `ServiceId` | Unique identifier, e.g. `"weather.v1"`, `"wiki.first-aid"`. Validated on construction: not empty, not whitespace only, at most 256 bytes, and not starting with `__`, which is reserved for control-message prefixes |
+| `version` | `String` | An opaque label the provider chooses, e.g. `"2.0"`. Nothing parses or compares it; a consumer that wants an ordering defines its own |
 | `capabilities` | `HashMap<String, String>` | Key-value metadata advertising features, formats, limits, etc. |
 
 The `capabilities` map lets providers advertise what they support **before** any request is made. Consumers inspect these in `ServiceDiscovered` events to pick the right provider. Example capabilities:
@@ -56,11 +58,11 @@ The `capabilities` map lets providers advertise what they support **before** any
 
 Discovery queries propagate through the mesh using **gossip flooding**:
 
-1. The originator sends the query to all its known peers.
-2. Each receiving node checks its local service registry for matches and responds directly to the originator.
-3. Each receiving node forwards the query to all its other known peers (excluding the sender and originator).
-4. A **deduplication window** (60 seconds) prevents query storms — each node tracks query IDs it has already processed.
-5. A **max-hops limit** (default 10) prevents unbounded propagation — each forward decrements the remaining hop counter.
+1. The originator sends the query to at most 20 of its known peers.
+2. Each receiving node checks its local service registry for matches and answers the peer it heard the query from, never the `originator` the payload names: a spoofed originator field would otherwise make every provider leak its service list to an arbitrary peer. A node that receives an answer it did not originate forwards it as a unicast toward the originator and emits no event; only the originator emits `ServiceDiscovered`.
+3. Each receiving node forwards the query to at most 5 of its other known peers (excluding the sender and originator), chosen deterministically from the query id.
+4. A **deduplication window** (60 seconds, at most 10,000 remembered ids) prevents query storms: each node tracks query IDs it has already processed.
+5. A **max-hops limit** (default 10) prevents unbounded propagation: each forward decrements the remaining hop counter.
 
 ```
     A ──── B ──── D
@@ -81,7 +83,7 @@ Discovery responses include a `hop_count` field derived from the message's actua
 
 ### Peer Tracking
 
-Service discovery broadcasts to **all known peers**, not just those with established MLS encryption sessions. Peers are tracked independently of encryption state — any peer discovered via `on_neighbor_found()` is eligible for service discovery messages. This means service discovery works even when encryption is disabled or before key exchange completes.
+Service discovery broadcasts to **known peers**, not just those with established MLS encryption sessions. Peers are tracked independently of encryption state: any peer the engine learns of through `on_neighbor_discovered()` or as the sender of a message is eligible for service discovery messages, until it has not been seen for the known-peer lifetime. This means service discovery works even when encryption is disabled or before key exchange completes.
 
 ### Encryption Interaction
 
@@ -110,7 +112,7 @@ protocol.register_service(ServiceDescriptor {
 let was_registered: bool = protocol.unregister_service("weather.v1")?;
 ```
 
-`ServiceId::new()` validates the ID is non-empty and returns `Err(Error::InvalidServiceId)` if it is.
+`ServiceId::new()` returns `Err(Error::InvalidServiceId)` for an empty or whitespace-only id, an id over 256 bytes, or one starting with `__` (the control-message prefix family). Registering an id that is already registered replaces its descriptor.
 
 ### Discovering Services
 
@@ -155,7 +157,7 @@ let message_id: MessageId = protocol.respond_to_service_request(
 )?;
 ```
 
-Common status values: `"ok"`, `"error"`, `"not_found"`. The status field is application-defined — use whatever values make sense for your service protocol.
+The status is one of exactly three values: `"ok"`, `"not_found"` or `"error"`. The engine refuses any other status on send (`ServiceError::InvalidStatus`) and a requester drops a response carrying any other status on receipt, so a status of your own is a response nobody receives. Put application-level outcomes in the body.
 
 ## Events
 
@@ -219,7 +221,7 @@ Emitted on the **consumer** node when a provider responds to a request.
 |-------|------|-------------|
 | `request_id` | `String` | Matches the request ID from `send_service_request()` |
 | `service_id` | `String` | The service that responded |
-| `status` | `String` | Application-defined status (`"ok"`, `"error"`, `"not_found"`, etc.) |
+| `status` | `String` | One of `"ok"`, `"not_found"`, `"error"`; a response with any other status is dropped before this event |
 | `body` | `String` | Response payload |
 | `provider_peer_id` | `String` | Peer ID of the provider |
 
@@ -331,7 +333,7 @@ Service messages use internal control-message prefixes to distinguish them from 
 | Prefix | Message Type | Direction |
 |--------|-------------|-----------|
 | `__SVC_DISC_Q__` | Discovery query | Broadcast + gossip forwarded |
-| `__SVC_DISC_R__` | Discovery response | Direct to originator |
+| `__SVC_DISC_R__` | Discovery response | To the peer the query came from; each hop forwards it toward the originator |
 | `__SVC_REQ__` | Service request | Direct to provider |
 | `__SVC_RESP__` | Service response | Direct to requester |
 
@@ -349,10 +351,17 @@ Service messages use internal control-message prefixes to distinguish them from 
 | Parameter | Value | Description |
 |-----------|-------|-------------|
 | Dedup TTL | 60 seconds | How long a query ID is remembered to prevent re-processing |
+| Dedup entries | 10,000 | Remembered query ids; the oldest is evicted first |
 | Max hops | 10 | Maximum gossip forwarding depth for discovery queries |
-| ServiceId | Non-empty string | Validated on construction; empty strings are rejected |
+| Initial broadcast | 20 peers | How many known peers the originator sends a query to |
+| Gossip fanout | 5 peers | How many known peers each hop forwards a query to, chosen deterministically from the query id |
+| Service payload | 128 KiB | A control frame over this is dropped unparsed |
+| Request or response body | 64 KiB | Refused on send, dropped on receipt |
+| Method name | 256 bytes | Refused on send, dropped on receipt |
+| Response status | `ok`, `not_found`, `error` | Refused on send, dropped on receipt |
+| ServiceId | 1 to 256 bytes | Not whitespace only, not starting with `__` |
 
-These values are compile-time constants. The dedup map is automatically cleaned up during the protocol's periodic `cleanup_expired_entries()` cycle.
+These values are compile-time constants in `crates/offline-protocol-services/src/payloads.rs`. The dedup map is swept by the engine's periodic cleanup.
 
 ## Architecture Integration
 
