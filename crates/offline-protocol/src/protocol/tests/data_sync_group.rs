@@ -2348,8 +2348,9 @@ fn group_frames_sent(member: &Member) -> usize {
 fn a_lost_final_delta_heals_once_local_commits_go_quiet() {
     // The failure the settle offer exists for. A delta that parks behind a
     // lost predecessor is noticed when the next one arrives; the last delta
-    // of a burst has no next one. Lost on a link that then stays up with
-    // nobody typing, nothing else ever fires: no rediscovery, no confirm.
+    // of a burst has no next one. The per-member ACK ladder would re-send it
+    // after the ACK timeout; the settle offer is what asks sooner, and what
+    // still asks once that ladder has given up. No ACK timeout passes here.
     let (mut alice, mut bob, mut carol, group) = trio();
 
     write(&mut alice, &group, "notes", "a", "1");

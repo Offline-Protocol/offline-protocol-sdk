@@ -1243,7 +1243,7 @@ fn a_peer_cannot_name_unlimited_documents_into_our_storage() {
 fn a_lost_final_delta_heals_once_local_commits_go_quiet() {
     // The 1:1 half of the settle offer. A lost delta mid-burst is noticed
     // when the next one parks behind it; the last one has no next one, and
-    // on a link that stays up nothing else asks.
+    // only the ACK retry, seconds later, would ask.
     let (mut alice, mut bob) = pair();
     let alice_space = Node::space_for(&bob);
     let bob_space = Node::space_for(&alice);
@@ -1297,6 +1297,42 @@ fn bring_settle_forward(node: &mut Node) {
     for (due, _) in node.protocol.data_sync_settle.values_mut() {
         *due = now;
     }
+}
+
+#[test]
+fn a_commit_inside_the_quiet_period_pushes_the_settle_offer_out() {
+    // Debounced, not throttled: a commit made while an offer is pending
+    // restarts its quiet period, so a burst costs one offer at its end
+    // rather than one every settle delay while the user keeps typing.
+    let (mut alice, bob) = pair();
+    let alice_space = Node::space_for(&bob);
+
+    write(&mut alice, &alice_space, "notes", "a", "1");
+    // The first commit's quiet period is over...
+    bring_settle_forward(&mut alice);
+    // ...but another commit lands before the tick that would send it.
+    write(&mut alice, &alice_space, "todo", "b", "2");
+    alice.transport.clear_sent_messages();
+
+    alice.protocol.process().expect("process");
+    assert!(
+        alice.transport.sent_messages().is_empty(),
+        "a commit inside the quiet period did not push the settle offer out"
+    );
+    let (_, docs) = alice
+        .protocol
+        .data_sync_settle
+        .get(&alice_space)
+        .expect("the pending settle offer was dropped by the second commit");
+    assert_eq!(
+        docs.iter().map(String::as_str).collect::<Vec<_>>(),
+        ["notes", "todo"],
+        "the pushed-out offer must still name every document of the burst"
+    );
+
+    bring_settle_forward(&mut alice);
+    alice.protocol.process().expect("process");
+    assert_eq!(alice.transport.sent_messages().len(), 1);
 }
 
 #[test]

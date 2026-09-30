@@ -377,7 +377,8 @@ A sender MAY also emit one version offer (`reply: false`, `partial: true`)
 naming the documents it committed locally, once its local commits to a space
 have been quiet for a few seconds: the settle offer. It is not an answer to
 any frame. It recovers the last delta of a burst, which has no successor to
-reveal its loss. A sender MUST NOT emit one except after a local commit, and
+reveal its loss and would otherwise wait for the delivery layer's retry, or
+be lost once that retry gives up. A sender MUST NOT emit one except after a local commit, and
 MUST NOT emit more than one per space per quiet period, so it cannot recur
 without new local work.
 

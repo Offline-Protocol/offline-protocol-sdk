@@ -167,7 +167,9 @@ it, and the next trigger repeats the sweep anyway.
 
 The settle offer neither waits for that window nor starts it. It exists
 because a delta held behind a lost predecessor is noticed when the next one
-arrives, and the last delta of a burst has no next one. It is an ordinary
+arrives, and the last delta of a burst has no next one: without it that
+delta waits for the acknowledgement retry, 10 seconds at the earliest, and is
+not recovered at all once the retry budget is spent. It is an ordinary
 offer (`reply: false`, `partial: true`) naming only the documents committed
 since the last one, sent by the committing device once its local commits to
 a space have been quiet for 3 seconds. Each commit pushes the deadline out,

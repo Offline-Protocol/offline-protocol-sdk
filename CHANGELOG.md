@@ -287,13 +287,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   accepts some forged assertions the strict check refuses. They now call
   `verifyIdentityAssertion`, the same check the Python central and both
   peer-stream managers use.
-- **The last document change of a burst is no longer lost for good.** A
-  change that arrives after one lost in transit is held and the gap asked for,
-  but the last change of a burst has nothing after it, so on a link that stays
-  up a group member that missed it never caught up. Three seconds after a
-  device's local flushes to a space go quiet, it now sends one version offer
-  naming the documents it flushed, and a replica that is behind asks for what
-  it lacks. Only a local flush arms it, so it cannot echo or chain. Each one
+- **A lost last document change of a burst comes back in seconds.** A
+  change that arrives after one lost in transit is held and the gap asked for
+  at once, but the last change of a burst has nothing after it, so a peer that
+  missed it waited for the acknowledgement retry: 10 seconds at the earliest,
+  longer under backoff, and never once the retry budget was spent. Three
+  seconds after a device's local flushes to a space go quiet, it now sends one
+  version offer naming the documents it flushed, and a replica that is behind
+  asks for what it lacks. Only a local flush arms it, so it cannot echo or
+  chain. Each one
   draws a full version list back from the 1:1 peer or from every group member.
 - **iOS: a burst of Bluetooth LE traffic no longer tears messages.** The
   fragment drain pulled the whole backlog out of the core into a bounded

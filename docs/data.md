@@ -133,8 +133,8 @@ While the user is editing, flush on a short throttle, at most about twice a
 second, and once more when editing stops. Not per keystroke: each flush is
 one frame to every peer of the space, and Bluetooth is slow (a few
 kilobytes per second at best, less on a link at the 185-byte fragment floor),
-so per-keystroke flushes queue frames faster than the link drains them. Not only on exit either, or
-nothing reaches the other side while the user types.
+so per-keystroke flushes queue frames faster than the link drains them. Not
+only on exit either, or nothing reaches the other side while the user types.
 
 A `data_changed` event fires **after** the change is durable, never before: a
 UI that re-renders on that event is rendering state that survives a restart.
@@ -175,15 +175,15 @@ neither does the settle offer.
 **The settle offer recovers the last change of a burst.** A change that
 arrives ahead of one lost in transit is held, and the receiver asks for the
 gap at once, so a loss in the middle of a burst heals itself. The last change
-has nothing behind it to notice the loss, so once flushes to a space have
-been quiet for 3 seconds the device that made them offers their versions
-once. A replica that is behind asks for what it lacks; one that is current
+has nothing behind it to notice the loss, and would otherwise wait for the
+acknowledgement retry (10 seconds at the earliest, and never once the retry
+budget is spent), so once flushes to a space have been quiet for 3 seconds
+the device that made them offers their versions once. A replica that is behind asks for what it lacks; one that is current
 answers with its versions and the exchange ends. That answer lists every
 document in the space, not only the ones offered, and in a group every member
 sends one, so the settle offer is debounced per space rather than sent per
-flush. There is at most one per
-space per quiet period, and only after a local flush: a change received from
-a peer never triggers one.
+flush. There is at most one per space per quiet period, and only after a local
+flush: a change received from a peer never triggers one.
 
 Two things follow from at-least-once, unordered delivery being enough here.
 The first is that nothing needs ordering or exactly-once semantics; duplicates

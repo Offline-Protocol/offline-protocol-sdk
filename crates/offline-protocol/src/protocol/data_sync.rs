@@ -131,12 +131,14 @@ pub(crate) const DATA_SYNC_OFFER_INTERVAL: Duration = Duration::from_secs(30);
 /// settle offer.
 ///
 /// A delta that parks behind a lost predecessor is noticed when the *next*
-/// delta arrives, so a loss anywhere in a burst of edits heals on its own,
-/// except at the tail. The last delta of a burst has no successor, and a
-/// receiver that never got it has nothing to notice it with until an
-/// unrelated trigger fires, which on a link that stays up may be never.
-/// Congestion is what loses deltas and it strikes during bursts, so the tail
-/// is not a corner case. The settle offer is that successor.
+/// delta arrives, so a loss in the middle of a burst of edits heals at once.
+/// The last delta of a burst has no successor. What recovers it otherwise is
+/// the delivery ladder: every sync frame, 1:1 or group (fanned out per
+/// member), is acknowledged, and an unacknowledged one is re-sent after the
+/// ACK timeout (10 s by default) and its backoff, until the retry budget is
+/// spent. The settle offer asks after [`DATA_SYNC_SETTLE_DELAY`] instead, and
+/// still asks once that budget is gone. Congestion is what loses deltas and it
+/// strikes during bursts, so the tail is not a corner case.
 ///
 /// Debounced rather than sent per commit: a commit inside the window pushes
 /// the deadline out, so a burst costs one offer at the end of it, not one per
