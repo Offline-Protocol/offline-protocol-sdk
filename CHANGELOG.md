@@ -15,6 +15,35 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Custody v1.** A device can now hold a neighbour's replication frames for
+  hours instead of the five seconds a forwarder gives them
+  (`docs/spec/custody.md`), off by default. `ProtocolConfig::custody`
+  (`custody` in every binding) switches it on and sets the hold and the
+  quotas; the hold is validated strictly shorter than the outbox lifetime. The
+  depositor's engine writes the one-hop request on its own sealed `delta`,
+  `snap`, `vv` and `blob_gone` frames when it offers them to neighbours, from
+  the plaintext it retains for re-sealing and never after a restart; every
+  forwarder strips the request from a third-party frame it transmits. A
+  custodian judges a frame at the drop point, after the forwarding identifier
+  is released, so it never blanks its own route; answers a depositor that
+  advertises `data_versions` entry 7 with the signed `__CUSTODY_RECEIPT__`
+  once, over the arrival link; redelivers on neighbour discovery through a
+  dedicated governor intake, at most once per neighbour per hold and straight
+  to the recipient when it appears; expires records in wall time against the
+  hold in force; and keeps them sealed under the new `custody_entries` storage
+  category, restored at launch. A receipt settles nothing. `custody_stats()`
+  (`get_custody_stats()` over the FFI) reports the counters, every refusal
+  reason included, and `erase_custody()` drops every record; the data-layer
+  wipe calls it. The receipt body has frozen vectors at
+  `crates/offline-protocol/tests/data/custody-receipt-v1.vectors.json`.
+
+- **The iOS config readers read `0` and `1` as numbers.** The Foundation-only
+  readers behind `meshRelay` and `custody` excluded JSON booleans with an
+  `is Bool` test that Swift also answers true for the numbers 0 and 1, so a
+  `fanout: 1`, an `activityIdleWindows: 1` or a `jitterMinMs: 0` written from
+  React Native reached the core as unset and the dial silently stayed at its
+  default. Both readers now exclude booleans by their CoreFoundation type.
+
 - **The custody chapter.** `docs/spec/custody.md` specifies how a device
   holds a neighbour's replication frame for hours instead of the five
   seconds a forwarder gives it today: an explicit deposit in which the
