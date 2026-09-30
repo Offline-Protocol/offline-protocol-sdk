@@ -625,20 +625,23 @@ fn the_acceptance_table_refuses_what_the_chapter_refuses() {
 fn a_held_frame_expires_at_the_end_of_the_hold_in_force() {
     let (mut alice, mut bob, carol) = topology(open_custody());
     let frame = deposit_from(&mut alice, &bob, &carol);
+    // Acceptance stamps the wall clock, so bracket it: a clock read only
+    // after it lets a slow runner put the "inside" sweep past the hold.
+    let before_ms = Utc::now().timestamp_millis();
     bob.receive_from(frame.clone(), &alice.address);
     drop_point(&mut bob);
+    let after_ms = Utc::now().timestamp_millis();
     assert_eq!(bob.protocol.custody_stats().held, 1);
     // The receipt at acceptance is the last thing that leaves.
     bob.take_peer_sends();
 
     let hold_ms = bob.protocol.custody_config().hold_ms;
-    let now_ms = Utc::now().timestamp_millis();
     bob.protocol
-        .sweep_custody_now(Instant::now(), now_ms + hold_ms as i64 - 1);
+        .sweep_custody_now(Instant::now(), before_ms + hold_ms as i64);
     assert_eq!(bob.protocol.custody_stats().held, 1, "inside the hold");
 
     bob.protocol
-        .sweep_custody_now(Instant::now(), now_ms + hold_ms as i64 + 1);
+        .sweep_custody_now(Instant::now(), after_ms + hold_ms as i64 + 1);
     let stats = bob.protocol.custody_stats();
     assert_eq!(stats.expired, 1);
     assert_eq!(stats.held, 0);
