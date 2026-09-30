@@ -174,6 +174,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **The storage conformance suite no longer deletes a merging backend's
+  records.** `runStorageConformance` cleaned up its probe records by listing
+  a probe key type and deleting what it listed, before any check had run.
+  On a backend that merges key types, or lists them by the tail of the name,
+  that listing names real records too, and the cleanup deleted them. The
+  suite now checks key-type isolation first, with point writes and point
+  deletes only, and a failure ends the run there with that one check
+  reported. A run that passes it still has thirteen checks, under the same
+  names.
 - **Relay timestamps parse on Android 7.** The Android bridge parsed them
   with `java.time.Instant`, which exists from Android 8 (API 26), while the
   SDK supports Android 7 (API 24). On Android 7 the call threw

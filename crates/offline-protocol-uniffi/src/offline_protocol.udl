@@ -61,7 +61,10 @@ namespace offline_protocol {
     // — swappability that cannot be verified is a promise, not a property.
     //
     // The suite writes only under its own probe key types and deletes
-    // everything it wrote, so it is safe against a live store.
+    // everything it wrote. Key-type isolation is checked first, with point
+    // writes and deletes, and a failure ends the run before anything is
+    // listed and deleted, so a backend that merges key types keeps its real
+    // records. Probe a new backend on a scratch instance until it is green.
     string run_storage_conformance(ProtocolStateStorageProvider storage);
 };
 

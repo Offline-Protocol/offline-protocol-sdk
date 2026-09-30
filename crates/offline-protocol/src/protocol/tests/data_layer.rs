@@ -743,6 +743,103 @@ fn the_conformance_suite_catches_a_broken_backend() {
     );
 }
 
+/// A backend whose key types bleed into each other, one of two ways.
+#[derive(Clone, Copy)]
+enum KeyTypeFault {
+    /// Every key type is one namespace.
+    Merged,
+    /// A listing matches the tail of the key type's name.
+    ListsBySuffix,
+}
+
+struct KeyTypeFaultStorage {
+    fault: KeyTypeFault,
+    records: Mutex<HashMap<(String, String), Vec<u8>>>,
+}
+
+impl KeyTypeFaultStorage {
+    fn new(fault: KeyTypeFault) -> Self {
+        Self {
+            fault,
+            records: Mutex::default(),
+        }
+    }
+
+    fn key(&self, key_type: &str, key_id: &str) -> (String, String) {
+        let key_type = match self.fault {
+            KeyTypeFault::Merged => "",
+            KeyTypeFault::ListsBySuffix => key_type,
+        };
+        (key_type.to_string(), key_id.to_string())
+    }
+}
+
+impl ProtocolStateStorage for KeyTypeFaultStorage {
+    fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> ProtocolStateResult<()> {
+        let key = self.key(key_type, key_id);
+        self.records
+            .lock()
+            .expect("lock")
+            .insert(key, data.to_vec());
+        Ok(())
+    }
+    fn load(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<Option<Vec<u8>>> {
+        let key = self.key(key_type, key_id);
+        Ok(self.records.lock().expect("lock").get(&key).cloned())
+    }
+    fn delete(&self, key_type: &str, key_id: &str) -> ProtocolStateResult<()> {
+        let key = self.key(key_type, key_id);
+        self.records.lock().expect("lock").remove(&key);
+        Ok(())
+    }
+    fn list_keys(&self, key_type: &str) -> ProtocolStateResult<Vec<String>> {
+        let (wanted, _) = self.key(key_type, "");
+        Ok(self
+            .records
+            .lock()
+            .expect("lock")
+            .keys()
+            .filter(|(kt, _)| match self.fault {
+                KeyTypeFault::Merged => *kt == wanted,
+                KeyTypeFault::ListsBySuffix => kt.ends_with(wanted.as_str()),
+            })
+            .map(|(_, id)| id.clone())
+            .collect())
+    }
+}
+
+/// The suite is exposed over the FFI and run against real providers, so a
+/// backend that merges key types must not lose a record to it: listing a
+/// probe type names every record there, and the cleanup deletes what it
+/// lists. The isolation check runs first and ends the run before any
+/// listed delete. The same for a backend that lists by the tail of a name,
+/// which a real category ending like a probe type would meet.
+#[test]
+fn the_conformance_suite_stops_before_deleting_from_a_backend_whose_key_types_bleed() {
+    for (fault, real_type) in [
+        (KeyTypeFault::Merged, "outbox"),
+        (
+            KeyTypeFault::ListsBySuffix,
+            "prefixed_storage_conformance_probe",
+        ),
+    ] {
+        let storage = KeyTypeFaultStorage::new(fault);
+        storage.store(real_type, "parked", b"kept").expect("seed");
+        let report = crate::storage_conformance::run(&storage);
+        assert!(report.passed.is_empty(), "{:?}", report.passed);
+        assert_eq!(report.failures.len(), 1, "{}", report.summary());
+        assert_eq!(
+            report.failures[0].check,
+            "key_types_are_separate_namespaces"
+        );
+        assert_eq!(
+            storage.load(real_type, "parked").expect("load"),
+            Some(b"kept".to_vec()),
+            "{real_type}: the suite deleted a real record"
+        );
+    }
+}
+
 #[test]
 fn the_mls_storage_conformance_suite_is_reachable_from_the_engine() {
     // The engine re-exports the MLS suite beside the state suite, so a Rust

@@ -12,7 +12,16 @@
 //! The suite drives the trait directly rather than going through the
 //! sealing chokepoint, because what is under test is the adapter's contract:
 //! bytes in, the same bytes out, addressed by `(key_type, key_id)`. It
-//! writes only under its own key type, and deletes everything it wrote.
+//! writes only under its own key types, and deletes everything it wrote.
+//!
+//! Key-type isolation is checked first, with point writes and point deletes
+//! of ids nothing else uses, and a failure ends the run there. Every listed
+//! delete after it trusts that listing a probe key type names only probe
+//! records; on a backend that merges key types it names real records too,
+//! and the cleanup would delete them. That makes the suite safe to run
+//! against a live store whatever the backend does with key types. It is not
+//! a promise for every defect: probe a new backend on a scratch instance
+//! until it is green.
 
 use crate::protocol_state_storage::{
     ProtocolStateError, ProtocolStateStorage, MAX_PROTOCOL_STATE_RECORD_TRANSFER_BYTES,
@@ -26,6 +35,20 @@ pub const CONFORMANCE_KEY_TYPE: &str = "storage_conformance_probe";
 
 /// A second key type, used to prove categories do not bleed into each other.
 pub const CONFORMANCE_KEY_TYPE_OTHER: &str = "storage_conformance_probe_other";
+
+/// A key type that ends with [`CONFORMANCE_KEY_TYPE`]. The second probe type
+/// is related to the first by prefix only, and a backend that lists by the
+/// tail of a name is caught only by one related by suffix.
+const CONFORMANCE_KEY_TYPE_SUFFIXED: &str = "suffixed_storage_conformance_probe";
+
+/// The id the isolation check writes under two probe key types. Nothing else
+/// uses it, so a point write or delete of it cannot reach a real record even
+/// on a backend that ignores the key type.
+const ISOLATION_PROBE_ID: &str = "storage_conformance_isolation";
+
+/// The id the isolation check writes under the other probe key types only,
+/// to catch a listing that crosses key types.
+const ISOLATION_LISTING_PROBE_ID: &str = "storage_conformance_isolation_listing";
 
 /// The report types are the MLS suite's, re-exported, so the two suites
 /// render one JSON shape and one reader serves both.
@@ -56,18 +79,31 @@ fn expect_load(
 pub fn run(storage: &dyn ProtocolStateStorage) -> ConformanceReport {
     let mut report = ConformanceReport::new();
 
+    // 1. Key types are separate namespaces, checked before anything is
+    // deleted. The data layer keeps documents, their delta logs and space
+    // indexes in three of them; a backend that merges them would serve a
+    // delta where a document was asked for. It is also the one defect that
+    // turns this suite destructive (see the module doc), so a failure ends
+    // the run here.
+    let isolation = key_types_are_isolated(storage);
+    let isolated = isolation.is_ok();
+    report.check("key_types_are_separate_namespaces", isolation);
+    if !isolated {
+        return report;
+    }
+
     // Anything left from an interrupted earlier run would make the listing
     // checks report failures that are not the adapter's fault.
     cleanup(storage);
 
-    // 1. The basic contract.
+    // 2. The basic contract.
     let outcome = storage
         .store(CONFORMANCE_KEY_TYPE, "basic", b"hello")
         .map_err(|err| format!("store failed: {err}"))
         .and_then(|()| expect_load(storage, "basic", b"hello"));
     report.check("store_then_load", outcome);
 
-    // 2. Values are bytes, not text. A backend that round-trips through a
+    // 3. Values are bytes, not text. A backend that round-trips through a
     // string type mangles these, and the failure is invisible until a
     // sealed record (which is ciphertext) comes back wrong.
     let binary: Vec<u8> = (0u8..=255).collect();
@@ -77,14 +113,14 @@ pub fn run(storage: &dyn ProtocolStateStorage) -> ConformanceReport {
         .and_then(|()| expect_load(storage, "binary", &binary));
     report.check("binary_values_round_trip", outcome);
 
-    // 3. An empty value is a value, and must not read back as absent.
+    // 4. An empty value is a value, and must not read back as absent.
     let outcome = storage
         .store(CONFORMANCE_KEY_TYPE, "empty", b"")
         .map_err(|err| format!("store failed: {err}"))
         .and_then(|()| expect_load(storage, "empty", b""));
     report.check("empty_value_is_not_missing", outcome);
 
-    // 4. A second store replaces; it does not append or refuse.
+    // 5. A second store replaces; it does not append or refuse.
     let outcome = storage
         .store(CONFORMANCE_KEY_TYPE, "overwrite", b"first")
         .and_then(|()| storage.store(CONFORMANCE_KEY_TYPE, "overwrite", b"second"))
@@ -92,7 +128,7 @@ pub fn run(storage: &dyn ProtocolStateStorage) -> ConformanceReport {
         .and_then(|()| expect_load(storage, "overwrite", b"second"));
     report.check("store_overwrites", outcome);
 
-    // 5. A key that was never written reads as missing, not as an error.
+    // 6. A key that was never written reads as missing, not as an error.
     let outcome = match storage.load(CONFORMANCE_KEY_TYPE, "never_written") {
         Ok(None) => Ok(()),
         Ok(Some(_)) => Err("a key that was never written returned a value".to_string()),
@@ -103,7 +139,7 @@ pub fn run(storage: &dyn ProtocolStateStorage) -> ConformanceReport {
     };
     report.check("absent_key_loads_as_none", outcome);
 
-    // 6. Delete removes, and deleting again is not an error. The data layer
+    // 7. Delete removes, and deleting again is not an error. The data layer
     // deletes folded delta records after a crash may already have taken
     // them, so a delete that fails on an absent key turns a clean recovery
     // into a spurious failure.
@@ -124,25 +160,12 @@ pub fn run(storage: &dyn ProtocolStateStorage) -> ConformanceReport {
         );
     report.check("delete_removes_and_is_idempotent", outcome);
 
-    // 7. Key types are separate namespaces. The data layer keeps documents,
-    // their delta logs and space indexes in three of them; a backend that
-    // merges them would serve a delta where a document was asked for.
-    let outcome = storage
-        .store(CONFORMANCE_KEY_TYPE, "shared_id", b"mine")
-        .and_then(|()| storage.store(CONFORMANCE_KEY_TYPE_OTHER, "shared_id", b"theirs"))
-        .map_err(|err| format!("store failed: {err}"))
-        .and_then(|()| expect_load(storage, "shared_id", b"mine"))
-        .and_then(
-            |()| match storage.load(CONFORMANCE_KEY_TYPE_OTHER, "shared_id") {
-                Ok(Some(value)) if value == b"theirs" => Ok(()),
-                Ok(_) => Err("the same key id in two key types collided".to_string()),
-                Err(err) => Err(format!("load failed: {err}")),
-            },
-        );
-    report.check("key_types_are_separate_namespaces", outcome);
-
     // 8. Listing names what is there, and only within its own key type.
     let outcome = (|| -> std::result::Result<(), String> {
+        storage
+            .store(CONFORMANCE_KEY_TYPE, "shared_id", b"mine")
+            .and_then(|()| storage.store(CONFORMANCE_KEY_TYPE_OTHER, "shared_id", b"theirs"))
+            .map_err(|err| format!("store failed: {err}"))?;
         let keys = storage
             .list_keys(CONFORMANCE_KEY_TYPE)
             .map_err(|err| format!("list_keys failed: {err}"))?;
@@ -238,6 +261,55 @@ pub fn run(storage: &dyn ProtocolStateStorage) -> ConformanceReport {
     report.check("listed_records_can_all_be_deleted", outcome);
 
     report
+}
+
+/// The isolation check: the same id under two key types, and an id under
+/// two others that must not appear in the first one's listing.
+///
+/// Only a collision fails it. A value that comes back wrong in another way
+/// is the round-trip checks' to report, and a listing that fails is the
+/// listing checks'; neither is evidence that a listed delete would reach
+/// outside the probe key types. The probe records are removed with point
+/// deletes whatever the outcome.
+fn key_types_are_isolated(storage: &dyn ProtocolStateStorage) -> std::result::Result<(), String> {
+    let outcome = (|| -> std::result::Result<(), String> {
+        storage
+            .store(CONFORMANCE_KEY_TYPE_OTHER, ISOLATION_PROBE_ID, b"theirs")
+            .and_then(|()| storage.store(CONFORMANCE_KEY_TYPE, ISOLATION_PROBE_ID, b"mine"))
+            .and_then(|()| {
+                storage.store(CONFORMANCE_KEY_TYPE_OTHER, ISOLATION_LISTING_PROBE_ID, b"x")
+            })
+            .and_then(|()| {
+                storage.store(CONFORMANCE_KEY_TYPE_SUFFIXED, ISOLATION_LISTING_PROBE_ID, b"x")
+            })
+            .map_err(|err| {
+                format!("store failed, so isolation could not be checked and nothing was deleted: {err}")
+            })?;
+        if let Ok(Some(other)) = storage.load(CONFORMANCE_KEY_TYPE_OTHER, ISOLATION_PROBE_ID) {
+            if other == b"mine" {
+                return Err(
+                    "the same key id in two key types collided: a write under one \
+                            replaced the other"
+                        .to_string(),
+                );
+            }
+        }
+        if let Ok(listed) = storage.list_keys(CONFORMANCE_KEY_TYPE) {
+            if listed.iter().any(|key| key == ISOLATION_LISTING_PROBE_ID) {
+                return Err("list_keys named a record written under another key type".to_string());
+            }
+        }
+        Ok(())
+    })();
+    for (key_type, key_id) in [
+        (CONFORMANCE_KEY_TYPE, ISOLATION_PROBE_ID),
+        (CONFORMANCE_KEY_TYPE_OTHER, ISOLATION_PROBE_ID),
+        (CONFORMANCE_KEY_TYPE_OTHER, ISOLATION_LISTING_PROBE_ID),
+        (CONFORMANCE_KEY_TYPE_SUFFIXED, ISOLATION_LISTING_PROBE_ID),
+    ] {
+        let _ = storage.delete(key_type, key_id);
+    }
+    outcome
 }
 
 /// Remove every record the suite writes, in both key types.
