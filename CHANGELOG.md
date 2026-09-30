@@ -15,6 +15,27 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **The local API chapter.** `docs/spec/local-api.md` specifies how one
+  server process fronts one engine for several local applications: JSON-RPC
+  2.0 over a WebSocket on a Unix domain socket by default (TCP on loopback
+  with a per-launch token as the opt-in), a `hello` that declares the
+  client's application id once and stamps it on every send, and the events
+  relayed unchanged as notifications. It is the first complete catalogue of
+  the engine's events: all seventy-five tags with their fields and the
+  vocabularies of the enum-valued ones, and how each is routed (by
+  application id, by an identifier the server issued, or to everyone). The
+  method table partitions the interface definition into the 126 methods a
+  client may call and the 92 platform operations it never can, including the
+  run loop and the drain, which the server owns because the engine delivers
+  a message only when something drains. Errors keep the engine's
+  twenty-five-variant taxonomy: the JSON-RPC code is the variant's position
+  in the append-only enum. There is no HTTP request path: the pinned
+  WebSocket library drops any non-`GET` handshake without a response, which
+  the chapter records so it is not re-added. `docs/bridges/local-api.md`
+  states which shared bridge rules the server inherits and the new rule that
+  a Rust guard pins the three tables to the definition, the engine and the
+  reference server. Nothing ships in this entry but the contract; the
+  reference server follows it.
 - **The leaf node builds for ESP32 RISC-V parts and for Cortex-M0.**
   `offline-protocol-leaf` now compiles, and CI lints it, for
   `riscv32imac-unknown-none-elf` (ESP32-C6, ESP32-H2),
