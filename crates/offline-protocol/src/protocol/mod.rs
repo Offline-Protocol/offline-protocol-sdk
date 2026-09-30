@@ -193,11 +193,17 @@ pub struct OfflineProtocol {
     /// seams. In-memory only, and absent facts mean today's behaviour.
     pub(crate) reachability: reachability::ReachabilityFacts,
 
-    /// Capability tokens the attached Reticulum gateway advertised.
+    /// Capability tokens the attached gateway daemon advertised.
     ///
     /// Delivered at attach, before the bridge reports the carrier available,
     /// and cleared when the carrier drops: a stale advertisement outlives the
     /// gateway that made it, and a reconnect may land on a different one.
+    ///
+    /// Stored and never read on a decision. The backbone behind the daemon
+    /// is the gateway's own property and reaches this device only as a
+    /// `backbone_<kind>_v1` token in this set; the set is for an application
+    /// to show, and the first production reader would turn a string set by
+    /// whoever holds the socket into a routing input (ADR 0026).
     ///
     /// Kept apart from `group_mesh.relay_capabilities` deliberately, though
     /// both are capability sets from a gateway. That one gates the relay
@@ -2620,7 +2626,7 @@ impl OfflineProtocol {
         }
     }
 
-    /// Records what the attached Reticulum gateway says it can do.
+    /// Records what the attached gateway daemon says it can do.
     ///
     /// Wholesale replace, like the relay's: each attach describes the gateway
     /// actually connected now. The bridge calls this **before** it reports the

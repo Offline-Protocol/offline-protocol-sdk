@@ -462,6 +462,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `ProtocolManager` already passes it, so only code that builds an
   `InternetManager` directly needs `app_id=`.
 
+- **The backbone is a gateway property.** The gateway contract's backbone
+  section is restated as what any backbone owes a gateway (gateway-to-gateway
+  presence, arbitrary-size framing, a provisioned peer list, a declared rate
+  class), with Reticulum as the reference backbone in a subsection of its
+  own. A gateway advertises each backbone as a `backbone_<kind>_v1`
+  capability token; a client ignores a kind it does not know, a gateway may
+  advertise none, and the token is advisory and never a routing input. A
+  device attaches to one gateway daemon at a time, because every gateway
+  answer is recorded against the one daemon carrier. No frame, verb or
+  token spelling changes: `backbone_reticulum_v1` is the family's first
+  member. The `reticulum_*` entry points keep their names and their doc
+  comments now say what they name, the gateway daemon carrier after its
+  reference backbone. [ADR 0026](docs/adr/0026-the-backbone-is-a-gateway-property.md)
+  records the decision.
+
 ## [0.27.0] — 2026-09-25
 
 > **Replicated documents can be removed, narrowed, and carry their bytes
