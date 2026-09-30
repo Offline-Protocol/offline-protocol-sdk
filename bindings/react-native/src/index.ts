@@ -46,6 +46,8 @@ import type {
   MeshRelayConfig,
   MeshRelayStats,
   MeshRelayTunables,
+  CustodyConfig,
+  CustodyStats,
   MlsKeyPackage,
   MlsEncryptedMessage,
   MlsWelcome,
@@ -180,6 +182,7 @@ interface NativeConfig {
     enforceAdminCommits?: boolean;
   };
   meshRelay?: MeshRelayConfig;
+  custody?: CustodyConfig;
   data?: {
     enabled?: boolean;
   };
@@ -542,6 +545,27 @@ export class OfflineProtocol {
       });
       if (meshRelayConfig) {
         nativeConfig.meshRelay = meshRelayConfig;
+      }
+    }
+
+    // Custody section. Nested only, forwarded field-for-field with no
+    // defaults filled in, for the reason the mesh forwarding section gives:
+    // the core owns every default, and its default here is off. A `?? false`
+    // on `enabled` would keep every app that omits the section off forever.
+    if (this.config.custody) {
+      const custodyConfig = sanitize({
+        enabled: this.config.custody.enabled,
+        holdMs: this.config.custody.holdMs,
+        maxEntriesPerDepositor: this.config.custody.maxEntriesPerDepositor,
+        maxBytesPerDepositor: this.config.custody.maxBytesPerDepositor,
+        maxEntries: this.config.custody.maxEntries,
+        maxBytes: this.config.custody.maxBytes,
+        strangerMaxEntries: this.config.custody.strangerMaxEntries,
+        strangerMaxBytes: this.config.custody.strangerMaxBytes,
+        overflowPolicy: this.config.custody.overflowPolicy,
+      });
+      if (custodyConfig) {
+        nativeConfig.custody = custodyConfig;
       }
     }
 
@@ -2302,6 +2326,33 @@ export class OfflineProtocol {
    */
   async getMeshRelayTunables(): Promise<MeshRelayTunables> {
     return await OfflineProtocolNativeModule.getMeshRelayTunables();
+  }
+
+  /**
+   * What this device holds for its neighbours and has done as a depositor
+   * (docs/spec/custody.md), read through to the Rust core.
+   *
+   * `held` and `heldBytes` are gauges; everything else is cumulative. Every
+   * refusal reason in the acceptance table has a counter, so an operator who
+   * enabled custody and sees nothing held can tell "off" from "nobody asked"
+   * from "everyone refused".
+   *
+   * @returns Custody counters
+   */
+  async getCustodyStats(): Promise<CustodyStats> {
+    return await OfflineProtocolNativeModule.getCustodyStats();
+  }
+
+  /**
+   * Drops every held frame and resets the custody counters.
+   *
+   * Callable on its own; the data layer's `wipeAll()` erases custody in the
+   * core as well, because a custody store that survived a logout would hold
+   * other people's traffic past the point the user asked for erasure. Fails
+   * only when a record could not be deleted, after attempting every one.
+   */
+  async eraseCustody(): Promise<void> {
+    await OfflineProtocolNativeModule.eraseCustody();
   }
 
   /**

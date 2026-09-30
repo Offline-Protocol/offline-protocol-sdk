@@ -436,6 +436,7 @@ never one client's share of it.
 | `get_retry_queue_size` | | `#` |
 | `get_mesh_relay_stats` | | `{MeshRelayStats}` |
 | `get_mesh_relay_tunables` | | `{MeshRelayTunables}` |
+| `get_custody_stats` | | `{CustodyStats}` |
 
 ### Engine: instance-wide tuning
 
@@ -544,6 +545,7 @@ this chapter asserts it.
 | `process_file_chunk`, `finalize_file` | The inbound chunk driver of a platform transport |
 | `services.constructor`, `data.constructor`, `data.with_storage` | The server constructs the two objects once, over the engine it owns; `with_storage` takes a callback interface |
 | `data.wipe_all` | Erases every client's documents and the identity's key documents at once. That is the operator's logout, taken at the server, never one application's call |
+| `erase_custody` | Drops every frame this device holds for its neighbours, whichever client's traffic brought them, and resets the counters. The operator's erase, like `data.wipe_all`, never one application's call |
 | `run_storage_conformance` | Takes a callback interface; a storage backend is verified by the host that supplies it |
 
 ## Event catalogue

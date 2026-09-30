@@ -1,0 +1,71 @@
+{
+  "chapter": "docs/spec/custody.md",
+  "prefix": "__CUSTODY_RECEIPT__",
+  "version": 1,
+  "notes": [
+    "A receipt is the control frame a custodian answers a deposit with: prefix, then a JSON object.",
+    "Fields serialize in the order v, id, hold_ms. A decoder reads v before the body and ignores unknown fields.",
+    "hold_ms is relative to the receipt's own timestamp and a u64 on the wire; the vectors stay within the double-safe integer range so every JSON decoder can run them.",
+    "Every case carries the prefix. Computed by tools/spec-vectors/generate.py from the chapter, independently of the code that pins them."
+  ],
+  "frames": [
+    {
+      "name": "six_hour_hold",
+      "id": "7f3a1c2e-4b5d-4e6f-8a9b-0c1d2e3f4a5b",
+      "hold_ms": 21600000,
+      "wire": "__CUSTODY_RECEIPT__{\"v\":1,\"id\":\"7f3a1c2e-4b5d-4e6f-8a9b-0c1d2e3f4a5b\",\"hold_ms\":21600000}"
+    },
+    {
+      "name": "zero_hold",
+      "id": "a",
+      "hold_ms": 0,
+      "wire": "__CUSTODY_RECEIPT__{\"v\":1,\"id\":\"a\",\"hold_ms\":0}"
+    },
+    {
+      "name": "largest_double_safe_hold",
+      "id": "max",
+      "hold_ms": 9007199254740991,
+      "wire": "__CUSTODY_RECEIPT__{\"v\":1,\"id\":\"max\",\"hold_ms\":9007199254740991}"
+    }
+  ],
+  "decode_only": [
+    {
+      "name": "unknown_field_ignored",
+      "wire": "__CUSTODY_RECEIPT__{\"v\":1,\"id\":\"m1\",\"hold_ms\":5,\"note\":\"a future field\"}",
+      "id": "m1",
+      "hold_ms": 5
+    },
+    {
+      "name": "field_order_is_free",
+      "wire": "__CUSTODY_RECEIPT__{\"hold_ms\":5,\"id\":\"m1\",\"v\":1}",
+      "id": "m1",
+      "hold_ms": 5
+    }
+  ],
+  "rejects": [
+    {
+      "name": "unknown_version",
+      "wire": "__CUSTODY_RECEIPT__{\"v\":2,\"id\":\"m1\",\"hold_ms\":5}"
+    },
+    {
+      "name": "missing_version",
+      "wire": "__CUSTODY_RECEIPT__{\"id\":\"m1\",\"hold_ms\":5}"
+    },
+    {
+      "name": "empty_id",
+      "wire": "__CUSTODY_RECEIPT__{\"v\":1,\"id\":\"\",\"hold_ms\":5}"
+    },
+    {
+      "name": "not_an_object",
+      "wire": "__CUSTODY_RECEIPT__[1,\"m1\",5]"
+    },
+    {
+      "name": "negative_hold",
+      "wire": "__CUSTODY_RECEIPT__{\"v\":1,\"id\":\"m1\",\"hold_ms\":-1}"
+    },
+    {
+      "name": "missing_hold",
+      "wire": "__CUSTODY_RECEIPT__{\"v\":1,\"id\":\"m1\"}"
+    }
+  ]
+}

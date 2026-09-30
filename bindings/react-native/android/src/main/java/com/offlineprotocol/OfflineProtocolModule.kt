@@ -3628,6 +3628,58 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    // Custody counters, read through to the Rust core (docs/spec/custody.md).
+    @ReactMethod
+    fun getCustodyStats(promise: Promise) {
+        try {
+            val stats = protocol?.getCustodyStats()
+            if (stats != null) {
+                val map = Arguments.createMap()
+                map.putDouble("held", stats.held.toDouble())
+                map.putDouble("heldBytes", stats.heldBytes.toDouble())
+                map.putDouble("accepted", stats.accepted.toDouble())
+                map.putDouble("delivered", stats.delivered.toDouble())
+                map.putDouble("reOriginated", stats.reOriginated.toDouble())
+                map.putDouble("expired", stats.expired.toDouble())
+                map.putDouble("duplicates", stats.duplicates.toDouble())
+                map.putDouble("evicted", stats.evicted.toDouble())
+                map.putDouble("receiptsSent", stats.receiptsSent.toDouble())
+                map.putDouble("receiptsDropped", stats.receiptsDropped.toDouble())
+                map.putDouble("receiptsReceived", stats.receiptsReceived.toDouble())
+                map.putDouble("receiptsIgnored", stats.receiptsIgnored.toDouble())
+                map.putDouble("refusedDisabled", stats.refusedDisabled.toDouble())
+                map.putDouble("refusedNoRequest", stats.refusedNoRequest.toDouble())
+                map.putDouble("refusedUnknownClass", stats.refusedUnknownClass.toDouble())
+                map.putDouble("refusedNotSealed", stats.refusedNotSealed.toDouble())
+                map.putDouble("refusedUnprovenPeer", stats.refusedUnprovenPeer.toDouble())
+                map.putDouble("refusedNotDepositor", stats.refusedNotDepositor.toDouble())
+                map.putDouble("refusedStranger", stats.refusedStranger.toDouble())
+                map.putDouble("refusedDepositorFull", stats.refusedDepositorFull.toDouble())
+                map.putDouble("refusedStoreFull", stats.refusedStoreFull.toDouble())
+                map.putDouble("refusedBattery", stats.refusedBattery.toDouble())
+                promise.resolve(map)
+            } else {
+                promise.resolve(null)
+            }
+        } catch (e: Exception) {
+            promise.reject("ERROR_STATS", "Failed to get custody stats: ${e.message}", e)
+        }
+    }
+
+    // Drops every held frame and resets the custody counters. The data
+    // layer's wipe calls the same erase in the core; this is the standalone
+    // verb.
+    @ReactMethod
+    fun eraseCustody(promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            proto.eraseCustody()
+            promise.resolve(null)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_ERASECUSTODY", "eraseCustody failed")
+        }
+    }
+
     @ReactMethod
     fun getPendingAckCount(promise: Promise) {
         try {

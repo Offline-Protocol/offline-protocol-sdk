@@ -574,6 +574,95 @@ Because parking removes the pending acknowledgement, a parked message that is th
 
 What is still not covered: a device whose only infrastructure is **Nostr** never receives an unreachable verdict at all (a broadcast relay reports no per-recipient delivery), so nothing contradicts the initial "reachable" answer and no mesh fallback fires for it. That gap is permanent for Nostr rather than unfinished: there is no verdict to be had. Reticulum is no longer in that position. Its managers speak [the gateway contract](spec/gateway-contract.md), so a gateway's `recipient_unreachable` verdict reaches the same parking machinery the relay's does (it was always keyed to the verdict rather than to the relay), and a device attached to a gateway gets mesh fallback for a recipient that gateway cannot reach. What remains carrier-specific is only that a zone with no gateway has no verdicts to receive, which is the same as having no infrastructure at all. Note also that carrier status is reported by the platform bridge and means "this carrier is up", not "the relay connection is authenticated"; a bridge that reports a connection it never authenticates produces no verdicts either, and its messages settle by acknowledgement timeout as they always did.
 
+### Holding a frame for hours: custody
+
+Everything above gives a frame this device did not originate five seconds:
+queued, tried on a link, abandoned when no neighbour could take it. Custody
+([spec](spec/custody.md)) lets a device close that gap for one class of
+traffic. It is off by default (`custody.enabled`); a device that never enables
+it, and a device that never meets a custodian, both behave exactly as
+described above.
+
+What happens, in the order it happens:
+
+1. **The depositor asks, on its own frame.** When a device offers its own
+   sealed replication frame (a document delta, a snapshot, a version offer or
+   a blob-gone report) to neighbours because the recipient is out of reach, it
+   writes a one-hop request on the copy it hands over. Only those frames: a
+   direct message, a media chunk, and a request for a snapshot or a blob are
+   never deposited, because a custodian cannot see inside a sealed frame and
+   the depositor asserts the class from the plaintext it retains for
+   re-sealing. After a restart that plaintext is gone, so the frame is offered
+   without the request.
+2. **Every forwarder strips the request.** The key is unsigned metadata outside
+   the sealed body, so it is removed from any third-party frame a device
+   transmits, custody-enabled or not. That is what keeps a deposit to one hop:
+   a custodian accepts a frame only from its own sender, over the link that
+   proved it.
+3. **The custodian holds only what it could not forward.** A frame carrying a
+   request is an ordinary forward first. Custody begins where forwarding ends:
+   at the point a forward has waited past the five seconds without reaching a
+   link and would be abandoned. By then the forwarding path has already
+   released the frame's identifier from the handled-once cache, and accepting
+   the frame never puts it back. That is the one thing a custodian must never
+   do, and the reason the drop point is where acceptance lives: a device that
+   both held a frame and suppressed its own forwarding of the sender's
+   retransmissions of it would be a black hole on exactly the route now known
+   to be slow. Acceptance is judged by the quotas (per depositor, global, and
+   a stranger tier that is closed by default), by whether the frame is sealed
+   and sent by the peer it arrived from, and by the battery floor; a refusal
+   is silent and counted.
+4. **A receipt that settles nothing.** The custodian answers the depositor
+   once, over a mesh link to the peer that handed the frame over, with a
+   signed `__CUSTODY_RECEIPT__`, and only
+   when the depositor advertised the custody entry in its key package. The
+   depositor uses it for exactly one thing: not asking that custodian again
+   for the same frame while the hold lasts. The outbox entry, the
+   acknowledgement timer, the retry ladder and any park are untouched.
+5. **Redelivery is an ordinary forward.** When a neighbour appears, the
+   custodian queues each eligible held frame toward it through a dedicated
+   intake of the forwarding governor: no handled-once check, no hop spent, the
+   forward budget rather than the device's own reserve, and one target only.
+   A frame is re-originated at most once per distinct neighbour during its
+   hold and stays held; a frame whose recipient is the neighbour is handed
+   straight over and leaves custody. Expiry, at the end of the hold in force,
+   is a silent drop with a counter and no event: the depositor never lost
+   anything.
+6. **Its own erase.** `eraseCustody()` drops every held frame and resets the
+   counters. There is no global wipe in this protocol for custody to inherit,
+   so the data layer's `wipeAll()` calls it, and a launch with custody
+   disabled erases whatever a previous launch held, under the same per-launch
+   delete budget every restore walk draws on, finishing at a later launch if
+   the store was large.
+
+Held frames are sealed on disk under their own storage category and restored
+at launch, oldest first under the quotas in force.
+
+#### Reading the custody numbers
+
+`getCustodyStats()` reports what a device has done as a custodian and as a
+depositor. `held` and `heldBytes` are gauges; everything else is cumulative
+since start-up or the last erase.
+
+- `accepted`, `delivered`, `reOriginated`, `expired` are the life of a held
+  frame. `delivered` counts frames handed straight to their recipient, which
+  is the number that says custody paid for itself.
+- Every refusal reason in the acceptance table has a counter. A frame that
+  asked for nothing lands in `refusedNoRequest` on any device, so
+  `refusedDisabled` counts the deposits a device with custody off turned away,
+  which is how "off" is told from "nobody asked". `refusedStranger` is
+  the one to read on a device that enabled custody and holds nothing: the
+  stranger tier is closed by default, so only peers with an established
+  session are admitted.
+- `duplicates` and `evicted` say the quotas are doing work.
+- `receiptsSent` and `receiptsDropped` are the custodian's side of the
+  receipt; `receiptsReceived` and `receiptsIgnored` are the depositor's. A
+  receipt naming nothing in the outbox is ignored and counted, which is the
+  ordinary shape of one arriving after the recipient's acknowledgement.
+
+Tunables live in `ProtocolConfig::custody` (`custody` in every binding); see
+[configuration.md](configuration.md#custody-configuration).
+
 ### How a forwarding device chooses
 
 There is no routing table and no remembered path. A device that decides to

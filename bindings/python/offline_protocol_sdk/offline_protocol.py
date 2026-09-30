@@ -641,6 +641,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session() != 31162:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody() != 61003:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session() != 56452:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file() != 63518:
@@ -662,6 +664,8 @@ def _uniffi_check_api_checksums(lib):
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level() != 41959:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users() != 56869:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats() != 53054:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats() != 26483:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1823,6 +1827,11 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_end_telemetr
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_end_telemetry_session.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_erase_custody.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_erase_custody.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_establish_secure_session.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -1889,6 +1898,11 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_blocked_
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_blocked_users.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_custody_stats.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_custody_stats.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_dedup_stats.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2952,6 +2966,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session.restype = ctypes.c_uint16
@@ -2985,6 +3002,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_ba
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats.restype = ctypes.c_uint16
@@ -3570,6 +3590,403 @@ class _UniffiFfiConverterTypeBleFragment(_UniffiConverterRustBuffer):
         _UniffiFfiConverterString.write(value.recipient_id, buf)
         _UniffiFfiConverterSequenceUInt8.write(value.data, buf)
 
+class _UniffiFfiConverterBoolean:
+    @classmethod
+    def check_lower(cls, value):
+        return not not value
+
+    @classmethod
+    def lower(cls, value):
+        return 1 if value else 0
+
+    @staticmethod
+    def lift(value):
+        return value != 0
+
+    @classmethod
+    def read(cls, buf):
+        return cls.lift(buf.read_u8())
+
+    @classmethod
+    def write(cls, value, buf):
+        buf.write_u8(value)
+
+class _UniffiFfiConverterOptionalBoolean(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterBoolean.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterBoolean.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterBoolean.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+class _UniffiFfiConverterOptionalUInt64(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterUInt64.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterUInt64.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterUInt64.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+
+
+
+
+
+class OverflowPolicy(enum.Enum):
+    
+    DROP_OLDEST = 0
+    
+    DROP_NEWEST = 1
+    
+
+
+class _UniffiFfiConverterTypeOverflowPolicy(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        variant = buf.read_i32()
+        if variant == 1:
+            return OverflowPolicy.DROP_OLDEST
+        if variant == 2:
+            return OverflowPolicy.DROP_NEWEST
+        raise InternalError("Raw enum value doesn't match any cases")
+
+    @staticmethod
+    def check_lower(value):
+        if value == OverflowPolicy.DROP_OLDEST:
+            return
+        if value == OverflowPolicy.DROP_NEWEST:
+            return
+        raise ValueError(value)
+
+    @staticmethod
+    def write(value, buf):
+        if value == OverflowPolicy.DROP_OLDEST:
+            buf.write_i32(1)
+        if value == OverflowPolicy.DROP_NEWEST:
+            buf.write_i32(2)
+
+
+
+class _UniffiFfiConverterOptionalTypeOverflowPolicy(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeOverflowPolicy.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeOverflowPolicy.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeOverflowPolicy.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
+@dataclass
+class CustodyConfig:
+    def __init__(self, *, enabled:typing.Optional[bool] = _DEFAULT, hold_ms:typing.Optional[int] = _DEFAULT, max_entries_per_depositor:typing.Optional[int] = _DEFAULT, max_bytes_per_depositor:typing.Optional[int] = _DEFAULT, max_entries:typing.Optional[int] = _DEFAULT, max_bytes:typing.Optional[int] = _DEFAULT, stranger_max_entries:typing.Optional[int] = _DEFAULT, stranger_max_bytes:typing.Optional[int] = _DEFAULT, overflow_policy:typing.Optional[OverflowPolicy] = _DEFAULT):
+        if enabled is _DEFAULT:
+            self.enabled = None
+        else:
+            self.enabled = enabled
+        if hold_ms is _DEFAULT:
+            self.hold_ms = None
+        else:
+            self.hold_ms = hold_ms
+        if max_entries_per_depositor is _DEFAULT:
+            self.max_entries_per_depositor = None
+        else:
+            self.max_entries_per_depositor = max_entries_per_depositor
+        if max_bytes_per_depositor is _DEFAULT:
+            self.max_bytes_per_depositor = None
+        else:
+            self.max_bytes_per_depositor = max_bytes_per_depositor
+        if max_entries is _DEFAULT:
+            self.max_entries = None
+        else:
+            self.max_entries = max_entries
+        if max_bytes is _DEFAULT:
+            self.max_bytes = None
+        else:
+            self.max_bytes = max_bytes
+        if stranger_max_entries is _DEFAULT:
+            self.stranger_max_entries = None
+        else:
+            self.stranger_max_entries = stranger_max_entries
+        if stranger_max_bytes is _DEFAULT:
+            self.stranger_max_bytes = None
+        else:
+            self.stranger_max_bytes = stranger_max_bytes
+        if overflow_policy is _DEFAULT:
+            self.overflow_policy = None
+        else:
+            self.overflow_policy = overflow_policy
+        
+        
+
+    
+    def __str__(self):
+        return "CustodyConfig(enabled={}, hold_ms={}, max_entries_per_depositor={}, max_bytes_per_depositor={}, max_entries={}, max_bytes={}, stranger_max_entries={}, stranger_max_bytes={}, overflow_policy={})".format(self.enabled, self.hold_ms, self.max_entries_per_depositor, self.max_bytes_per_depositor, self.max_entries, self.max_bytes, self.stranger_max_entries, self.stranger_max_bytes, self.overflow_policy)
+    def __eq__(self, other):
+        if self.enabled != other.enabled:
+            return False
+        if self.hold_ms != other.hold_ms:
+            return False
+        if self.max_entries_per_depositor != other.max_entries_per_depositor:
+            return False
+        if self.max_bytes_per_depositor != other.max_bytes_per_depositor:
+            return False
+        if self.max_entries != other.max_entries:
+            return False
+        if self.max_bytes != other.max_bytes:
+            return False
+        if self.stranger_max_entries != other.stranger_max_entries:
+            return False
+        if self.stranger_max_bytes != other.stranger_max_bytes:
+            return False
+        if self.overflow_policy != other.overflow_policy:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeCustodyConfig(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return CustodyConfig(
+            enabled=_UniffiFfiConverterOptionalBoolean.read(buf),
+            hold_ms=_UniffiFfiConverterOptionalUInt64.read(buf),
+            max_entries_per_depositor=_UniffiFfiConverterOptionalUInt64.read(buf),
+            max_bytes_per_depositor=_UniffiFfiConverterOptionalUInt64.read(buf),
+            max_entries=_UniffiFfiConverterOptionalUInt64.read(buf),
+            max_bytes=_UniffiFfiConverterOptionalUInt64.read(buf),
+            stranger_max_entries=_UniffiFfiConverterOptionalUInt64.read(buf),
+            stranger_max_bytes=_UniffiFfiConverterOptionalUInt64.read(buf),
+            overflow_policy=_UniffiFfiConverterOptionalTypeOverflowPolicy.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterOptionalBoolean.check_lower(value.enabled)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.hold_ms)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.max_entries_per_depositor)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.max_bytes_per_depositor)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.max_entries)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.max_bytes)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.stranger_max_entries)
+        _UniffiFfiConverterOptionalUInt64.check_lower(value.stranger_max_bytes)
+        _UniffiFfiConverterOptionalTypeOverflowPolicy.check_lower(value.overflow_policy)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterOptionalBoolean.write(value.enabled, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.hold_ms, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.max_entries_per_depositor, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.max_bytes_per_depositor, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.max_entries, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.max_bytes, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.stranger_max_entries, buf)
+        _UniffiFfiConverterOptionalUInt64.write(value.stranger_max_bytes, buf)
+        _UniffiFfiConverterOptionalTypeOverflowPolicy.write(value.overflow_policy, buf)
+
+@dataclass
+class CustodyStats:
+    def __init__(self, *, held:int, held_bytes:int, accepted:int, delivered:int, re_originated:int, expired:int, duplicates:int, evicted:int, receipts_sent:int, receipts_dropped:int, receipts_received:int, receipts_ignored:int, refused_disabled:int, refused_no_request:int, refused_unknown_class:int, refused_not_sealed:int, refused_unproven_peer:int, refused_not_depositor:int, refused_stranger:int, refused_depositor_full:int, refused_store_full:int, refused_battery:int):
+        self.held = held
+        self.held_bytes = held_bytes
+        self.accepted = accepted
+        self.delivered = delivered
+        self.re_originated = re_originated
+        self.expired = expired
+        self.duplicates = duplicates
+        self.evicted = evicted
+        self.receipts_sent = receipts_sent
+        self.receipts_dropped = receipts_dropped
+        self.receipts_received = receipts_received
+        self.receipts_ignored = receipts_ignored
+        self.refused_disabled = refused_disabled
+        self.refused_no_request = refused_no_request
+        self.refused_unknown_class = refused_unknown_class
+        self.refused_not_sealed = refused_not_sealed
+        self.refused_unproven_peer = refused_unproven_peer
+        self.refused_not_depositor = refused_not_depositor
+        self.refused_stranger = refused_stranger
+        self.refused_depositor_full = refused_depositor_full
+        self.refused_store_full = refused_store_full
+        self.refused_battery = refused_battery
+        
+        
+
+    
+    def __str__(self):
+        return "CustodyStats(held={}, held_bytes={}, accepted={}, delivered={}, re_originated={}, expired={}, duplicates={}, evicted={}, receipts_sent={}, receipts_dropped={}, receipts_received={}, receipts_ignored={}, refused_disabled={}, refused_no_request={}, refused_unknown_class={}, refused_not_sealed={}, refused_unproven_peer={}, refused_not_depositor={}, refused_stranger={}, refused_depositor_full={}, refused_store_full={}, refused_battery={})".format(self.held, self.held_bytes, self.accepted, self.delivered, self.re_originated, self.expired, self.duplicates, self.evicted, self.receipts_sent, self.receipts_dropped, self.receipts_received, self.receipts_ignored, self.refused_disabled, self.refused_no_request, self.refused_unknown_class, self.refused_not_sealed, self.refused_unproven_peer, self.refused_not_depositor, self.refused_stranger, self.refused_depositor_full, self.refused_store_full, self.refused_battery)
+    def __eq__(self, other):
+        if self.held != other.held:
+            return False
+        if self.held_bytes != other.held_bytes:
+            return False
+        if self.accepted != other.accepted:
+            return False
+        if self.delivered != other.delivered:
+            return False
+        if self.re_originated != other.re_originated:
+            return False
+        if self.expired != other.expired:
+            return False
+        if self.duplicates != other.duplicates:
+            return False
+        if self.evicted != other.evicted:
+            return False
+        if self.receipts_sent != other.receipts_sent:
+            return False
+        if self.receipts_dropped != other.receipts_dropped:
+            return False
+        if self.receipts_received != other.receipts_received:
+            return False
+        if self.receipts_ignored != other.receipts_ignored:
+            return False
+        if self.refused_disabled != other.refused_disabled:
+            return False
+        if self.refused_no_request != other.refused_no_request:
+            return False
+        if self.refused_unknown_class != other.refused_unknown_class:
+            return False
+        if self.refused_not_sealed != other.refused_not_sealed:
+            return False
+        if self.refused_unproven_peer != other.refused_unproven_peer:
+            return False
+        if self.refused_not_depositor != other.refused_not_depositor:
+            return False
+        if self.refused_stranger != other.refused_stranger:
+            return False
+        if self.refused_depositor_full != other.refused_depositor_full:
+            return False
+        if self.refused_store_full != other.refused_store_full:
+            return False
+        if self.refused_battery != other.refused_battery:
+            return False
+        return True
+
+class _UniffiFfiConverterTypeCustodyStats(_UniffiConverterRustBuffer):
+    @staticmethod
+    def read(buf):
+        return CustodyStats(
+            held=_UniffiFfiConverterUInt64.read(buf),
+            held_bytes=_UniffiFfiConverterUInt64.read(buf),
+            accepted=_UniffiFfiConverterUInt64.read(buf),
+            delivered=_UniffiFfiConverterUInt64.read(buf),
+            re_originated=_UniffiFfiConverterUInt64.read(buf),
+            expired=_UniffiFfiConverterUInt64.read(buf),
+            duplicates=_UniffiFfiConverterUInt64.read(buf),
+            evicted=_UniffiFfiConverterUInt64.read(buf),
+            receipts_sent=_UniffiFfiConverterUInt64.read(buf),
+            receipts_dropped=_UniffiFfiConverterUInt64.read(buf),
+            receipts_received=_UniffiFfiConverterUInt64.read(buf),
+            receipts_ignored=_UniffiFfiConverterUInt64.read(buf),
+            refused_disabled=_UniffiFfiConverterUInt64.read(buf),
+            refused_no_request=_UniffiFfiConverterUInt64.read(buf),
+            refused_unknown_class=_UniffiFfiConverterUInt64.read(buf),
+            refused_not_sealed=_UniffiFfiConverterUInt64.read(buf),
+            refused_unproven_peer=_UniffiFfiConverterUInt64.read(buf),
+            refused_not_depositor=_UniffiFfiConverterUInt64.read(buf),
+            refused_stranger=_UniffiFfiConverterUInt64.read(buf),
+            refused_depositor_full=_UniffiFfiConverterUInt64.read(buf),
+            refused_store_full=_UniffiFfiConverterUInt64.read(buf),
+            refused_battery=_UniffiFfiConverterUInt64.read(buf),
+        )
+
+    @staticmethod
+    def check_lower(value):
+        _UniffiFfiConverterUInt64.check_lower(value.held)
+        _UniffiFfiConverterUInt64.check_lower(value.held_bytes)
+        _UniffiFfiConverterUInt64.check_lower(value.accepted)
+        _UniffiFfiConverterUInt64.check_lower(value.delivered)
+        _UniffiFfiConverterUInt64.check_lower(value.re_originated)
+        _UniffiFfiConverterUInt64.check_lower(value.expired)
+        _UniffiFfiConverterUInt64.check_lower(value.duplicates)
+        _UniffiFfiConverterUInt64.check_lower(value.evicted)
+        _UniffiFfiConverterUInt64.check_lower(value.receipts_sent)
+        _UniffiFfiConverterUInt64.check_lower(value.receipts_dropped)
+        _UniffiFfiConverterUInt64.check_lower(value.receipts_received)
+        _UniffiFfiConverterUInt64.check_lower(value.receipts_ignored)
+        _UniffiFfiConverterUInt64.check_lower(value.refused_disabled)
+        _UniffiFfiConverterUInt64.check_lower(value.refused_no_request)
+        _UniffiFfiConverterUInt64.check_lower(value.refused_unknown_class)
+        _UniffiFfiConverterUInt64.check_lower(value.refused_not_sealed)
+        _UniffiFfiConverterUInt64.check_lower(value.refused_unproven_peer)
+        _UniffiFfiConverterUInt64.check_lower(value.refused_not_depositor)
+        _UniffiFfiConverterUInt64.check_lower(value.refused_stranger)
+        _UniffiFfiConverterUInt64.check_lower(value.refused_depositor_full)
+        _UniffiFfiConverterUInt64.check_lower(value.refused_store_full)
+        _UniffiFfiConverterUInt64.check_lower(value.refused_battery)
+
+    @staticmethod
+    def write(value, buf):
+        _UniffiFfiConverterUInt64.write(value.held, buf)
+        _UniffiFfiConverterUInt64.write(value.held_bytes, buf)
+        _UniffiFfiConverterUInt64.write(value.accepted, buf)
+        _UniffiFfiConverterUInt64.write(value.delivered, buf)
+        _UniffiFfiConverterUInt64.write(value.re_originated, buf)
+        _UniffiFfiConverterUInt64.write(value.expired, buf)
+        _UniffiFfiConverterUInt64.write(value.duplicates, buf)
+        _UniffiFfiConverterUInt64.write(value.evicted, buf)
+        _UniffiFfiConverterUInt64.write(value.receipts_sent, buf)
+        _UniffiFfiConverterUInt64.write(value.receipts_dropped, buf)
+        _UniffiFfiConverterUInt64.write(value.receipts_received, buf)
+        _UniffiFfiConverterUInt64.write(value.receipts_ignored, buf)
+        _UniffiFfiConverterUInt64.write(value.refused_disabled, buf)
+        _UniffiFfiConverterUInt64.write(value.refused_no_request, buf)
+        _UniffiFfiConverterUInt64.write(value.refused_unknown_class, buf)
+        _UniffiFfiConverterUInt64.write(value.refused_not_sealed, buf)
+        _UniffiFfiConverterUInt64.write(value.refused_unproven_peer, buf)
+        _UniffiFfiConverterUInt64.write(value.refused_not_depositor, buf)
+        _UniffiFfiConverterUInt64.write(value.refused_stranger, buf)
+        _UniffiFfiConverterUInt64.write(value.refused_depositor_full, buf)
+        _UniffiFfiConverterUInt64.write(value.refused_store_full, buf)
+        _UniffiFfiConverterUInt64.write(value.refused_battery, buf)
+
 @dataclass
 class DedupConfig:
     def __init__(self, *, max_tracked_messages:int, retention_time_secs:int):
@@ -3653,27 +4070,6 @@ class _UniffiFfiConverterTypeDedupStats(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt64.write(value.recent_tracked, buf)
         _UniffiFfiConverterUInt8.write(value.capacity_used_percent, buf)
         _UniffiFfiConverterString.write(value.mode, buf)
-
-class _UniffiFfiConverterBoolean:
-    @classmethod
-    def check_lower(cls, value):
-        return not not value
-
-    @classmethod
-    def lower(cls, value):
-        return 1 if value else 0
-
-    @staticmethod
-    def lift(value):
-        return value != 0
-
-    @classmethod
-    def read(cls, buf):
-        return cls.lift(buf.read_u8())
-
-    @classmethod
-    def write(cls, value, buf):
-        buf.write_u8(value)
 
 class _UniffiFfiConverterFloat32(_UniffiConverterPrimitiveFloat):
     @staticmethod
@@ -3841,46 +4237,6 @@ class _UniffiFfiConverterTypeDorsConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterUInt8.write(value.low_battery_threshold, buf)
         _UniffiFfiConverterUInt8.write(value.relay_min_battery_level, buf)
         _UniffiFfiConverterUInt8.write(value.relay_optimal_connection_count, buf)
-
-
-
-
-
-
-class OverflowPolicy(enum.Enum):
-    
-    DROP_OLDEST = 0
-    
-    DROP_NEWEST = 1
-    
-
-
-class _UniffiFfiConverterTypeOverflowPolicy(_UniffiConverterRustBuffer):
-    @staticmethod
-    def read(buf):
-        variant = buf.read_i32()
-        if variant == 1:
-            return OverflowPolicy.DROP_OLDEST
-        if variant == 2:
-            return OverflowPolicy.DROP_NEWEST
-        raise InternalError("Raw enum value doesn't match any cases")
-
-    @staticmethod
-    def check_lower(value):
-        if value == OverflowPolicy.DROP_OLDEST:
-            return
-        if value == OverflowPolicy.DROP_NEWEST:
-            return
-        raise ValueError(value)
-
-    @staticmethod
-    def write(value, buf):
-        if value == OverflowPolicy.DROP_OLDEST:
-            buf.write_i32(1)
-        if value == OverflowPolicy.DROP_NEWEST:
-            buf.write_i32(2)
-
-
 
 @dataclass
 class PendingQueueConfig:
@@ -4326,31 +4682,6 @@ class _UniffiFfiConverterTypeInviteInfo(_UniffiConverterRustBuffer):
         _UniffiFfiConverterSequenceUInt8.write(value.public_key, buf)
         _UniffiFfiConverterOptionalString.write(value.petname, buf)
         _UniffiFfiConverterBoolean.write(value.signed, buf)
-
-class _UniffiFfiConverterOptionalUInt64(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterUInt64.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterUInt64.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterUInt64.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
 
 class _UniffiFfiConverterOptionalUInt32(_UniffiConverterRustBuffer):
     @classmethod
@@ -5933,9 +6264,34 @@ class _UniffiFfiConverterOptionalTypeMeshRelayConfig(_UniffiConverterRustBuffer)
         else:
             raise InternalError("Unexpected flag byte for optional type")
 
+class _UniffiFfiConverterOptionalTypeCustodyConfig(_UniffiConverterRustBuffer):
+    @classmethod
+    def check_lower(cls, value):
+        if value is not None:
+            _UniffiFfiConverterTypeCustodyConfig.check_lower(value)
+
+    @classmethod
+    def write(cls, value, buf):
+        if value is None:
+            buf.write_u8(0)
+            return
+
+        buf.write_u8(1)
+        _UniffiFfiConverterTypeCustodyConfig.write(value, buf)
+
+    @classmethod
+    def read(cls, buf):
+        flag = buf.read_u8()
+        if flag == 0:
+            return None
+        elif flag == 1:
+            return _UniffiFfiConverterTypeCustodyConfig.read(buf)
+        else:
+            raise InternalError("Unexpected flag byte for optional type")
+
 @dataclass
 class ProtocolConfig:
-    def __init__(self, *, app_id:str, profile:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, edge_driven_unreachable_dm:bool = False, max_group_members:int = 256, group_relay_enabled:bool = True, group_relay_broadcast_enabled:bool = True, group_enforce_admin_commits:bool = False, require_transport_identity:bool = False, binary_wire_enabled:bool = True, nostr_sealing_enabled:bool = True, nostr_cold_contact_enabled:bool = True, nostr_username_discovery_enabled:bool = False, compact_envelope_enabled:bool = True, rich_payload_enabled:bool = True, crypto_recovery_enabled:bool = True, mesh_relay:typing.Optional[MeshRelayConfig] = _DEFAULT, data_enabled:bool = True, control_freshness_enforced:bool = True):
+    def __init__(self, *, app_id:str, profile:str, ble_enabled:bool, wifi_direct_enabled:bool, internet_enabled:bool, reticulum_enabled:bool, nostr_enabled:bool, prefer_online:bool, initial_ttl:int, encryption_enabled:bool, auto_key_exchange:bool, store_pending:bool, require_encryption:bool = True, max_pending_per_peer:int, max_pending_global:int, pending_ttl_ms:int, overflow_policy:OverflowPolicy, edge_driven_unreachable_dm:bool = False, max_group_members:int = 256, group_relay_enabled:bool = True, group_relay_broadcast_enabled:bool = True, group_enforce_admin_commits:bool = False, require_transport_identity:bool = False, binary_wire_enabled:bool = True, nostr_sealing_enabled:bool = True, nostr_cold_contact_enabled:bool = True, nostr_username_discovery_enabled:bool = False, compact_envelope_enabled:bool = True, rich_payload_enabled:bool = True, crypto_recovery_enabled:bool = True, mesh_relay:typing.Optional[MeshRelayConfig] = _DEFAULT, custody:typing.Optional[CustodyConfig] = _DEFAULT, data_enabled:bool = True, control_freshness_enforced:bool = True):
         self.app_id = app_id
         self.profile = profile
         self.ble_enabled = ble_enabled
@@ -5970,6 +6326,10 @@ class ProtocolConfig:
             self.mesh_relay = None
         else:
             self.mesh_relay = mesh_relay
+        if custody is _DEFAULT:
+            self.custody = None
+        else:
+            self.custody = custody
         self.data_enabled = data_enabled
         self.control_freshness_enforced = control_freshness_enforced
         
@@ -5977,7 +6337,7 @@ class ProtocolConfig:
 
     
     def __str__(self):
-        return "ProtocolConfig(app_id={}, profile={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, edge_driven_unreachable_dm={}, max_group_members={}, group_relay_enabled={}, group_relay_broadcast_enabled={}, group_enforce_admin_commits={}, require_transport_identity={}, binary_wire_enabled={}, nostr_sealing_enabled={}, nostr_cold_contact_enabled={}, nostr_username_discovery_enabled={}, compact_envelope_enabled={}, rich_payload_enabled={}, crypto_recovery_enabled={}, mesh_relay={}, data_enabled={}, control_freshness_enforced={})".format(self.app_id, self.profile, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.edge_driven_unreachable_dm, self.max_group_members, self.group_relay_enabled, self.group_relay_broadcast_enabled, self.group_enforce_admin_commits, self.require_transport_identity, self.binary_wire_enabled, self.nostr_sealing_enabled, self.nostr_cold_contact_enabled, self.nostr_username_discovery_enabled, self.compact_envelope_enabled, self.rich_payload_enabled, self.crypto_recovery_enabled, self.mesh_relay, self.data_enabled, self.control_freshness_enforced)
+        return "ProtocolConfig(app_id={}, profile={}, ble_enabled={}, wifi_direct_enabled={}, internet_enabled={}, reticulum_enabled={}, nostr_enabled={}, prefer_online={}, initial_ttl={}, encryption_enabled={}, auto_key_exchange={}, store_pending={}, require_encryption={}, max_pending_per_peer={}, max_pending_global={}, pending_ttl_ms={}, overflow_policy={}, edge_driven_unreachable_dm={}, max_group_members={}, group_relay_enabled={}, group_relay_broadcast_enabled={}, group_enforce_admin_commits={}, require_transport_identity={}, binary_wire_enabled={}, nostr_sealing_enabled={}, nostr_cold_contact_enabled={}, nostr_username_discovery_enabled={}, compact_envelope_enabled={}, rich_payload_enabled={}, crypto_recovery_enabled={}, mesh_relay={}, custody={}, data_enabled={}, control_freshness_enforced={})".format(self.app_id, self.profile, self.ble_enabled, self.wifi_direct_enabled, self.internet_enabled, self.reticulum_enabled, self.nostr_enabled, self.prefer_online, self.initial_ttl, self.encryption_enabled, self.auto_key_exchange, self.store_pending, self.require_encryption, self.max_pending_per_peer, self.max_pending_global, self.pending_ttl_ms, self.overflow_policy, self.edge_driven_unreachable_dm, self.max_group_members, self.group_relay_enabled, self.group_relay_broadcast_enabled, self.group_enforce_admin_commits, self.require_transport_identity, self.binary_wire_enabled, self.nostr_sealing_enabled, self.nostr_cold_contact_enabled, self.nostr_username_discovery_enabled, self.compact_envelope_enabled, self.rich_payload_enabled, self.crypto_recovery_enabled, self.mesh_relay, self.custody, self.data_enabled, self.control_freshness_enforced)
     def __eq__(self, other):
         if self.app_id != other.app_id:
             return False
@@ -6041,6 +6401,8 @@ class ProtocolConfig:
             return False
         if self.mesh_relay != other.mesh_relay:
             return False
+        if self.custody != other.custody:
+            return False
         if self.data_enabled != other.data_enabled:
             return False
         if self.control_freshness_enforced != other.control_freshness_enforced:
@@ -6082,6 +6444,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
             rich_payload_enabled=_UniffiFfiConverterBoolean.read(buf),
             crypto_recovery_enabled=_UniffiFfiConverterBoolean.read(buf),
             mesh_relay=_UniffiFfiConverterOptionalTypeMeshRelayConfig.read(buf),
+            custody=_UniffiFfiConverterOptionalTypeCustodyConfig.read(buf),
             data_enabled=_UniffiFfiConverterBoolean.read(buf),
             control_freshness_enforced=_UniffiFfiConverterBoolean.read(buf),
         )
@@ -6119,6 +6482,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.check_lower(value.rich_payload_enabled)
         _UniffiFfiConverterBoolean.check_lower(value.crypto_recovery_enabled)
         _UniffiFfiConverterOptionalTypeMeshRelayConfig.check_lower(value.mesh_relay)
+        _UniffiFfiConverterOptionalTypeCustodyConfig.check_lower(value.custody)
         _UniffiFfiConverterBoolean.check_lower(value.data_enabled)
         _UniffiFfiConverterBoolean.check_lower(value.control_freshness_enforced)
 
@@ -6155,6 +6519,7 @@ class _UniffiFfiConverterTypeProtocolConfig(_UniffiConverterRustBuffer):
         _UniffiFfiConverterBoolean.write(value.rich_payload_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.crypto_recovery_enabled, buf)
         _UniffiFfiConverterOptionalTypeMeshRelayConfig.write(value.mesh_relay, buf)
+        _UniffiFfiConverterOptionalTypeCustodyConfig.write(value.custody, buf)
         _UniffiFfiConverterBoolean.write(value.data_enabled, buf)
         _UniffiFfiConverterBoolean.write(value.control_freshness_enforced, buf)
 
@@ -6825,31 +7190,6 @@ class _UniffiFfiConverterUInt16(_UniffiConverterPrimitiveInt):
     @staticmethod
     def write(value, buf):
         buf.write_u16(value)
-
-class _UniffiFfiConverterOptionalBoolean(_UniffiConverterRustBuffer):
-    @classmethod
-    def check_lower(cls, value):
-        if value is not None:
-            _UniffiFfiConverterBoolean.check_lower(value)
-
-    @classmethod
-    def write(cls, value, buf):
-        if value is None:
-            buf.write_u8(0)
-            return
-
-        buf.write_u8(1)
-        _UniffiFfiConverterBoolean.write(value, buf)
-
-    @classmethod
-    def read(cls, buf):
-        flag = buf.read_u8()
-        if flag == 0:
-            return None
-        elif flag == 1:
-            return _UniffiFfiConverterBoolean.read(buf)
-        else:
-            raise InternalError("Unexpected flag byte for optional type")
 
 
 
@@ -9954,6 +10294,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def end_telemetry_session(self, ) -> None:
         raise NotImplementedError
+    def erase_custody(self, ) -> None:
+        raise NotImplementedError
     def establish_secure_session(self, peer_id: str) -> typing.Optional[MlsWelcomeMessage]:
         raise NotImplementedError
     def finalize_file(self, file_id: str) -> None:
@@ -9975,6 +10317,8 @@ class OfflineProtocolProtocol(typing.Protocol):
     def get_battery_level(self, ) -> typing.Optional[int]:
         raise NotImplementedError
     def get_blocked_users(self, ) -> typing.List[str]:
+        raise NotImplementedError
+    def get_custody_stats(self, ) -> CustodyStats:
         raise NotImplementedError
     def get_dedup_stats(self, ) -> DedupStats:
         raise NotImplementedError
@@ -10645,6 +10989,18 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def erase_custody(self, ) -> None:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_erase_custody,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def establish_secure_session(self, peer_id: str) -> typing.Optional[MlsWelcomeMessage]:
         
         _UniffiFfiConverterString.check_lower(peer_id)
@@ -10807,6 +11163,18 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_blocked_users,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def get_custody_stats(self, ) -> CustodyStats:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterTypeCustodyStats.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_custody_stats,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -13077,6 +13445,8 @@ __all__ = [
     "TransportType",
     "AckConfig",
     "BleFragment",
+    "CustodyConfig",
+    "CustodyStats",
     "DedupConfig",
     "DedupStats",
     "DorsConfig",

@@ -93,9 +93,11 @@ enum MeshRelayConfigReader {
 
     private static func number(_ dict: [String: Any], _ keys: [String]) -> NSNumber? {
         for key in keys {
-            // Bool is bridged as NSNumber, so an explicit exclusion keeps a
-            // stray `true` from arriving as the number 1.
-            if let value = dict[key] as? NSNumber, !(dict[key] is Bool) {
+            // A JSON boolean also arrives as an NSNumber, so it is excluded by
+            // its CoreFoundation type rather than by `is Bool`: Swift bridges
+            // the numbers 0 and 1 to Bool as well, and testing that read a
+            // legitimate `fanout: 1` or `activityIdleWindows: 1` as unset.
+            if let value = dict[key] as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID() {
                 return value
             }
         }

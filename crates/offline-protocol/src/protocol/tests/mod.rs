@@ -1,4 +1,6 @@
 #[cfg(feature = "data")]
+mod custody;
+#[cfg(feature = "data")]
 mod data_layer;
 #[cfg(feature = "data")]
 mod data_sync;
@@ -2938,7 +2940,8 @@ fn data_sync_is_advertised_only_when_the_layer_is_on() {
             DATA_MEDIA_V1,
             DATA_TOMBSTONE_V1,
             DATA_INTEREST_V1,
-            DATA_GROUP_BLOB_V1
+            DATA_GROUP_BLOB_V1,
+            DATA_CUSTODY_V1
         ],
         "every entry, and the order is append-only. Each says something a \
          build advertising only its predecessors does not do: intercept a \

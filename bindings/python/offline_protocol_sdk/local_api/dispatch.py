@@ -121,6 +121,7 @@ EXPOSED: frozenset[str] = frozenset(
         "get_retry_queue_size",
         "get_mesh_relay_stats",
         "get_mesh_relay_tunables",
+        "get_custody_stats",
         # instance-wide tuning
         "set_relay_priority",
         "update_relay_config",
@@ -282,6 +283,8 @@ PLATFORM: frozenset[str] = frozenset(
         "data.with_storage",
         # the operator's logout
         "data.wipe_all",
+        # erases what every client's traffic deposited
+        "erase_custody",
         # takes a callback interface
         "run_storage_conformance",
     }
