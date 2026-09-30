@@ -59,10 +59,12 @@ stateDiagram-v2
     Removed --> Open: createDoc, or a change from beyond the floor
 ```
 
-**Edits batch; a flush is what makes them durable.** Flushes happen on an
-explicit `flush()` or `flushAll()`, and when the protocol instance is dropped,
-because the debounce window between an edit and its record is otherwise a
-window in which work is lost. `data_changed` fires *after* the record is
+**Edits batch; a flush is what makes them durable, and what replicates
+them.** Flushes happen on an explicit `flush()` or `flushAll()`, and when the
+protocol instance is dropped, because the debounce window between an edit and
+its record is otherwise a window in which work is lost. Nothing is pushed
+before that, so an application flushes on a short throttle while the user
+edits. `data_changed` fires *after* the record is
 durable, so a UI that re-renders on it renders state that survives a restart.
 
 **The cap refuses growth, not the document.** A document is measured
@@ -153,6 +155,7 @@ Triggers, each of which names its cause in the logs:
 | Trigger | Cause | Scope |
 |---------|-------|-------|
 | A local change becoming durable | pushed immediately | The space it belongs to |
+| Local commits to a space quiet for 3 seconds | `settle` | The documents committed, to the space's peer or whole roster |
 | MLS session confirmed | the confirming event | That peer |
 | Peer rediscovered on any transport | `peer_rediscovered` | That peer, and groups shared with them |
 | Start-up | `start` | 1:1 spaces only |
@@ -160,7 +163,19 @@ Triggers, each of which names its cause in the logs:
 
 Offers to one peer are suppressed for 30 seconds after the last one. The
 window delays only the reconciliation sweep: a local change does not wait for
-it, and the next trigger repeats the sweep anyway. Start-up deliberately does
+it, and the next trigger repeats the sweep anyway.
+
+The settle offer neither waits for that window nor starts it. It exists
+because a delta held behind a lost predecessor is noticed when the next one
+arrives, and the last delta of a burst has no next one: without it that
+delta waits for the acknowledgement retry, 10 seconds at the earliest, and is
+not recovered at all once the retry budget is spent. It is an ordinary
+offer (`reply: false`, `partial: true`) naming only the documents committed
+since the last one, sent by the committing device once its local commits to
+a space have been quiet for 3 seconds. Each commit pushes the deadline out,
+so a burst costs one offer at its end, and only a local commit arms it: an
+import never does, which is what keeps it from echoing or chaining. It is
+driven by the protocol's periodic tick. Start-up deliberately does
 not sweep group spaces, because that would mean an offer per member per group
 at every launch to recover something a local commit already pushed.
 
@@ -254,7 +269,10 @@ The frames and the ladder are identical. Three rules are not:
 
 - **Offers and answers are addressed to one member**, because anti-entropy
   between two members is a conversation between two devices. Only a local
-  commit goes to the whole roster.
+  commit, and the settle offer that follows a burst of them, go to the whole
+  roster: the commit went to everyone, so anyone may have missed it, and one
+  roster-wide frame keeps every member's ratchet in step where an addressed
+  copy per member would spend the budget below.
 - **An addressed frame still advances every member's ratchet**, so a sender
   bounds how many it encrypts without giving the roster one and promotes the
   next frame to a roster-wide delivery. See

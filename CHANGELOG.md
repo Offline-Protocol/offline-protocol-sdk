@@ -287,6 +287,23 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   accepts some forged assertions the strict check refuses. They now call
   `verifyIdentityAssertion`, the same check the Python central and both
   peer-stream managers use.
+- **A lost last document change of a burst comes back in seconds.** A
+  change that arrives after one lost in transit is held and the gap asked for
+  at once, but the last change of a burst has nothing after it, so a peer that
+  missed it waited for the acknowledgement retry: 10 seconds at the earliest,
+  longer under backoff, and never once the retry budget was spent. Three
+  seconds after a device's local flushes to a space go quiet, it now sends one
+  version offer naming the documents it flushed, and a replica that is behind
+  asks for what it lacks. Only a local flush arms it, so it cannot echo or
+  chain. Each one
+  draws a full version list back from the 1:1 peer or from every group member.
+- **iOS: a burst of Bluetooth LE traffic no longer tears messages.** The
+  fragment drain pulled the whole backlog out of the core into a bounded
+  per-peer queue faster than CoreBluetooth sent it, and the queue then evicted
+  its oldest fragments, leaving slices that reassemble into garbage. The drain
+  now stops pulling once a peer's queue is three quarters full, on both the
+  central write path and the peripheral NOTIFY path, and resumes when the
+  queue drains or after one second.
 - **The iOS library is built for the pod's deployment target.** The C and
   assembly objects inside it, from `ring` and `oslog`, were stamped for the
   newest iOS the release machine's Xcode knew, so an application linking the
@@ -298,6 +315,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   for the Rust target's floor of iOS 10.
 
 ### Changed
+
+- **iOS: an overflowing outbound fragment queue is discarded whole.** Both
+  outbound queues, central write and peripheral NOTIFY, used to drop their
+  oldest fragments when full. They now discard the whole per-peer queue, as
+  Android and the inbound side already did, because a partial cut splits a
+  message. The messages lost are re-sent by the acknowledgement retry or by
+  data-sync anti-entropy.
+
+- **Documents replicate only when flushed.** This was always true and is now
+  documented: an edit changes the open document in memory, and nothing is
+  stored or sent to peers until `flush()` or `flushAll()` runs. Flush on a
+  short throttle while the user edits, at most about twice a second, and once
+  more when editing stops.
 
 - **iOS: the Multipeer service type is `offlineprotocol`.** It was
   `offline-proto`. An app that enables the `wifiDirect` transport on iOS must

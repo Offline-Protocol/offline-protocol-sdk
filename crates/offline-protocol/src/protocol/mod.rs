@@ -556,6 +556,15 @@ pub struct OfflineProtocol {
     #[cfg(feature = "data")]
     pub(crate) last_data_sync_offer: HashMap<String, Instant>,
 
+    /// Settle offers waiting for local commits to a space to go quiet, keyed
+    /// by space: when the offer is due, and the documents committed since
+    /// the last one. Pushed out by every local commit and removed when it
+    /// fires. See [`DATA_SYNC_SETTLE_DELAY`].
+    ///
+    /// [`DATA_SYNC_SETTLE_DELAY`]: crate::protocol::data_sync::DATA_SYNC_SETTLE_DELAY
+    #[cfg(feature = "data")]
+    pub(crate) data_sync_settle: HashMap<String, (Instant, std::collections::BTreeSet<String>)>,
+
     /// Attachment fetches asked for and not yet answered, keyed by space and
     /// blob hash, valued by the last sign that an answer is coming: the
     /// moment the question went out, or the arrival of a chunk of its
@@ -1088,6 +1097,8 @@ impl OfflineProtocol {
             data: data::DataLayer::default(),
             #[cfg(feature = "data")]
             last_data_sync_offer: HashMap::new(),
+            #[cfg(feature = "data")]
+            data_sync_settle: HashMap::new(),
             #[cfg(feature = "data")]
             pending_attachment_fetches: HashMap::new(),
             blob_request_windows: HashMap::new(),
@@ -3394,6 +3405,8 @@ impl OfflineProtocol {
         // change threshold or a time cadence, never per message.
         self.persist_dedup_seen_if_due();
         self.pump_media_transfers();
+        #[cfg(feature = "data")]
+        self.send_due_data_settle_offers(Instant::now());
         self.refresh_nostr_key_package_slots();
         self.refresh_nostr_discovery_claim();
         // A relay is free never to send end-of-stored-events, and that is the

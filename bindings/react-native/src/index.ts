@@ -3915,8 +3915,12 @@ export type DataValue =
  * record, and that key is minted there — and `data.enabled` set in the
  * config. Every method answers `DataDisabled` until it is.
  *
- * Edits batch before they reach storage. Call {@link flush} when the app
- * must know a change is durable; the SDK also flushes on shutdown.
+ * Edits change the open document in memory only. Nothing is stored or
+ * replicated to peers until {@link flush} or {@link flushAll} runs (the SDK
+ * also flushes on shutdown). While the user is editing, flush on a short
+ * throttle, at most about twice a second, and once more when editing stops:
+ * each flush is one frame to every peer, and Bluetooth is slow enough that
+ * per-keystroke flushes queue faster than the link drains.
  *
  * @example
  * ```typescript
@@ -4223,16 +4227,18 @@ export class DataStore {
   }
 
   /**
-   * Persists pending edits to a document.
+   * Persists pending edits to a document and pushes them to the space.
    *
-   * Edits batch before they reach a record, so call this when the app must
-   * know a change survives a crash. The SDK also flushes on shutdown.
+   * Edits are neither stored nor replicated until this runs, so call it on a
+   * short throttle while the user is editing (at most about twice a second),
+   * and whenever the app must know a change survives a crash. The SDK also
+   * flushes on shutdown.
    */
   async flush(spaceId: string, docId: string): Promise<void> {
     await OfflineProtocolNativeModule.dataFlush(spaceId, docId);
   }
 
-  /** Persists pending edits to every open document. */
+  /** {@link flush} for every open document. */
   async flushAll(): Promise<void> {
     await OfflineProtocolNativeModule.dataFlushAll();
   }

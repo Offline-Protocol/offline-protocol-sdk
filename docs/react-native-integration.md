@@ -624,9 +624,10 @@ type DataValue =
   | { kind: 'attachment'; hash: string; size: number; name?: string; mime?: string };
 ```
 
-Edits batch before they reach storage: call `flush()` when the app must know a
-change is durable. The `data_changed` event fires **after** the change is
-durable. A document is capped at 1 MiB compacted, with `data_doc_size_warning`
+Edits are neither stored nor replicated until `flush()` runs: flush on a short
+throttle while the user edits (at most about twice a second) and once more
+when editing stops. See [Durability](data.md#durability). The `data_changed`
+event fires **after** the change is durable. A document is capped at 1 MiB compacted, with `data_doc_size_warning`
 at 768 KiB; passing the cap raises `DocTooLarge`, and deletions keep working so
 the document can be brought back under it.
 

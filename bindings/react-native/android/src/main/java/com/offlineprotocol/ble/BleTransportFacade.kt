@@ -896,7 +896,7 @@ class BleTransportFacade(
                 OutboundFragmentQueue.DropReason.CAPPED -> {
                     Log.w(
                         TAG,
-                        "Pending outbound fragment queue capped for $recipientId, dropping oldest " +
+                        "Pending outbound fragment queue capped for $recipientId, discarded $count " +
                             "(max=${OutboundFragmentQueue.DEFAULT_MAX_PER_PEER})",
                     )
                 }

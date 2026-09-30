@@ -10,8 +10,7 @@ import Foundation
 /// previous write hit flow control.
 ///
 /// This is the iOS mirror of Android's `OutboundFragmentQueue.kt` — keep the
-/// two in sync. See the overflow note below for the one place they currently
-/// disagree.
+/// two in sync.
 ///
 /// ### Thread-safety contract
 ///
@@ -22,6 +21,17 @@ import Foundation
 /// single indivisible operations, and peer eviction and transport teardown
 /// both run on the main queue, where a hop onto the owning queue would mean
 /// the very `dispatch_sync` this class exists to delete.
+///
+/// One instance departs from that: `BleManager.notifyFragments`, the NOTIFY
+/// egress queue, is enqueued on `fragmentQueue` and flushed on main, because
+/// `CBPeripheralManager.updateValue` must run on main while the drain has to
+/// count what it just enqueued. It passes no `queueCheck`. The split holds
+/// because main is its only flusher and `flush` never takes a fragment out of
+/// the queue before it has been sent: a concurrent `enqueue` appends behind
+/// it, so the stream stays in order, and `isBackedUp` and the cap count every
+/// fragment still waiting. A flush that took the queue out to send it would
+/// hide those fragments from both, the drain would pull past the mark, and
+/// the next `enqueue` would discard the lot.
 ///
 /// The `NSLock` exists so **readers on other threads** — chiefly the metrics
 /// refresher — can take a snapshot without `dispatch_sync`-ing onto the
@@ -34,15 +44,21 @@ import Foundation
 ///
 /// ### Overflow policy
 ///
-/// `enqueue` drops the **oldest** fragments when the per-recipient cap is
-/// exceeded. This is preserved verbatim from the pre-extraction inline
-/// implementation, and it is a known divergence from Android, which discards
-/// the whole per-recipient queue instead: fragments are slices of a single
-/// application message, so evicting slice 0 of a five-slice message leaves
-/// four orphan slices that reassemble into garbage at the receiver. The
-/// inbound side (`InboundFragmentBuffer`) already does the whole-buffer drop.
-/// Converging the outbound side is a behaviour change and is deliberately
-/// **not** bundled into the OFF-2123 threading fix — tracked separately.
+/// When `enqueue` would push the per-recipient queue past `maxPerPeer`, the
+/// entire queue for that recipient is discarded before the new fragment is
+/// appended — the same policy as Android and as the inbound side
+/// (`InboundFragmentBuffer`). Dropping just the oldest fragments (the previous
+/// iOS policy) was unsafe: fragments are slices of a single application
+/// message, so evicting slice 0 of a five-slice message leaves four orphan
+/// slices that reassemble into garbage at the receiver. The fragments are
+/// opaque at this layer — no message ids come down from Rust — so the queue
+/// cannot cut at a message boundary; the whole queue is the only cut that
+/// never splits one. We lose messages that hadn't started delivery yet, and
+/// the sender's higher layer (ack-driven retry, data-sync anti-entropy)
+/// re-drives them.
+///
+/// Overflow should be rare: `isBackedUp` is the drain loop's signal to stop
+/// pulling from the Rust core well before the cap is reached.
 final class OutboundFragmentQueue: @unchecked Sendable {
 
     enum DropReason {
@@ -53,10 +69,15 @@ final class OutboundFragmentQueue: @unchecked Sendable {
     private struct Entry {
         let data: Data
         let timestamp: Date
+        /// Identifies this entry across an unlocked `send`, so `flush` removes
+        /// the fragment it sent and never one that replaced it after a
+        /// `removeAll` or an overflow discard.
+        let seq: UInt64
     }
 
     private let lock = NSLock()
     private var queues: [String: [Entry]] = [:]
+    private var nextSeq: UInt64 = 0
 
     private let queueCheck: () -> Void
     private let maxPerPeer: Int
@@ -102,23 +123,42 @@ final class OutboundFragmentQueue: @unchecked Sendable {
         return !(queues[recipientId]?.isEmpty ?? true)
     }
 
+    /// True once `recipientId`'s queue has filled past a high-water mark
+    /// (3/4 of `maxPerPeer`). The drain loop uses this as a backpressure
+    /// signal to STOP pulling more fragments out of the Rust core — which is
+    /// a destructive pop — into this bounded queue. Without it, when
+    /// CoreBluetooth's write buffer paces sends slower than the loop can pull,
+    /// the loop spins the whole Rust backlog into the queue, overflows
+    /// `maxPerPeer`, and `enqueue` discards the queue mid-message. Holding the
+    /// backlog in Rust (the proper unbounded, ordered buffer) instead keeps
+    /// delivery lossless; the next drain resumes pulling once `flush` has
+    /// drained the queue back below the mark. Mirrors Android's `isBackedUp`.
+    /// Safe from any thread.
+    func isBackedUp(_ recipientId: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return (queues[recipientId]?.count ?? 0) >= maxPerPeer * 3 / 4
+    }
+
     // MARK: - Owning-queue mutations
 
-    /// Append a fragment for `recipientId`, dropping the oldest entries if the
-    /// per-recipient cap is exceeded (see the overflow note above).
+    /// Append a fragment for `recipientId`. If doing so would exceed
+    /// `maxPerPeer` the entire per-recipient queue is discarded first (see the
+    /// overflow policy above); `onDropped` is invoked once with the number of
+    /// fragments evicted, then the new fragment starts a fresh queue.
     func enqueue(_ recipientId: String, _ data: Data) {
         queueCheck()
         var dropped = 0
         lock.lock()
+        if let count = queues[recipientId]?.count, count >= maxPerPeer {
+            dropped = count
+            queues[recipientId] = nil
+        }
         // Mutate through the subscript rather than via a local copy: binding
         // the array to a `var` takes a second reference, so every append would
         // deep-copy a queue holding up to `maxPerPeer` fragments.
-        queues[recipientId, default: []].append(Entry(data: data, timestamp: clock()))
-        let count = queues[recipientId]?.count ?? 0
-        if count > maxPerPeer {
-            dropped = count - maxPerPeer
-            queues[recipientId]?.removeFirst(dropped)
-        }
+        nextSeq &+= 1
+        queues[recipientId, default: []].append(Entry(data: data, timestamp: clock(), seq: nextSeq))
         lock.unlock()
 
         if dropped > 0 {
@@ -150,6 +190,13 @@ final class OutboundFragmentQueue: @unchecked Sendable {
     /// retries it) and iteration for that recipient stops — but other
     /// recipients continue to drain.
     ///
+    /// A fragment stays in the queue until `send` has accepted it: the head is
+    /// read under the lock, sent without it, and only then removed, and only
+    /// if it is still the head (a `removeAll` or an overflow discard on
+    /// another thread may have replaced it meanwhile). So every count this
+    /// class answers, `isBackedUp` and the cap in `enqueue` included, sees
+    /// the fragments a flush is still working through.
+    ///
     /// Expiry is per-fragment, not per-message, and is reported through
     /// `onDropped` whenever anything expires — these are opaque fragment
     /// bytes from the Rust fragmenter with no message grouping at this layer,
@@ -168,45 +215,43 @@ final class OutboundFragmentQueue: @unchecked Sendable {
         let now = clock()
 
         for recipientId in recipientIds() {
-            // Take the whole queue out under the lock so `send` — a
-            // CoreBluetooth write — never runs with the lock held.
             lock.lock()
-            guard var queue = queues.removeValue(forKey: recipientId) else {
-                lock.unlock()
-                continue
+            var expired = 0
+            if let queue = queues[recipientId] {
+                let kept = queue.filter { now.timeIntervalSince($0.timestamp) < timeout }
+                expired = queue.count - kept.count
+                queues[recipientId] = kept.isEmpty ? nil : kept
             }
             lock.unlock()
-
-            let beforeExpiry = queue.count
-            queue.removeAll { now.timeIntervalSince($0.timestamp) >= timeout }
             // Reported whenever anything expired, not only when the whole queue
             // did. A partial expiry is the case that actually tears a message
             // (see the note above), so it is the one worth seeing in telemetry.
-            let expired = beforeExpiry - queue.count
-
-            var sentAll = true
-            while let first = queue.first {
-                if send(recipientId, first.data) {
-                    queue.removeFirst()
-                } else {
-                    sentAll = false
-                    break
-                }
-            }
-
-            if !queue.isEmpty {
-                lock.lock()
-                // Anything enqueued while we were sending must stay behind the
-                // older fragments being put back, or the stream reorders.
-                queues[recipientId] = queue + (queues[recipientId] ?? [])
-                lock.unlock()
-                if !sentAll {
-                    hasUnsent = true
-                }
-            }
-
             if expired > 0 {
                 onDropped(recipientId, .expired, expired)
+            }
+
+            while true {
+                lock.lock()
+                let head = queues[recipientId]?.first
+                lock.unlock()
+                guard let head else { break }
+
+                // The lock is not held here: `send` is a CoreBluetooth write.
+                guard send(recipientId, head.data) else {
+                    hasUnsent = true
+                    break
+                }
+
+                lock.lock()
+                // In place through the subscript, as in `enqueue`, so the
+                // removal does not copy the array.
+                if queues[recipientId]?.first?.seq == head.seq {
+                    queues[recipientId]?.removeFirst()
+                    if queues[recipientId]?.isEmpty == true {
+                        queues[recipientId] = nil
+                    }
+                }
+                lock.unlock()
             }
         }
 
