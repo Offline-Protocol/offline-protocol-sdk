@@ -49,10 +49,12 @@ pub const MAX_CUSTODY_RECEIPTS_PER_MESSAGE: usize = 64;
 /// chapter's acceptance table applies them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CustodyRefusal {
+    /// The frame carries no deposit request. Judged first, on every device,
+    /// so `refused_disabled` counts deposits an off device turned away rather
+    /// than every frame it ever abandoned.
+    NoRequest,
     /// Custody is off on this device.
     Disabled,
-    /// The frame carries no deposit request.
-    NoRequest,
     /// The request names a class this version does not define.
     UnknownClass,
     /// The outer prefix is not `__MLS_ENC__`.
@@ -67,28 +69,30 @@ pub enum CustodyRefusal {
     Duplicate,
     /// The depositor is a stranger and the stranger tier is closed.
     StrangerRefused,
+    /// The battery is below the soft relay floor. Judged before the budgets,
+    /// so a refusal for battery never evicts a held frame to make room for a
+    /// deposit that is then refused.
+    Battery,
     /// The depositor's own budget is full and the policy does not make room.
     DepositorFull,
     /// The global budget is full and the policy does not make room.
     StoreFull,
-    /// The battery is below the soft relay floor.
-    Battery,
 }
 
 impl CustodyRefusal {
     /// Every refusal reason, in table order, for the counters and their tests.
     pub const ALL: &'static [Self] = &[
-        Self::Disabled,
         Self::NoRequest,
+        Self::Disabled,
         Self::UnknownClass,
         Self::NotSealed,
         Self::UnprovenPeer,
         Self::NotDepositor,
         Self::Duplicate,
         Self::StrangerRefused,
+        Self::Battery,
         Self::DepositorFull,
         Self::StoreFull,
-        Self::Battery,
     ];
 
     /// The reason as the chapter names it.
@@ -296,6 +300,16 @@ enum Tier {
     Stranger,
 }
 
+/// What the acceptance table established about a candidate it did not
+/// refuse, so the budgets can be applied without re-proving any of it.
+struct Admitted<'a> {
+    tier: Tier,
+    /// The arrival peer, which the table proved is also the frame's sender.
+    depositor: &'a str,
+    /// The class token, which the table proved is one this version defines.
+    token: &'a str,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct Usage {
     entries: usize,
@@ -375,21 +389,24 @@ impl CustodyStore {
         &mut self,
         candidate: CustodyCandidate<'_>,
     ) -> Result<Accepted, CustodyRefusal> {
-        let tier = match self.check(&candidate) {
-            Ok(tier) => tier,
+        let Admitted {
+            tier,
+            depositor,
+            token,
+        } = match self.check(&candidate) {
+            Ok(admitted) => admitted,
             Err(refusal) => {
-                // Every row is counted, `disabled` included, so an operator
-                // who expected deposits and sees none can tell "off" from
-                // "nobody asked"; a duplicate lands in its own counter.
+                // Every row is counted. `no_request` is judged before
+                // `disabled`, so on an off device the latter counts deposits
+                // turned away rather than every abandoned forward, and an
+                // operator can tell "off" from "nobody asked"; a duplicate
+                // lands in its own counter.
                 self.stats.count(refusal);
                 return Err(refusal);
             }
         };
-
-        let depositor = candidate
-            .arrival_peer
-            .expect("check proved the arrival peer")
-            .to_string();
+        let depositor = depositor.to_string();
+        let class = token.to_string();
         let bytes = frame_footprint(&candidate.message);
         let (max_entries, max_bytes) = match tier {
             Tier::Session => (
@@ -456,10 +473,6 @@ impl CustodyStore {
         }
 
         let id = candidate.message.id.clone();
-        let class = candidate
-            .request
-            .expect("check proved the request")
-            .to_string();
         self.insert(HeldFrame {
             message: candidate.message,
             depositor: depositor.clone(),
@@ -479,14 +492,16 @@ impl CustodyStore {
         })
     }
 
-    /// The acceptance table, in the chapter's order.
-    fn check(&self, c: &CustodyCandidate<'_>) -> Result<Tier, CustodyRefusal> {
-        if !self.config.enabled {
-            return Err(CustodyRefusal::Disabled);
-        }
+    /// The acceptance table, in the chapter's order: the request before the
+    /// switch, the depositor's identity before the tiers, and the battery
+    /// before the budgets, which [`Self::judge`] applies after this returns.
+    fn check<'a>(&self, c: &CustodyCandidate<'a>) -> Result<Admitted<'a>, CustodyRefusal> {
         let Some(token) = c.request else {
             return Err(CustodyRefusal::NoRequest);
         };
+        if !self.config.enabled {
+            return Err(CustodyRefusal::Disabled);
+        }
         if token != CUSTODY_CLASS_DATA {
             return Err(CustodyRefusal::UnknownClass);
         }
@@ -518,7 +533,11 @@ impl CustodyStore {
         if !c.battery_ok {
             return Err(CustodyRefusal::Battery);
         }
-        Ok(tier)
+        Ok(Admitted {
+            tier,
+            depositor: peer,
+            token,
+        })
     }
 
     fn fits_depositor(
@@ -682,10 +701,14 @@ impl CustodyStore {
     }
 
     /// A marked forward reached no link and came back from the drop point.
-    /// Not a deposit, not a refusal, not counted.
+    /// Not a deposit, not a refusal, not counted, and the neighbour it was
+    /// queued toward is untried again: an attempt that never transmitted has
+    /// not spent the one re-origination the hold allows toward that neighbour.
     pub(crate) fn returned(&mut self, id: &MessageId) {
         if let Some(held) = self.entries.get_mut(id) {
-            held.in_flight = None;
+            if let Some(peer) = held.in_flight.take() {
+                held.tried.remove(&peer);
+            }
         }
     }
 
@@ -1084,6 +1107,61 @@ mod tests {
         ));
         assert_eq!(store.stats().accepted, 0);
         assert_eq!(store.stats().held, 1);
+    }
+
+    #[test]
+    fn a_frame_asking_for_nothing_is_no_request_before_disabled() {
+        let mut off = CustodyStore::new(CustodyConfig::default());
+        let mut silent = candidate(sealed("alice", "carol", "m1"), "alice");
+        silent.request = None;
+        assert_eq!(off.judge(silent).err(), Some(CustodyRefusal::NoRequest));
+        assert_eq!(off.stats().refused_no_request, 1);
+        assert_eq!(off.stats().refused_disabled, 0, "nobody asked");
+
+        let verdict = off.judge(candidate(sealed("alice", "carol", "m1"), "alice"));
+        assert_eq!(verdict.err(), Some(CustodyRefusal::Disabled));
+        assert_eq!(off.stats().refused_disabled, 1, "a deposit turned away");
+    }
+
+    #[test]
+    fn battery_is_judged_before_the_quotas_so_a_refusal_evicts_nothing() {
+        let mut store = CustodyStore::new(CustodyConfig {
+            max_entries_per_depositor: 1,
+            ..config()
+        });
+        store
+            .judge(candidate(sealed("alice", "carol", "m1"), "alice"))
+            .unwrap();
+        let mut flat = candidate(sealed("alice", "carol", "m2"), "alice");
+        flat.battery_ok = false;
+        assert_eq!(store.judge(flat).err(), Some(CustodyRefusal::Battery));
+        assert_eq!(
+            store.stats().evicted,
+            0,
+            "nothing made room for a refused deposit"
+        );
+        assert!(store.contains(&mid("m1")));
+        assert_eq!(store.stats().refused_battery, 1);
+    }
+
+    #[test]
+    fn a_returned_forward_leaves_its_neighbour_untried() {
+        let mut store = CustodyStore::new(config());
+        store
+            .judge(candidate(sealed("alice", "carol", "m1"), "alice"))
+            .unwrap();
+        let id = mid("m1");
+        store.mark_queued(&id, "dave");
+        assert!(store.candidates_for("dave").is_empty(), "in flight");
+        store.returned(&id);
+        assert_eq!(
+            store.candidates_for("dave"),
+            vec![id.clone()],
+            "an attempt that never transmitted is not spent"
+        );
+        store.mark_queued(&id, "dave");
+        store.record_re_originated(&id);
+        assert!(store.candidates_for("dave").is_empty(), "a transmission is");
     }
 
     #[test]

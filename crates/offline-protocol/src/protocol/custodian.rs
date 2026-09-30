@@ -52,6 +52,8 @@ impl OfflineProtocol {
     /// erase that left records behind is the worst shape this call can take.
     pub fn erase_custody(&mut self) -> Result<()> {
         let ids = self.custody.erase();
+        // A redelivery queued seconds ago must not go out after the erase.
+        self.mesh_relay.drop_held();
         self.custody_receipts.clear();
         let Some(storage) = self.protocol_state_storage.clone() else {
             return Ok(());
@@ -117,8 +119,11 @@ impl OfflineProtocol {
             .as_deref()
             .is_some_and(|peer| self.confirmed_sessions.contains(peer));
         // The battery snapshot locks and allocates across every transport;
-        // skipped while custody is off, where the table refuses first anyway.
-        let battery_ok = !self.custody.is_enabled() || self.battery_allows_relaying();
+        // taken only for a frame the table can reach that row for, which is
+        // one that asked for custody on a device that has it on.
+        let battery_ok = !self.custody.is_enabled()
+            || custody_request.is_none()
+            || self.battery_allows_relaying();
         let now_ms = Utc::now().timestamp_millis();
 
         let message_id = message.id.clone();
@@ -184,19 +189,32 @@ impl OfflineProtocol {
     }
 
     /// Queues every eligible held frame toward a neighbour that just
-    /// appeared, through the governor's held-frame intake.
+    /// appeared on a mesh link, through the governor's held-frame intake.
     ///
-    /// Obeys `allow_relay` and the battery floors like any forward: a
-    /// custodian is a forwarder for the frames it holds. A refusal for rate
-    /// or room leaves the frame held and untried, so the next discovery of
-    /// the same neighbour tries again; the store itself bounds how many
-    /// distinct neighbours a frame is offered to during its hold.
+    /// The discovery hook also fires for a peer a carrier with no link
+    /// reported present (a gateway presence edge, a relay's presence
+    /// answer); nothing is queued for those, because a marked forward
+    /// toward a peer no mesh link reaches would only sit out the overdue
+    /// window and come back. Obeys `allow_relay` and the battery floors like
+    /// any forward: a custodian is a forwarder for the frames it holds. A
+    /// refusal for rate or room, and a forward that comes back untransmitted,
+    /// both leave the frame held and the neighbour untried, so the next
+    /// discovery of the same neighbour tries again; the store itself bounds
+    /// how many distinct neighbours a frame is offered to during its hold.
     pub(super) fn redeliver_custody_to(&mut self, peer: &str) {
         if !self.custody.is_enabled() || self.custody.is_empty() {
             return;
         }
         if !self.config.relay.allow_relay
             || matches!(self.config.relay.relay_priority, RelayPriority::Never)
+        {
+            return;
+        }
+        if !self
+            .transport_manager
+            .mesh_neighbors()
+            .iter()
+            .any(|neighbor| neighbor.peer_id == peer)
         {
             return;
         }
@@ -237,9 +255,9 @@ impl OfflineProtocol {
     }
 
     /// [`Self::sweep_custody`] without the throttle, at the given clocks.
-    pub(super) fn sweep_custody_now(&mut self, now: Instant, now_ms: i64) {
+    pub(super) fn sweep_custody_now(&mut self, _now: Instant, now_ms: i64) {
         self.custody_receipts.retain(|_, custodians| {
-            custodians.retain(|_, until| *until > now);
+            custodians.retain(|_, until_ms| *until_ms > now_ms);
             !custodians.is_empty()
         });
 
@@ -340,7 +358,17 @@ impl OfflineProtocol {
     /// the ordinary shape of one arriving after the recipient's
     /// acknowledgement settled the message, and the shape a forged receipt
     /// for a never-sent identifier would take.
-    pub(super) fn handle_custody_receipt(&mut self, custodian: &str, body: &str) {
+    ///
+    /// `minted_at_ms` is the receipt frame's own timestamp: the hold is
+    /// relative to it, as the chapter says, so the suppression ends when the
+    /// custodian's does, however long the receipt took to arrive and whatever
+    /// this device's monotonic clock did in the meantime.
+    pub(super) fn handle_custody_receipt(
+        &mut self,
+        custodian: &str,
+        body: &str,
+        minted_at_ms: i64,
+    ) {
         let receipt = match decode_receipt(body) {
             Ok(receipt) => receipt,
             Err(err) => {
@@ -360,14 +388,14 @@ impl OfflineProtocol {
         }
 
         // A hold longer than this device's own outbox window buys nothing:
-        // the entry is gone before the suppression would end. Clamping here
-        // also keeps the instant arithmetic in range.
+        // the entry is gone before the suppression would end. Wall clock,
+        // from the receipt's own timestamp: a monotonic clock pauses in
+        // suspend and knows nothing of transit, and either would keep asking
+        // nothing of a custodian that had already let the frame go.
         let hold_ms = receipt
             .hold_ms
             .min(self.config.reliability.retry.outbox_max_lifetime_ms);
-        let until = Instant::now()
-            .checked_add(Duration::from_millis(hold_ms))
-            .unwrap_or_else(Instant::now);
+        let until_ms = minted_at_ms.saturating_add(i64::try_from(hold_ms).unwrap_or(i64::MAX));
 
         let custodians = self.custody_receipts.entry(id.clone()).or_default();
         if !custodians.contains_key(custodian)
@@ -377,13 +405,13 @@ impl OfflineProtocol {
             // suppression that ends soonest is the one worth least.
             if let Some(oldest) = custodians
                 .iter()
-                .min_by_key(|(_, until)| **until)
+                .min_by_key(|(_, until_ms)| **until_ms)
                 .map(|(peer, _)| peer.clone())
             {
                 custodians.remove(&oldest);
             }
         }
-        custodians.insert(custodian.to_string(), until);
+        custodians.insert(custodian.to_string(), until_ms);
         debug!(custodian = %custodian, message_id = %id, hold_ms, "Recorded a custody receipt");
         self.custody.record_receipt_received();
     }
@@ -429,7 +457,7 @@ impl OfflineProtocol {
         self.custody_receipts
             .get(id)
             .and_then(|custodians| custodians.get(custodian))
-            .is_some_and(|until| *until > Instant::now())
+            .is_some_and(|until_ms| *until_ms > Utc::now().timestamp_millis())
     }
 
     /// Writes one held frame under its own message id. Best-effort, like the

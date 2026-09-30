@@ -145,10 +145,11 @@ pub struct OfflineProtocol {
 
     /// Receipts this device holds as a *depositor*: for each outbox entry,
     /// the custodians holding it and until when a further deposit request
-    /// toward each is suppressed. In memory only, bounded by the outbox and
+    /// toward each is suppressed, in Unix milliseconds from the receipt's own
+    /// timestamp. In memory only, bounded by the outbox and
     /// by [`custody::MAX_CUSTODY_RECEIPTS_PER_MESSAGE`]; losing it at a
     /// restart costs one duplicate deposit, which the custodian absorbs.
-    pub(crate) custody_receipts: HashMap<MessageId, HashMap<String, Instant>>,
+    pub(crate) custody_receipts: HashMap<MessageId, HashMap<String, i64>>,
 
     /// When the custody store was last swept for expired records.
     custody_last_sweep: Instant,
@@ -3343,7 +3344,7 @@ impl OfflineProtocol {
         // Consumed whatever the body says: a malformed one is refused
         // silently, and a receipt never requests an acknowledgement.
         if let Some(data) = content.strip_prefix(internal_prefixes::CUSTODY_RECEIPT) {
-            self.handle_custody_receipt(sender, data);
+            self.handle_custody_receipt(sender, data, message.timestamp.as_millis());
             return Some(InternalMessageResult::Consumed);
         }
 

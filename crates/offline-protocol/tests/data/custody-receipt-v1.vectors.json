@@ -5,8 +5,8 @@
   "notes": [
     "A receipt is the control frame a custodian answers a deposit with: prefix, then a JSON object.",
     "Fields serialize in the order v, id, hold_ms. A decoder reads v before the body and ignores unknown fields.",
-    "hold_ms is relative to the receipt's own timestamp. Every case below carries the prefix.",
-    "Computed by hand from the chapter, independently of the code that pins them."
+    "hold_ms is relative to the receipt's own timestamp and a u64 on the wire; the vectors stay within the double-safe integer range so every JSON decoder can run them.",
+    "Every case carries the prefix. Computed by tools/spec-vectors/generate.py from the chapter, independently of the code that pins them."
   ],
   "frames": [
     {
@@ -22,10 +22,10 @@
       "wire": "__CUSTODY_RECEIPT__{\"v\":1,\"id\":\"a\",\"hold_ms\":0}"
     },
     {
-      "name": "largest_hold",
+      "name": "largest_double_safe_hold",
       "id": "max",
-      "hold_ms": 18446744073709551615,
-      "wire": "__CUSTODY_RECEIPT__{\"v\":1,\"id\":\"max\",\"hold_ms\":18446744073709551615}"
+      "hold_ms": 9007199254740991,
+      "wire": "__CUSTODY_RECEIPT__{\"v\":1,\"id\":\"max\",\"hold_ms\":9007199254740991}"
     }
   ],
   "decode_only": [

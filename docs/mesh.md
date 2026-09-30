@@ -613,7 +613,8 @@ What happens, in the order it happens:
    and sent by the peer it arrived from, and by the battery floor; a refusal
    is silent and counted.
 4. **A receipt that settles nothing.** The custodian answers the depositor
-   once, over the arrival link, with a signed `__CUSTODY_RECEIPT__`, and only
+   once, over a mesh link to the peer that handed the frame over, with a
+   signed `__CUSTODY_RECEIPT__`, and only
    when the depositor advertised the custody entry in its key package. The
    depositor uses it for exactly one thing: not asking that custodian again
    for the same frame while the hold lasts. The outbox entry, the
@@ -646,9 +647,10 @@ since start-up or the last erase.
 - `accepted`, `delivered`, `reOriginated`, `expired` are the life of a held
   frame. `delivered` counts frames handed straight to their recipient, which
   is the number that says custody paid for itself.
-- Every refusal reason in the acceptance table has a counter. `refusedDisabled`
-  climbs on a device with custody off for every frame abandoned at the drop
-  point, which is how "off" is told from "nobody asked". `refusedStranger` is
+- Every refusal reason in the acceptance table has a counter. A frame that
+  asked for nothing lands in `refusedNoRequest` on any device, so
+  `refusedDisabled` counts the deposits a device with custody off turned away,
+  which is how "off" is told from "nobody asked". `refusedStranger` is
   the one to read on a device that enabled custody and holds nothing: the
   stranger tier is closed by default, so only peers with an established
   session are admitted.

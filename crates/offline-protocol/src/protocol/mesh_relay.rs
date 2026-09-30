@@ -1082,6 +1082,13 @@ impl MeshRelayGovernor {
         None
     }
 
+    /// Drops every marked held forward from the queue, leaving the ordinary
+    /// ones. For the custody erase: a frame queued for redelivery seconds
+    /// before the erase must not go out after it.
+    pub fn drop_held(&mut self) {
+        self.pending.retain(|relay| relay.custody_target.is_none());
+    }
+
     /// Whether `message_id` is recorded as handled in the suppression cache.
     ///
     /// For the tests that pin custody and the cache disjoint: a custodian
@@ -2782,6 +2789,24 @@ mod tests {
             gov.counters().abandoned_overdue,
             counters_before.abandoned_overdue
         );
+    }
+
+    #[test]
+    fn dropping_held_forwards_leaves_the_ordinary_ones_queued() {
+        let mut gov = governor();
+        gov.admit(&frame(), Some("alice"), 3, false);
+        gov.admit_held(frame(), "dave", Instant::now())
+            .expect("queued");
+        gov.admit_held(frame(), "erin", Instant::now())
+            .expect("queued");
+        assert_eq!(gov.pending_len(), 3);
+
+        gov.drop_held();
+
+        assert_eq!(gov.pending_len(), 1);
+        let (due, _) = gov.release_due(Instant::now());
+        assert_eq!(due.len(), 1);
+        assert!(due[0].custody_target.is_none());
     }
 
     #[test]

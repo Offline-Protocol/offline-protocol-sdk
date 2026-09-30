@@ -26,7 +26,7 @@ use crate::protocol::tests::{create_test_config_for_user, id};
 use crate::protocol::types::{storage_keys, SessionState};
 use crate::protocol::{OfflineProtocol, TestProtocolStateStorage};
 use crate::ProtocolConfig;
-use offline_protocol_core::{Message, MessageId, MessagePriority};
+use offline_protocol_core::{Message, MessageId, MessagePriority, Timestamp};
 use offline_protocol_mls::MlsStorage;
 
 /// One device, with the radio its frames actually go through.
@@ -797,6 +797,148 @@ fn a_receipt_naming_nothing_or_arriving_unsigned_changes_nothing() {
     assert_eq!(bob.protocol.custody_stats().receipts_sent, 0);
     assert_eq!(bob.protocol.custody_stats().receipts_dropped, 1);
     assert!(bob.take_peer_sends().is_empty());
+}
+
+#[test]
+fn a_neighbour_without_a_mesh_link_queues_nothing_and_stays_untried() {
+    let (mut alice, mut bob, mut carol) = topology(open_custody());
+    let frame = deposit_from(&mut alice, &bob, &carol);
+    bob.receive_from(frame.clone(), &alice.address);
+    drop_point(&mut bob);
+    bob.take_peer_sends();
+
+    // A presence edge from a carrier holding no link to carol runs the
+    // discovery hook; nothing is queued, and nothing is spent.
+    bob.protocol.on_neighbor_discovered(&carol.address);
+    bob.flush_after(Duration::ZERO);
+    assert_eq!(bob.transport.peer_send_count_for(&frame.id.as_str()), 0);
+    assert_eq!(bob.protocol.mesh_relay_stats().awaiting_transmission, 0);
+    assert_eq!(bob.protocol.custody_stats().held, 1);
+
+    // The mesh link appears: delivered on the first flush.
+    bob.link(&carol);
+    bob.flush_after(Duration::ZERO);
+    assert_eq!(bob.protocol.custody_stats().delivered, 1);
+    let sends = bob.take_peer_sends();
+    let (_, delivered) = sends.into_iter().find(|(_, m)| m.id == frame.id).unwrap();
+    carol.receive_from(delivered, &bob.address);
+    assert_eq!(
+        read(&mut carol, &Node::space_for(&alice), "notes", "k"),
+        Some(DataValue::text("v"))
+    );
+}
+
+#[test]
+fn an_abandoned_forward_leaves_the_neighbour_untried() {
+    let (mut alice, mut bob, carol) = topology(open_custody());
+    let frame = deposit_from(&mut alice, &bob, &carol);
+    bob.receive_from(frame.clone(), &alice.address);
+    drop_point(&mut bob);
+    bob.take_peer_sends();
+
+    // Dave is not the recipient. Queued toward him, gone before the flush,
+    // abandoned at the overdue cut-off: returned, and dave untried.
+    let dave = Node::new("dave");
+    bob.link(&dave);
+    bob.transport.remove_connected_peer(&dave.address);
+    bob.flush_after(Duration::ZERO);
+    bob.flush_after(RELAY_QUEUE_MAX_OVERDUE + Duration::from_millis(1));
+    assert_eq!(bob.protocol.custody_stats().re_originated, 0);
+    assert_eq!(bob.transport.peer_send_count_for(&frame.id.as_str()), 0);
+
+    // Seen again with a link: the one attempt the hold allows toward dave
+    // is still available.
+    bob.transport.add_connected_peer(dave.address.clone(), -55);
+    bob.protocol.on_neighbor_discovered(&dave.address);
+    bob.flush_after(Duration::ZERO);
+    assert_eq!(bob.transport.peer_send_count_for(&frame.id.as_str()), 1);
+    assert_eq!(bob.protocol.custody_stats().re_originated, 1);
+}
+
+#[test]
+fn a_frame_asking_for_nothing_on_an_off_device_is_no_request() {
+    let (mut alice, mut bob, carol) = topology(CustodyConfig::default());
+    let mut frame = deposit_from(&mut alice, &bob, &carol);
+    frame.metadata.remove(CUSTODY_META_KEY);
+    bob.receive_from(frame, &alice.address);
+    drop_point(&mut bob);
+    let stats = bob.protocol.custody_stats();
+    assert_eq!(stats.refused_no_request, 1, "nobody asked");
+    assert_eq!(
+        stats.refused_disabled, 0,
+        "so nothing was turned away for being off"
+    );
+}
+
+#[test]
+fn a_receipt_is_judged_from_its_own_timestamp_not_from_arrival() {
+    let (mut alice, mut bob, carol) = topology(open_custody());
+    let frame = deposit_from(&mut alice, &bob, &carol);
+    let hold_ms = bob.protocol.custody_config().hold_ms;
+    let now_ms = Utc::now().timestamp_millis();
+    let depositor = alice.address.clone();
+    let held_id = frame.id.as_str();
+
+    let receipt_at = |bob: &mut Node, minted_at_ms: i64| -> Message {
+        let mut receipt = bob
+            .protocol
+            .create_message(
+                &depositor,
+                encode_receipt(&held_id, hold_ms),
+                Some(MessagePriority::Low),
+                None,
+            )
+            .unwrap();
+        receipt.requires_ack = false;
+        receipt.timestamp = Timestamp::from_millis(minted_at_ms);
+        bob.protocol.sign_control_message(&mut receipt).unwrap();
+        receipt
+    };
+
+    // Minted longer ago than its hold: received, and nothing left to
+    // suppress, so the next offer toward bob carries the request.
+    let stale = receipt_at(&mut bob, now_ms - hold_ms as i64 - 60_000);
+    alice.receive_from(stale, &bob.address);
+    assert_eq!(alice.protocol.custody_stats().receipts_received, 1);
+    assert!(!alice
+        .protocol
+        .custody_suppressed_toward(&frame.id, &bob.address));
+
+    // A fresh one suppresses until its hold elapses on the wall clock.
+    let fresh = receipt_at(&mut bob, now_ms);
+    alice.receive_from(fresh, &bob.address);
+    assert!(alice
+        .protocol
+        .custody_suppressed_toward(&frame.id, &bob.address));
+    alice
+        .protocol
+        .sweep_custody_now(Instant::now(), now_ms + hold_ms as i64 + 1);
+    assert!(
+        !alice
+            .protocol
+            .custody_suppressed_toward(&frame.id, &bob.address),
+        "the sweep drops a suppression whose hold has ended"
+    );
+}
+
+#[test]
+fn erase_drops_redeliveries_already_queued() {
+    let (mut alice, mut bob, carol) = topology(open_custody());
+    let frame = deposit_from(&mut alice, &bob, &carol);
+    bob.receive_from(frame.clone(), &alice.address);
+    drop_point(&mut bob);
+    bob.take_peer_sends();
+
+    // Carol appears: a marked forward is queued and not yet flushed.
+    bob.link(&carol);
+    bob.protocol.erase_custody().unwrap();
+    bob.flush_after(Duration::ZERO);
+    assert_eq!(
+        bob.transport.peer_send_count_for(&frame.id.as_str()),
+        0,
+        "a redelivery queued before the erase must not go out after it"
+    );
+    assert_eq!(bob.protocol.custody_stats().delivered, 0);
 }
 
 #[test]

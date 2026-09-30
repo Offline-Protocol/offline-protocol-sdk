@@ -37,13 +37,6 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   wipe calls it. The receipt body has frozen vectors at
   `crates/offline-protocol/tests/data/custody-receipt-v1.vectors.json`.
 
-- **The iOS config readers read `0` and `1` as numbers.** The Foundation-only
-  readers behind `meshRelay` and `custody` excluded JSON booleans with an
-  `is Bool` test that Swift also answers true for the numbers 0 and 1, so a
-  `fanout: 1`, an `activityIdleWindows: 1` or a `jitterMinMs: 0` written from
-  React Native reached the core as unset and the dial silently stayed at its
-  default. Both readers now exclude booleans by their CoreFoundation type.
-
 - **The custody chapter.** `docs/spec/custody.md` specifies how a device
   holds a neighbour's replication frame for hours instead of the five
   seconds a forwarder gives it today: an explicit deposit in which the
@@ -221,6 +214,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   weighed. They now fill the mesh, as their Kotlin twins have since #120.
 
 ### Fixed
+
+- **The iOS config readers read `0` and `1` as numbers.** The Foundation-only
+  readers behind `meshRelay` and `custody` excluded JSON booleans with an
+  `is Bool` test that Swift also answers true for the numbers 0 and 1, so a
+  `fanout: 1`, an `activityIdleWindows: 1` or a `jitterMinMs: 0` written from
+  React Native reached the core as unset and the dial silently stayed at its
+  default. Both readers now exclude booleans by their CoreFoundation type.
 
 - **The storage conformance suite no longer deletes a merging backend's
   records.** `runStorageConformance` cleaned up its probe records by listing

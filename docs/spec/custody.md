@@ -203,8 +203,8 @@ of these holds, and MUST refuse otherwise:
 
 | Condition | Refusal reason when it fails |
 |-----------|------------------------------|
-| Custody is enabled | `disabled` |
 | The frame carries `__custody` | `no_request` |
+| Custody is enabled | `disabled` |
 | The token is `data` | `unknown_class` |
 | The outer prefix is `__MLS_ENC__` | `not_sealed` |
 | The frame arrived from a peer whose address the transport proved | `unproven_peer` |
@@ -212,9 +212,9 @@ of these holds, and MUST refuse otherwise:
 | The frame is not addressed to this device | never fails: a frame for this device is delivered, not held |
 | No frame with this identifier is already held | `duplicate` |
 | The depositor's tier admits it: a peer with an established session under the session tier, any other proven peer under the stranger tier | `stranger_refused` |
+| The battery is above the soft relay floor, judged before the budgets so a refusal evicts nothing | `battery` |
 | The depositor's entry and byte budgets have room, or the overflow policy makes room | `depositor_full` |
 | The global entry and byte budgets have room, or the overflow policy makes room | `store_full` |
-| The battery is above the soft relay floor | `battery` |
 
 The `unproven_peer` and `not_depositor` rows together make the depositor one
 address: the peer that handed the frame over, the frame's `sender`, the key the
@@ -274,7 +274,7 @@ __CUSTODY_RECEIPT__{"v":1,"id":"<held frame's message id>","hold_ms":<u64>}
 |-------|---------|
 | `v` | Body version, `1` |
 | `id` | The identifier of the frame now held |
-| `hold_ms` | How much longer the custodian will hold it, relative to the receipt's own timestamp. Relative rather than absolute so the depositor applies it to its own clock and skew cannot expire a valid receipt |
+| `hold_ms` | How much longer the custodian will hold it, relative to the receipt's own timestamp. Relative rather than absolute so the depositor applies it to its own clock and skew cannot expire a valid receipt. A `u64` on the wire; the vectors stay within the double-safe integer range (2^53 - 1) so every JSON decoder can run them |
 
 The custodian's address is the frame's `sender`; the depositor's is its
 `recipient`. Unknown fields MUST be ignored. A receiver MUST refuse a body it
