@@ -580,6 +580,26 @@ class OfflineProtocolModule: RCTEventEmitter {
             )
         }
 
+        // Custody section: read by CustodyConfigReader, Foundation-only like
+        // the mesh forwarding reader and for the same reason; mirrors
+        // ProtocolConfigParser.kt, keep the read order in sync. Absent stays
+        // absent all the way to the core, whose default is off; the reader
+        // carries the overflow policy as the app spelled it, and an unknown
+        // spelling stays absent rather than becoming a default written here.
+        let custody = CustodyConfigReader.read(raw).map { values in
+            CustodyConfig(
+                enabled: values.enabled,
+                holdMs: values.holdMs,
+                maxEntriesPerDepositor: values.maxEntriesPerDepositor,
+                maxBytesPerDepositor: values.maxBytesPerDepositor,
+                maxEntries: values.maxEntries,
+                maxBytes: values.maxBytes,
+                strangerMaxEntries: values.strangerMaxEntries,
+                strangerMaxBytes: values.strangerMaxBytes,
+                overflowPolicy: values.overflowPolicy.flatMap(custodyOverflowPolicy)
+            )
+        }
+
         // Data layer section (nested home under `data`, both cases). Same
         // rule as meshRelay: absent stays absent, so the Rust default is the
         // only default. Kept in step with android/ ProtocolConfigParser —
@@ -637,7 +657,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             compactEnvelopeEnabled: encryption.compactEnvelopeEnabled,
             richPayloadEnabled: encryption.richPayloadEnabled,
             cryptoRecoveryEnabled: encryption.cryptoRecoveryEnabled,
-            meshRelay: meshRelay
+            meshRelay: meshRelay,
+            custody: custody
         )
 
         // Assigned only when the app actually sent it. Writing `?? false`
@@ -654,6 +675,20 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
 
         return (config, raw)
+    }
+
+    /// The custody overflow policy as the app spelled it, or nil for a
+    /// spelling this build does not know: nil reaches the core as "keep the
+    /// default", never as a default chosen here.
+    private func custodyOverflowPolicy(_ raw: String) -> OverflowPolicy? {
+        switch raw.lowercased() {
+        case "drop_newest", "dropnewest":
+            return .dropNewest
+        case "drop_oldest", "dropoldest":
+            return .dropOldest
+        default:
+            return nil
+        }
     }
 
     /// Accepts both the current vocabulary and the pre-0.22 `low`/`medium`/`high`
@@ -3830,6 +3865,60 @@ class OfflineProtocolModule: RCTEventEmitter {
             "activityIdleWindows": tunables.activityIdleWindows
         ]
         resolver(tunablesDict)
+    }
+
+    /// Custody counters, read through to the Rust core (docs/spec/custody.md).
+    @objc func getCustodyStats(_ resolver: @escaping RCTPromiseResolveBlock,
+                               rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_STATS", "Protocol not initialized", nil)
+            return
+        }
+        let stats = proto.getCustodyStats()
+        let statsDict: [String: Any] = [
+            "held": stats.held,
+            "heldBytes": stats.heldBytes,
+            "accepted": stats.accepted,
+            "delivered": stats.delivered,
+            "reOriginated": stats.reOriginated,
+            "expired": stats.expired,
+            "duplicates": stats.duplicates,
+            "evicted": stats.evicted,
+            "receiptsSent": stats.receiptsSent,
+            "receiptsDropped": stats.receiptsDropped,
+            "receiptsReceived": stats.receiptsReceived,
+            "receiptsIgnored": stats.receiptsIgnored,
+            "refusedDisabled": stats.refusedDisabled,
+            "refusedNoRequest": stats.refusedNoRequest,
+            "refusedUnknownClass": stats.refusedUnknownClass,
+            "refusedNotSealed": stats.refusedNotSealed,
+            "refusedUnprovenPeer": stats.refusedUnprovenPeer,
+            "refusedNotDepositor": stats.refusedNotDepositor,
+            "refusedStranger": stats.refusedStranger,
+            "refusedDepositorFull": stats.refusedDepositorFull,
+            "refusedStoreFull": stats.refusedStoreFull,
+            "refusedBattery": stats.refusedBattery
+        ]
+        resolver(statsDict)
+    }
+
+    /// Drops every held frame and resets the custody counters. The data
+    /// layer's wipe calls the same erase in the core; this is the standalone
+    /// verb.
+    @objc func eraseCustody(_ resolver: @escaping RCTPromiseResolveBlock,
+                            rejecter: @escaping RCTPromiseRejectBlock) {
+        do {
+            guard let proto = protocolInstance else {
+                throw NSError(domain: "OfflineProtocol", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "Protocol not initialized"])
+            }
+            try proto.eraseCustody()
+            resolver(nil)
+        } catch {
+            rejectWithProtocolError(error, rejecter,
+                                    fallbackCode: "ERROR_ERASECUSTODY",
+                                    fallbackMessage: "eraseCustody failed")
+        }
     }
 
     @objc func getPendingAckCount(_ resolver: @escaping RCTPromiseResolveBlock,

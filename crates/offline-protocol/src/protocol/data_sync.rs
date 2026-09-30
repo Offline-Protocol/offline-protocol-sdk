@@ -3957,3 +3957,100 @@ mod golden_vectors {
         }
     }
 }
+
+impl SyncBody {
+    /// The custody class of this frame, or `None` for a kind custody never
+    /// carries (`docs/spec/custody.md`, "The classes").
+    ///
+    /// Exhaustive on purpose: a new kind has to decide here whether a copy of
+    /// it is idempotent in cost, rather than inheriting an answer.
+    pub(crate) fn custody_class(&self) -> Option<&'static str> {
+        match self {
+            SyncBody::Versions { .. }
+            | SyncBody::Delta { .. }
+            | SyncBody::Snapshot { .. }
+            | SyncBody::BlobGone { .. } => Some(crate::protocol::custody::CUSTODY_CLASS_DATA),
+            // Not idempotent in cost: each acted-on copy of a request spends a
+            // whole media transfer or a snapshot export, and a carried chunk
+            // repeats an answer the requester already had.
+            SyncBody::NeedSnapshot { .. } | SyncBody::NeedBlob { .. } | SyncBody::Chunk { .. } => {
+                None
+            }
+        }
+    }
+}
+
+/// The custody class of a `__DATA_V1__` plaintext the depositor retains for
+/// re-sealing, or `None` when it is not a sync frame this build reads, or is a
+/// kind custody refuses by name.
+///
+/// Read the way an arriving frame is read: version before body, so a frame of
+/// a future version is simply not deposited rather than misclassified.
+pub(crate) fn custody_class_of_plaintext(plaintext: &str) -> Option<&'static str> {
+    let body = plaintext.strip_prefix(internal_prefixes::DATA_V1)?;
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    if value.get("v").and_then(serde_json::Value::as_u64) != Some(u64::from(DATA_SYNC_V1)) {
+        return None;
+    }
+    serde_json::from_value::<SyncBody>(value)
+        .ok()?
+        .custody_class()
+}
+
+#[cfg(test)]
+mod custody_class_tests {
+    use super::*;
+
+    fn framed(body: &str) -> String {
+        format!(
+            "{}{{\"v\":{},{}",
+            internal_prefixes::DATA_V1,
+            DATA_SYNC_V1,
+            &body[1..]
+        )
+    }
+
+    #[test]
+    fn class_a_kinds_are_deposited_and_the_rest_are_not() {
+        for (kind, expected) in [
+            (
+                "{\"k\":\"delta\",\"doc\":\"d\",\"blob\":\"AA==\"}",
+                Some("data"),
+            ),
+            (
+                "{\"k\":\"snap\",\"doc\":\"d\",\"blob\":\"AA==\"}",
+                Some("data"),
+            ),
+            ("{\"k\":\"vv\",\"docs\":{}}", Some("data")),
+            ("{\"k\":\"blob_gone\",\"hash\":\"h\"}", Some("data")),
+            ("{\"k\":\"need_snap\",\"doc\":\"d\"}", None),
+            ("{\"k\":\"need_blob\",\"hash\":\"h\"}", None),
+            (
+                "{\"k\":\"chunk\",\"hash\":\"h\",\"i\":0,\"n\":1,\"blob\":\"AA==\"}",
+                None,
+            ),
+        ] {
+            assert_eq!(
+                custody_class_of_plaintext(&framed(kind)),
+                expected,
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn anything_but_a_readable_sync_frame_is_not_deposited() {
+        assert_eq!(custody_class_of_plaintext("hello"), None);
+        assert_eq!(
+            custody_class_of_plaintext(&format!("{}not json", internal_prefixes::DATA_V1)),
+            None
+        );
+        // A future version is not deposited rather than misclassified.
+        let future = format!(
+            "{}{{\"v\":{},\"k\":\"delta\",\"doc\":\"d\",\"blob\":\"AA==\"}}",
+            internal_prefixes::DATA_V1,
+            DATA_SYNC_V1 + 1
+        );
+        assert_eq!(custody_class_of_plaintext(&future), None);
+    }
+}
