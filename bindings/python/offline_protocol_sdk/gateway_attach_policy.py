@@ -119,6 +119,25 @@ RELAY_PUSHED_STORED = "relay_pushed_stored"
 GATEWAY_SILENT = f"gateway_silent: no verdict within {int(VERDICT_TIMEOUT)}s"
 
 
+# -- Remote strings ----------------------------------------------------------
+
+
+def utf8_bytes(text: str) -> bytes | None:
+    """``text`` as UTF-8, or ``None`` when it cannot be encoded.
+
+    ``json.loads`` accepts a lone surrogate escape (``"\\ud800"``) and hands
+    back a ``str`` that ``encode("utf-8")`` refuses, and the generated FFI
+    refuses it the same way when a string is lowered. A gateway can put one
+    in any string field, so every remote string is passed through here
+    before it is measured or handed to the core: a frame that carries one
+    is malformed and is skipped, and it must never cost more than that.
+    """
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+
+
 # -- Attach ------------------------------------------------------------------
 
 
@@ -201,13 +220,14 @@ def capability_tokens(frame: dict[str, Any]) -> list[str]:
     raw = frame.get("tokens")
     if not isinstance(raw, list):
         return []
-    kept = [
-        token
-        for token in raw
-        if isinstance(token, str)
-        and token
-        and len(token.encode("utf-8")) <= MAX_CAPABILITY_TOKEN_BYTES
-    ]
+    kept: list[str] = []
+    for token in raw:
+        if not isinstance(token, str) or not token:
+            continue
+        encoded = utf8_bytes(token)
+        if encoded is None or len(encoded) > MAX_CAPABILITY_TOKEN_BYTES:
+            continue
+        kept.append(token)
     return kept[:MAX_CAPABILITY_TOKENS]
 
 
@@ -316,7 +336,9 @@ def parse_verdict(frame: dict[str, Any], frame_type: str) -> Verdict | None:
         # without an id is not ours to act on.
         return None
     recipient = frame.get("recipient")
-    if not isinstance(recipient, str) or not recipient:
+    # A recipient the core cannot be handed (a lone surrogate) is no
+    # recipient: the verdict still settles its id, and nobody is watched.
+    if not isinstance(recipient, str) or not recipient or utf8_bytes(recipient) is None:
         recipient = None
     # ``is True``: the contract makes both optional booleans that default to
     # false when absent, and a non-boolean is not a claim the gateway made.
@@ -325,7 +347,11 @@ def parse_verdict(frame: dict[str, Any], frame_type: str) -> Verdict | None:
     if frame_type == "MessageSent":
         return Verdict(message_id, None, recipient, pushed=pushed, stored=stored)
     reason = frame.get("reason")
-    if not isinstance(reason, str) or not reason:
+    # A reason the core cannot be handed is reported as the bare failure,
+    # which the core reads as a retry: the gateway's wording was never
+    # load-bearing past the `recipient_unreachable` prefix, and a lone
+    # surrogate cannot be part of that prefix.
+    if not isinstance(reason, str) or not reason or utf8_bytes(reason) is None:
         reason = "DeliveryError"
     return Verdict(message_id, reason, recipient, pushed=False, stored=stored)
 
@@ -390,7 +416,7 @@ class PresenceAnswer:
 
 def parse_presence(frame: dict[str, Any]) -> PresenceAnswer | None:
     peer = frame.get("peer")
-    if not isinstance(peer, str) or not peer:
+    if not isinstance(peer, str) or not peer or utf8_bytes(peer) is None:
         return None
     # A missing or non-boolean ``online`` is not readable as "offline": that
     # would manufacture a claim the gateway did not make.

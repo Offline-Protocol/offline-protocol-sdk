@@ -638,8 +638,28 @@ class GatewayManager(TransportManager):
                 if self._generation != generation:
                     return
                 stripped = line.strip()
-                if stripped:
+                if not stripped:
+                    continue
+                try:
                     await self._process_line(stripped, generation)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # A handler that raises must not end this task quietly.
+                    # Ended quietly, nothing retires the session: the flags
+                    # stay up, the poll loop keeps submitting, every frame
+                    # fails at the verdict timeout, and nothing addressed to
+                    # this device is delivered again until stop(). The
+                    # remote-triggerable causes are handled per field
+                    # (`utf8_bytes`); this is the net for the rest, and the
+                    # ladder brings a fresh session.
+                    self._emit_diagnostic(
+                        "error",
+                        "Gateway frame handler raised",
+                        {"error": str(exc), "type": type(exc).__name__},
+                    )
+                    self._handle_connection_closed(generation, exc)
+                    return
         except asyncio.CancelledError:
             return
 
@@ -742,12 +762,11 @@ class GatewayManager(TransportManager):
         declared = frame.get("address")
         # Bounded before it reaches the core: the echo is remote-chosen and
         # the line it arrived on may be a mebibyte.
-        if (
-            not isinstance(declared, str)
-            or not declared
-            or len(declared.encode("utf-8")) > policy.MAX_ADDRESS_BYTES
-        ):
-            self._emit_diagnostic("warning", "Invalid AddressDeclared: missing or over-long address")
+        encoded = policy.utf8_bytes(declared) if isinstance(declared, str) else None
+        if not declared or encoded is None or len(encoded) > policy.MAX_ADDRESS_BYTES:
+            self._emit_diagnostic(
+                "warning", "Invalid AddressDeclared: missing, over-long or unencodable address"
+            )
             return
         if self._generation != generation:
             return
@@ -849,30 +868,43 @@ class GatewayManager(TransportManager):
             # the core has moved past.
             return
         report = policy.verdict_report(verdict)
-        if report.confirmed:
-            self._protocol.reticulum_confirm_sent(message_id=verdict.message_id)
-        else:
-            # Verbatim. The core classifies on the token and discards the
-            # rest at that boundary, so nothing here needs to understand the
-            # gateway's wording.
-            self._protocol.reticulum_send_failed_with_reason(
-                message_id=verdict.message_id, reason=report.reason
-            )
-            recipient = verdict.recipient
-            if report.watch_recipient and recipient and not self._is_self_peer(recipient):
-                # Watch them: the gateway pushes a PresenceStatus when a
-                # watched peer attaches, and that answer is what un-parks
-                # the message this verdict just parked. And feed the verdict
-                # in as presence: the core parks on the verdict already;
-                # this is what emits the `presence_updated(offline)` an app
-                # renders a header from, labelled with the carrier that
-                # answered. Never for self: the core drops that too, but a
-                # malformed self-addressed frame should not cost a watch
-                # slot.
-                self._presence_watch.watch(recipient, self._now_ms())
-                self._protocol.reticulum_peer_presence(
-                    peer_id=recipient, online=False, last_seen_ms=None
+        # The three core calls below are wrapped for one exception only. A
+        # lone surrogate in a field the parser did not already sanitise is
+        # refused by the FFI as it lowers the string, and a gateway can put
+        # one in any field, so that costs the frame and never the session.
+        # Anything else the core raises is a core in a state this manager
+        # cannot reason about, and it propagates to the receive loop, which
+        # closes the session: re-attaching fails every id in flight, so the
+        # core hears an outcome for each rather than waiting out its expiry.
+        try:
+            if report.confirmed:
+                self._protocol.reticulum_confirm_sent(message_id=verdict.message_id)
+            else:
+                # Verbatim. The core classifies on the token and discards
+                # the rest at that boundary, so nothing here needs to
+                # understand the gateway's wording.
+                self._protocol.reticulum_send_failed_with_reason(
+                    message_id=verdict.message_id, reason=report.reason
                 )
+                recipient = verdict.recipient
+                if report.watch_recipient and recipient and not self._is_self_peer(recipient):
+                    # Watch them: the gateway pushes a PresenceStatus when a
+                    # watched peer attaches, and that answer is what
+                    # un-parks the message this verdict just parked. And
+                    # feed the verdict in as presence: the core parks on the
+                    # verdict already; this is what emits the
+                    # `presence_updated(offline)` an app renders a header
+                    # from, labelled with the carrier that answered. Never
+                    # for self: the core drops that too, but a malformed
+                    # self-addressed frame should not cost a watch slot.
+                    self._presence_watch.watch(recipient, self._now_ms())
+                    self._protocol.reticulum_peer_presence(
+                        peer_id=recipient, online=False, last_seen_ms=None
+                    )
+        except UnicodeEncodeError:
+            self._emit_diagnostic(
+                "warning", "Verdict with an unencodable field, dropped", {"type": frame_type}
+            )
         # A verdict frees an in-flight slot, so the next frame goes out on
         # it. Unless paused: with eight in flight, a paused transport would
         # otherwise drain a batch per answer for the whole background stay.
@@ -931,10 +963,17 @@ class GatewayManager(TransportManager):
     def _handle_message_received(self, frame: dict[str, Any]) -> None:
         sender = frame.get("sender")
         content = frame.get("content")
-        if not isinstance(sender, str) or not sender or not isinstance(content, str):
-            self._emit_diagnostic("warning", "Invalid MessageReceived: missing sender or content")
+        if (
+            not isinstance(sender, str)
+            or not sender
+            or policy.utf8_bytes(sender) is None
+            or not isinstance(content, str)
+        ):
+            self._emit_diagnostic(
+                "warning", "Invalid MessageReceived: missing or unencodable sender, or no content"
+            )
             return
-        data: bytes
+        data: bytes | None
         if frame.get("encoding") == "base64":
             try:
                 data = base64.b64decode(content, validate=True)
@@ -942,7 +981,10 @@ class GatewayManager(TransportManager):
                 self._emit_diagnostic("warning", "Invalid MessageReceived: malformed base64")
                 return
         else:
-            data = content.encode("utf-8")
+            data = policy.utf8_bytes(content)
+            if data is None:
+                self._emit_diagnostic("warning", "Invalid MessageReceived: unencodable content")
+                return
         try:
             self._protocol.reticulum_message_received(sender_id=sender, data=list(data))
             self._messages_received += 1

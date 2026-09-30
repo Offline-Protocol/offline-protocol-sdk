@@ -368,3 +368,45 @@ class TestParsePresence:
 def test_bounded_reason_cuts_remote_text_to_256_characters():
     assert policy.bounded_reason("x" * 1000) == "x" * 256
     assert policy.bounded_reason("short") == "short"
+
+
+class TestLoneSurrogates:
+    """``json.loads`` accepts ``"\\ud800"`` and hands back a str that cannot
+    be UTF-8 encoded, and the FFI refuses it the same way when a string is
+    lowered. A gateway can put one in any field; each parser treats it as
+    the absence of that field, never as an exception."""
+
+    SURROGATE = "\ud800"
+
+    def test_utf8_bytes_returns_none_for_an_unencodable_string(self):
+        assert policy.utf8_bytes("plain") == b"plain"
+        assert policy.utf8_bytes("é") == "é".encode("utf-8")
+        assert policy.utf8_bytes(self.SURROGATE) is None
+        assert policy.utf8_bytes("abc" + self.SURROGATE) is None
+
+    def test_a_json_escape_yields_the_surrogate(self):
+        # The way it arrives: an escape the JSON parser accepts.
+        assert json.loads('"\\ud800"') == self.SURROGATE
+
+    def test_an_unencodable_capability_token_is_dropped(self):
+        tokens = capability_tokens({"tokens": ["gateway_v1", self.SURROGATE, "x"]})
+        assert tokens == ["gateway_v1", "x"]
+
+    def test_an_unencodable_reason_is_reported_as_the_bare_failure(self):
+        verdict = parse_verdict(
+            {"message_id": "id", "recipient": OTHER_ADDRESS, "reason": "bad " + self.SURROGATE},
+            "DeliveryError",
+        )
+        assert verdict == Verdict("id", "DeliveryError", OTHER_ADDRESS)
+        assert not verdict_report(verdict).watch_recipient
+
+    def test_an_unencodable_recipient_is_no_recipient(self):
+        verdict = parse_verdict(
+            {"message_id": "id", "recipient": self.SURROGATE, "reason": "recipient_unreachable"},
+            "DeliveryError",
+        )
+        assert verdict.recipient is None
+        assert verdict.reason == "recipient_unreachable"
+
+    def test_an_unencodable_presence_peer_is_ignored(self):
+        assert parse_presence({"peer": self.SURROGATE, "online": True}) is None

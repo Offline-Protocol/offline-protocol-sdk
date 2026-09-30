@@ -6,7 +6,7 @@ The Reticulum transport provides long-range, resilient mesh networking via the [
 
 Reticulum is one of five transports in the Offline Protocol SDK, alongside BLE, Wi-Fi Direct, Internet and Nostr. It is disabled by default because it requires external infrastructure (a running Reticulum instance, an RNode radio, or a gateway).
 
-> **This repository ships the device half.** The Rust transport opens no Reticulum link of its own: it manages queues, metrics and the confirmation loop, and expects the platform to bridge to a real Reticulum stack. Both mobile managers now speak [the gateway daemon contract](spec/gateway-contract.md) to a configurable address: they attach with a signed address declaration, settle each send on the gateway's verdict, and watch presence. What answers on the other end is a gateway daemon built to that contract, which is a deployment rather than something this SDK ships. With nothing listening at `daemonAddress`, enabling Reticulum gives you a transport that never becomes available.
+> **This repository ships the device half.** The Rust transport opens no Reticulum link of its own: it manages queues, metrics and the confirmation loop, and expects the platform to bridge to a real Reticulum stack. The two mobile managers and the Python `GatewayManager` speak [the gateway daemon contract](spec/gateway-contract.md) to a configurable address: they attach with a signed address declaration, settle each send on the gateway's verdict, and watch presence. What answers on the other end is a gateway daemon built to that contract, which is a deployment rather than something this SDK ships. With nothing listening at the daemon address, enabling Reticulum gives you a transport that never becomes available.
 
 ## When to Use Reticulum
 
@@ -197,7 +197,7 @@ Regardless of which integration strategy you choose, the platform bridge interac
 > program that attaches to a Reticulum stack on one side and speaks this
 > contract to devices on the other.
 
-The built-in `ReticulumManager` (iOS and Android) speaks a newline-delimited JSON protocol over TCP to a configurable `daemonAddress` (default `localhost:4242`). Both platforms implement the same message types to stay in sync.
+The built-in clients, `ReticulumManager` on iOS and Android and `GatewayManager` in Python (`bindings/python/offline_protocol_sdk/gateway_manager.py`, configured with `daemon_address`), speak a newline-delimited JSON protocol over TCP to a configurable daemon address (default `localhost:4242`). All three implement the same message types, and the Rust guards that read the attach constants read all three sources.
 
 **Client-to-daemon messages:**
 

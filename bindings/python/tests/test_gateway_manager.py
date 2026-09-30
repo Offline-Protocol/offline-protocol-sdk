@@ -928,6 +928,111 @@ class TestWake:
 
 
 # ---------------------------------------------------------------------------
+# A gateway that sends a frame a handler cannot take
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedFramesCostTheFrameNotTheCarrier:
+    """One malformed line must never wedge the carrier: a frame a handler
+    cannot take is skipped and the session survives, and a handler that
+    raises for any other reason costs the connection, which the ladder
+    replaces, never the transport."""
+
+    SURROGATE_MESSAGE = (
+        b'{"type":"MessageReceived","sender":"' + PEER.encode() + b'","content":"\\ud800"}\n'
+    )
+
+    async def test_a_lone_surrogate_in_a_delivered_frame_is_skipped(
+        self, protocol, daemon, manager
+    ):
+        conn = await attached(protocol, daemon)
+        await conn.send_raw(self.SURROGATE_MESSAGE)
+        # Same escape in the fields the other handlers read.
+        await conn.send_raw(b'{"type":"MessageReceived","sender":"\\ud800","content":"x"}\n')
+        await conn.send_raw(b'{"type":"Capabilities","tokens":["\\ud800","gateway_v1"]}\n')
+        await conn.send_raw(b'{"type":"PresenceStatus","peer":"\\ud800","online":true}\n')
+        await conn.send_raw(b'{"type":"AddressDeclared","address":"\\ud800"}\n')
+        await conn.send_raw(b'{"type":"\\ud800"}\n')
+        await asyncio.sleep(0.05)
+        protocol.reticulum_message_received.assert_not_called()
+        protocol.reticulum_peer_presence.assert_not_called()
+        assert manager.bound
+        assert manager.state is TransportState.RUNNING
+        assert protocol.reticulum_gateway_capabilities.call_args_list[-1].kwargs == {
+            "capabilities": ["gateway_v1"]
+        }
+        # The session is live: a submission goes out and its verdict still
+        # reaches the core.
+        queue_message(protocol, "m1")
+        manager.on_messages_available()
+        assert (await conn.read_frame())["message_id"] == "m1"
+        await conn.send({"type": "MessageSent", "message_id": "m1"})
+        await until(lambda: protocol.reticulum_confirm_sent.called)
+        protocol.reticulum_confirm_sent.assert_called_once_with(message_id="m1")
+        assert "status:False" not in protocol.calls
+
+    async def test_a_lone_surrogate_in_a_verdict_still_settles_the_id(
+        self, protocol, daemon, manager
+    ):
+        conn = await attached(protocol, daemon)
+        queue_message(protocol, "m1", recipient=PEER)
+        manager.on_messages_available()
+        await conn.read_frame()
+        await conn.send_raw(
+            b'{"type":"DeliveryError","message_id":"m1","recipient":"\\ud800","reason":"\\ud800"}\n'
+        )
+        await until(lambda: protocol.reticulum_send_failed_with_reason.called)
+        # Reported as the bare failure, nobody watched, session intact.
+        protocol.reticulum_send_failed_with_reason.assert_called_once_with(
+            message_id="m1", reason="DeliveryError"
+        )
+        protocol.reticulum_peer_presence.assert_not_called()
+        assert manager.bound
+        # And the id is free again.
+        queue_message(protocol, "m1")
+        manager.on_messages_available()
+        assert (await conn.read_frame())["message_id"] == "m1"
+
+    async def test_a_core_that_raises_on_a_verdict_costs_the_connection_not_the_carrier(
+        self, protocol, daemon, manager
+    ):
+        conn = await attached(protocol, daemon)
+        protocol.reticulum_confirm_sent.side_effect = RuntimeError("poisoned")
+        queue_message(protocol, "m1")
+        manager.on_messages_available()
+        await conn.read_frame()
+        await conn.send({"type": "MessageSent", "message_id": "m1"})
+        # The session ends, the core hears it, and the ladder replaces it.
+        assert await conn.closed_by_client()
+        await until(lambda: "status:False" in protocol.calls)
+        assert not manager.bound
+        protocol.reticulum_confirm_sent.side_effect = None
+        second = await daemon.next_connection()
+        await attach(second)
+        await until(lambda: protocol.calls.count("status:True") == 2)
+        assert manager.bound
+        assert manager.state is TransportState.RUNNING
+
+    async def test_a_handler_that_raises_reports_a_diagnostic(self, protocol, daemon, manager):
+        diagnostics: list[tuple[str, str]] = []
+        manager.set_delegate(on_diagnostic=lambda level, msg, ctx: diagnostics.append((level, msg)))
+        conn = await attached(protocol, daemon)
+        protocol.reticulum_peer_presence.side_effect = RuntimeError("poisoned")
+        await conn.send({"type": "PresenceStatus", "peer": PEER, "online": True})
+        await asyncio.sleep(0.05)
+        # The presence handler swallows core errors itself; the net is not
+        # reached, and the session stays.
+        assert manager.bound
+        protocol.reticulum_send_failed_with_reason.side_effect = RuntimeError("poisoned")
+        queue_message(protocol, "m1")
+        manager.on_messages_available()
+        await conn.read_frame()
+        await conn.send({"type": "DeliveryError", "message_id": "m1", "reason": "budget_exceeded"})
+        assert await conn.closed_by_client()
+        assert any(level == "error" and msg == "Gateway frame handler raised" for level, msg in diagnostics)
+
+
+# ---------------------------------------------------------------------------
 # ProtocolManager wiring
 # ---------------------------------------------------------------------------
 
