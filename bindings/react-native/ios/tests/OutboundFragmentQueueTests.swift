@@ -207,6 +207,70 @@ final class OutboundFragmentQueueTests: XCTestCase {
         XCTAssertFalse(queue.isBackedUp("bob"))
     }
 
+    /// The NOTIFY queue is enqueued by the drain while main flushes it. A
+    /// flush that took the queue out to send it hid those fragments from
+    /// `isBackedUp`, so the drain pulled on past the mark, and from the cap,
+    /// so the splice back left the queue over it and the next `enqueue`
+    /// discarded everything. Enqueueing from inside `send` is that drain.
+    func testFragmentsBeingFlushedStayCountedForTheDrain() {
+        var dropped: [(String, OutboundFragmentQueue.DropReason, Int)] = []
+        let queue = OutboundFragmentQueue(
+            maxPerPeer: 8,
+            onDropped: { dropped.append(($0, $1, $2)) }
+        )
+        for i in 0..<5 { queue.enqueue("bob", bytes(UInt8(i))) }
+
+        // The drain as the backpressure check in BleManager runs it: pull
+        // until the queue reports backed up.
+        var drainPulled = 0
+        var sends = 0
+        _ = queue.flush { _, _ in
+            sends += 1
+            guard sends <= 2 else { return false }
+            while !queue.isBackedUp("bob") {
+                drainPulled += 1
+                queue.enqueue("bob", self.bytes(UInt8(100 + drainPulled)))
+            }
+            return true
+        }
+
+        XCTAssertLessThanOrEqual(queue.totalCount(), 8, "the queue ended over its cap")
+        XCTAssertTrue(dropped.isEmpty, "the queue was discarded: \(dropped)")
+        // 5 queued; each accepted send frees one slot and the drain refills to
+        // the mark of 6, so it pulls 1 then 1.
+        XCTAssertEqual(drainPulled, 2)
+
+        let drain = Sender()
+        _ = queue.flush(send: drain.send)
+        XCTAssertEqual(drain.sent.map(\.1),
+                       [bytes(2), bytes(3), bytes(4), bytes(101), bytes(102)],
+                       "fragments sent during the flush must not be sent twice or reordered")
+    }
+
+    /// A `removeAll` that lands while `send` runs (peer eviction on main)
+    /// must not be undone, and the flush must not then remove a fragment
+    /// enqueued after it in place of the one it sent.
+    func testRemoveAllDuringASendIsNotUndone() {
+        let queue = OutboundFragmentQueue()
+        queue.enqueue("bob", bytes(1))
+        queue.enqueue("bob", bytes(2))
+
+        var sends = 0
+        _ = queue.flush { _, _ in
+            sends += 1
+            if sends == 1 {
+                queue.removeAll("bob")
+                queue.enqueue("bob", self.bytes(9))
+                return true
+            }
+            return false
+        }
+
+        let drain = Sender()
+        _ = queue.flush(send: drain.send)
+        XCTAssertEqual(drain.sent.map(\.1), [bytes(9)])
+    }
+
     // MARK: - Removal
 
     func testRemoveAllReturnsDroppedCount() {

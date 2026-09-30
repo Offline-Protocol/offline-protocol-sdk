@@ -1609,12 +1609,14 @@ public class BleManager: NSObject, TransportManager {
         
         fragmentQueue.async { [weak self] in
             guard let self = self else { return }
-            _ = self.flushPendingOutboundFragments()
-            
             var consecutiveSkips = 0
             let maxConsecutiveSkips = 5
             var reconnectAttempted = Set<UUID>()
-            var hitBackpressure = false
+            // A pending fragment the flush could not send keeps the re-drain
+            // armed, as on Android: without this, a refusal with no wake-up
+            // got one re-drain, and if Rust was empty by then nothing re-armed
+            // and the fragments waited for the expiry that tears them.
+            var hitBackpressure = self.flushPendingOutboundFragments()
 
             while let fragment = self.protocolInstance.bleGetNextFragment() {
                 let recipientId = fragment.recipientId
@@ -1819,10 +1821,15 @@ public class BleManager: NSObject, TransportManager {
         // peripheral, not just this central, so every later send is refused
         // without asking and waits for the ready callback.
         var transmitQueueFull = false
+        // Resolved once per recipient per pump, not per fragment: each lookup
+        // copies the subscriber table under a lock, and this runs on main.
+        var centrals: [String: CBCentral?] = [:]
         notifyFragments.flush { recipientId, data in
-            guard !transmitQueueFull, let central = notifyTarget(for: recipientId) else {
-                return false
+            guard !transmitQueueFull else { return false }
+            if centrals[recipientId] == nil {
+                centrals[recipientId] = .some(notifyTarget(for: recipientId))
             }
+            guard let central = centrals[recipientId] ?? nil else { return false }
             if pm.updateValue(data, for: characteristic, onSubscribedCentrals: [central]) {
                 meshController.markPeerActive(recipientId)
                 meshController.markPeerActive(deviceId)
@@ -1917,7 +1924,9 @@ public class BleManager: NSObject, TransportManager {
             return min(100, max(0, scaled))
         }
         let pc = inboundFragments.totalCount()
-        let oc = outboundFragments.totalCount()
+        // Both egress queues: on the Android-central / iOS-peripheral topology
+        // every outbound fragment waits in the NOTIFY one.
+        let oc = outboundFragments.totalCount() + notifyFragments.totalCount()
         let totalPending = pc + oc
         let stability = max(0.0, 1.0 - min(1.0, Double(pc) / 10.0))
         let loadPercent = min(100, (totalPending * 100) / LOAD_SATURATION_COUNT)
