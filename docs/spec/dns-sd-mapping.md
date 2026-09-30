@@ -202,7 +202,12 @@ neighbour that missed one resolve window until that cache turned over.
 Delivery to the application is therefore at least once: an entry that
 expires from the listed set and resolves again is announced again, with the
 same event. An application that keys its own state on `(address,
-service_id)` sees the second announcement as a refresh.
+service_id)` sees the second announcement as a refresh. At a sweep the
+importer re-resolves before it expires, so an entry whose resolve on the
+boundary answers is refreshed rather than dropped and announced again: with
+a sweep at half the time to live, one missed window puts the next attempt on
+that boundary, and the other order would show the application an empty list
+during the resolve and a duplicate announcement after it.
 
 Removal is the importer dropping the entry from its own registry; it never
 calls `unregister_service`: the engine never held the entry, and the id may
