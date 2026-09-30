@@ -64,6 +64,7 @@ implementation written against these documents should interoperate.
 | [Username discovery and invites](spec/username-discovery.md) | The self-certifying invite payload, the username directory, and the signing-domain registry |
 | [The gateway contract](spec/gateway-contract.md) | What a gateway is, the five verbs, the daemon wire protocol, and the backbone |
 | [The local API](spec/local-api.md) | One server, several local applications: JSON-RPC over a WebSocket, the method and event tables, routing, replay, errors |
+| [Custody](spec/custody.md) | Holding a neighbour's replication frame for hours: the deposit, the receipt that settles nothing, the hold, redelivery, quotas, erase |
 | [Conformance](spec/conformance.md) | The two profiles, what every implementation owes, and the vectors that decide it |
 
 ## Security
