@@ -821,7 +821,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-swift-package
+          # The deployment target is the podspec's, and cargo does not rebuild
+          # a Rust crate when IPHONEOS_DEPLOYMENT_TARGET changes. Without the
+          # hash a lowered target restores objects stamped for the old one, and
+          # the minimum-OS gate fails on them with no cargo clean to reach. It
+          # goes in shared-key: rust-cache ignores `key` when shared-key is set.
+          shared-key: ci-swift-package-${{ hashFiles('bindings/react-native/MeshSdk.podspec') }}
 
       # One simulator slice, for the architecture of this runner. The release
       # builds the device slice and both simulator architectures.

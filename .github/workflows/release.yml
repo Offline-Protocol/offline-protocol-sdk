@@ -112,7 +112,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: release-ios
+          # The deployment target is the podspec's, and cargo does not rebuild
+          # a Rust crate when IPHONEOS_DEPLOYMENT_TARGET changes. Without the
+          # hash a lowered target restores objects stamped for the old one, and
+          # the minimum-OS gate fails on them with no cargo clean to reach. It
+          # goes in shared-key: rust-cache ignores `key` when shared-key is set.
+          shared-key: release-ios-${{ hashFiles('bindings/react-native/MeshSdk.podspec') }}
 
       - name: Cache uniffi-bindgen
         id: cache-uniffi
