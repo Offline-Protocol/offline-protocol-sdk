@@ -211,7 +211,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: thumbv8m.main-none-eabihf,riscv32imac-unknown-none-elf,riscv32imc-unknown-none-elf,thumbv6m-none-eabi
+          targets: thumbv8m.main-none-eabihf,riscv32imac-unknown-none-elf,riscv32imc-unknown-none-elf,thumbv6m-none-eabi,wasm32-wasip1
           components: clippy, llvm-tools
 
       - uses: Swatinem/rust-cache@v2
@@ -319,6 +319,38 @@ jobs:
 
       - name: Build the leaf node standalone with default features
         run: cargo build --package offline-protocol-leaf --locked
+
+      # The leaf on a WebAssembly host, on the WASI target. Two halves are
+      # pinned. The `no_std` half builds with no `bare-metal-rng`, because on
+      # `wasm32-wasip1` getrandom's backend is chosen by the target ahead of
+      # any feature and reads the runtime's `random_get`: the host's entropy
+      # is what the MLS library draws, and there is no symbol for the host to
+      # register. The `std` half builds through the host shim example, which
+      # is the shape a runtime would run, so the example cannot rot into a
+      # file nobody compiles.
+      #
+      # `wasm32-unknown-unknown` is deliberately not claimed. On that target
+      # the pinned mls-rs enables getrandom's `js` feature, and getrandom 0.2
+      # selects `js` ahead of `custom`, so a host that registered its own
+      # entropy backend would supply a symbol nothing calls and the module
+      # would import browser glue. A green build there proves nothing about a
+      # non-browser host, which is why this job builds the one target where
+      # the claim is true and no other.
+      - name: Build the leaf node for WASI
+        run: >
+          cargo build --package offline-protocol-leaf
+          --no-default-features --locked --target wasm32-wasip1
+
+      - name: Clippy the leaf node for WASI
+        run: >
+          cargo clippy --package offline-protocol-leaf
+          --no-default-features --locked --target wasm32-wasip1
+          -- -D warnings
+
+      - name: Build the WASI host shim example
+        run: >
+          cargo build --package offline-protocol-leaf --example wasi_host_shim
+          --locked --target wasm32-wasip1
 
       # `embedded-footprint` has its own workspace, so the repo's Clippy job
       # does not reach it. The leaf configurations are linted individually

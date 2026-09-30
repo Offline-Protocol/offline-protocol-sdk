@@ -171,6 +171,17 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   package's job. Two mesh controller tests were failing: they registered two
   peers in a mesh with room for four, so the eviction they assert was never
   weighed. They now fill the mesh, as their Kotlin twins have since #120.
+- **The leaf node builds for WASI, and CI gates it.** `offline-protocol-leaf`
+  compiles for `wasm32-wasip1` in both halves: without default features,
+  where `getrandom` reads the runtime's `random_get` and the firmware-style
+  `bare-metal-rng` feature is not used, and with `std` through the new
+  `wasi_host_shim` example, which drives a device from a runtime over its
+  standard streams with the time and the frames supplied by the host. The
+  claim is WASI only: `wasm32-unknown-unknown` is not gated, because there
+  the pinned MLS library enables `getrandom`'s `js` feature ahead of any
+  host-registered backend, so a green build on that target proves nothing
+  about a non-browser host. This is a compile result plus a native run of
+  the shim; nothing has run under a WebAssembly runtime.
 
 ### Fixed
 

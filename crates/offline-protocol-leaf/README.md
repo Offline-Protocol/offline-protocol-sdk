@@ -28,6 +28,8 @@ The last column was checked once by hand, with a scratch firmware crate that dep
 
 Compiling is all this table claims. Nothing here has been linked into a firmware image or run on a board, and a device still owes a radio, a flash driver behind `LeafStore`, a hardware entropy source behind `getrandom`, and a time source at pairing.
 
+The crate also builds for a WebAssembly host, on the WASI target `wasm32-wasip1`, and CI gates both halves there: the `no_std` build with no `bare-metal-rng`, because on WASI `getrandom` reads the runtime's `random_get` and there is no symbol for the host to register, and the `std` build through [`examples/wasi_host_shim.rs`](examples/wasi_host_shim.rs), a shim that takes the time and the frames from the runtime over its standard streams. `wasm32-unknown-unknown` is not claimed: on that target the pinned mls-rs enables `getrandom`'s `js` feature, which is selected ahead of a host-registered backend, so a green build there says nothing about a non-browser host. Entropy on WASI is the runtime's, and every key is exactly as strong as the runtime's source.
+
 This crate is for firmware. Applications on a phone want the main [`offline-protocol`](https://crates.io/crates/offline-protocol) crate instead, or the [React Native](https://www.npmjs.com/package/@offline-protocol/mesh-sdk) or [Python](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/bindings/python/README.md) bindings.
 
 ## License
