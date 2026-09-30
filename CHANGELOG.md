@@ -15,6 +15,25 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **The Python reference server for the local API.**
+  `offline_protocol_sdk.local_api` and the `offline-protocol-service` command
+  front one engine for any number of local applications over JSON-RPC 2.0 on
+  a WebSocket, on an owner-only Unix domain socket by default or on loopback
+  TCP with a per-launch token. The server owns the run loop and the drain;
+  a client declares its application id once in `hello`, every send is
+  stamped with it, and every event is relayed as the engine serialised it to
+  the clients the chapter's rules select (by application id, by an
+  identifier the server issued, or to everyone), with the stamped inbound
+  events held for an application whose client is away. The method table is
+  generated from the interface definition and checked in
+  (`local_api/table.py`), every declaration is classified as exposed or
+  platform-only in `dispatch.py`, and a Rust guard in the FFI crate holds
+  the chapter, the definition and that classification to one another, so
+  an unclassified method is a failing test rather than a method every local
+  application can reach. Optional rules from one JSON file: a space
+  allow-list and method denials per application id, which once configured
+  refuse a `hello` under an id no rule names. A test over two servers on
+  one host exchanges a message over the peer-stream transport.
 - **The local API chapter.** `docs/spec/local-api.md` specifies how one
   server process fronts one engine for several local applications: JSON-RPC
   2.0 over a WebSocket on a Unix domain socket by default (TCP on loopback
