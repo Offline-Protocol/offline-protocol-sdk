@@ -5,8 +5,8 @@ use super::{
     lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
     PeerCapabilities, PendingDecryptRecord, PendingMessage, PendingMessageRecord,
     ReceivedKeyPackage, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
-    DATA_GROUP_BLOB_V1, DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1, DATA_SYNC_V1,
-    DATA_TOMBSTONE_V1, MAX_BLOCKED_USERS, MAX_KEY_PACKAGE_SENT_TO,
+    DATA_CUSTODY_V1, DATA_GROUP_BLOB_V1, DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1,
+    DATA_SYNC_V1, DATA_TOMBSTONE_V1, MAX_BLOCKED_USERS, MAX_KEY_PACKAGE_SENT_TO,
     MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH, MAX_PENDING_KEY_PACKAGES, MAX_PENDING_MESSAGES_GLOBAL,
     MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
     MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_PERSISTED_CAPABILITY_VERSIONS,
@@ -58,6 +58,12 @@ pub(crate) enum StateCategory {
     /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`], which has no pre-split
     /// data to inherit for it.
     PendingDecryptEntries,
+    /// Frames held in custody for a neighbour. Sealed for the reason the
+    /// pending-decrypt records are: other people's ciphertext plus routing
+    /// metadata about them, outliving the process. Post-split only, and
+    /// absent from [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] like
+    /// [`Self::PendingDecryptEntries`].
+    Custody,
     Outbox,
     MediaDescriptors,
     PeerKeyPackages,
@@ -120,6 +126,7 @@ impl StateCategory {
             storage_keys::PENDING_MESSAGES => Self::PendingMessages,
             storage_keys::PENDING_MESSAGE_ENTRIES => Self::PendingMessageEntries,
             storage_keys::PENDING_DECRYPT_ENTRIES => Self::PendingDecryptEntries,
+            storage_keys::CUSTODY => Self::Custody,
             storage_keys::OUTBOX => Self::Outbox,
             storage_keys::MEDIA_DESCRIPTORS => Self::MediaDescriptors,
             storage_keys::PEER_KEY_PACKAGES => Self::PeerKeyPackages,
@@ -159,6 +166,7 @@ impl StateCategory {
         Self::PendingMessages,
         Self::PendingMessageEntries,
         Self::PendingDecryptEntries,
+        Self::Custody,
         Self::Outbox,
         Self::MediaDescriptors,
         Self::PeerKeyPackages,
@@ -190,6 +198,7 @@ impl StateCategory {
             Self::PendingMessages => storage_keys::PENDING_MESSAGES,
             Self::PendingMessageEntries => storage_keys::PENDING_MESSAGE_ENTRIES,
             Self::PendingDecryptEntries => storage_keys::PENDING_DECRYPT_ENTRIES,
+            Self::Custody => storage_keys::CUSTODY,
             Self::Outbox => storage_keys::OUTBOX,
             Self::MediaDescriptors => storage_keys::MEDIA_DESCRIPTORS,
             Self::PeerKeyPackages => storage_keys::PEER_KEY_PACKAGES,
@@ -303,6 +312,7 @@ impl StateCategory {
             Self::PendingMessages
             | Self::PendingMessageEntries
             | Self::PendingDecryptEntries
+            | Self::Custody
             | Self::Outbox
             | Self::MediaDescriptors
             | Self::PeerKeyPackages
@@ -992,7 +1002,7 @@ impl<'a> PruneBudget<'a> {
     /// Claims one delete. Refuses — and records that this walk's share is gone
     /// — only for a refusing budget; a counting one always allows the delete
     /// and just charges for it.
-    fn claim(&mut self) -> bool {
+    pub(super) fn claim(&mut self) -> bool {
         if self.is_spent() {
             self.exhausted = true;
             if self.refusable {
@@ -3233,6 +3243,13 @@ impl OfflineProtocol {
             }
             if self.config.data.enabled && caps.data_versions.contains(&DATA_GROUP_BLOB_V1) {
                 self.peer_data_group_blob.insert(peer_id.clone());
+            }
+            // And the custody receipt. Cheapest of all to skip: a deposit
+            // taken on before the peer's next key package would simply go
+            // unanswered, and the depositor deposits again on its next retry.
+            // Restored anyway, because the record is already here.
+            if self.config.data.enabled && caps.data_versions.contains(&DATA_CUSTODY_V1) {
+                self.peer_data_custody.insert(peer_id.clone());
             }
             if self.config.data.enabled && caps.attested_data_versions.contains(&DATA_GROUP_BLOB_V1)
             {

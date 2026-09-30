@@ -117,6 +117,7 @@ are computed independently of that code.
 | `crates/offline-protocol-sealed/tests/data/key-package-v1.vectors.json` | [Capability negotiation](capability-negotiation.md) | Parse |
 | `crates/offline-protocol-sealed/tests/data/identity-assertion-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md#the-identity-assertion) | Both |
 | `crates/offline-protocol/tests/data/data-sync-v1.vectors.json` | [Document replication](data-sync.md) | Both |
+| `crates/offline-protocol/tests/data/custody-receipt-v1.vectors.json` | [Custody](custody.md) | Both |
 | `crates/offline-protocol-transport/tests/data/ble-framing-v1.vectors.json` | [Bluetooth LE framing](ble-framing.md) | Both |
 | `crates/offline-protocol-transport/tests/data/stream-framing-v1.vectors.json` | [Peer-stream framing](stream-framing.md) | Both |
 
@@ -224,7 +225,3 @@ Some chapters specify behaviour that has no vector file:
   reads as a key problem rather than an encoding one. The rest of the chapter
   is a JSON message vocabulary whose mistakes surface as a rejected message,
   and it stays prose.
-- [Custody](custody.md) adds one encoding, the receipt body, and has no
-  vector for it yet: the chapter precedes the codec, and a vector computed
-  from prose pins nothing. The vector lands with the implementation, in the
-  crate that holds the codec, and this list loses the entry then.

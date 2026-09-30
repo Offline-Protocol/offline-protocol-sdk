@@ -6,8 +6,8 @@ use super::{
     GroupMemberAddedPayload, GroupMemberRemovedPayload, GroupMessageReceivedPayload,
     InternalMessageResult, KeyPackagePayload, OfflineProtocol, PeerCapabilities, PresencePayload,
     ReadReceiptPayload, ReceivedKeyPackage, TypingIndicatorPayload, UserGroupsPayload,
-    DATA_GROUP_BLOB_V1, DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1, DATA_SYNC_V1,
-    DATA_TOMBSTONE_V1, MAX_KEY_PACKAGE_LIFETIME_MS, MAX_KEY_PACKAGE_SENT_TO,
+    DATA_CUSTODY_V1, DATA_GROUP_BLOB_V1, DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1,
+    DATA_SYNC_V1, DATA_TOMBSTONE_V1, MAX_KEY_PACKAGE_LIFETIME_MS, MAX_KEY_PACKAGE_SENT_TO,
     MAX_PENDING_KEY_PACKAGES, MAX_READ_RECEIPT_IDS, MLS_ENVELOPE_COMPACT_V1, RICH_PAYLOAD_V1,
 };
 use crate::events::{DecryptionFailureCode, Event, SecurityWarningCode};
@@ -253,6 +253,22 @@ impl OfflineProtocol {
                 self.peer_data_group_blob.remove(sender);
             }
             self.peer_data_group_blob_attested.remove(sender);
+
+            // Whether this peer parses a custody receipt, so a deposit of
+            // theirs this device takes on may be answered. Gates the receipt
+            // only: a deposit is judged by the quotas, never by this entry.
+            // Same shape as the sets above: gated by our own data switch,
+            // removed when a fresh key package stops advertising it.
+            if self.config.data.enabled && payload.data_versions.contains(&DATA_CUSTODY_V1) {
+                if !self.peer_data_custody.contains(sender)
+                    && self.peer_data_custody.len() >= MAX_KEY_PACKAGE_SENT_TO
+                {
+                    self.peer_data_custody.clear();
+                }
+                self.peer_data_custody.insert(sender.to_string());
+            } else {
+                self.peer_data_custody.remove(sender);
+            }
 
             // Direct knowledge is authoritative for the group capability
             // too: a key package from the peer itself evicts whatever an

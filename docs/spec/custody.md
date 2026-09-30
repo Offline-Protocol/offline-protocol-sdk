@@ -475,11 +475,13 @@ also volunteering to store.
 
 ## Conformance
 
-The receipt body is the one encoding this chapter adds, and it has no frozen
-vector yet: the chapter precedes the codec, and a vector computed from prose
-alone pins nothing. The vector lands with the implementation, in the crate that
-holds the codec, and [Conformance](conformance.md) lists this chapter among
-those that are not yet surfaces until then.
+The receipt body is the one encoding this chapter adds. Its frozen vectors are
+`crates/offline-protocol/tests/data/custody-receipt-v1.vectors.json`, in the
+crate that holds the codec: three bodies to encode and decode, two that only a
+decoder sees (an unknown field, and the fields in another order), and six that
+MUST be refused (an unknown or missing version, an empty identifier, a body
+that is not an object, a negative or missing hold). [Conformance](conformance.md)
+lists the file with the others.
 
 ## What this chapter does not specify
 
