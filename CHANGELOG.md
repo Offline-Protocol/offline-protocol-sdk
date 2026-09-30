@@ -272,6 +272,30 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   about a non-browser host. This is a compile result plus a native run of
   the shim; nothing has run under a WebAssembly runtime.
 
+- **Services on the LAN, and the first Python service wrappers.** A new
+  specification chapter, `docs/spec/dns-sd-mapping.md`, lays a
+  `ServiceDescriptor` out as a DNS-SD instance under the subtype
+  `_svc._sub._offlineprotocol._tcp`: a digest instance name, a TXT record
+  (`txtvers`, `sid`, `ver`, `addr`, one `c.<key>` per capability) and its
+  bounds (a service id over 200 bytes, a record over 1300 bytes or a
+  capability key DNS-SD cannot carry is refused, never truncated). An
+  imported LAN record is unsigned: it arrives as a `service_discovered`
+  event with `source: "lan"`, is kept in an application-level registry, and
+  is never registered with the engine, because a registration made from it
+  would go out in signed discovery responses under this node's identity.
+  A peer-stream browser now ignores a record carrying `sid`, so a published
+  service is not one more connector to the same host. In Python,
+  `services.Services` wraps the generated `MeshServices` with the copy of
+  this node's registrations the engine cannot enumerate, and refuses a
+  response status outside the engine's closed set with the reason;
+  `dnssd_bridge.DnsSdBridge` publishes those registrations and imports the
+  LAN's, over the existing optional `lan` extra, re-resolving an import at
+  half its time to live and dropping it at the whole. The service discovery
+  guide is corrected where it disagreed with the engine: discovery responses
+  go to the peer the query came from and are forwarded toward the
+  originator, the response status is one of exactly three values, the
+  version is opaque, and the peer-tracking hook is `on_neighbor_discovered`.
+
 ### Fixed
 
 - **The iOS config readers read `0` and `1` as numbers.** The Foundation-only

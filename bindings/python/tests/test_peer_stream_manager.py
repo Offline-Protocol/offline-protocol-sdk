@@ -224,6 +224,19 @@ class TestDiscoveryRecords:
         assert peers_from_record(self._info(properties={b"addr": b"not-an-address"})) == []
         assert peers_from_record(self._info(port=0)) == []
 
+    def test_a_service_instance_is_not_a_peer_hint(self):
+        # dns-sd-mapping.md invariant 5: a record carrying `sid` is a service
+        # instance under the subtype, listed under this type as well by some
+        # responders, and would otherwise be one more connector per service.
+        assert (
+            peers_from_record(
+                self._info(
+                    properties={b"txtvers": b"1", b"sid": b"weather.v1", b"addr": PEER_ADDRESS.encode()}
+                )
+            )
+            == []
+        )
+
     def test_record_falls_back_to_the_server_name(self):
         assert peers_from_record(self._info(addresses=[])) == [
             PeerEntry("host.local", 7878, PEER_ADDRESS)
