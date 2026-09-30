@@ -325,7 +325,7 @@ store.mapSet(space, "trip", "meta", "title", """{"kind":"text","value":"Coast ro
 store.textInsert(space, "trip", "notes", 0u, "Meet at the bridge")
 store.counterIncrement(space, "trip", "opened", 1.0)
 
-// Edits batch. This is what makes them durable.
+// Edits batch. This is what makes them durable and sends them to peers.
 store.flush(space, "trip")
 
 val json = store.docJson(space, "trip")

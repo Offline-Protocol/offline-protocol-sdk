@@ -368,7 +368,7 @@ try store.counterIncrement(
     spaceId: space, docId: "trip", collection: "opened", amount: 1
 )
 
-// Edits batch. This is what makes them durable.
+// Edits batch. This is what makes them durable and sends them to peers.
 try store.flush(spaceId: space, docId: "trip")
 
 let json = try store.docJson(spaceId: space, docId: "trip")

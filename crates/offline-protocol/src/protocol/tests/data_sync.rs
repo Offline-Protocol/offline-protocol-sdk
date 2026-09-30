@@ -1240,6 +1240,45 @@ fn a_peer_cannot_name_unlimited_documents_into_our_storage() {
 }
 
 #[test]
+fn a_lost_final_delta_heals_once_local_commits_go_quiet() {
+    // The 1:1 half of the settle offer. A lost delta mid-burst is noticed
+    // when the next one parks behind it; the last one has no next one, and
+    // on a link that stays up nothing else asks.
+    let (mut alice, mut bob) = pair();
+    let alice_space = Node::space_for(&bob);
+    let bob_space = Node::space_for(&alice);
+
+    write(&mut alice, &alice_space, "notes", "a", "1");
+    settle(&mut alice, &mut bob);
+    write(&mut alice, &alice_space, "notes", "b", "2");
+    alice.transport.clear_sent_messages();
+    settle(&mut alice, &mut bob);
+    assert_eq!(read(&mut bob, &bob_space, "notes", "b"), None);
+
+    // Brought forward rather than waited out; the tick is the real one.
+    for (due, _) in alice.protocol.data_sync_settle.values_mut() {
+        *due = std::time::Instant::now();
+    }
+    alice.protocol.process().expect("process");
+    let rounds = settle(&mut alice, &mut bob);
+
+    assert_eq!(
+        read(&mut bob, &bob_space, "notes", "b"),
+        Some(DataValue::text("2")),
+        "the lost tail of the burst never reached the peer"
+    );
+    assert_eq!(
+        rounds.last(),
+        Some(&0),
+        "the settle exchange has to stop (rounds: {rounds:?})"
+    );
+    assert!(
+        alice.protocol.data_sync_settle.is_empty() && bob.protocol.data_sync_settle.is_empty(),
+        "a settle offer outlived its quiet period, or an import armed one"
+    );
+}
+
+#[test]
 fn a_change_too_large_to_inline_still_tells_the_peer_it_happened() {
     let (mut alice, mut bob) = pair();
     let alice_space = Node::space_for(&bob);

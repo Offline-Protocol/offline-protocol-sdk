@@ -73,7 +73,7 @@
 //! until it has survived, so a blob that kills the process kills it once
 //! rather than every time the sender retries.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -125,6 +125,28 @@ const MAX_DOCS_PER_VERSION_FRAME: usize = 128;
 /// thing the window delays is the reconciliation sweep, and the next trigger
 /// repeats it anyway.
 pub(crate) const DATA_SYNC_OFFER_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How long local commits to a space must stay quiet before the committing
+/// device sends one follow-up version offer for what it committed: the
+/// settle offer.
+///
+/// A delta that parks behind a lost predecessor is noticed when the *next*
+/// delta arrives, so a loss anywhere in a burst of edits heals on its own,
+/// except at the tail. The last delta of a burst has no successor, and a
+/// receiver that never got it has nothing to notice it with until an
+/// unrelated trigger fires, which on a link that stays up may be never.
+/// Congestion is what loses deltas and it strikes during bursts, so the tail
+/// is not a corner case. The settle offer is that successor.
+///
+/// Debounced rather than sent per commit: a commit inside the window pushes
+/// the deadline out, so a burst costs one offer at the end of it, not one per
+/// flush. Three seconds is longer than the gap between flushes of someone
+/// still typing on the recommended throttle, so it fires at a pause rather
+/// than mid-sentence, and short enough that a lost tail is back before the
+/// reader has looked away. It also leaves the burst ahead of it time to drain
+/// a slow link, since the offer queues behind it; one that overtakes costs a
+/// duplicate delta, which the merge absorbs.
+pub(crate) const DATA_SYNC_SETTLE_DELAY: Duration = Duration::from_secs(3);
 
 /// Documents one space may hold on a peer's say-so.
 ///
@@ -1142,6 +1164,14 @@ impl OfflineProtocol {
         let Some(channel) = self.space_channel(space, origin) else {
             return;
         };
+        // Only a change made here: one applied from a peer is theirs to
+        // settle, and settling it from here would be the echo `origin`
+        // exists to stop. Armed before the size check so a change that went
+        // out as a nudge is settled too; that nudge is one frame and can be
+        // lost like any other.
+        if origin.is_none() {
+            self.arm_data_sync_settle(space, doc);
+        }
         if blob.len() > MAX_SYNC_BLOB_BYTES {
             // Too big to inline, so the catch-up ladder has to fetch it: it
             // can answer with a compacted snapshot instead of raw history.
@@ -1166,6 +1196,105 @@ impl OfflineProtocol {
                 blob: BASE64.encode(blob),
             },
         );
+    }
+
+    /// Start, or push out, the settle offer for `doc` in `space`.
+    ///
+    /// Keyed by space, not by document, so a burst across several documents
+    /// is still one offer naming all of them. See [`DATA_SYNC_SETTLE_DELAY`].
+    fn arm_data_sync_settle(&mut self, space: &str, doc: &str) {
+        let due = Instant::now() + DATA_SYNC_SETTLE_DELAY;
+        let (at, docs) = self
+            .data_sync_settle
+            .entry(space.to_string())
+            .or_insert_with(|| (due, BTreeSet::new()));
+        *at = due;
+        docs.insert(doc.to_string());
+    }
+
+    /// Send every settle offer whose space has been quiet for
+    /// [`DATA_SYNC_SETTLE_DELAY`]. Driven by [`OfflineProtocol::process`],
+    /// the binding's periodic tick, like every other timer in the core.
+    ///
+    /// The offer names only the documents committed since the last one and
+    /// is marked partial, so the receiver draws no "never seen it" inference
+    /// from the rest of the space. It is an ordinary offer and not a reply,
+    /// because the side that is behind is the receiver, and only its
+    /// counter-offer carries the version a catch-up is computed from. That
+    /// counter-offer is a reply and provokes catch-up only, so the exchange
+    /// is the same terminating 1.5 round trips every other offer starts, and
+    /// nothing in it re-arms this: only a local commit does, and an import
+    /// is never one.
+    ///
+    /// Neither consults nor stamps the 30-second offer window. Consulting it
+    /// would swallow exactly the offers this exists for: the sweep that set
+    /// the window most likely fired when the peer came into range, seconds
+    /// before the burst. Stamping it would let an offer about a few documents
+    /// suppress a sweep of the whole space. It needs no window of its own
+    /// either: an entry is created only by a local commit and removed when
+    /// it fires, so this sends at most one offer per space per quiet period,
+    /// never more often than once per [`DATA_SYNC_SETTLE_DELAY`], and never
+    /// without a commit behind it.
+    ///
+    /// In a group the offer goes to the whole roster rather than addressed to
+    /// each member. The delta it follows was roster-wide, so any member may
+    /// have missed it and there is no one member to ask; one roster-wide
+    /// encryption costs the sender one ratchet generation every member
+    /// observes, and resets the addressed-frame budget rather than spending
+    /// it, where one addressed copy per member would spend a generation per
+    /// member that the others never see. The channel is re-derived here, so
+    /// a group whose replication gate has closed since the commit is sent
+    /// nothing, exactly as the commit's own push would have been.
+    pub(crate) fn send_due_data_settle_offers(&mut self, now: Instant) {
+        let due: Vec<String> = self
+            .data_sync_settle
+            .iter()
+            .filter(|(_, (at, _))| *at <= now)
+            .map(|(space, _)| space.clone())
+            .collect();
+        for space in due {
+            let Some((_, docs)) = self.data_sync_settle.remove(&space) else {
+                continue;
+            };
+            let Some(channel) = self.space_channel(&space, None) else {
+                continue;
+            };
+            let mut versions = BTreeMap::new();
+            for doc in docs {
+                // A document removed since its commit has a floor, which the
+                // next sweep carries; opening it here would bring it back.
+                if !self.data_holds_doc(&space, &doc) {
+                    continue;
+                }
+                match self.data_doc_version(&space, &doc) {
+                    Ok(version) => {
+                        versions.insert(doc, version);
+                    }
+                    Err(err) => {
+                        warn!(space, doc, error = %err, "Could not read a version to settle");
+                    }
+                }
+            }
+            if versions.is_empty() {
+                continue;
+            }
+            debug!(
+                space,
+                cause = "settle",
+                docs = versions.len(),
+                "Local commits went quiet; offering their versions"
+            );
+            self.send_version_frames(
+                &space,
+                &channel,
+                OfferContents {
+                    docs: versions,
+                    ..OfferContents::default()
+                },
+                false,
+                true,
+            );
+        }
     }
 
     // ---- inbound ----------------------------------------------------

@@ -137,8 +137,9 @@ gaps.
 **Offers and answers are addressed to one member.** Anti-entropy between two
 members is a conversation between two devices. A sender MUST address version
 offers, deltas answering them, and snapshots to the member that asked, so the
-1.5-round-trip termination rule below holds unchanged. Only a local commit is
-sent to the whole roster.
+1.5-round-trip termination rule below holds unchanged. Only a local commit, and
+the settle offer that may follow one (see [Every leg ends](#every-leg-ends)),
+are sent to the whole roster.
 
 With one exception, which a sender MUST implement: a group has a single
 sender ratchet per epoch, so an addressed frame advances the generation every
@@ -371,6 +372,14 @@ which case the import folds it into the imported change and suppresses the
 pair as an echo, so the offer is what tells the peer to ask. It cannot recur
 either: it costs a storage failure that recovered inside one frame, since a
 failure still in force fails the import too and no offer is sent.
+
+A sender MAY also emit one version offer (`reply: false`, `partial: true`)
+naming the documents it committed locally, once its local commits to a space
+have been quiet for a few seconds: the settle offer. It is not an answer to
+any frame. It recovers the last delta of a burst, which has no successor to
+reveal its loss. A sender MUST NOT emit one except after a local commit, and
+MUST NOT emit more than one per space per quiet period, so it cannot recur
+without new local work.
 
 The one chain longer than a single hop is that targeted offer: it draws
 catch-up and nothing further. It terminates because it names only documents

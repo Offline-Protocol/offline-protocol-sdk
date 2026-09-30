@@ -161,12 +161,11 @@ final class OutboundFragmentQueueTests: XCTestCase {
 
     // MARK: - Overflow
 
-    /// Preserved verbatim from the pre-extraction implementation: the outbound
-    /// side drops the OLDEST fragments, unlike the inbound side and unlike
-    /// Android, which drop the whole queue. Converging them is a behaviour
-    /// change tracked separately — this test pins today's behaviour so the
-    /// divergence cannot be closed by accident.
-    func testOverflowDropsOldestFragments() {
+    /// The overflow policy is whole-queue drop, not oldest-first, matching
+    /// Android and the inbound side: evicting slice 0 of a multi-fragment
+    /// message leaves orphan slices that reassemble into garbage at the
+    /// receiver, so the only safe cut is the whole queue.
+    func testOverflowDiscardsTheWholeQueue() {
         var dropped: [(String, OutboundFragmentQueue.DropReason, Int)] = []
         let queue = OutboundFragmentQueue(
             maxPerPeer: 3,
@@ -175,16 +174,37 @@ final class OutboundFragmentQueueTests: XCTestCase {
         queue.enqueue("bob", bytes(1))
         queue.enqueue("bob", bytes(2))
         queue.enqueue("bob", bytes(3))
+        queue.enqueue("carol", bytes(7))
         queue.enqueue("bob", bytes(4))
 
         let sender = Sender()
         _ = queue.flush(send: sender.send)
-        XCTAssertEqual(sender.sent.map(\.1), [bytes(2), bytes(3), bytes(4)])
+        XCTAssertEqual(sender.sent.filter { $0.0 == "bob" }.map(\.1), [bytes(4)])
+        XCTAssertEqual(sender.sent.filter { $0.0 == "carol" }.map(\.1), [bytes(7)],
+                       "another recipient's queue must be untouched")
         XCTAssertEqual(dropped.count, 1)
-        XCTAssertEqual(dropped.first?.2, 1)
+        XCTAssertEqual(dropped.first?.2, 3)
         if case .capped = dropped.first?.1 {} else {
             XCTFail("expected .capped, got \(String(describing: dropped.first?.1))")
         }
+    }
+
+    /// The drain loop's signal to stop pulling from the Rust core must trip
+    /// before the cap, or the loop overflows the queue it is protecting.
+    func testIsBackedUpTripsAtThreeQuartersOfTheCap() {
+        let queue = OutboundFragmentQueue(maxPerPeer: 8)
+        for i in 0..<5 { queue.enqueue("bob", bytes(UInt8(i))) }
+        XCTAssertFalse(queue.isBackedUp("bob"))
+
+        queue.enqueue("bob", bytes(5))
+        XCTAssertTrue(queue.isBackedUp("bob"))
+        XCTAssertFalse(queue.isBackedUp("carol"))
+
+        // Draining below the mark releases it, so the next drain pulls again.
+        let sender = Sender()
+        sender.refuseAfter = 1
+        _ = queue.flush(send: sender.send)
+        XCTAssertFalse(queue.isBackedUp("bob"))
     }
 
     // MARK: - Removal

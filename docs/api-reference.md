@@ -1073,7 +1073,7 @@ await store.flush('space-1', 'profile');
 | `counterValue(space, doc, collection)` | `number` | |
 | `docJson(space, doc)` | `unknown` | Plain JSON of current state |
 | `exportRaw(space, doc)` | `string` | Full history, base64 |
-| `flush(space, doc)` | `void` | Persist pending edits |
+| `flush(space, doc)` | `void` | Persist pending edits and push them to the space. Nothing replicates until this runs |
 | `flushAll()` | `void` | |
 | `docSize(space, doc)` | `number` | Compacted size in bytes |
 | `wipeAll()` | `void` | Delete every data-layer record. Only durable once replication has stopped |
@@ -1188,8 +1188,11 @@ Five things worth knowing before you build on this:
 
 ### Durability
 
-Edits batch before they reach storage. Call `flush()` when the app must know a
-change survives a crash; the SDK also flushes on shutdown. A `data_changed`
+Edits change the open document in memory only: nothing is stored or replicated
+to peers until `flush()` or `flushAll()` runs, and the SDK also flushes on
+shutdown. While the user is editing, flush on a short throttle (at most about
+twice a second) and once more when editing stops; each flush is one frame per
+peer, and Bluetooth is slow. A `data_changed`
 event fires **after** the change is durable, so a UI that re-renders on it is
 rendering state that survives a restart.
 

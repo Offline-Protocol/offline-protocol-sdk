@@ -2241,6 +2241,7 @@ impl OfflineProtocol {
         // bytes land for a space this device no longer has, and hand them to
         // the application as an answer to a question the wipe erased.
         self.last_data_sync_offer.clear();
+        self.data_sync_settle.clear();
         self.pending_attachment_fetches.clear();
         self.blob_request_windows.clear();
 

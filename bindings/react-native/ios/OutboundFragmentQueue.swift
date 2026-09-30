@@ -10,8 +10,7 @@ import Foundation
 /// previous write hit flow control.
 ///
 /// This is the iOS mirror of Android's `OutboundFragmentQueue.kt` — keep the
-/// two in sync. See the overflow note below for the one place they currently
-/// disagree.
+/// two in sync.
 ///
 /// ### Thread-safety contract
 ///
@@ -34,15 +33,21 @@ import Foundation
 ///
 /// ### Overflow policy
 ///
-/// `enqueue` drops the **oldest** fragments when the per-recipient cap is
-/// exceeded. This is preserved verbatim from the pre-extraction inline
-/// implementation, and it is a known divergence from Android, which discards
-/// the whole per-recipient queue instead: fragments are slices of a single
-/// application message, so evicting slice 0 of a five-slice message leaves
-/// four orphan slices that reassemble into garbage at the receiver. The
-/// inbound side (`InboundFragmentBuffer`) already does the whole-buffer drop.
-/// Converging the outbound side is a behaviour change and is deliberately
-/// **not** bundled into the OFF-2123 threading fix — tracked separately.
+/// When `enqueue` would push the per-recipient queue past `maxPerPeer`, the
+/// entire queue for that recipient is discarded before the new fragment is
+/// appended — the same policy as Android and as the inbound side
+/// (`InboundFragmentBuffer`). Dropping just the oldest fragments (the previous
+/// iOS policy) was unsafe: fragments are slices of a single application
+/// message, so evicting slice 0 of a five-slice message leaves four orphan
+/// slices that reassemble into garbage at the receiver. The fragments are
+/// opaque at this layer — no message ids come down from Rust — so the queue
+/// cannot cut at a message boundary; the whole queue is the only cut that
+/// never splits one. We lose messages that hadn't started delivery yet, and
+/// the sender's higher layer (ack-driven retry, data-sync anti-entropy)
+/// re-drives them.
+///
+/// Overflow should be rare: `isBackedUp` is the drain loop's signal to stop
+/// pulling from the Rust core well before the cap is reached.
 final class OutboundFragmentQueue: @unchecked Sendable {
 
     enum DropReason {
@@ -102,23 +107,41 @@ final class OutboundFragmentQueue: @unchecked Sendable {
         return !(queues[recipientId]?.isEmpty ?? true)
     }
 
+    /// True once `recipientId`'s queue has filled past a high-water mark
+    /// (3/4 of `maxPerPeer`). The drain loop uses this as a backpressure
+    /// signal to STOP pulling more fragments out of the Rust core — which is
+    /// a destructive pop — into this bounded queue. Without it, when
+    /// CoreBluetooth's write buffer paces sends slower than the loop can pull,
+    /// the loop spins the whole Rust backlog into the queue, overflows
+    /// `maxPerPeer`, and `enqueue` discards the queue mid-message. Holding the
+    /// backlog in Rust (the proper unbounded, ordered buffer) instead keeps
+    /// delivery lossless; the next drain resumes pulling once `flush` has
+    /// drained the queue back below the mark. Mirrors Android's `isBackedUp`.
+    /// Safe from any thread.
+    func isBackedUp(_ recipientId: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return (queues[recipientId]?.count ?? 0) >= maxPerPeer * 3 / 4
+    }
+
     // MARK: - Owning-queue mutations
 
-    /// Append a fragment for `recipientId`, dropping the oldest entries if the
-    /// per-recipient cap is exceeded (see the overflow note above).
+    /// Append a fragment for `recipientId`. If doing so would exceed
+    /// `maxPerPeer` the entire per-recipient queue is discarded first (see the
+    /// overflow policy above); `onDropped` is invoked once with the number of
+    /// fragments evicted, then the new fragment starts a fresh queue.
     func enqueue(_ recipientId: String, _ data: Data) {
         queueCheck()
         var dropped = 0
         lock.lock()
+        if let count = queues[recipientId]?.count, count >= maxPerPeer {
+            dropped = count
+            queues[recipientId] = nil
+        }
         // Mutate through the subscript rather than via a local copy: binding
         // the array to a `var` takes a second reference, so every append would
         // deep-copy a queue holding up to `maxPerPeer` fragments.
         queues[recipientId, default: []].append(Entry(data: data, timestamp: clock()))
-        let count = queues[recipientId]?.count ?? 0
-        if count > maxPerPeer {
-            dropped = count - maxPerPeer
-            queues[recipientId]?.removeFirst(dropped)
-        }
         lock.unlock()
 
         if dropped > 0 {

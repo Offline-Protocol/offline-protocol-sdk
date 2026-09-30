@@ -235,6 +235,10 @@ public class BleManager: NSObject, TransportManager {
 
     // Fragment sending (event-driven, no polling)
     private let fragmentQueue = DispatchQueue(label: "com.offlineprotocol.ble.fragments")
+    /// A drain that stopped at a peer's backpressure mark has a re-drain
+    /// pending. Owned by `fragmentQueue`. See `drainAndSendFragments`.
+    private var backpressureRedrainScheduled = false
+    private let BACKPRESSURE_REDRAIN_DELAY: TimeInterval = 1.0
     
     // Pending fragments waiting for device ID.
     //
@@ -286,7 +290,7 @@ public class BleManager: NSObject, TransportManager {
                                         context: ["recipientId": recipientId, "dropped": count])
                 }
             } else {
-                self.emitDiagnostic("warning", "Pending outbound fragment queue capped, dropping oldest",
+                self.emitDiagnostic("warning", "Pending outbound fragment queue capped, discarding queue",
                                     context: ["recipientId": recipientId, "dropped": count,
                                               "max": self.MAX_PENDING_FRAGMENTS_PER_PEER])
             }
@@ -1579,6 +1583,7 @@ public class BleManager: NSObject, TransportManager {
             var consecutiveSkips = 0
             let maxConsecutiveSkips = 5
             var reconnectAttempted = Set<UUID>()
+            var hitBackpressure = false
 
             while let fragment = self.protocolInstance.bleGetNextFragment() {
                 let recipientId = fragment.recipientId
@@ -1623,6 +1628,32 @@ public class BleManager: NSObject, TransportManager {
                 // enqueue instead of sending directly.
                 if self.outboundFragments.hasPending(recipientId) {
                     self.enqueuePendingOutboundFragment(recipientId: recipientId, data: data)
+                    // Backpressure against CoreBluetooth's write buffer: once
+                    // this peer's queue is backed up, stop pulling more
+                    // fragments out of the Rust core (bleGetNextFragment is a
+                    // destructive pop) into the bounded per-peer queue. The
+                    // write buffer drains far slower than this loop can pull;
+                    // without this stop the loop spins the whole backlog into
+                    // the queue, overflows MAX_PENDING_FRAGMENTS_PER_PEER, and
+                    // OutboundFragmentQueue.enqueue discards the in-flight
+                    // message. Leaving the backlog in Rust keeps delivery
+                    // lossless. Mirrors Android's drainAndSendFragments.
+                    //
+                    // This stops pulling for every peer, not just this one,
+                    // because the pop is one FIFO across all of them. Usually
+                    // the stalled head's own wake-up resumes it:
+                    // peripheralIsReady(toSendWriteWithoutResponse:) for a
+                    // full write buffer, the handshake-complete drain for a
+                    // missing link. Not every refusal has one (a missing
+                    // characteristic on a peripheral whose services are
+                    // already discovered, a reconnect that never completes),
+                    // and without one the other peers' fragments sit in Rust
+                    // behind this one. The re-drain scheduled below is the
+                    // floor under those.
+                    if self.outboundFragments.isBackedUp(recipientId) {
+                        hitBackpressure = true
+                        break
+                    }
                     continue
                 }
 
@@ -1633,6 +1664,22 @@ public class BleManager: NSObject, TransportManager {
                 } else {
                     self.enqueuePendingOutboundFragment(recipientId: recipientId, data: data)
                     break
+                }
+            }
+
+            // One pending re-drain at most, however many drains hit the mark
+            // before it fires. Cleared on fragmentQueue ahead of the drain it
+            // triggers (serial, FIFO), so a drain that backs up again re-arms.
+            // ponytail: fixed interval, no ladder. A peer stalled with no
+            // wake-up costs one drain a second until its fragments expire or
+            // it disconnects; add Android's BackpressureRetryPolicy if that
+            // shows up.
+            if hitBackpressure && !self.backpressureRedrainScheduled {
+                self.backpressureRedrainScheduled = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + self.BACKPRESSURE_REDRAIN_DELAY) { [weak self] in
+                    guard let self = self else { return }
+                    self.fragmentQueue.async { self.backpressureRedrainScheduled = false }
+                    self.drainAndSendFragments()
                 }
             }
         }
