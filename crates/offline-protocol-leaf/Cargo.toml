@@ -81,7 +81,7 @@ mls-rs-core = { version = "=0.27.0", default-features = false }
 
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
-base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 thiserror = { version = "2.0", default-features = false }
 # `Zeroizing` is in the signature of `GroupStateStorage`, so it is ours to name.
 zeroize = { version = "1", default-features = false }

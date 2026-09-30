@@ -49,7 +49,7 @@ std = [
 # `src/lib.rs` fails the build if they drift.
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
-base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+base64 = { version = "0.23", default-features = false, features = ["alloc"] }
 thiserror = { version = "2.0", default-features = false }
 # The only cryptographic dependency here, and the reason this crate exists
 # rather than these types living in core: core links no crypto at all, and

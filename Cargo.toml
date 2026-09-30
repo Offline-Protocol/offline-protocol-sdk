@@ -94,7 +94,7 @@ openmls_basic_credential = "0.4"
 openmls_traits = "0.4"
 
 # Encoding
-base64 = "0.22"
+base64 = "0.23"
 hex = "0.4"
 # Only `alloc` is needed: `std` adds `std::error::Error` impls on bech32's own
 # error types, which never cross this workspace's API surface.

@@ -222,12 +222,6 @@ checksum = "4c7f02d4ea65f2c1853089ffd8d2787bdbc63de2f0d29dedbcf8ccdfa0ccd4cf"
 
 [[package]]
 name = "base64"
-version = "0.22.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
-
-[[package]]
-name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
@@ -2295,7 +2289,7 @@ dependencies = [
 name = "offline-protocol"
 version = "0.27.0"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "chacha20poly1305",
  "chrono",
  "ed25519-dalek 3.0.0",
@@ -2345,7 +2339,7 @@ dependencies = [
 name = "offline-protocol-core"
 version = "0.27.0"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "bech32",
  "postcard",
  "serde",
@@ -2371,7 +2365,7 @@ dependencies = [
 name = "offline-protocol-leaf"
 version = "0.27.0"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "getrandom 0.2.16",
  "mls-rs",
  "mls-rs-core",
@@ -2390,7 +2384,7 @@ dependencies = [
 name = "offline-protocol-mls"
 version = "0.27.0"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "chrono",
  "ed25519-dalek 3.0.0",
  "hex",
@@ -2435,7 +2429,7 @@ dependencies = [
 name = "offline-protocol-sealed"
 version = "0.27.0"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "offline-protocol-core",
  "serde",
  "serde_json",
@@ -2468,7 +2462,7 @@ dependencies = [
 name = "offline-protocol-transport"
 version = "0.27.0"
 dependencies = [
- "base64 0.22.1",
+ "base64",
  "chacha20",
  "hex",
  "hkdf",
@@ -3977,7 +3971,7 @@ version = "3.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af5546be8f5378d5414f83733f5c9a2526f4645829edbc1c41790aeef1b38e8b"
 dependencies = [
- "base64 0.23.1",
+ "base64",
  "log",
  "percent-encoding",
  "rustls",
@@ -3993,7 +3987,7 @@ version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fabc3e92916c89c95b20eef7b06b00b066bc217ef9ea3a4ac9bf1a7e35261e10"
 dependencies = [
- "base64 0.23.1",
+ "base64",
  "http",
  "httparse",
  "log",
