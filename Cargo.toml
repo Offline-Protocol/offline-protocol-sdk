@@ -114,7 +114,7 @@ hkdf = "0.12"
 # NIP-44 v2 is encrypt-then-MAC over a raw ChaCha20 stream — not an AEAD — so
 # it needs the bare stream cipher and HMAC rather than `chacha20poly1305`.
 chacha20 = "0.9"
-hmac = "0.12"
+hmac = "0.13"
 subtle = "2"
 rand_core = { version = "0.6", features = ["getrandom"] }
 zeroize = "1"
