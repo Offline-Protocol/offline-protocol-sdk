@@ -307,9 +307,12 @@ public class BleManager: NSObject, TransportManager {
     /// `fragmentQueue`, synchronously, so the `isBackedUp` it reads next counts
     /// the fragment it just added; `pumpNotifyOutbound` flushes on main, where
     /// `updateValue` must run. That split is safe because main is the only
-    /// flusher, and `flush` takes each recipient's queue out under the lock and
-    /// puts the unsent remainder back ahead of anything enqueued meanwhile, so a
-    /// recipient's stream stays in order.
+    /// flusher and `flush` leaves a fragment in the queue until `send` has
+    /// accepted it, so a concurrent `enqueue` appends behind it, the stream
+    /// stays in order, and `isBackedUp` and the cap count every fragment still
+    /// waiting. A flush that took the queue out to send it would hide those
+    /// fragments from both: the drain would pull past the mark and the next
+    /// `enqueue` would discard the lot. See `OutboundFragmentQueue`.
     private lazy var notifyFragments = OutboundFragmentQueue(
         maxPerPeer: MAX_PENDING_FRAGMENTS_PER_PEER,
         timeout: PENDING_OUTBOUND_FRAGMENT_TIMEOUT,
@@ -1824,7 +1827,13 @@ public class BleManager: NSObject, TransportManager {
         // Resolved once per recipient per pump, not per fragment: each lookup
         // copies the subscriber table under a lock, and this runs on main.
         var centrals: [String: CBCentral?] = [:]
-        notifyFragments.flush { recipientId, data in
+        // A queue at its mark is what stopped the drain pulling from Rust.
+        // The ready callback below resumes it only after a refused
+        // `updateValue`, so a pump that empties a backed-up queue without
+        // one has to wake the drain itself, or the next pull waits for the
+        // one-second re-drain.
+        let stoppedTheDrain = notifyFragments.recipientIds().contains { notifyFragments.isBackedUp($0) }
+        let hasUnsent = notifyFragments.flush { recipientId, data in
             guard !transmitQueueFull else { return false }
             if centrals[recipientId] == nil {
                 centrals[recipientId] = .some(notifyTarget(for: recipientId))
@@ -1837,6 +1846,9 @@ public class BleManager: NSObject, TransportManager {
             }
             transmitQueueFull = true
             return false
+        }
+        if stoppedTheDrain && !hasUnsent {
+            drainAndSendFragments()
         }
     }
 
