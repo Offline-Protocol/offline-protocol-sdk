@@ -23,6 +23,7 @@ document says which reading is normative for the wire.
 | [Leaf node provisioning](leaf-provisioning.md) | What a constrained device owes at pairing, the never-committing profile, and the provisioning-time adversary |
 | [Bluetooth LE framing](ble-framing.md) | The GATT contract, the fragment header, and what a receiver owes on reassembly |
 | [Peer-stream framing](stream-framing.md) | The preamble that proves a stream's peer, the length-prefixed message frame, and the LAN discovery hint |
+| [DNS-SD mapping](dns-sd-mapping.md) | A service descriptor as a DNS-SD instance: the subtype, the instance name, the TXT record and its bounds, and what an unsigned LAN import may never become |
 | [Username discovery and invites](username-discovery.md) | The self-certifying invite payload, and the non-authoritative username directory |
 | [The gateway contract](gateway-contract.md) | What a gateway is, the five verbs it implements, the gateway-daemon wire protocol, and the backbone |
 | [The local API](local-api.md) | One server fronting one engine for several local applications: JSON-RPC over a WebSocket, the `hello` handshake, the method and event tables, routing, replay, and the errors |

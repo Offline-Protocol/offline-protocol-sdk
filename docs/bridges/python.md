@@ -225,6 +225,19 @@ bounds as literals (`4`, `1_048_576`, `96`) for the C5 reason. DNS-SD needs
 the optional extra (`pip install 'offline-protocol-sdk[lan]'`); the base
 install carries no LGPL dependency.
 
+The same type carries service instances under the subtype `_svc._sub`
+([DNS-SD mapping](../spec/dns-sd-mapping.md)), published and read by
+`dnssd_bridge.py` over the same optional extra. Two rules of that chapter are
+the binding's to hold, because nothing in the core can see a LAN record: an
+import is delivered with `source: "lan"` and never reaches
+`register_service` (a registration made from an unsigned LAN record would go
+out in signed discovery responses under this node's identity), and a peer
+browser ignores any record carrying `sid` (each published service would
+otherwise be one more connector to the same host). `test_dnssd_bridge.py`
+asserts the chapter's bounds (`200`, `255`, `1300`, `63`) and the subtype as
+literals for the C5 reason, and `services.py` mirrors the engine's closed
+status set (`ok`, `not_found`, `error`) as a literal pinned the same way.
+
 ## P10. Freeing a core object never blocks, wherever the interpreter frees it
 
 The generated bindings keep every callback object in one handle map behind

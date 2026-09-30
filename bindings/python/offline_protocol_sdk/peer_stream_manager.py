@@ -1266,6 +1266,13 @@ def peers_from_record(info: Any) -> list[PeerEntry]:
     unscoped one cannot be connected to.
     """
     properties = getattr(info, "properties", None) or {}
+    # A record carrying `sid` is a service instance under the DNS-SD mapping
+    # chapter, published under a subtype of this type. It names the same
+    # host and address as the peer record and would become a second
+    # connector to it per service; the chapter's invariant 5 has a peer
+    # browser ignore it.
+    if b"sid" in properties:
+        return []
     raw = properties.get(b"addr")
     if raw is None:
         return []
