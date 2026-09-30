@@ -185,6 +185,13 @@ a per-launch token instead of the socket. See
 [the bridge contract](../../docs/bridges/local-api.md) for what the server
 owes.
 
+The guide is [docs/local-api.md](../../docs/local-api.md). Two clients ship
+as examples and are run by the test suite against an in-process server:
+[`examples/local_api_client.py`](examples/local_api_client.py) (this package's
+`websockets` dependency, Unix socket or TCP) and
+[`examples/local-api/client.mjs`](../../examples/local-api/client.mjs) at the
+repository root (Node 22 or later, no dependencies, TCP with the token).
+
 ### Headless hosts: the built-in file stores
 
 A server or container usually has no secret service at all. Pass a store key

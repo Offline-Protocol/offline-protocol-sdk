@@ -15,6 +15,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **A local API guide and two client examples.** `docs/local-api.md` is
+  the guide to running the SDK as a service several local applications
+  share; `bindings/python/examples/local_api_client.py` (Python) and
+  `examples/local-api/client.mjs` (Node 22, no dependencies) each show
+  `hello`, `subscribe`, a send with its delivery event, a document edit read
+  back, and the one-shot idiom. The Python suite runs both against an
+  in-process server, the Node one when `node` is on the path.
 - **The Python reference server for the local API.**
   `offline_protocol_sdk.local_api` and the `offline-protocol-service` command
   front one engine for any number of local applications over JSON-RPC 2.0 on
