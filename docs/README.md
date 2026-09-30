@@ -62,6 +62,7 @@ implementation written against these documents should interoperate.
 | [Bluetooth LE framing](spec/ble-framing.md) | The GATT contract, the fragment header, and what a receiver owes on reassembly |
 | [Username discovery and invites](spec/username-discovery.md) | The self-certifying invite payload, the username directory, and the signing-domain registry |
 | [The gateway contract](spec/gateway-contract.md) | What a gateway is, the five verbs, the daemon wire protocol, and the backbone |
+| [Custody](spec/custody.md) | Holding a neighbour's replication frame for hours: the deposit, the receipt that settles nothing, the hold, redelivery, quotas, erase |
 | [Conformance](spec/conformance.md) | The two profiles, what every implementation owes, and the vectors that decide it |
 
 ## Security

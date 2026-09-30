@@ -342,6 +342,7 @@ observed on the wire:
 | `ack_transport` | Transport the acknowledged message arrived on |
 | `transport_preference` | Requested transport for this message |
 | `original_content_type` | Pre-chunking content type of a file transfer |
+| `__custody` | The class a depositor asserts for its own frame when it offers it into custody; engine-written, unsigned, and stripped by every device that forwards the frame, so it travels one hop. See [Custody](custody.md) |
 | `__ctrl_sig` | Base64 Ed25519 signature over the control-message canonical payload |
 | `__ctrl_pk` | Base64 Ed25519 public key of the signer, 32 raw bytes |
 

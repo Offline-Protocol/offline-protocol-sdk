@@ -25,6 +25,7 @@ document says which reading is normative for the wire.
 | [Peer-stream framing](stream-framing.md) | The preamble that proves a stream's peer, the length-prefixed message frame, and the LAN discovery hint |
 | [Username discovery and invites](username-discovery.md) | The self-certifying invite payload, and the non-authoritative username directory |
 | [The gateway contract](gateway-contract.md) | What a gateway is, the five verbs it implements, the gateway-daemon wire protocol, and the backbone |
+| [Custody](custody.md) | Holding a neighbour's replication frame for hours instead of seconds: the deposit, the receipt that settles nothing, the hold, redelivery, quotas and erase |
 | [Conformance](conformance.md) | The two profiles, what every implementation owes, and how the vectors decide it |
 
 ## Conformance vectors
