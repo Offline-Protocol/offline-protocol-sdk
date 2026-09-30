@@ -55,6 +55,26 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   a Rust guard pins the three tables to the definition, the engine and the
   reference server. Nothing ships in this entry but the contract; the
   reference server follows it.
+
+- **The custody chapter.** `docs/spec/custody.md` specifies how a device
+  holds a neighbour's replication frame for hours instead of the five
+  seconds a forwarder gives it today: an explicit deposit in which the
+  depositor asserts the class and this version carries only `delta`, `snap`,
+  `vv` and `blob_gone`; a signed receipt that settles nothing; a hold that is
+  validated strictly shorter than the outbox lifetime, because a custodian
+  holds ciphertext it cannot re-seal; acceptance only for what the mesh could
+  not forward, at the point where the forwarding identifier is already
+  released, so a custodian never blanks its own route; redelivery as an
+  ordinary forward; entry and byte quotas per depositor with a stranger tier
+  of zero; and an erase of its own, because no global wipe exists. The
+  control-message registry and the engine's prefix list reserve
+  `__CUSTODY_RECEIPT__`, the wire-format chapter reserves the metadata key
+  `__custody`, and `data_versions` gains entry 7 for the receipt. The threat
+  model gains R19 (custody-borne re-key pressure), R20 (a custodian retains
+  third-party routing metadata) and R21 (deposit spam). Nothing ships in this
+  entry but the contract and the reservations; the store, the quotas and the
+  receipt follow it, and custody stays off until they do.
+
 - **The leaf node builds for ESP32 RISC-V parts and for Cortex-M0.**
   `offline-protocol-leaf` now compiles, and CI lints it, for
   `riscv32imac-unknown-none-elf` (ESP32-C6, ESP32-H2),
