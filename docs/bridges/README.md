@@ -11,6 +11,7 @@ binding.
 | [Kotlin](kotlin.md) | Android native, the Android library and the React Native Android bridge |
 | [Python](python.md) | Desktop and tooling |
 | [TypeScript](typescript.md) | The React Native JavaScript surface |
+| [Local API](local-api.md) | A server fronting one engine for several local clients over a socket, and the reference server |
 
 Integration **guides** live elsewhere: [iOS](../ios-integration.md),
 [Android](../android-integration.md),
