@@ -16691,6 +16691,43 @@ mod tests {
         );
     }
 
+    /// Two orderings in the peer-stream managers that no test can run.
+    ///
+    /// iOS `stop()` forgets the session before it ends every link. The
+    /// state-change and data callbacks check `self.session === session` on
+    /// the link queue, so a `.connected` already queued then finds nothing; forgotten after
+    /// `endAll()`, it created a link in the emptied table that `start()`
+    /// never clears, and a remote that kept its MCPeerID met a stale refused
+    /// link on the next session.
+    ///
+    /// Android resets the redial delay on a new connection after a
+    /// disconnect (group owners nearly always share one address, so the
+    /// comparison is with the null the disconnect leaves). The delay doubles
+    /// per failed dial, so without the reset a new group's first failed dial
+    /// waited out the previous group's backoff.
+    #[test]
+    fn react_native_peer_stream_managers_forget_the_session_first_and_reset_on_a_new_group() {
+        let swift = rn_source_code_only("ios/WifiDirectManager.swift");
+        assert!(
+            swift.contains(
+                "let old = session session = nil onLinkQueueSync { peers.endAll() } \
+                 old?.disconnect()"
+            ),
+            "ios/WifiDirectManager.swift: stop() must clear the session before endAll()"
+        );
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        assert!(
+            kotlin.contains(
+                "val previousOwner = groupOwnerAddress isGroupOwner = it.isGroupOwner \
+                 groupOwnerAddress = it.groupOwnerAddress?.hostAddress \
+                 if (groupOwnerAddress != previousOwner) { \
+                 reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS) }"
+            ),
+            "android/.../WifiDirectManager.kt: a new connection must reset the redial delay"
+        );
+    }
+
     /// Wi-Fi Direct hands the core only an address a preamble proved.
     ///
     /// Both managers used to pass a transport-level string, a TCP endpoint on
