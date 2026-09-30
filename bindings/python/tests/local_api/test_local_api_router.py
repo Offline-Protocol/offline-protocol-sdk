@@ -171,13 +171,20 @@ async def test_an_event_from_the_run_loop_during_a_call_is_not_the_callers(route
     other = attached(router, "other")
     router.current_caller = notes
     # Emitted on the loop thread by `process()` while notes' call is in
-    # flight on the executor: broadcast, and the id it names stays unknown.
+    # flight on the executor: never the caller's. An event naming no
+    # identifier broadcasts at once; one naming an identifier nobody owns
+    # is parked until the call's result is recorded, then broadcast, and
+    # the id it names stays unknown.
     router.route({"type": "message_delivered", "message_id": "not-ours"})
     router.route({"type": "neighbor_lost", "peer_id": "p"})
+    assert [e["type"] for e in drain(notes)] == ["neighbor_lost"]
+    assert [e["type"] for e in drain(other)] == ["neighbor_lost"]
+    assert router.parked_count() == 1
     router.current_caller = None
-    assert [e["type"] for e in drain(notes)] == ["message_delivered", "neighbor_lost"]
-    assert [e["type"] for e in drain(other)] == ["message_delivered", "neighbor_lost"]
-    assert not router.knows("not-ours")
+    router.flush_parked()
+    assert [e["type"] for e in drain(notes)] == ["message_delivered"]
+    assert [e["type"] for e in drain(other)] == ["message_delivered"]
+    assert not router.knows("not-ours") and router.parked_count() == 0
 
 
 async def test_issued_identifiers_are_bounded_oldest_first(router):
@@ -210,3 +217,59 @@ async def test_a_terminal_event_forgets_its_identifier_after_routing_it(router):
     # Anything later naming the id is broadcast.
     router.route({"type": "message_failed", "message_id": "m1", "reason": "x", "retry_count": 1})
     assert [e["type"] for e in drain(other)] == ["message_failed"]
+
+
+async def test_a_loop_event_naming_the_calls_own_id_waits_for_the_id_and_reaches_only_the_caller(router):
+    notes = attached(router, "notes")
+    other = attached(router, "other")
+    router.current_caller = notes  # the call is in flight on the executor
+    # The transport takes the frame on a `process()` tick that lands between
+    # the executor's completion and the wakeup that records the result: the
+    # id is not yet known, and the event carries the content.
+    router.route({"type": "message_sent", "message_id": "m1", "sender": "a", "recipient": "b", "content": "private"})
+    assert drain(notes) == [] and drain(other) == []
+    assert router.parked_count() == 1
+    # The call completes: caller cleared, result recorded, parked flushed.
+    router.current_caller = None
+    router.note_ids("notes", ["m1"])
+    router.flush_parked()
+    assert [e["message_id"] for e in drain(notes)] == ["m1"]
+    assert drain(other) == []
+    assert router.parked_count() == 0
+    # A later event for the id correlates as usual.
+    router.route({"type": "message_delivered", "message_id": "m1"})
+    assert [e["type"] for e in drain(notes)] == ["message_delivered"]
+    assert drain(other) == []
+
+
+async def test_parking_needs_a_call_in_flight_and_an_unknown_identifier(router):
+    notes = attached(router, "notes")
+    other = attached(router, "other")
+    # No call in flight: an unknown identifier broadcasts at once.
+    router.route({"type": "message_delivered", "message_id": "peer-1"})
+    assert [e["type"] for e in drain(notes)] == ["message_delivered"]
+    assert [e["type"] for e in drain(other)] == ["message_delivered"]
+    # A call in flight, but the identifier is known: delivered at once.
+    router.note_ids("other", ["o1"])
+    router.current_caller = notes
+    router.route({"type": "message_delivered", "message_id": "o1"})
+    assert drain(other) == [{"type": "message_delivered", "message_id": "o1"}]
+    assert drain(notes) == [] and router.parked_count() == 0
+    # A call in flight and a stamped event: routed by its id, never parked.
+    router.route({"type": "message_received", "message_id": "x", "app_id": "other"})
+    assert [e["message_id"] for e in drain(other)] == ["x"]
+    assert router.parked_count() == 0
+    router.current_caller = None
+
+
+async def test_a_failed_call_flushes_what_it_parked_by_the_ordinary_rules(router):
+    notes = attached(router, "notes")
+    other = attached(router, "other")
+    router.current_caller = notes
+    router.route({"type": "message_delivered", "message_id": "peer-2"})
+    assert router.parked_count() == 1
+    # The call failed: nothing issued, so the event broadcasts on the flush.
+    router.current_caller = None
+    router.flush_parked()
+    assert [e["message_id"] for e in drain(notes)] == ["peer-2"]
+    assert [e["message_id"] for e in drain(other)] == ["peer-2"]

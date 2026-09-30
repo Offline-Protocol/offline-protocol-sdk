@@ -616,3 +616,34 @@ async def test_a_slow_call_leaves_the_loop_ticking_and_other_calls_waiting(harne
     assert slow_call.done() and await slow_call == 0
     assert waited >= 0.3, waited
     assert ticks[0] - ticks_before >= 3, ticks
+
+
+async def test_a_loop_event_for_the_calls_own_id_reaches_only_the_caller(harness):
+    """The window between the executor's completion and the wakeup that
+    records the call's result, driven without timing: the fake engine call
+    schedules a loop-thread `message_sent` for the id it is about to return,
+    ahead of its own completion, exactly as a `process()` tick landing in
+    that window would emit it."""
+    server = await harness.server()
+    loop = asyncio.get_running_loop()
+    engine = server.manager.protocol
+
+    def fake_send(**kwargs):
+        loop.call_soon_threadsafe(
+            server._route,
+            {"type": "message_sent", "message_id": "fake-1", "sender": "a", "recipient": "b", "content": "private"},
+        )
+        return "fake-1"
+
+    engine.send_message_rich = fake_send
+    notes = await harness.client(server)
+    other = await harness.client(server)
+    await notes.hello("notes")
+    await other.hello("other")
+    message_id = await notes.call("send_message", {"recipient": "off1qb", "content": "private", "priority": "Low"})
+    assert message_id == "fake-1"
+    sent = await notes.wait_event("message_sent", timeout=5, message_id="fake-1")
+    assert sent["content"] == "private"
+    await asyncio.sleep(0.3)
+    assert other.events_of("message_sent") == []
+    assert server.router.parked_count() == 0

@@ -388,25 +388,39 @@ class Dispatcher:
         )
         fn: Callable[..., Any] = getattr(target, declaration)
         loop = asyncio.get_running_loop()
-        async with self._lock:
-            # Set while the lock is held: an event the engine emits on the
-            # executor thread during this call reaches the loop through
-            # `call_soon_threadsafe` ahead of the call's own completion, so
-            # it is routed while this is still the caller.
-            self._router.current_caller = session
-            try:
-                result = await loop.run_in_executor(None, lambda: fn(**args))
-            except generated.ProtocolError as exc:
-                self._after_failure(method, args)
-                raise error_from_protocol(exc) from None
-            except RpcError:
-                raise
-            except Exception as exc:  # the binding itself failed
-                self._after_failure(method, args)
-                raise RpcError(codec.INTERNAL_ERROR, f"{method}: {exc}") from None
-            finally:
-                self._router.current_caller = None
-        result = self._after_success(session, method, args, result)
+        failure: RpcError | None = None
+        result: Any = None
+        try:
+            async with self._lock:
+                # Set while the lock is held: an event the engine emits on
+                # the executor thread during this call reaches the loop
+                # through `call_soon_threadsafe` ahead of the call's own
+                # completion, so it is routed while this is still the caller.
+                # An event the run loop emits meanwhile that names an
+                # identifier nobody owns yet is parked by the router.
+                self._router.current_caller = session
+                try:
+                    result = await loop.run_in_executor(None, lambda: fn(**args))
+                except generated.ProtocolError as exc:
+                    self._after_failure(method, args)
+                    failure = error_from_protocol(exc)
+                except RpcError as exc:
+                    failure = exc
+                except Exception as exc:  # the binding itself failed
+                    self._after_failure(method, args)
+                    failure = RpcError(codec.INTERNAL_ERROR, f"{method}: {exc}")
+                finally:
+                    self._router.current_caller = None
+            if failure is None:
+                result = self._after_success(session, method, args, result)
+        finally:
+            # Nothing has yielded since the caller was cleared, so the parked
+            # events are routed with this call's identifiers recorded (or,
+            # after a failure, with none issued), and before any other call
+            # takes the lock.
+            self._router.flush_parked()
+        if failure is not None:
+            raise failure
         return codec.encode(result_type, result)
 
     # -- parameters -----------------------------------------------------------

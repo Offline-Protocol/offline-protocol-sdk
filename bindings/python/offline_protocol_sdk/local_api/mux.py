@@ -64,6 +64,10 @@ class EventRouter:
         self._sessions: dict[str, list[Session]] = {}
         self._issued: OrderedDict[str, str] = OrderedDict()
         self._held: dict[str, deque[dict[str, Any]]] = {}
+        #: Events the run loop emitted while a call was in flight, naming an
+        #: identifier nobody owned yet. Routed once the call's result is
+        #: recorded (see `flush_parked`).
+        self._parked: list[dict[str, Any]] = []
         self._on_drop = on_drop
         #: The session whose call the server is executing right now, if any.
         self.current_caller: Session | None = None
@@ -170,10 +174,40 @@ class EventRouter:
             targets = self.sessions_for(caller.app_id)
         else:
             owner = self._correlated_app(event)
+            if owner is None and self.current_caller is not None and self._names_an_identifier(event):
+                # The run loop emitted this while a call was in flight, and
+                # nobody owns the identifier it names yet. Between the
+                # executor's completion and the wakeup that records the
+                # call's result, one or two loop iterations run; a `process()`
+                # tick landing there can emit `message_sent` for the very id
+                # the call is about to return, content and all. Broadcasting
+                # it would hand one application's message to every other, so
+                # it waits for the result to be recorded.
+                self._parked.append(event)
+                return
             targets = self.sessions_for(owner) if owner is not None else self.all_sessions()
         for session in targets:
             self._deliver(session, tag, event)
         self._forget_terminal(tag, event)
+
+    def flush_parked(self) -> None:
+        """Routes what was parked during a call, now that its identifiers are
+        recorded. Called with no caller set, after the call's result was
+        noted, or after its failure, when the events route by the ordinary
+        rules (an unknown identifier broadcasts) but never with the caller's
+        own identifiers still unknown."""
+        parked, self._parked = self._parked, []
+        for event in parked:
+            self.route(event)
+
+    def parked_count(self) -> int:
+        return len(self._parked)
+
+    @staticmethod
+    def _names_an_identifier(event: dict[str, Any]) -> bool:
+        return any(
+            isinstance(event.get(key), str) and event.get(key) for key in CORRELATION_KEYS
+        )
 
     def _deliver(self, session: Session, tag: Any, event: dict[str, Any]) -> None:
         if not session.wants(tag):
