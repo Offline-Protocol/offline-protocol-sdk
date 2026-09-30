@@ -50,12 +50,11 @@ extern crate alloc;
 use embedded_footprint as _;
 
 use alloc::string::ToString;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::hint::black_box;
 use cortex_m_rt::entry;
 use offline_protocol_core::{validate_id_chars, Address, Message, UserId};
-use offline_protocol_leaf::{LeafDevice, LeafStore, StoreError};
+use offline_protocol_leaf::{shared_store, LeafDevice, LeafStore, StoreError};
 
 /// A real message, produced by the SDK on the host and pasted here. Both
 /// codecs round-trip it, which was checked before it was embedded.
@@ -135,7 +134,10 @@ impl LeafStore for NullStore {
 /// itself and linked neither the envelope codec nor the control-frame signing
 /// nor the address derivation, so it priced an image nobody could ship.
 fn mls_workload() -> Option<()> {
-    let store: Arc<dyn LeafStore> = Arc::new(NullStore);
+    // `shared_store` rather than `Arc::new`: it is the one constructor that
+    // builds on every target, including those without compare-and-swap, so it
+    // is the route a firmware should copy and the route this image prices.
+    let store = shared_store(NullStore);
 
     // Provisioning draws from the getrandom backend this harness registers,
     // which is a counter. On hardware that symbol is the part's TRNG, and the

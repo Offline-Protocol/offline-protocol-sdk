@@ -31,6 +31,14 @@ for arch in "${IOS_ARCHS[@]}"; do
   rustup target add "$arch"
 done
 
+# Every compiler in the build targets the oldest iOS the pod admits, and they
+# learn it from the environment. Set unconditionally: a value inherited from
+# the caller's shell would build a different library on every machine.
+# See THE DEPLOYMENT TARGET in shared/xcframework.sh.
+IOS_DEPLOYMENT_TARGET="$(ios_deployment_target "$SCRIPT_DIR/../MeshSdk.podspec")"
+export IPHONEOS_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET"
+echo "Building for iOS $IOS_DEPLOYMENT_TARGET and later"
+
 # Build for each architecture
 echo "Building UniFFI library for iOS architectures..."
 for arch in "${IOS_ARCHS[@]}"; do
@@ -53,6 +61,7 @@ static_lib_for() {
   fi
 }
 
+# Packaging checks every archive against the deployment target first.
 echo "Packaging the XCFramework..."
 
 # Why an XCFramework, and why both slices share one archive basename: see
@@ -61,7 +70,8 @@ package_xcframework \
   "$OUTPUT_DIR" \
   "$(static_lib_for aarch64-apple-ios)" \
   "$(static_lib_for aarch64-apple-ios-sim)" \
-  "$(static_lib_for x86_64-apple-ios)"
+  "$(static_lib_for x86_64-apple-ios)" \
+  "$IOS_DEPLOYMENT_TARGET"
 
 # Generate bindings — all languages, not just Swift: they are one artifact set
 # off one UDL (see scripts/generate-bindings.sh).

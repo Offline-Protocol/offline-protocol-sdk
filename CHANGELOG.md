@@ -70,8 +70,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   record proves the key; a damaged check over an empty store fails with
   `FileStoreError::KeyCheckUnverifiable`, naming the file to remove. The
   sealed store never deletes a record on a read; a damaged one is reported
-  as `CorruptedData` naming its file, and one the listing skips is logged,
-  once per store, as a warning naming its file. Each store holds an
+  as `CorruptedData` naming its file, and one the listing skips is logged
+  as a warning naming its file, once until that file is written or removed.
+  A record that cannot be read is reported as a read failure, never as one
+  sealed under another key, and never counts towards refusing the store key. Each store holds an
   exclusive lock on its directory while open, so a second engine over the
   same directories fails with `FileStoreError::InUse` instead of silently
   diverging the MLS state. `close()` on either store releases its directory
@@ -120,8 +122,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   failed nor a first write that failed can disarm it); a state root that
   holds records and belongs with another MLS store (an identity is in
   place, but not the one that wrote the state), decided by the pairing ids
-  the two stores' first open wrote, and for a state root never bound by
-  whether its sealed records open under this MLS store's record key; an
+  the two stores' first open wrote, and for a state root never bound, or
+  bound to another id, by whether its sealed records open under this MLS
+  store's record key, which only this identity's do; an
   account directory that cannot be read, which is never taken for empty;
   and roots that are one directory
   or one inside the other, compared as spelled before anything is created
@@ -149,9 +152,66 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   them too. Any other manager is stopped by the block, as before, and can
   be entered again. A `close()` cancelled while the core is releasing
   still releases, and the manager is closed once it has.
+- **A Swift package and an Android library, built without React Native.**
+  Both are built from the bridge sources the React Native module compiles,
+  where they are: the transport managers, the storage providers and the
+  generated bindings, less the five files that need React. The Swift package
+  is `OfflineProtocolSDK`, assembled by `scripts/assemble-swift-package.sh`.
+  The Android library is `com.offlineprotocol:offline-protocol-android`,
+  built by the Gradle build in `bindings/kotlin`. CI builds and tests both
+  on every pull request, and builds an application against each. Neither is
+  published yet. What is public in them is what the React Native module
+  happened to need public, not a chosen API, and on iOS that leaves out the
+  storage providers, so an application cannot construct the built-in stores
+  there. Both carry the license, the commercial license, the third-party
+  notices and the export notice.
+- **Three iOS suites run for the first time.** The mesh controller, the BLE
+  discovery bootstrap policy and the error mapping suites are excluded from
+  the SwiftPM test harness, and nothing else ran them. They run in the Swift
+  package's job. Two mesh controller tests were failing: they registered two
+  peers in a mesh with room for four, so the eviction they assert was never
+  weighed. They now fill the mesh, as their Kotlin twins have since #120.
 
 ### Fixed
 
+- **The storage conformance suite no longer deletes a merging backend's
+  records.** `runStorageConformance` cleaned up its probe records by listing
+  a probe key type and deleting what it listed, before any check had run.
+  On a backend that merges key types, or lists them by the tail of the name,
+  that listing names real records too, and the cleanup deleted them. The
+  suite now checks key-type isolation first, with point writes and point
+  deletes only, and a failure ends the run there with that one check
+  reported. A run that passes it still has thirteen checks, under the same
+  names.
+- **Relay timestamps parse on Android 7.** The Android bridge parsed them
+  with `java.time.Instant`, which exists from Android 8 (API 26), while the
+  SDK supports Android 7 (API 24). On Android 7 the call threw
+  `NoClassDefFoundError`, which the surrounding `catch (e: Exception)` does
+  not catch, for a legacy relay message and an ISO-8601 last-seen timestamp.
+  An application that enables core library desugaring was not affected. The
+  timestamp is now parsed without `java.time`, as RFC 3339, and gives the
+  answers `Instant` gave for every timestamp a relay sends. At the edges it
+  is stricter than `Instant`: hour 24, a fraction with no digits, lowercase
+  `t` or `z` and a leap second are refused. A Rust guard refuses a new
+  `java.time` call in the bridge. Not run on an Android 7 device.
+- **An opted-in mesh wake with no wake service stops at once.** A sticky
+  restart that wakes JavaScript started the wake service by name, and
+  `startService` returns null rather than throwing when no such service is
+  declared. The keep-alive then held "Mesh Active" over no mesh until the
+  wake watchdog fired. It now checks that the service resolves, and stops as
+  it does without the opt-in. A React Native application declares the
+  service, so this reached only the native Android library.
+- **The iOS deployment target has one reader.** The release build and the
+  Swift package read the podspec with two parsers that disagreed on a bare
+  major version, a trailing dot and a second declaration. There is one now,
+  and it refuses all three. The Swift package's CI job runs the release's
+  deployment-target gate on the library it builds, on every pull request.
+- **An Android application that minifies can build against the SDK.** Tink,
+  which `androidx.security:security-crypto` brings for the MLS store, refers
+  to Error Prone's annotation classes and does not ship them, and R8 stops a
+  release build on a class it cannot find. The SDK's consumer rules now tell
+  R8 to disregard them. A React Native application was affected only if
+  nothing else in it brought the annotations.
 - **A stopped Python `ProtocolManager` is freed.** The core kept every
   callback the manager registered, and those reached the manager again
   through Rust, where the collector cannot see the cycle, so a stopped
@@ -242,6 +302,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   now stops pulling once a peer's queue is three quarters full, on both the
   central write path and the peripheral NOTIFY path, and resumes when the
   queue drains or after one second.
+- **The iOS library is built for the pod's deployment target.** The C and
+  assembly objects inside it, from `ring` and `oslog`, were stamped for the
+  newest iOS the release machine's Xcode knew, so an application linking the
+  pod got one linker warning for each of them. The build now reads the pod's
+  target, iOS 13.0, hands it to every compiler, and refuses to package an
+  archive holding an object built for anything newer. The arm64 simulator
+  slice is held to 14.0, the oldest system that simulator has. The SDK's own
+  Rust code is compiled for the pod's target as well, where it was compiled
+  for the Rust target's floor of iOS 10.
 
 ### Changed
 

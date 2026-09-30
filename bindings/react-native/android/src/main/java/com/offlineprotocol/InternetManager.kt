@@ -1820,14 +1820,8 @@ class InternetManager(
     }
     
     /** Parse ISO-8601 timestamp string to Unix ms, or return current time if invalid. */
-    private fun parseTimestampToMs(timestampStr: String): Long {
-        if (timestampStr.isEmpty()) return System.currentTimeMillis()
-        return try {
-            java.time.Instant.parse(timestampStr).toEpochMilli()
-        } catch (e: Exception) {
-            System.currentTimeMillis()
-        }
-    }
+    private fun parseTimestampToMs(timestampStr: String): Long =
+        RelayTimestamps.parseIso8601ToMsOrNull(timestampStr) ?: System.currentTimeMillis()
 
     /** Build serialized Message JSON bytes for an internal (relay) message, same shape as MessageReceived. */
     private fun buildInternalMessageBytes(senderId: String, content: String): ByteArray =

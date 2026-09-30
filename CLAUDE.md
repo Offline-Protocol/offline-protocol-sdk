@@ -26,6 +26,7 @@ that are versioned, reviewable, and readable by people who are not an agent.
 | `offline-protocol-leaf`: anything a device does at pairing, on a frame, or with its store | ADR [0021](docs/adr/0021-a-leaf-node-speaks-mls.md) and [docs/spec/leaf-provisioning.md](docs/spec/leaf-provisioning.md) (a time source, real entropy, durable-before-emit and authorization are obligations, not suggestions) |
 | Replicated documents: the store, sync frames, attachments | [docs/spec/data-sync.md](docs/spec/data-sync.md), [the replication state machine](docs/state-machines/data-replication.md), ADR [0018](docs/adr/0018-data-layer-engine-and-storage-seams.md) and [0019](docs/adr/0019-remote-document-imports-are-contained-not-trusted.md) |
 | Any binding: Swift, Kotlin, Python, TypeScript | [docs/bridges/](docs/bridges/README.md) |
+| The Swift package or the Android library: what is in them, how they are built | ADR [0025](docs/adr/0025-native-packages-are-assembled-in-place.md), [bindings/swift](bindings/swift/README.md), [bindings/kotlin](bindings/kotlin/README.md) |
 | The telemetry pipe: what it sends, when, the queue, the uploader | [docs/telemetry.md](docs/telemetry.md), the [network egress](docs/security/threat-model.md#network-egress) section of the threat model, and [docs/privacy.md](docs/privacy.md) |
 
 The ADR index is the fastest route to "why is this like this". If you are about
@@ -104,6 +105,33 @@ npm run generate:bindings         # wrapper for ../../scripts/generate-bindings.
 Prerequisites: `cargo install uniffi --version 0.30.0 --features cli --locked`
 (must match the workspace `uniffi = "0.30"` pin), Android NDK
 (`ANDROID_NDK_HOME`), Xcode.
+
+### Native packages
+
+```bash
+# The Swift package: build the Rust library for the simulator, assemble the
+# package from the bridge sources, run every suite, then build an application
+# against it. `swift test` cannot do this: it builds for the Mac, where the
+# bridge does not compile. Under build/, not target/, which CI caches badly.
+IPHONEOS_DEPLOYMENT_TARGET="$(bash scripts/ios-deployment-target.sh)" \
+  cargo build --release --target aarch64-apple-ios-sim --package offline-protocol-uniffi
+bash scripts/package-swiftpm-xcframework.sh build/swiftpm \
+  target/aarch64-apple-ios-sim/release/liboffline_protocol_uniffi.a
+rm -rf build/offline-protocol-swift
+bash scripts/assemble-swift-package.sh --output build/offline-protocol-swift \
+  --version 0.0.0 --bridge-tests \
+  --xcframework-path build/swiftpm/offline_protocolFFI.xcframework
+(cd build/offline-protocol-swift && xcodebuild test -scheme OfflineProtocolSDK \
+  -destination "platform=iOS Simulator,id=$(bash ../../scripts/pick-ios-simulator.sh)")
+(cd bindings/swift/consumer-check && xcodebuild test -scheme ConsumerCheck-Package \
+  -destination "platform=iOS Simulator,id=$(bash ../../../scripts/pick-ios-simulator.sh)")
+
+# The Android library (JDK 17, Gradle 8.9, no wrapper in the repository).
+cd bindings/kotlin
+gradle -PVERSION_NAME=0.0.0 :offline-protocol-android:testDebugUnitTest \
+  :offline-protocol-android:publishAllPublicationsToStagingRepository
+gradle -p consumer-check -PVERSION_NAME=0.0.0 :app:assembleRelease
+```
 
 **`cargo test` proves nothing about the bridges.** Each binding has its own
 tests; see [docs/bridges/](docs/bridges/README.md#c9-bridge-behaviour-is-not-covered-by-the-rust-test-suite).
@@ -204,9 +232,10 @@ These fail silently if broken. Each is documented in full where it is linked.
   the same two traps as core (local dependency declarations, no bare
   `use std::`), gated by the same `embedded-core` CI job
   ([ADR 0022](docs/adr/0022-one-sealed-layer-shared-with-the-leaf.md)).
-- **`offline-protocol-leaf` names `Arc` in `src/shared.rs` only.** A target
-  with no compare-and-swap (ESP32-C3, Cortex-M0) has no `alloc::sync`, and a
-  host always does, so a direct import compiles and tests green everywhere a
+- **`offline-protocol-leaf` reaches `alloc::sync` in `src/shared.rs` only.**
+  Every other file takes `Arc` from `crate::shared`. A target with no
+  compare-and-swap (ESP32-C3, Cortex-M0) has no `alloc::sync`, and a host
+  always does, so a direct import compiles and tests green everywhere a
   developer works. `only_one_file_names_the_counted_pointer` refuses it on the
   host and the `embedded-core` job on the targets
   ([ADR 0021](docs/adr/0021-a-leaf-node-speaks-mls.md#the-store-handle-follows-the-target)).
@@ -227,6 +256,18 @@ These fail silently if broken. Each is documented in full where it is linked.
   lifecycle** ([C12](docs/bridges/README.md#c12-telemetry-is-callback-free-and-the-binding-fills-the-platform));
   `every_bridge_reads_the_telemetry_config_section` reads the UDL record and
   the three parsers.
+- **Never move or copy a bridge source, and never write down in a native
+  package a version, an SDK level, a deployment target or a permission the
+  React Native package declares.** The Swift package and the Android library
+  are built from the files under `bindings/react-native/{ios,android}`, where
+  about fifty Rust guards read them by path, and four of those guards skip a
+  file that is missing instead of failing. The packages read those values
+  from the module, and the Android library is built by the toolchain the
+  module's tests run on. A shared source that starts to need React breaks
+  both packages, and the `Swift Package` and `Android Library` jobs are what
+  say so
+  ([ADR 0025](docs/adr/0025-native-packages-are-assembled-in-place.md),
+  [C13](docs/bridges/README.md#c13-a-shared-bridge-source-compiles-without-react)).
 - **Never add a catch-all arm to a telemetry reason classifier that matches on
   an enum** (a classifier over an open wire string may, if the fallback returns
   a fixed token and never the input)

@@ -112,7 +112,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          shared-key: release-ios
+          # The deployment target is the podspec's, and cargo does not rebuild
+          # a Rust crate when IPHONEOS_DEPLOYMENT_TARGET changes. Without the
+          # hash a lowered target restores objects stamped for the old one, and
+          # the minimum-OS gate fails on them with no cargo clean to reach. It
+          # goes in shared-key: rust-cache ignores `key` when shared-key is set.
+          shared-key: release-ios-${{ hashFiles('bindings/react-native/MeshSdk.podspec') }}
 
       - name: Cache uniffi-bindgen
         id: cache-uniffi
@@ -1112,24 +1117,48 @@ jobs:
           set -euo pipefail
           PKG="@offline-protocol/mesh-sdk@$VERSION"
 
+          # A version that is not there yet prints nothing, or an E404. An npm
+          # error of any other kind (a DNS failure, a bad .npmrc, a registry
+          # outage) is not staging, and reading it as staging would spend the
+          # whole budget and then blame the registry. So each poll keeps what
+          # npm said, and the failure below prints the last error. Warnings
+          # (`npm warn`) are not errors and read as staging.
+          ERR="$(mktemp)"
+          LAST_ERROR=""
           visible=false
           for attempt in $(seq 1 "$VISIBLE_POLLS"); do
-            if [ "$(npm view "$PKG" version 2>/dev/null || true)" = "$VERSION" ]; then
+            SEEN="$(npm view "$PKG" version 2>"$ERR" || true)"
+            if [ "$SEEN" = "$VERSION" ]; then
               visible=true
               echo "$PKG is readable on the registry (poll $attempt of $VISIBLE_POLLS)."
               break
             fi
-            echo "$PKG not readable yet, probably still staging (poll $attempt of $VISIBLE_POLLS)."
+            if ! grep -qE '^npm (ERR!|error)' "$ERR" || grep -q 'E404' "$ERR"; then
+              # A missing version after an error means the error passed.
+              LAST_ERROR=""
+              echo "$PKG not readable yet, probably still staging (poll $attempt of $VISIBLE_POLLS)."
+            else
+              # One line: a workflow annotation ends at the first newline.
+              # `%` would start an escape in a workflow command.
+              LAST_ERROR="$(grep -E '^npm (ERR!|error)' "$ERR" | tail -n 5 | tr '\n' ' ' | sed 's/%/%25/g')"
+              echo "npm view failed, not a staging answer (poll $attempt of $VISIBLE_POLLS): $LAST_ERROR"
+            fi
             sleep "$POLL_SECONDS"
           done
 
           if [ "$visible" != true ]; then
-            echo "::error title=Published version not visible::$PKG was accepted by the \
+            if [ -n "$LAST_ERROR" ]; then
+              echo "::error title=npm view failed::$PKG could not be read back for \
+          $((VISIBLE_POLLS * POLL_SECONDS)) seconds, and npm reported an error rather than \
+          a missing version, so this may not be staging at all. Last error: $LAST_ERROR"
+            else
+              echo "::error title=Published version not visible::$PKG was accepted by the \
           publish step but is still not readable after $((VISIBLE_POLLS * POLL_SECONDS)) \
           seconds. The registry stages large uploads and can take this long; check \
           'npm view $PKG dist.attestations' by hand before doing anything else. A re-run \
           is safe (the publish step skips a version that is already there) but only \
           waits again."
+            fi
             exit 1
           fi
 
