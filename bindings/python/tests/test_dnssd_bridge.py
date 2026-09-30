@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -197,9 +198,17 @@ class TestTxtRecord:
             ("c.format", "json"),
         ]
 
-    def test_capability_keys_are_in_byte_order(self):
-        entries = txt_record(ServiceRecord("s", "", {"b": "1", "B": "2", "a": "3"}), OUR_ADDRESS)
-        assert [k for k in entries if k.startswith("c.")] == ["c.B", "c.a", "c.b"]
+    def test_capability_keys_are_in_the_byte_order_of_their_lower_case_form(self):
+        # Raw byte order would put `B` (0x42) before `a` (0x61).
+        entries = txt_record(ServiceRecord("s", "", {"B": "1", "a": "2", "c": "3"}), OUR_ADDRESS)
+        assert [k for k in entries if k.startswith("c.")] == ["c.a", "c.B", "c.c"]
+
+    def test_capability_keys_that_fold_to_one_key_are_refused_not_dropped(self):
+        # RFC 6763 section 6.4: keys are case-insensitive. Publishing both
+        # is a duplicate the reader ignores the record for; publishing one
+        # is a different claim.
+        with pytest.raises(RecordRefused, match="'Foo' and 'foo' are one key"):
+            txt_record(ServiceRecord("s", "", {"Foo": "1", "foo": "2"}), OUR_ADDRESS)
 
     def test_the_size_counts_a_length_octet_per_string(self):
         entries = {"txtvers": "1", "sid": "s"}
@@ -312,6 +321,22 @@ class TestRecordFromTxt:
 
     def test_a_key_twice_is_ignored_whole(self):
         raw = raw_strings([b"txtvers=1", b"sid=a", b"sid=b", b"addr=" + PEER_ADDRESS.encode()])
+        assert record_from_txt(raw) is None
+
+    def test_keys_are_read_case_insensitively(self):
+        # RFC 6763 section 6.4: `SID=` is `sid=`, and `c.Foo` is `c.foo`.
+        raw = raw_strings(
+            [b"TXTVERS=1", b"SID=weather.v1", b"Addr=" + PEER_ADDRESS.encode(), b"c.Foo=1"]
+        )
+        record = record_from_txt(raw)
+        assert record is not None
+        assert record.service_id == "weather.v1"
+        assert record.capabilities == {"foo": "1"}
+
+    def test_a_key_twice_under_case_folding_is_ignored_whole(self):
+        raw = raw_strings([b"txtvers=1", b"sid=a", b"SID=b", b"addr=" + PEER_ADDRESS.encode()])
+        assert record_from_txt(raw) is None
+        raw = raw_strings([b"txtvers=1", b"sid=a", b"addr=" + PEER_ADDRESS.encode(), b"c.Foo=1", b"c.foo=2"])
         assert record_from_txt(raw) is None
 
     def test_a_value_that_is_not_utf8_is_ignored(self):
@@ -440,6 +465,24 @@ class TestPublishing:
         mesh.register_service.assert_called_once()
         assert "not published on the LAN" in caplog.text and "201 bytes" in caplog.text
 
+    async def test_a_responder_refusal_while_running_is_logged_with_the_service_id(
+        self, bridge, services, backend, caplog
+    ):
+        # The listener path runs in a task nobody awaits. Without the guard
+        # a refusal surfaces as "Task exception was never retrieved" at
+        # collection, without the service id, or not at all.
+        async def refuse(**kw: Any) -> object:
+            raise RuntimeError("name conflict")
+
+        backend.register = refuse  # type: ignore[assignment]
+        with caplog.at_level(logging.WARNING):
+            services.register("wiki")
+            await settle()
+        assert bridge.published() == []
+        assert bridge._tasks == set()
+        assert "service 'wiki' not published on the LAN: name conflict" in caplog.text
+        assert "never retrieved" not in caplog.text
+
     async def test_publish_refuses_anything_but_this_nodes_own(self, bridge):
         # Invariant 2: a LAN claim never goes out under this node's identity.
         lan = ServiceRecord("s", provider=PEER_ADDRESS, source=SOURCE_LAN)
@@ -522,8 +565,9 @@ class TestImporting:
         backend.on_change(PEER_NAME, False)
         await settle()
         assert bridge.lan_services() != []
-        mesh.register_service.assert_not_called()
-        mesh.unregister_service.assert_not_called()
+        # The whole engine surface, not two methods of it: a discover or a
+        # request on the import path would be as wrong as a registration.
+        assert mesh.mock_calls == []
 
     async def test_our_own_record_is_ignored(self, bridge, backend, events):
         name = service_instance_name(OUR_ADDRESS, "weather.v1")
@@ -628,6 +672,77 @@ class TestLifetime:
             await asyncio.sleep(0.15)
             assert bridge.lan_services() == []
             assert PEER_NAME in backend.resolve_calls
+        finally:
+            await bridge.stop()
+
+    async def test_a_dropped_import_comes_back_when_it_resolves_again(self, bridge, backend, events):
+        # The browser reports a name once, and again only when its own
+        # cache has forgotten it (75 minutes for the PTR). A bridge that
+        # stopped re-resolving a name when it left the listed set would
+        # lose a neighbour that missed one resolve window for that long.
+        base = time.monotonic()
+        backend.txt_by_name[PEER_NAME] = peer_txt()
+        backend.on_change(PEER_NAME, False)
+        await settle()
+        assert len(events) == 1 and len(bridge.lan_services()) == 1
+
+        # `base` was read before the browser reported the name, so every
+        # clock below is a second past the boundary it exercises.
+        del backend.txt_by_name[PEER_NAME]  # one missed window
+        await bridge.sweep(now=base + 101.0)
+        assert bridge.lan_services() == []
+        assert bridge.browsed_names() == [PEER_NAME]
+
+        backend.txt_by_name[PEER_NAME] = peer_txt()  # the neighbour is back
+        await bridge.sweep(now=base + 152.0)
+        assert len(bridge.lan_services()) == 1
+        assert len(events) == 2, "delivery is at least once: an expired entry is announced again"
+        assert events[1] == events[0]
+
+        backend.on_change(PEER_NAME, True)  # only Removed leaves the browsed set
+        assert bridge.browsed_names() == [] and bridge.lan_services() == []
+        backend.resolve_calls.clear()
+        await bridge.sweep(now=base + 300.0)
+        assert backend.resolve_calls == []
+
+    async def test_a_name_that_never_resolved_is_re_resolved_until_it_does(self, bridge, backend, events):
+        base = time.monotonic()
+        backend.on_change(PEER_NAME, False)  # reported, but the resolve times out
+        await settle()
+        assert bridge.lan_services() == [] and bridge.browsed_names() == [PEER_NAME]
+        assert backend.resolve_calls == [PEER_NAME]
+        await bridge.sweep(now=base + 49.0)
+        assert backend.resolve_calls == [PEER_NAME]
+        await bridge.sweep(now=base + 51.0)  # `base` predates the report by a hair
+        assert backend.resolve_calls == [PEER_NAME, PEER_NAME]
+        await bridge.sweep(now=base + 52.0)  # a failed attempt still counts as one
+        assert backend.resolve_calls == [PEER_NAME, PEER_NAME]
+        backend.txt_by_name[PEER_NAME] = peer_txt()
+        await bridge.sweep(now=base + 102.0)
+        assert len(bridge.lan_services()) == 1 and len(events) == 1
+
+    async def test_a_resolve_that_lands_after_the_instance_is_gone_lists_nothing(self, services, events):
+        class SlowBackend(FakeBackend):
+            def __init__(self) -> None:
+                super().__init__()
+                self.release = asyncio.Event()
+
+            async def resolve(self, name: str, timeout_ms: int) -> bytes | None:
+                await self.release.wait()
+                return await super().resolve(name, timeout_ms)
+
+        backend = SlowBackend()
+        backend.txt_by_name[PEER_NAME] = peer_txt()
+        bridge = DnsSdBridge(services, on_event=events.append, backend=backend, publish=False)
+        await bridge.start(address=OUR_ADDRESS)
+        try:
+            backend.on_change(PEER_NAME, False)
+            await settle()
+            backend.on_change(PEER_NAME, True)  # gone while the resolve is in flight
+            backend.release.set()
+            await settle()
+            assert bridge.lan_services() == [] and bridge.browsed_names() == []
+            assert events == []
         finally:
             await bridge.stop()
 

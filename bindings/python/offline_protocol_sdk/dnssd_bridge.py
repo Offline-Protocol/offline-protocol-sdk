@@ -122,8 +122,20 @@ def txt_record(record: ServiceRecord, address: str) -> dict[str, str]:
         "ver": record.version,
         "addr": address,
     }
-    for key in sorted(record.capabilities, key=lambda k: k.encode("utf-8")):
+    # TXT keys are case-insensitive (RFC 6763 section 6.4), so two
+    # capability keys that fold to one are one key: refused, never one of
+    # them dropped (a different claim) or both published (a duplicate the
+    # reader ignores the record for).
+    folded: dict[str, str] = {}
+    for key in record.capabilities:
         _check_key(key)
+        other = folded.setdefault(key.lower(), key)
+        if other != key:
+            raise RecordRefused(
+                f"capability keys {other!r} and {key!r} are one key under case folding "
+                "(RFC 6763 section 6.4)"
+            )
+    for key in sorted(record.capabilities, key=lambda k: k.lower().encode("utf-8")):
         entries[_CAPABILITY_PREFIX + key] = record.capabilities[key]
     for key, value in entries.items():
         string = len(key.encode("utf-8")) + 1 + len(value.encode("utf-8"))
@@ -175,19 +187,22 @@ def record_from_txt(raw: bytes) -> ServiceRecord | None:
     pairs = parse_txt(raw)
     if pairs is None or len(raw) > MAX_TXT_RECORD_BYTES:
         return None
-    seen: set[bytes] = set()
+    seen: set[str] = set()
     fields: dict[str, str] = {}
     capabilities: dict[str, str] = {}
     for key, value in pairs:
-        if key in seen:
-            return None
-        seen.add(key)
         try:
-            name = key.decode("ascii")
+            # Keys are case-insensitive (RFC 6763 section 6.4): folded
+            # before the duplicate check and the fixed-key match, so
+            # `SID=` is `sid=` and `c.Foo` is `c.foo`.
+            name = key.decode("ascii").lower()
             _check_key(name)
             text = "" if value is None else value.decode("utf-8")
         except (UnicodeDecodeError, RecordRefused):
             return None
+        if name in seen:
+            return None
+        seen.add(name)
         if name in _TXT_KEYS_FIXED:
             fields[name] = text
         elif name.startswith(_CAPABILITY_PREFIX) and len(name) > len(_CAPABILITY_PREFIX):
@@ -334,7 +349,16 @@ class DnsSdBridge:
         self._port = 0
         self._addresses: list[str] = []
         self._published: dict[str, Any] = {}
+        # The listed set: what the application sees.
         self._lan: dict[str, _LanEntry] = {}
+        # The browsed set: every name the browser reported and has not
+        # reported gone, by the time of its last resolve attempt. Kept apart
+        # from the listed set because a browser reports a name once, and
+        # again only when its own cache has forgotten it (75 minutes for the
+        # PTR): a bridge that stopped re-resolving a name when the name left
+        # the listed set would lose a neighbour that missed one resolve
+        # window for that long.
+        self._browsed: dict[str, float] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
         self._sweeper: asyncio.Task[None] | None = None
         self._running = False
@@ -414,6 +438,7 @@ class DnsSdBridge:
             except Exception:
                 logger.exception("withdrawing %r from the LAN failed", service_id)
         self._lan.clear()
+        self._browsed.clear()
         try:
             await self._backend.close()
         finally:
@@ -459,55 +484,91 @@ class DnsSdBridge:
 
     # ServicesListener: called on whatever thread changed the registry.
     def on_registered(self, record: ServiceRecord) -> None:
-        self._later(lambda: self.publish(record))
+        self._later(
+            lambda: self.publish(record),
+            f"service {record.service_id!r} not published on the LAN",
+        )
 
     def on_unregistered(self, record: ServiceRecord) -> None:
-        self._later(lambda: self.withdraw(record))
+        self._later(
+            lambda: self.withdraw(record),
+            f"service {record.service_id!r} not withdrawn from the LAN",
+        )
 
-    def _later(self, make: Callable[[], Any]) -> None:
+    def _later(self, make: Callable[[], Any], what: str) -> None:
         loop = self._loop
         if loop is None or not self._running:
             return
-        loop.call_soon_threadsafe(self._spawn, make)
+        loop.call_soon_threadsafe(self._spawn, make, what)
 
-    def _spawn(self, make: Callable[[], Any]) -> None:
+    def _spawn(self, make: Callable[[], Any], what: str) -> None:
         if not self._running or self._loop is None:
             return
-        task = self._loop.create_task(make())
+        task = self._loop.create_task(self._guarded(make, what))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    @staticmethod
+    async def _guarded(make: Callable[[], Any], what: str) -> None:
+        """Run one scheduled step and log what it was when it fails. A task
+        nobody awaits otherwise reports "exception was never retrieved" at
+        collection, without the service id, or nothing at all."""
+        try:
+            await make()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("%s: %s", what, exc, exc_info=True)
 
     # -- importing ------------------------------------------------------------
 
     def lan_services(self) -> list[ServiceRecord]:
-        """What the LAN's neighbours currently claim to offer."""
+        """What the LAN's neighbours currently claim to offer: the listed
+        set."""
         return [entry.record for entry in self._lan.values()]
+
+    def browsed_names(self) -> list[str]:
+        """Every instance name the browser has reported and not yet reported
+        gone, listed or not: the browsed set, which the sweep re-resolves."""
+        return list(self._browsed)
 
     def _on_change(self, name: str, removed: bool) -> None:
         if removed:
+            self._browsed.pop(name, None)
             self._lan.pop(name, None)
             return
-        self._spawn(lambda: self._resolve_and_import(name))
+        self._browsed[name] = time.monotonic()
+        self._spawn(
+            lambda: self._resolve_and_import(name),
+            f"instance {name!r} not resolved",
+        )
 
-    async def _resolve_and_import(self, name: str) -> None:
+    async def _resolve_and_import(self, name: str, now: float | None = None) -> None:
         if self._backend is None:
             return
         raw = await self._backend.resolve(name, self._resolve_timeout_ms)
+        if name not in self._browsed:
+            # Reported gone while the resolve was in flight: an import now
+            # would list an instance the browser has already withdrawn.
+            return
         if raw is not None:
-            self.import_txt(name, raw)
+            self.import_txt(name, raw, now=now)
 
     def import_txt(self, name: str, raw: bytes, now: float | None = None) -> bool:
         """Take a resolved instance's TXT record into the LAN registry.
-        Returns whether an event was delivered: a new instance, or one whose
-        record changed. A record the chapter says to ignore removes any
-        earlier import under that name; this node's own record is ignored."""
+        Returns whether an event was delivered: a new instance, one whose
+        record changed, or one that had expired from the listed set and
+        resolved again (delivery is at least once). A record the chapter
+        says to ignore removes any earlier import under that name; this
+        node's own record is ignored. A resolved name is a browsed name."""
+        seen_at = time.monotonic() if now is None else now
+        self._browsed[name] = seen_at
         record = record_from_txt(raw)
         if record is None:
             self._lan.pop(name, None)
             return False
         if record.provider == self._address:
             return False
-        seen_at = time.monotonic() if now is None else now
         previous = self._lan.get(name)
         self._lan[name] = _LanEntry(record, seen_at)
         if previous is not None and previous.record == record:
@@ -516,18 +577,19 @@ class DnsSdBridge:
         return True
 
     async def sweep(self, now: float | None = None) -> None:
-        """Re-resolve every import older than half the time to live, and
-        drop every one older than the whole of it. The periodic task calls
-        this; a test calls it with a clock of its own."""
+        """Drop every listed entry older than the time to live, then
+        re-resolve every browsed name whose last resolve attempt is older
+        than half of it, listed or not. The periodic task calls this; a
+        test calls it with a clock of its own."""
         current = time.monotonic() if now is None else now
         for name, entry in list(self._lan.items()):
-            age = current - entry.seen_at
-            if age >= self._ttl:
+            if current - entry.seen_at >= self._ttl:
                 self._lan.pop(name, None)
-            elif age >= self._ttl / 2 and self._backend is not None:
-                raw = await self._backend.resolve(name, self._resolve_timeout_ms)
-                if raw is not None:
-                    self.import_txt(name, raw, now=current)
+        for name, attempted_at in list(self._browsed.items()):
+            if current - attempted_at < self._ttl / 2 or name not in self._browsed:
+                continue
+            self._browsed[name] = current
+            await self._resolve_and_import(name, now=current)
 
     async def _sweep_forever(self) -> None:
         while self._running:

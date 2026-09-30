@@ -413,3 +413,15 @@ Both license texts, along with `THIRD-PARTY-NOTICES.md`, are also installed with
 package under `offline_protocol_sdk-<version>.dist-info/licenses/`. The links above are
 absolute because this file is the PyPI long description, and PyPI does not resolve
 repository-relative links.
+
+### Optional dependencies
+
+`THIRD-PARTY-NOTICES.md` covers the Rust crates compiled into the native
+library. The `lan` extra (`pip install 'offline-protocol-sdk[lan]'`) adds two
+runtime dependencies that pip installs from PyPI and that are never
+redistributed in this wheel: [python-zeroconf](https://pypi.org/project/zeroconf/)
+(LGPL-2.1-or-later), used by `peer_stream_manager.py` and `dnssd_bridge.py`
+for DNS-SD, and [ifaddr](https://pypi.org/project/ifaddr/) (MIT), used to
+list the interface addresses a record publishes. Both are imported only when a
+manager or bridge is asked to advertise or discover; the base install imports
+neither.
