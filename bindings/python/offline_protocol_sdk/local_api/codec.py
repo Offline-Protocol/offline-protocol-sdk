@@ -120,12 +120,7 @@ def decode(type_name: str, value: Any, where: str) -> Any:
     if type_name in _FLOATS:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise invalid_params(f"{where}: expected a number")
-        try:
-            return float(value)
-        except OverflowError:
-            # An integer JSON can spell but a double cannot hold: a refusal,
-            # not an exception that closes the connection.
-            raise invalid_params(f"{where}: {value!r} is outside {type_name}") from None
+        return float(value)
     if type_name == "bytes":
         return _b64decode(value, where)
     if type_name == "sequence<u8>":

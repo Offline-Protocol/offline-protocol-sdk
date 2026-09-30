@@ -75,12 +75,7 @@ def validate_app_id(value: Any) -> str:
         raise taxonomy_error("InvalidArgument", "app_id must be a string")
     if not value or value in (".", ".."):
         raise taxonomy_error("InvalidArgument", "app_id must not be empty, '.' or '..'")
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError:
-        # A lone surrogate is valid JSON text and not valid UTF-8.
-        raise taxonomy_error("InvalidArgument", "app_id is not valid UTF-8") from None
-    if len(encoded) > APP_ID_MAX_BYTES:
+    if len(value.encode("utf-8")) > APP_ID_MAX_BYTES:
         raise taxonomy_error("InvalidArgument", f"app_id is over {APP_ID_MAX_BYTES} bytes")
     if any(ord(ch) < 0x20 or ch == "\x7f" for ch in value):
         raise taxonomy_error("InvalidArgument", "app_id contains a control character")
@@ -106,20 +101,8 @@ class LocalApiServer:
         The space allow-lists and method denials; empty by default.
     socket_path:
         The Unix domain socket to serve on (the default carrier). Created
-        ``0600``. A directory the server creates for it is made ``0700``; a
-        directory that already exists must be this user's with no group or
-        other permissions, and is refused otherwise rather than narrowed. A
-        stale socket file at the path is removed first; anything else at
-        the path is refused.
-
-    Every engine call a client makes runs on the event loop's default
-    executor behind one server-wide lock: calls are serialised, so the
-    caller rule's attribution stays exact, and the loop keeps ticking
-    (``process()``, the drain, other connections' framing, ``GET /health``)
-    while one runs. A media send marshals its bytes per element in pure
-    Python, about 1.5 s per MiB, which is the cost that rule pays for.
-    ``hello``, ``subscribe`` and ``unsubscribe`` run on the loop; the two
-    engine reads in ``hello`` hold the engine's lock for microseconds.
+        ``0600`` in a directory made ``0700``; a stale file at the path is
+        removed first.
     tcp_port, tcp_host, token_path:
         The loopback TCP alternative: ``tcp_port`` (``0`` picks a free port,
         readable as :attr:`port`), a loopback ``tcp_host``, and the file the
@@ -184,12 +167,6 @@ class LocalApiServer:
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
-        if self.socket_path is not None:
-            # Refused before the engine starts: a directory or a path the
-            # server may not use is the operator's to fix, and no reason to
-            # have opened the stores.
-            _prepare_socket_directory(self.socket_path.parent)
-            _remove_stale_socket(self.socket_path)
         self._manager.on_event(self._on_engine_event)
         await self._manager.start()
         try:
@@ -204,9 +181,8 @@ class LocalApiServer:
                 # The data layer is off or has no storage; every `data.*`
                 # call answers with this same refusal.
                 data = exc
-            self._call_lock = asyncio.Lock()
             self._dispatcher = Dispatcher(
-                engine, services, data, self._router, self._policy, self._ownership, self._call_lock
+                engine, services, data, self._router, self._policy, self._ownership
             )
             if self.socket_path is not None:
                 self._server = await self._serve_unix(self.socket_path)
@@ -222,8 +198,10 @@ class LocalApiServer:
         logger.info("local API serving on %s", self.socket_path or f"{self._tcp_host}:{self.port}")
 
     async def _serve_unix(self, path: Path) -> Server:
-        # The directory and the path were checked in `start()`, before the
-        # engine came up.
+        path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(path.parent, stat.S_IRWXU)
+        if path.exists() or path.is_symlink():
+            path.unlink()
         server = await unix_serve(
             self._handle,
             path=str(path),
@@ -279,9 +257,9 @@ class LocalApiServer:
         await self._stop_manager()
         if self.socket_path is not None:
             try:
-                _remove_stale_socket(self.socket_path)
-            except ValueError:
-                logger.warning("%s is no longer this server's socket; left in place", self.socket_path)
+                self.socket_path.unlink()
+            except FileNotFoundError:
+                pass
         if self.token_path is not None:
             try:
                 self.token_path.unlink()
@@ -307,16 +285,11 @@ class LocalApiServer:
         except RuntimeError:
             on_loop = False
         if on_loop:
-            # The run loop or the drain, on this thread: never a client's
-            # call, whatever call is in flight on the executor right now.
             self._route(event)
         else:
-            # The executor thread executing one client's call. Queued behind
-            # whatever is already on the loop and ahead of the call's own
-            # completion, so it is routed while that client is the caller.
-            loop.call_soon_threadsafe(self._route, event, True)
+            loop.call_soon_threadsafe(self._route, event)
 
-    def _route(self, event: dict[str, Any], in_call: bool = False) -> None:
+    def _route(self, event: dict[str, Any]) -> None:
         if not isinstance(event, dict):
             return
         if event.get("type") == "message_received" and "message_id" not in event:
@@ -325,7 +298,7 @@ class LocalApiServer:
             # emitted the real event inside that same `receive_message()`
             # call, so this copy is dropped rather than delivered twice.
             return
-        self._router.route(event, in_call=in_call)
+        self._router.route(event)
 
     # -- the request hook -----------------------------------------------------
 
@@ -353,10 +326,7 @@ class LocalApiServer:
         sender = asyncio.ensure_future(session.sender(websocket))
         try:
             async for raw in websocket:
-                # One request at a time per connection, in arrival order;
-                # the call itself runs on the executor behind the server's
-                # one lock, so the loop keeps ticking while it runs.
-                await self._handle_frame(session, raw)
+                self._handle_frame(session, raw)
         except ConnectionClosed:
             pass
         finally:
@@ -366,7 +336,7 @@ class LocalApiServer:
             sender.cancel()
             await asyncio.gather(sender, return_exceptions=True)
 
-    async def _handle_frame(self, session: Session, raw: str | bytes) -> None:
+    def _handle_frame(self, session: Session, raw: str | bytes) -> None:
         if isinstance(raw, bytes):
             session.push(self._error(None, RpcError(codec.INVALID_REQUEST, "text frames only")))
             return
@@ -387,9 +357,7 @@ class LocalApiServer:
             # A notification: a client never sends one, and it gets no answer.
             return
         request_id = request["id"]
-        # A string or a number (JSON-RPC 2.0 allows a fractional one); `true`
-        # is an int to Python and not a number to the framing.
-        if not (request_id is None or isinstance(request_id, (str, int, float))) or isinstance(request_id, bool):
+        if not (request_id is None or isinstance(request_id, (str, int))) or isinstance(request_id, bool):
             session.push(self._error(None, RpcError(codec.INVALID_REQUEST, "id must be a string or a number")))
             return
         method = request.get("method")
@@ -416,24 +384,13 @@ class LocalApiServer:
                 result = self._subscription(session, method, params or {})
             else:
                 assert self._dispatcher is not None
-                result = await self._dispatcher.call(session, method, params)
+                result = self._dispatcher.call(session, method, params)
         except _CloseAfter as exc:
             session.push(self._error(request_id, exc))
             session.push_close(POLICY_VIOLATION, "policy violation")
             return
         except RpcError as exc:
             session.push(self._error(request_id, exc))
-            return
-        except Exception:
-            # A value the decoders did not foresee, or a failure of the
-            # server's own: the server's log gets the traceback, the client
-            # gets an error object, and the connection stays open. Without
-            # this the library closes the socket with 1011 and the client
-            # learns nothing.
-            logger.exception("internal error handling %s", method)
-            session.push(
-                self._error(request_id, RpcError(codec.INTERNAL_ERROR, f"{method}: internal error"))
-            )
             return
         session.push({"jsonrpc": "2.0", "id": request_id, "result": result})
 
@@ -457,14 +414,7 @@ class LocalApiServer:
             raise codec.invalid_params("hello.client must be a string")
         if self.carrier == "tcp":
             token = params.get("token")
-            # `compare_digest` takes ASCII strings only and raises on
-            # anything else; a token that is not ASCII is simply wrong.
-            if (
-                not isinstance(token, str)
-                or not token.isascii()
-                or self.token is None
-                or not hmac.compare_digest(token, self.token)
-            ):
+            if not isinstance(token, str) or self.token is None or not hmac.compare_digest(token, self.token):
                 raise _CloseAfter(*_permission_denied("hello.token is missing or wrong"))
         # Once any rule is configured, an id no rule names is refused, so a
         # rule cannot be stepped around by reconnecting under another name.
@@ -500,42 +450,3 @@ class LocalApiServer:
 def _permission_denied(message: str) -> tuple[int, str, dict[str, Any]]:
     error = taxonomy_error("PermissionDenied", message)
     return error.code, error.message, error.data or {}
-
-
-def _prepare_socket_directory(directory: Path) -> None:
-    """The socket's directory, owner-only, without touching what the server
-    did not create.
-
-    A directory the server creates is made ``0700``. One that already exists
-    is required to be this user's with no group or other bits, and is
-    otherwise refused by name: narrowing an operator's ``0755`` directory
-    (or ``/tmp``) to ``0700`` is not the server's to do, and a socket inside
-    a directory others can enter is not the credential the chapter says it
-    is.
-    """
-    try:
-        found = directory.stat()
-    except FileNotFoundError:
-        directory.mkdir(parents=True)
-        os.chmod(directory, stat.S_IRWXU)
-        return
-    if not stat.S_ISDIR(found.st_mode):
-        raise ValueError(f"{directory} exists and is not a directory")
-    mode = stat.S_IMODE(found.st_mode)
-    if found.st_uid != os.getuid() or mode & 0o077:
-        raise ValueError(
-            f"{directory} must be owned by this user with no group or other "
-            f"permissions (found mode {mode:04o}); the server does not narrow a "
-            "directory it did not create"
-        )
-
-
-def _remove_stale_socket(path: Path) -> None:
-    """Removes a socket file left by an earlier launch, and nothing else."""
-    try:
-        found = os.lstat(path)
-    except FileNotFoundError:
-        return
-    if not stat.S_ISSOCK(found.st_mode):
-        raise ValueError(f"{path} exists and is not a socket; refusing to remove it")
-    path.unlink()

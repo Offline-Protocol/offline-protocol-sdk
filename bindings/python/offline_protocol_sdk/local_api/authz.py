@@ -86,19 +86,10 @@ class Policy:
         spaces = {str(k): [str(p) for p in v] for k, v in (raw.get("spaces") or {}).items()}
         denied = {str(k): [str(m) for m in v] for k, v in (raw.get("denied") or {}).items()}
         applications = [str(a) for a in (raw.get("applications") or [])]
-        # Imported here: dispatch imports this module. A deny that names
-        # nothing on the wire would otherwise deny nothing and say nothing,
-        # and an operator who misspelled `sign_data` would believe the
-        # signing oracle denied while every application still held it.
-        from .dispatch import EXPOSED
-
         for app_id, names in denied.items():
             for name in names:
-                if name not in METHOD_GROUPS and name not in EXPOSED:
-                    raise ValueError(
-                        f"policy denies {name!r} for {app_id!r}: not a method group "
-                        f"({', '.join(sorted(METHOD_GROUPS))}) or an exposed method"
-                    )
+                if name not in METHOD_GROUPS and "." not in name and not name.isidentifier():
+                    raise ValueError(f"policy denies {name!r} for {app_id!r}: not a method or group")
         return cls(spaces=spaces, denied=denied, applications=applications)
 
     def restricts(self) -> bool:

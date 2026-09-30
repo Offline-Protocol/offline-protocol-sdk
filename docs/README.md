@@ -17,6 +17,7 @@ before changing behaviour, not before using the SDK.
 | [React Native Integration](react-native-integration.md) | Full SDK integration guide with complete API reference |
 | [iOS Integration](ios-integration.md) | Native iOS (Swift) setup and usage |
 | [Android Integration](android-integration.md) | Native Android (Kotlin) setup and usage |
+| [The local API](local-api.md) | Run the SDK as a service several local applications share: the service, the policy file, and the two client examples |
 
 ## Core Concepts
 

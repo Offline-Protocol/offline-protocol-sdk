@@ -10,7 +10,7 @@ identifiers and ``space_id``.
 from __future__ import annotations
 
 import logging
-from collections import OrderedDict, deque
+from collections import deque
 from typing import Any, Callable, Iterable
 
 from .authz import Policy, ServiceOwnership
@@ -30,24 +30,6 @@ HOLD_CAPACITY = 256
 #: Identifier fields the server correlates by, in the order they are read.
 CORRELATION_KEYS: tuple[str, ...] = ("message_id", "file_id", "query_id", "request_id")
 
-#: How many issued identifiers are remembered. An identifier is forgotten on
-#: its terminal event; one whose terminal event never comes (a query, a
-#: message the engine gave up on silently) is evicted oldest-first past
-#: this, after which its events are broadcast, which is what the chapter
-#: says happens to an identifier the server does not know.
-ISSUED_CAPACITY = 65536
-
-#: The last event that names an identifier, after which it is forgotten.
-TERMINAL_TAGS: dict[str, str] = {
-    "message_delivered": "message_id",
-    "message_failed": "message_id",
-    "message_undeliverable": "message_id",
-    "connection_request_undeliverable": "message_id",
-    "media_sent": "file_id",
-    "media_send_failed": "file_id",
-    "service_response_received": "request_id",
-}
-
 
 class EventRouter:
     """Selects the sessions an event reaches and pushes it to them."""
@@ -62,12 +44,8 @@ class EventRouter:
         self._policy = policy
         self._ownership = ownership
         self._sessions: dict[str, list[Session]] = {}
-        self._issued: OrderedDict[str, str] = OrderedDict()
+        self._issued: dict[str, str] = {}
         self._held: dict[str, deque[dict[str, Any]]] = {}
-        #: Events the run loop emitted while a call was in flight, naming an
-        #: identifier nobody owned yet. Routed once the call's result is
-        #: recorded (see `flush_parked`).
-        self._parked: list[dict[str, Any]] = []
         self._on_drop = on_drop
         #: The session whose call the server is executing right now, if any.
         self.current_caller: Session | None = None
@@ -103,29 +81,17 @@ class EventRouter:
 
     # -- identifiers ----------------------------------------------------------
 
-    def issued_count(self) -> int:
-        return len(self._issued)
-
-    def knows(self, identifier: str) -> bool:
-        return identifier in self._issued
-
     def note_ids(self, app_id: str, ids: Iterable[Any]) -> None:
         """Records identifiers the server handed to ``app_id`` as results."""
         for value in ids:
             if isinstance(value, str) and value:
-                self._remember(value, app_id)
-
-    def _remember(self, identifier: str, app_id: str) -> None:
-        self._issued[identifier] = app_id
-        self._issued.move_to_end(identifier)
-        while len(self._issued) > ISSUED_CAPACITY:
-            self._issued.popitem(last=False)
+                self._issued[value] = app_id
 
     def _record_from_event(self, app_id: str, event: dict[str, Any]) -> None:
         for key in CORRELATION_KEYS:
             value = event.get(key)
-            if isinstance(value, str) and value and value not in self._issued:
-                self._remember(value, app_id)
+            if isinstance(value, str) and value:
+                self._issued.setdefault(value, app_id)
 
     def _correlated_app(self, event: dict[str, Any]) -> str | None:
         for key in CORRELATION_KEYS:
@@ -137,24 +103,10 @@ class EventRouter:
             return self._ownership.owner(service_id)
         return None
 
-    def _forget_terminal(self, tag: Any, event: dict[str, Any]) -> None:
-        key = TERMINAL_TAGS.get(tag) if isinstance(tag, str) else None
-        if key is None:
-            return
-        value = event.get(key)
-        if isinstance(value, str):
-            self._issued.pop(value, None)
-
     # -- routing --------------------------------------------------------------
 
-    def route(self, event: dict[str, Any], *, in_call: bool = False) -> None:
-        """Pushes ``event`` to the sessions the rules select.
-
-        ``in_call`` says the event was emitted on the thread executing a
-        client's call. Only then does the caller rule apply: an event the
-        run loop emits while a call is in flight on the executor is not the
-        caller's, and would be misattributed to it otherwise.
-        """
+    def route(self, event: dict[str, Any]) -> None:
+        """Pushes ``event`` to the sessions the rules select."""
         tag = event.get("type")
         app_id = event.get("app_id")
         if isinstance(app_id, str):
@@ -168,46 +120,15 @@ class EventRouter:
             # has nothing to route or hold by, so it is broadcast, and said.
             logger.info("%s carries no app_id: broadcast, not held", tag)
             targets = self.all_sessions()
-        elif in_call and self.current_caller is not None and self.current_caller.app_id is not None:
+        elif self.current_caller is not None and self.current_caller.app_id is not None:
             caller = self.current_caller
             self._record_from_event(caller.app_id, event)
             targets = self.sessions_for(caller.app_id)
         else:
             owner = self._correlated_app(event)
-            if owner is None and self.current_caller is not None and self._names_an_identifier(event):
-                # The run loop emitted this while a call was in flight, and
-                # nobody owns the identifier it names yet. Between the
-                # executor's completion and the wakeup that records the
-                # call's result, one or two loop iterations run; a `process()`
-                # tick landing there can emit `message_sent` for the very id
-                # the call is about to return, content and all. Broadcasting
-                # it would hand one application's message to every other, so
-                # it waits for the result to be recorded.
-                self._parked.append(event)
-                return
             targets = self.sessions_for(owner) if owner is not None else self.all_sessions()
         for session in targets:
             self._deliver(session, tag, event)
-        self._forget_terminal(tag, event)
-
-    def flush_parked(self) -> None:
-        """Routes what was parked during a call, now that its identifiers are
-        recorded. Called with no caller set, after the call's result was
-        noted, or after its failure, when the events route by the ordinary
-        rules (an unknown identifier broadcasts) but never with the caller's
-        own identifiers still unknown."""
-        parked, self._parked = self._parked, []
-        for event in parked:
-            self.route(event)
-
-    def parked_count(self) -> int:
-        return len(self._parked)
-
-    @staticmethod
-    def _names_an_identifier(event: dict[str, Any]) -> bool:
-        return any(
-            isinstance(event.get(key), str) and event.get(key) for key in CORRELATION_KEYS
-        )
 
     def _deliver(self, session: Session, tag: Any, event: dict[str, Any]) -> None:
         if not session.wants(tag):
