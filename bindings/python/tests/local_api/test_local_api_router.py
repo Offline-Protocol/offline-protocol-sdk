@@ -101,7 +101,7 @@ async def test_an_event_emitted_inside_a_call_belongs_to_the_caller(router):
     notes = attached(router, "notes")
     other = attached(router, "other")
     router.current_caller = notes
-    router.route({"type": "message_sent", "message_id": "m9", "sender": "a", "recipient": "b"})
+    router.route({"type": "message_sent", "message_id": "m9", "sender": "a", "recipient": "b"}, in_call=True)
     router.current_caller = None
     assert [e["type"] for e in drain(notes)] == ["message_sent"]
     assert drain(other) == []
@@ -164,3 +164,49 @@ async def test_detach_stops_delivery(router):
     router.route({"type": "message_received", "message_id": "m1", "app_id": "notes"})
     assert drain(notes) == []
     assert router.held_count("notes") == 1
+
+
+async def test_an_event_from_the_run_loop_during_a_call_is_not_the_callers(router):
+    notes = attached(router, "notes")
+    other = attached(router, "other")
+    router.current_caller = notes
+    # Emitted on the loop thread by `process()` while notes' call is in
+    # flight on the executor: broadcast, and the id it names stays unknown.
+    router.route({"type": "message_delivered", "message_id": "not-ours"})
+    router.route({"type": "neighbor_lost", "peer_id": "p"})
+    router.current_caller = None
+    assert [e["type"] for e in drain(notes)] == ["message_delivered", "neighbor_lost"]
+    assert [e["type"] for e in drain(other)] == ["message_delivered", "neighbor_lost"]
+    assert not router.knows("not-ours")
+
+
+async def test_issued_identifiers_are_bounded_oldest_first(router):
+    from offline_protocol_sdk.local_api.mux import ISSUED_CAPACITY
+
+    notes = attached(router, "notes")
+    other = attached(router, "other")
+    router.note_ids("notes", [f"id{i}" for i in range(ISSUED_CAPACITY + 5)])
+    assert router.issued_count() == ISSUED_CAPACITY
+    assert not router.knows("id0") and not router.knows("id4")
+    assert router.knows("id5") and router.knows(f"id{ISSUED_CAPACITY + 4}")
+    # An evicted id is unknown, so its event is broadcast, as the chapter says.
+    router.route({"type": "message_failed", "message_id": "id0", "reason": "x", "retry_count": 1})
+    router.route({"type": "message_failed", "message_id": "id5", "reason": "x", "retry_count": 1})
+    assert [e["message_id"] for e in drain(notes)] == ["id0", "id5"]
+    assert [e["message_id"] for e in drain(other)] == ["id0"]
+
+
+async def test_a_terminal_event_forgets_its_identifier_after_routing_it(router):
+    notes = attached(router, "notes")
+    other = attached(router, "other")
+    router.note_ids("notes", ["m1", "f1"])
+    router.route({"type": "file_progress", "file_id": "f1", "chunks_sent": 1})
+    assert router.knows("f1")
+    router.route({"type": "message_delivered", "message_id": "m1"})
+    router.route({"type": "media_sent", "file_id": "f1", "recipient": "r"})
+    assert [e["type"] for e in drain(notes)] == ["file_progress", "message_delivered", "media_sent"]
+    assert drain(other) == []
+    assert not router.knows("m1") and not router.knows("f1")
+    # Anything later naming the id is broadcast.
+    router.route({"type": "message_failed", "message_id": "m1", "reason": "x", "retry_count": 1})
+    assert [e["type"] for e in drain(other)] == ["message_failed"]

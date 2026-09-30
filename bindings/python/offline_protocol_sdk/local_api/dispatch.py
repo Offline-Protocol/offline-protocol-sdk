@@ -17,6 +17,7 @@ set, and the rich twins refuse an ``app_id`` the client sent.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable
 
 from .. import offline_protocol as generated
@@ -352,7 +353,14 @@ class Dispatcher:
         router: EventRouter,
         policy: Policy,
         ownership: ServiceOwnership,
+        lock: asyncio.Lock,
     ) -> None:
+        #: One lock for the whole server: engine calls run one at a time, on
+        #: the default executor, so a slow one (a media send marshals its
+        #: bytes per element in pure Python, about 1.5 s per MiB) neither
+        #: stalls the event loop nor interleaves with another client's call,
+        #: which is what keeps the caller rule's attribution exact.
+        self._lock = lock
         self._engine = engine
         self._services = services
         #: The ``DataStore``, or the exception its construction raised, so
@@ -364,7 +372,7 @@ class Dispatcher:
 
     # -- entry ----------------------------------------------------------------
 
-    def call(self, session: Session, method: str, params: Any) -> Any:
+    async def call(self, session: Session, method: str, params: Any) -> Any:
         if method not in EXPOSED:
             raise RpcError(codec.METHOD_NOT_FOUND, f"unknown method {method}")
         if session.app_id is None:
@@ -379,19 +387,25 @@ class Dispatcher:
             session, method, obj, declaration, args, result_type
         )
         fn: Callable[..., Any] = getattr(target, declaration)
-        self._router.current_caller = session
-        try:
-            result = fn(**args)
-        except generated.ProtocolError as exc:
-            self._after_failure(method, args)
-            raise error_from_protocol(exc) from None
-        except RpcError:
-            raise
-        except Exception as exc:  # the binding itself failed
-            self._after_failure(method, args)
-            raise RpcError(codec.INTERNAL_ERROR, f"{method}: {exc}") from None
-        finally:
-            self._router.current_caller = None
+        loop = asyncio.get_running_loop()
+        async with self._lock:
+            # Set while the lock is held: an event the engine emits on the
+            # executor thread during this call reaches the loop through
+            # `call_soon_threadsafe` ahead of the call's own completion, so
+            # it is routed while this is still the caller.
+            self._router.current_caller = session
+            try:
+                result = await loop.run_in_executor(None, lambda: fn(**args))
+            except generated.ProtocolError as exc:
+                self._after_failure(method, args)
+                raise error_from_protocol(exc) from None
+            except RpcError:
+                raise
+            except Exception as exc:  # the binding itself failed
+                self._after_failure(method, args)
+                raise RpcError(codec.INTERNAL_ERROR, f"{method}: {exc}") from None
+            finally:
+                self._router.current_caller = None
         result = self._after_success(session, method, args, result)
         return codec.encode(result_type, result)
 
