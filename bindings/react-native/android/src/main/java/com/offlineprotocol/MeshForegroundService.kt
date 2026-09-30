@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -190,6 +191,14 @@ class MeshForegroundService : Service() {
 
     /** The armed watchdog, or null when no wake is outstanding. */
     private var wakeWatchdog: Runnable? = null
+
+    /**
+     * How [dispatchWake] starts the wake service: [startService], and a test
+     * seam only. `startService` answers null when it starts nothing, and
+     * Robolectric's never does, so the null branch below is reachable from a
+     * test only through here.
+     */
+    internal var startWakeService: (Intent) -> ComponentName? = { startService(it) }
 
     inner class LocalBinder : Binder() {
         fun getService(): MeshForegroundService = this@MeshForegroundService
@@ -396,7 +405,7 @@ class MeshForegroundService : Service() {
                     "declared in this application; stopping instead",
             )
             false
-        } else if (startService(intent) == null) {
+        } else if (startWakeService(intent) == null) {
             Log.w(TAG, "The mesh wake service did not start; stopping instead")
             false
         } else {
