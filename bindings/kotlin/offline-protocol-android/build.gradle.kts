@@ -117,6 +117,19 @@ android {
             withSourcesJar()
         }
     }
+
+    // A call to an API newer than minSdk compiles, passes every unit test on
+    // the JVM, and throws NoClassDefFoundError on an older phone, which a
+    // `catch (e: Exception)` does not catch. java.time on Android 7 was one.
+    // Lint's NewApi check is the class of that defect, so it runs alone and
+    // fails the build: the other checks report findings this library has not
+    // decided on. lint.xml leaves out the generated bindings, which guard
+    // their one such call behind a Class.forName.
+    lint {
+        checkOnly += "NewApi"
+        abortOnError = true
+        lintConfig = file("lint.xml")
+    }
 }
 
 // A source set is a list of directories and cannot leave a file out, so the

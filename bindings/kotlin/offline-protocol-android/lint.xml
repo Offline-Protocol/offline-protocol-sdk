@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The generated UniFFI bindings are regenerated, never edited, and guard
+  their one newer API (java.lang.ref.Cleaner) behind a Class.forName check
+  that lint cannot follow. Every hand-written source is still checked.
+-->
+<lint>
+    <issue id="NewApi">
+        <ignore path="**/uniffi/**" />
+    </issue>
+</lint>

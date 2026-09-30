@@ -15135,11 +15135,12 @@ mod tests {
     ///
     /// `minSdk` is 24 and `java.time` exists from API 26. On API 24 or 25 a
     /// call throws `NoClassDefFoundError`, an `Error`, which passes through
-    /// the `catch (e: Exception)` these call sites are written with. Nothing
-    /// else would say so: the unit suite runs on a JVM that has `java.time`,
-    /// the build does not run Android lint, and desugaring would be every
+    /// the `catch (e: Exception)` these call sites are written with. The unit
+    /// suite runs on a JVM that has `java.time`, and desugaring would be every
     /// application's switch to throw, not this library's. `RelayTimestamps`
-    /// parses ISO-8601 by hand for exactly this reason.
+    /// parses ISO-8601 by hand for exactly this reason. The Android Library
+    /// CI job runs lint's NewApi check, which covers every newer API; this
+    /// guard keeps the one that already shipped from coming back without it.
     #[test]
     fn android_bridge_sources_never_call_java_time() {
         let callers: Vec<String> = rn_android_kotlin_sources()
