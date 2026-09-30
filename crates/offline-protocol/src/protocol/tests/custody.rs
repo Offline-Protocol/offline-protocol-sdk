@@ -904,6 +904,20 @@ fn a_receipt_is_judged_from_its_own_timestamp_not_from_arrival() {
         .protocol
         .custody_suppressed_toward(&frame.id, &bob.address));
 
+    // One stamped a day ahead of this clock is judged from local now: the
+    // suppression ends by now + hold, not a day later.
+    let ahead = receipt_at(&mut bob, now_ms + 86_400_000);
+    alice.receive_from(ahead, &bob.address);
+    assert!(alice
+        .protocol
+        .custody_suppressed_toward(&frame.id, &bob.address));
+    let until = alice.protocol.custody_receipts[&frame.id][&bob.address];
+    assert!(
+        until <= Utc::now().timestamp_millis() + hold_ms as i64,
+        "a future timestamp must not extend the suppression"
+    );
+    alice.protocol.custody_receipts.clear();
+
     // A fresh one suppresses until its hold elapses on the wall clock.
     let fresh = receipt_at(&mut bob, now_ms);
     alice.receive_from(fresh, &bob.address);

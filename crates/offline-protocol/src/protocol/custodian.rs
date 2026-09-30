@@ -395,7 +395,13 @@ impl OfflineProtocol {
         let hold_ms = receipt
             .hold_ms
             .min(self.config.reliability.retry.outbox_max_lifetime_ms);
-        let until_ms = minted_at_ms.saturating_add(i64::try_from(hold_ms).unwrap_or(i64::MAX));
+        // Never from a timestamp ahead of this device's clock: the control
+        // gate admits one up to two days ahead, and never checks it on an
+        // unbound signature, so a fast-clock custodian would otherwise
+        // suppress re-deposit toward itself past its own hold.
+        let until_ms = minted_at_ms
+            .min(Utc::now().timestamp_millis())
+            .saturating_add(i64::try_from(hold_ms).unwrap_or(i64::MAX));
 
         let custodians = self.custody_receipts.entry(id.clone()).or_default();
         if !custodians.contains_key(custodian)
