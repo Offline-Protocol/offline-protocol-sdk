@@ -144,6 +144,47 @@ sealed protocol-state record. Install a real secret service (gnome-keyring,
 kwallet) for any deployment where that matters, supply your own
 `MlsStorageProvider`, or use the built-in file stores below.
 
+### Run as a service: the local API
+
+One process can own the engine and serve several local applications at once,
+over JSON-RPC 2.0 on a WebSocket. The contract is
+[the local API chapter](../../docs/spec/local-api.md); the reference server
+ships in this package as `offline_protocol_sdk.local_api` and as the
+`offline-protocol-service` command:
+
+```bash
+export OFFLINE_PROTOCOL_STORE_KEY="$(openssl rand -hex 32)"   # once; keep it
+offline-protocol-service --config config.json \
+    --mls-root /var/lib/example/keys --state-root /var/lib/example/state \
+    --socket /run/example/api.sock --listen 0.0.0.0:7878 --peer 10.0.0.2:7878
+```
+
+`config.json` holds the `ProtocolConfig` fields by name; the socket is
+created owner-only. A client opens the socket, sends `hello` with its
+application id, and calls the engine's own methods by name:
+
+```python
+import asyncio, json
+from websockets.asyncio.client import unix_connect
+
+async def main():
+    async with unix_connect("/run/example/api.sock", uri="ws://localhost/") as ws:
+        await ws.send(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "hello",
+                                  "params": {"app_id": "notes"}}))
+        print(json.loads(await ws.recv())["result"]["local_address"])
+
+asyncio.run(main())
+```
+
+Every message a `notes` client sends is stamped with that id, and a
+`message_received` for `notes` reaches only `notes` clients; what the server
+holds for an application whose client is away, and what it never puts on the
+wire, is the chapter's. `--policy policy.json` adds the optional rules
+(`spaces`, `denied`); `--tcp PORT --token-file PATH` serves loopback TCP with
+a per-launch token instead of the socket. See
+[the bridge contract](../../docs/bridges/local-api.md) for what the server
+owes.
+
 ### Headless hosts: the built-in file stores
 
 A server or container usually has no secret service at all. Pass a store key
