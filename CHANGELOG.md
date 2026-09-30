@@ -15,6 +15,27 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Python has a gateway-daemon client.** `GatewayManager`, as
+  `ProtocolManager.gateway` when `reticulum_enabled=True`, speaks the
+  [gateway-daemon contract](docs/spec/gateway-contract.md) over TCP to a
+  daemon on local IP: it attaches with the core-built address declaration,
+  offers the carrier to the core only once the gateway has bound the session
+  to this device's address (its capabilities are handed to the core on their
+  own frame, which the contract puts before the announcement), settles every
+  send on the gateway's verdict rather than on the socket write, fails what a
+  dead or silent connection owes (sixty seconds, under the core's own expiry),
+  and asks about the core's presence watchlist. It is the first client on this
+  carrier to read the `stored` and `pushed` verdict flags, reported as
+  `relay_stored`, `relay_pushed` and `relay_pushed_stored`, the relay client's
+  mapping. The stub callback the manager used to install for this slot is
+  gone; an application that drives the slot itself still replaces the callback
+  the same way. `configure(daemon_address=...)` and `start()` it after
+  `ProtocolManager.start()`; `stop()` stops it with the rest. The decisions
+  live in `gateway_attach_policy.py`, `gateway_verdict_tracker.py` and
+  `presence_watch_policy.py`, ports of the Swift files, with their
+  hand-mirrored constants pinned as literals and read by the Rust guards
+  beside the Swift and Kotlin copies (P11 in `docs/bridges/python.md`). No
+  daemon has been run against it.
 - **The leaf node builds for ESP32 RISC-V parts and for Cortex-M0.**
   `offline-protocol-leaf` now compiles, and CI lints it, for
   `riscv32imac-unknown-none-elf` (ESP32-C6, ESP32-H2),

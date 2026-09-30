@@ -106,6 +106,9 @@ offline_protocol_sdk/
 ├── protocol_manager.py      # High-level wrapper (processing loop, lifecycle)
 ├── internet_manager.py      # WebSocket transport (websockets library)
 ├── peer_stream_manager.py   # TCP peer streams + DNS-SD (the wifi_direct slot)
+├── gateway_manager.py       # Gateway-daemon client over TCP (the reticulum slot)
+├── gateway_attach_policy.py # Its decisions and frame shapes, socket-free
+├── gateway_verdict_tracker.py, presence_watch_policy.py
 ├── ble_manager.py           # BLE transport (bleak library)
 ├── secure_storage.py        # MLS key storage (keyring library)
 ├── state_storage.py         # Restartable protocol state (application data)
@@ -119,7 +122,7 @@ offline_protocol_sdk/
 | Internet/WebSocket | `websockets` | All | Primary transport for desktop |
 | BLE | `bleak` | All | Central (scanner) role only; peripheral/GATT server requires `bless` |
 | Peer stream (the `wifi_direct` slot) | `asyncio` sockets; `zeroconf` for LAN discovery (optional extra `lan`) | All | `PeerStreamManager`: TCP streams to configured `host:port` peers or hosts found over DNS-SD, each proved by the identity-assertion preamble ([spec](../../docs/spec/stream-framing.md)). Start it after `ProtocolManager.start()`; binds every interface unless `listen_host` narrows it |
-| Reticulum | Built-in | All | Handled in Rust core; `ProtocolManager` wires a stub callback when `reticulum_enabled=True` — apps driving Reticulum themselves replace it via `protocol.set_reticulum_transport_callback(...)` |
+| Reticulum (a gateway daemon) | `asyncio` sockets | All | `GatewayManager` as `pm.gateway` when `reticulum_enabled=True`: the [gateway-daemon contract](../../docs/spec/gateway-contract.md) over TCP to a daemon on local IP (`configure(daemon_address="localhost:4242")`, then `await pm.gateway.start()` after `pm.start()`). Attaches with a signed address declaration, settles each send on the gateway's verdict, watches presence. What answers is a daemon built to the contract; this package ships the device half. Apps driving the slot themselves replace the callback via `protocol.set_reticulum_transport_callback(...)` |
 | Nostr | Built-in | All | Handled in Rust core (BIP-340 signing); `ProtocolManager` wires a stub callback when `nostr_enabled=True` — apps driving Nostr themselves replace it via `protocol.set_nostr_transport_callback(...)` |
 
 ### Secure Storage
