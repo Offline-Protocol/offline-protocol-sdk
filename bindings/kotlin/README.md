@@ -82,7 +82,13 @@ not cross-compile Rust for Android. With them in
 commands build the library a release would, and `--require-natives` makes
 the check insist on all four ABIs. The check also refuses a native library
 under any other name, which is what an old build leaves in that directory.
-Nothing publishes the library yet.
+
+A release builds the library from its own native libraries, runs the same
+checks with `--require-natives`, and uploads it to Maven Central when the
+`MAVEN_CENTRAL_PUBLISH` variable is on. The build writes an unsigned Maven
+repository; the publishing job signs it with gpg
+(`scripts/maven-central-bundle.sh`), so the signing key never enters a Gradle
+build. See [Cutting a Release](../../CONTRIBUTING.md#the-native-packages-and-pypi).
 
 ## What an application has to declare
 

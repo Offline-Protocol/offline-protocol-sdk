@@ -22,8 +22,12 @@ Thumbs.db
 *.lib
 
 # Staged GitHub release assets (built by release.yml on the runner; present
-# locally only if someone reproduces that step by hand)
+# locally only if someone reproduces that step by hand), and the two inputs
+# the release writes beside them: the Swift package's XCFramework and the
+# package assembled against it
 /release-assets/
+/swiftpm/
+/swift-package/
 
 # Python
 __pycache__/

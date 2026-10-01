@@ -244,7 +244,8 @@ async def test_the_unix_socket_is_owner_only(harness):
 async def test_tcp_requires_the_per_launch_token(harness):
     server = await harness.server(tcp=True)
     assert server.token and len(server.token) == 64
-    assert stat.S_IMODE(os.stat(server.token_path).st_mode) == 0o600
+    if os.name != "nt":  # Windows has no owner-only file mode
+        assert stat.S_IMODE(os.stat(server.token_path).st_mode) == 0o600
     assert server.token_path.read_text().strip() == server.token
     # Without the token: PermissionDenied, then the connection closes 1008.
     ws = await connect(f"ws://127.0.0.1:{server.port}/")
@@ -520,6 +521,7 @@ async def test_a_failure_inside_the_server_is_an_error_object_on_an_open_connect
 # -- the socket's directory and path ------------------------------------------
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Unix sockets and POSIX modes only")
 async def test_a_wide_pre_existing_directory_is_refused_and_not_narrowed(harness):
     wide = harness._tmp / "wide"
     wide.mkdir()
@@ -532,6 +534,7 @@ async def test_a_wide_pre_existing_directory_is_refused_and_not_narrowed(harness
     assert not (wide / "api.sock").exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Unix sockets and POSIX modes only")
 async def test_a_regular_file_at_the_socket_path_is_refused_and_kept(harness):
     directory = harness._tmp / "kept"
     directory.mkdir(mode=0o700)
@@ -544,6 +547,7 @@ async def test_a_regular_file_at_the_socket_path_is_refused_and_kept(harness):
     assert path.read_text() == "not a socket"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Unix sockets and POSIX modes only")
 async def test_an_owner_only_pre_existing_directory_is_used_as_is(harness):
     directory = harness._tmp / "mine"
     directory.mkdir(mode=0o700)

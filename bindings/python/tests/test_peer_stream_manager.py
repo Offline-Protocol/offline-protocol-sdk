@@ -1184,6 +1184,14 @@ class TestOutboundIsolation:
         finally:
             await manager.stop()
 
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason=(
+            "wedges on a single 1 MiB frame, which Windows loopback absorbs despite "
+            "the 8 KiB buffers; the 2 MiB stall the restart test forms does wedge there. "
+            "The bound this checks is the same code on every platform."
+        ),
+    )
     async def test_a_stalled_peer_queue_is_bounded(self, fake_verifier):
         protocol, queue = queued_protocol()
         manager = PeerStreamManager(protocol, listen_host="127.0.0.1", listen_port=0)

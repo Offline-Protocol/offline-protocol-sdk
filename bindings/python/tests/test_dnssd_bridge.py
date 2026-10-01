@@ -870,6 +870,14 @@ class TestLifecycle:
 
     def test_the_real_responder_is_built_lazily(self):
         pytest.importorskip("zeroconf")
-        backend = ZeroconfBackend()
-        assert backend is not None
-        asyncio.run(backend.close())
+
+        # Built and closed on one loop, as the bridge does in start(): the
+        # constructor binds the real zeroconf to the running loop, or to a
+        # thread of its own when none runs, and closing it from another
+        # loop is a wait that can time out (it did, once, on a Windows runner).
+        async def build_and_close() -> None:
+            backend = ZeroconfBackend()
+            assert backend is not None
+            await backend.close()
+
+        asyncio.run(build_and_close())

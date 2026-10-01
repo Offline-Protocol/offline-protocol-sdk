@@ -158,6 +158,12 @@ class ServerHarness:
         manager: ProtocolManager | None = None,
     ) -> LocalApiServer:
         n = next(self._count)
+        # The release runs this suite on Windows, against the wheel it ships
+        # there, and Windows has no Unix domain sockets in asyncio: the server
+        # there is the TCP one. A test that asks for the Unix socket is not a
+        # Windows test; the TCP tests are what Windows runs.
+        if not tcp and os.name == "nt":
+            pytest.skip("the Unix socket server needs a POSIX host")
         if manager is None:
             manager = ProtocolManager(config or make_config(profile=f"user-{n}"))
         if tcp:

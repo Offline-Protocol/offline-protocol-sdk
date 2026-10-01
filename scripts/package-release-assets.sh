@@ -39,6 +39,17 @@ ANDROID_JNILIBS="$RN/android/src/main/jniLibs"
 ANDROID_KOTLIN="$RN/android/src/main/java/uniffi"
 PYTHON_MODULE="$ROOT/bindings/python/offline_protocol_sdk/offline_protocol.py"
 DESKTOP_LIBS="$ROOT/desktop-libs"
+# The XCFramework the Swift package links (scripts/package-swiftpm-xcframework.sh),
+# which differs from the pod's above by carrying its headers, zipped where it
+# was built: the package's manifest names this archive by checksum, so the
+# bytes are fixed before the package is assembled, and the archive is
+# published verbatim. Beside it, the package assembled against that checksum
+# and the url the archive is published under. The distribution repository
+# pulls both from the release (ADR 0025, decision 7).
+SWIFTPM_ARCHIVE="$ROOT/swiftpm/offline_protocolFFI.xcframework.zip"
+SWIFT_PACKAGE="$ROOT/swift-package"
+# One platform wheel per desktop library (bindings/python/scripts/build-wheel.sh).
+PYTHON_WHEELS="$ROOT/python-wheels"
 
 # Every archive carries the licences and the export notice with it. A binary
 # handed out on its own is an AGPL distribution, and 15 CFR §742.15(b) attaches
@@ -47,6 +58,10 @@ DESKTOP_LIBS="$ROOT/desktop-libs"
 LEGAL_FILES=(LICENSE LICENSE-COMMERCIAL.md THIRD-PARTY-NOTICES.md EXPORT.md)
 
 DESKTOP_PLATFORMS=(macos-arm64 linux-x86_64 linux-aarch64 windows-x86_64)
+
+# The platform tag each desktop platform's wheel carries. The Linux ones name
+# the glibc floor read from the library, so they are matched, not spelled.
+WHEEL_TAGS=('macosx_*_arm64' 'manylinux_*_x86_64' 'manylinux_*_aarch64' 'win_amd64')
 
 die() {
   echo "ERROR: $*" >&2
@@ -125,6 +140,43 @@ for plat in "${DESKTOP_PLATFORMS[@]}"; do
   require_file "$DESKTOP_LIBS/$plat/$lib"
 done
 
+require_file "$SWIFTPM_ARCHIVE"
+# Listed first, then searched: under pipefail a grep that stops reading early
+# can hand the pipeline unzip's SIGPIPE, which would read as "not there".
+SWIFTPM_ENTRIES="$(unzip -Z1 "$SWIFTPM_ARCHIVE")"
+grep -qx 'offline_protocolFFI.xcframework/Info.plist' <<<"$SWIFTPM_ENTRIES" ||
+  die "${SWIFTPM_ARCHIVE#"$ROOT"/} does not hold offline_protocolFFI.xcframework at its top level"
+require_file "$SWIFT_PACKAGE/Package.swift"
+require_nonempty_dir "$SWIFT_PACKAGE/Sources"
+
+# The manifest a consumer resolves has to name the archive published beside
+# it, by the url the release publishes it under and by its checksum. Assembled
+# against the wrong archive, the package is one nobody can resolve, and its
+# tag can never be moved to a right one.
+SWIFTPM_URL="$(bash "$SCRIPT_DIR/swiftpm-archive-url.sh" "$VERSION")"
+SWIFTPM_CHECKSUM="$(sha256_manifest "$SWIFTPM_ARCHIVE" | cut -d' ' -f1)"
+grep -qxF "            url: \"$SWIFTPM_URL\"," "$SWIFT_PACKAGE/Package.swift" ||
+  die "the Swift package's manifest does not name the archive's url, $SWIFTPM_URL"
+grep -qxF "            checksum: \"$SWIFTPM_CHECKSUM\"" "$SWIFT_PACKAGE/Package.swift" ||
+  die "the Swift package's manifest does not name the archive's checksum, $SWIFTPM_CHECKSUM"
+
+# Exactly one wheel per platform, numbered as this release in Python's
+# spelling: one for each tag, and no more wheels than tags. Two for one
+# platform would both be uploaded, and pip would pick between them by a rule
+# nobody chose.
+PY_VERSION="$(bash "$SCRIPT_DIR/pep440-version.sh" "$VERSION")"
+require_nonempty_dir "$PYTHON_WHEELS"
+WHEELS=()
+for tag in "${WHEEL_TAGS[@]}"; do
+  # shellcheck disable=SC2206 # the tag is a glob, on purpose
+  matches=("$PYTHON_WHEELS"/offline_protocol_sdk-"$PY_VERSION"-py3-none-$tag.whl)
+  [ -f "${matches[0]}" ] || die "no wheel for $tag at version $PY_VERSION in ${PYTHON_WHEELS#"$ROOT"/}"
+  WHEELS+=("${matches[0]}")
+done
+wheel_count="$(find "$PYTHON_WHEELS" -maxdepth 1 -name '*.whl' | wc -l | tr -d ' ')"
+[ "$wheel_count" = "${#WHEEL_TAGS[@]}" ] ||
+  die "${PYTHON_WHEELS#"$ROOT"/} holds $wheel_count wheels, expected one per platform (${#WHEEL_TAGS[@]})"
+
 EXPECTED_ASSETS=(
   "offline-protocol-$VERSION-ios-xcframework.zip"
   "offline-protocol-$VERSION-android.zip"
@@ -132,7 +184,12 @@ EXPECTED_ASSETS=(
   "offline-protocol-$VERSION-linux-x86_64.tar.gz"
   "offline-protocol-$VERSION-linux-aarch64.tar.gz"
   "offline-protocol-$VERSION-windows-x86_64.zip"
+  "$(bash "$SCRIPT_DIR/swiftpm-archive-url.sh" --asset-name "$VERSION")"
+  "offline-protocol-$VERSION-swift-package.tar.gz"
 )
+for wheel in "${WHEELS[@]}"; do
+  EXPECTED_ASSETS+=("$(basename "$wheel")")
+done
 
 STAGE_ROOT="$(mktemp -d)"
 PACKAGING_COMPLETE=0
@@ -297,6 +354,25 @@ EOF
     archive_zip "$stage" "$ASSETS/$asset_name"
   fi
 done
+
+# ---------------------------------------------------------------------------
+# Swift Package Manager: the archive, verbatim, since the manifest names its
+# checksum; and the package, which carries the legal files itself.
+#
+# The archive holds the XCFramework alone, with no legal files and no VERSION
+# stamp beside it, unlike every other archive here: Swift Package Manager
+# unpacks it into the consumer's build and looks for exactly one artifact.
+# ---------------------------------------------------------------------------
+
+cp "$SWIFTPM_ARCHIVE" "$ASSETS/$(bash "$SCRIPT_DIR/swiftpm-archive-url.sh" --asset-name "$VERSION")"
+archive_tar "$SWIFT_PACKAGE" "$ASSETS/offline-protocol-$VERSION-swift-package.tar.gz"
+
+# ---------------------------------------------------------------------------
+# Python: the wheels as built. Each already carries the licences and the
+# export notice (pyproject.toml's license-files).
+# ---------------------------------------------------------------------------
+
+cp "${WHEELS[@]}" "$ASSETS/"
 
 # ---------------------------------------------------------------------------
 # Manifest and final assertions
