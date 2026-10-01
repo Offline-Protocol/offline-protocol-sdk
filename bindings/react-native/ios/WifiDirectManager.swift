@@ -74,10 +74,11 @@ public class WifiDirectManager: NSObject, TransportManager {
     private static let MAX_STREAMS = PeerStreamDialPolicy.maxStreams
     /// A listener or browser that failed is rebuilt after this long.
     private static let REBUILD_DELAY: TimeInterval = 5.0
-    /// How long a dialed stream may wait for a path before it is ended and
-    /// left to the redial ladder. The connect timeout, so AWDL gets as long to
-    /// come up as a connect attempt does.
-    private static let WAITING_GRACE: TimeInterval = 10.0
+    /// How long a dial may take to become ready, whatever it waits on
+    /// (resolving the record, a path, AWDL coming up, the handshake), before
+    /// it is ended and left to the redial ladder. Python's `CONNECT_TIMEOUT`
+    /// and Android's connect timeout bound the whole connect the same way.
+    private static let DIAL_TIMEOUT: TimeInterval = 10.0
     /// Android's `Limits`: queued bytes toward one peer beyond which a body
     /// is dropped (the core retries it), and only while that peer's oldest
     /// write has been outstanding for `WRITE_STALL_MS`. The core hands a burst
@@ -633,15 +634,6 @@ public class WifiDirectManager: NSObject, TransportManager {
             case .ready:
                 self.peers.connected(stream)
                 self.receive(on: stream)
-            case .waiting:
-                // No path to the peer yet, which over AWDL can be the link
-                // still coming up. Ended if it is still waiting after the
-                // grace, so the redial ladder decides when to try again
-                // rather than a connection that waits forever.
-                self.linkQueue.asyncAfter(deadline: .now() + Self.WAITING_GRACE) { [weak stream] in
-                    guard let stream = stream, case .waiting = stream.connection.state else { return }
-                    stream.connection.cancel()
-                }
             case .failed, .cancelled:
                 self.end(stream)
             default:
@@ -649,6 +641,15 @@ public class WifiDirectManager: NSObject, TransportManager {
             }
         }
         stream.connection.start(queue: linkQueue)
+        guard stream.outbound else { return }
+        // The TCP connect timeout does not cover resolving the record, and a
+        // dial toward a host that left without a goodbye can sit there with no
+        // state change, holding a slot and its address's one dial.
+        linkQueue.asyncAfter(deadline: .now() + Self.DIAL_TIMEOUT) { [weak stream] in
+            guard let stream = stream else { return }
+            if case .ready = stream.connection.state { return }
+            stream.connection.cancel()
+        }
     }
 
     /// Reads the stream and hands each whole frame to the session, which owns

@@ -248,8 +248,9 @@ instead of adding a second. A record whose dial is answered by a peer that
 does not prove the address it advertises is left out until the browser
 reports it again, so another record for the address is dialed, or none;
 redialed, it failed the same way for as long as it lived and kept the real
-record undialed. A dial with no path yet (`.waiting`) gets ten
-seconds, the connect timeout, before the redial ladder takes it over.
+record undialed. A dial gets ten seconds to become ready, whatever it
+waits on (resolving the record, a path, the handshake), as on Python and
+Android, before the redial ladder takes it over.
 
 Writes follow Android's bounds: a body is dropped (the core retries it) when
 more than 4 MiB is queued toward a peer whose oldest write has been

@@ -17357,6 +17357,16 @@ mod tests {
                 && ios_manager.contains("unprovable.subtract(fresh)"),
             "ios/WifiDirectManager.swift: an unprovable record must be left out until reported again"
         );
+        // Every dial has a deadline for the whole connect. The TCP timeout does
+        // not cover resolving the record, so a dial toward a host that left
+        // could hang there, holding a slot and its address's one dial.
+        assert!(
+            ios_manager.contains(
+                "guard stream.outbound else { return } \
+                 linkQueue.asyncAfter(deadline: .now() + Self.DIAL_TIMEOUT)"
+            ),
+            "ios/WifiDirectManager.swift: every dial must be bounded as a whole"
+        );
 
         // A group client redials the owner the group has NOW. On a group
         // switch the new owner's dial loses the one-outbound-socket flag to
