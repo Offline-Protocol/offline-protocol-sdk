@@ -33,11 +33,21 @@ import threading
 import time
 from typing import Any
 
-from bless import (
-    BlessServer,
-    GATTAttributePermissions,
-    GATTCharacteristicProperties,
-)
+# bless is not installed on Windows (pyproject.toml leaves it out there: it
+# has no Windows backend), and this module is imported by the package's
+# __init__, so a bare import here is `import offline_protocol_sdk` failing
+# on Windows. The names are only reached from start(), behind
+# is_available(), which answers False without them.
+try:
+    from bless import (
+        BlessServer,
+        GATTAttributePermissions,
+        GATTCharacteristicProperties,
+    )
+except ImportError:  # pragma: no cover - the Windows wheel test covers it
+    BlessServer = None  # type: ignore[assignment, misc]
+    GATTAttributePermissions = None  # type: ignore[assignment, misc]
+    GATTCharacteristicProperties = None  # type: ignore[assignment, misc]
 
 from .ble_manager import (
     DEVICE_ID_CHAR_UUID,
@@ -149,8 +159,9 @@ class BlePeripheral(TransportManager):
     # -- TransportManager interface -------------------------------------------
 
     def is_available(self) -> bool:
-        """Return True on platforms where bless is supported (macOS, Linux)."""
-        return sys.platform in ("darwin", "linux")
+        """Return True on platforms where bless is supported (macOS, Linux),
+        and only where it is installed."""
+        return sys.platform in ("darwin", "linux") and BlessServer is not None
 
     def _resolve_identity(self) -> None:
         """Fetch the address and the assertion this peripheral will serve.

@@ -343,6 +343,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **`import offline_protocol_sdk` works on Windows.** `pyproject.toml` has
+  never installed `bless` on Windows, where it has no backend, and the
+  package imported it on the way in, so the import failed on every Windows
+  install. The import is guarded; `BlePeripheral.is_available()` is False
+  there, as it was documented to be, and everything else is unchanged. Found
+  by the first run of the Python suite against a Windows wheel.
 - **Closing the file stores no longer loses unflushed document edits.** An
   edit waits in memory until a flush, and the engine flushes what is left
   when it is dropped. With the built-in file stores that drop runs after
