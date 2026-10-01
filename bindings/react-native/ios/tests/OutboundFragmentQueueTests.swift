@@ -161,12 +161,11 @@ final class OutboundFragmentQueueTests: XCTestCase {
 
     // MARK: - Overflow
 
-    /// Preserved verbatim from the pre-extraction implementation: the outbound
-    /// side drops the OLDEST fragments, unlike the inbound side and unlike
-    /// Android, which drop the whole queue. Converging them is a behaviour
-    /// change tracked separately — this test pins today's behaviour so the
-    /// divergence cannot be closed by accident.
-    func testOverflowDropsOldestFragments() {
+    /// The overflow policy is whole-queue drop, not oldest-first, matching
+    /// Android and the inbound side: evicting slice 0 of a multi-fragment
+    /// message leaves orphan slices that reassemble into garbage at the
+    /// receiver, so the only safe cut is the whole queue.
+    func testOverflowDiscardsTheWholeQueue() {
         var dropped: [(String, OutboundFragmentQueue.DropReason, Int)] = []
         let queue = OutboundFragmentQueue(
             maxPerPeer: 3,
@@ -175,16 +174,101 @@ final class OutboundFragmentQueueTests: XCTestCase {
         queue.enqueue("bob", bytes(1))
         queue.enqueue("bob", bytes(2))
         queue.enqueue("bob", bytes(3))
+        queue.enqueue("carol", bytes(7))
         queue.enqueue("bob", bytes(4))
 
         let sender = Sender()
         _ = queue.flush(send: sender.send)
-        XCTAssertEqual(sender.sent.map(\.1), [bytes(2), bytes(3), bytes(4)])
+        XCTAssertEqual(sender.sent.filter { $0.0 == "bob" }.map(\.1), [bytes(4)])
+        XCTAssertEqual(sender.sent.filter { $0.0 == "carol" }.map(\.1), [bytes(7)],
+                       "another recipient's queue must be untouched")
         XCTAssertEqual(dropped.count, 1)
-        XCTAssertEqual(dropped.first?.2, 1)
+        XCTAssertEqual(dropped.first?.2, 3)
         if case .capped = dropped.first?.1 {} else {
             XCTFail("expected .capped, got \(String(describing: dropped.first?.1))")
         }
+    }
+
+    /// The drain loop's signal to stop pulling from the Rust core must trip
+    /// before the cap, or the loop overflows the queue it is protecting.
+    func testIsBackedUpTripsAtThreeQuartersOfTheCap() {
+        let queue = OutboundFragmentQueue(maxPerPeer: 8)
+        for i in 0..<5 { queue.enqueue("bob", bytes(UInt8(i))) }
+        XCTAssertFalse(queue.isBackedUp("bob"))
+
+        queue.enqueue("bob", bytes(5))
+        XCTAssertTrue(queue.isBackedUp("bob"))
+        XCTAssertFalse(queue.isBackedUp("carol"))
+
+        // Draining below the mark releases it, so the next drain pulls again.
+        let sender = Sender()
+        sender.refuseAfter = 1
+        _ = queue.flush(send: sender.send)
+        XCTAssertFalse(queue.isBackedUp("bob"))
+    }
+
+    /// The NOTIFY queue is enqueued by the drain while main flushes it. A
+    /// flush that took the queue out to send it hid those fragments from
+    /// `isBackedUp`, so the drain pulled on past the mark, and from the cap,
+    /// so the splice back left the queue over it and the next `enqueue`
+    /// discarded everything. Enqueueing from inside `send` is that drain.
+    func testFragmentsBeingFlushedStayCountedForTheDrain() {
+        var dropped: [(String, OutboundFragmentQueue.DropReason, Int)] = []
+        let queue = OutboundFragmentQueue(
+            maxPerPeer: 8,
+            onDropped: { dropped.append(($0, $1, $2)) }
+        )
+        for i in 0..<5 { queue.enqueue("bob", bytes(UInt8(i))) }
+
+        // The drain as the backpressure check in BleManager runs it: pull
+        // until the queue reports backed up.
+        var drainPulled = 0
+        var sends = 0
+        _ = queue.flush { _, _ in
+            sends += 1
+            guard sends <= 2 else { return false }
+            while !queue.isBackedUp("bob") {
+                drainPulled += 1
+                queue.enqueue("bob", self.bytes(UInt8(100 + drainPulled)))
+            }
+            return true
+        }
+
+        XCTAssertLessThanOrEqual(queue.totalCount(), 8, "the queue ended over its cap")
+        XCTAssertTrue(dropped.isEmpty, "the queue was discarded: \(dropped)")
+        // 5 queued; each accepted send frees one slot and the drain refills to
+        // the mark of 6, so it pulls 1 then 1.
+        XCTAssertEqual(drainPulled, 2)
+
+        let drain = Sender()
+        _ = queue.flush(send: drain.send)
+        XCTAssertEqual(drain.sent.map(\.1),
+                       [bytes(2), bytes(3), bytes(4), bytes(101), bytes(102)],
+                       "fragments sent during the flush must not be sent twice or reordered")
+    }
+
+    /// A `removeAll` that lands while `send` runs (peer eviction on main)
+    /// must not be undone, and the flush must not then remove a fragment
+    /// enqueued after it in place of the one it sent.
+    func testRemoveAllDuringASendIsNotUndone() {
+        let queue = OutboundFragmentQueue()
+        queue.enqueue("bob", bytes(1))
+        queue.enqueue("bob", bytes(2))
+
+        var sends = 0
+        _ = queue.flush { _, _ in
+            sends += 1
+            if sends == 1 {
+                queue.removeAll("bob")
+                queue.enqueue("bob", self.bytes(9))
+                return true
+            }
+            return false
+        }
+
+        let drain = Sender()
+        _ = queue.flush(send: drain.send)
+        XCTAssertEqual(drain.sent.map(\.1), [bytes(9)])
     }
 
     // MARK: - Removal

@@ -500,6 +500,47 @@ populated, so no caller needs a fallback literal. Counters are
 `getMeshRelayStats()`; see [mesh.md](mesh.md#reading-the-numbers) for how to
 read them.
 
+### Custody Configuration
+
+Holding a neighbour's replication frames for hours instead of the seconds a
+forwarder gives them ([spec](spec/custody.md)). Off by default. A device that
+enables it takes on other people's ciphertext under the quotas below, holds
+each frame until its recipient appears or the hold ends (re-originating it
+toward other neighbours meanwhile), and settles nothing: only the recipient's acknowledgement settles a message, and the
+receipt a custodian sends the depositor is advisory.
+
+Applied at construction. There is no runtime update.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `custody.enabled` | boolean | `false` | Whether this device accepts deposits. The off switch |
+| `custody.holdMs` | number | 21600000 (6 hours) | How long an accepted frame is held, judged in wall time against the value in force at each sweep, so lowering it expires records already held |
+| `custody.maxEntriesPerDepositor` | number | 64 | Held frames one depositor with an established session may have at once |
+| `custody.maxBytesPerDepositor` | number | 2097152 (2 MiB) | Bytes one such depositor may have at once |
+| `custody.maxEntries` | number | 512 | Held frames across every depositor |
+| `custody.maxBytes` | number | 16777216 (16 MiB) | Bytes across every depositor |
+| `custody.strangerMaxEntries` | number | 0 | Held frames one proven peer *without* a session may have at once. Zero refuses such peers |
+| `custody.strangerMaxBytes` | number | 0 | Bytes one such peer may have at once |
+| `custody.overflowPolicy` | `'drop_oldest'` or `'drop_newest'` | `drop_oldest` | Evict the oldest held frame to admit a new one, or refuse the new one |
+
+Every field is optional, and an omitted one keeps the default above rather than
+being restated by a binding, for the reason the mesh forwarding section gives.
+Here the default that matters is `enabled: false`: a binding that wrote it as a
+literal would keep every app that omits the section off after the release that
+ever flips it.
+
+```typescript
+const config: ProtocolConfig = {
+  appId: 'my-app',
+  profile: 'default',
+  custody: { enabled: true },
+};
+```
+
+The counters are `getCustodyStats()`, and `eraseCustody()` drops every held
+frame; see [mesh.md](mesh.md#holding-a-frame-for-hours-custody) for what the
+numbers mean and what a custodian owes.
+
 ### Path Configuration
 
 | Parameter | Type | Default | Description |
@@ -813,6 +854,30 @@ work. Nothing is partially applied.
     5s overdue cut-off, past which a forward is abandoned rather than late
 24. `meshRelay.activityWindowMs`, `activityMinForwards` and
     `activityIdleWindows` must each be > 0
+
+**Custody**
+
+25. `custody.holdMs` must be > 0, whether or not custody is enabled. Zero is
+    not a shorter hold but a store that expires everything at the first sweep
+26. While `custody.enabled`: `custody.holdMs` must be strictly shorter than
+    `reliability.retry.outboxMaxLifetimeMs`. A custodian holds ciphertext it
+    cannot re-seal, and a hold that outlives the depositor's outbox delivers
+    frames whose sender has already reported them failed; nothing at runtime
+    would notice, because the custodian cannot see the depositor's ladder
+27. While enabled: `custody.maxEntriesPerDepositor` and
+    `custody.maxBytesPerDepositor` must each be > 0, the byte cap must be at
+    least 65536 (one replication frame at its ceiling, or every deposit is
+    refused as `depositor_full`), and `custody.maxEntries` and
+    `custody.maxBytes` must each be at least their per-depositor sibling
+28. While enabled: `custody.strangerMaxEntries` and `custody.strangerMaxBytes`
+    must be both zero (no deposits from peers without a session, the default)
+    or both > 0, a positive byte cap must be at least 65536, and neither may
+    exceed the global dial
+
+Rules 26 through 28 are checked only while custody is enabled. A disabled
+section that could refuse a configuration would turn every outbox lifetime
+shorter than the six-hour default hold into a startup error for a feature the
+app never switched on.
 
 Rules 17 through 20 all guard one failure: a dial that reads like a
 conservative setting but is in fact an off switch, leaving the device running,

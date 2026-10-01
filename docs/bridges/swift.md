@@ -122,11 +122,13 @@ five places, and missing any one produces a different, unhelpful symptom:
    `react_native_podspec_ships_every_hand_written_ios_source` fails `cargo test`
    on an unlisted top-level source. A file added under `ble/` or `mesh/` needs
    no podspec edit at all.
-2. The Swift package manifest's target sources, for the typecheck harness.
+2. The target sources in `bindings/react-native/ios/Package.swift`, the
+   manifest of the test harness. Not the Swift package that ships, which
+   takes a new source without being told ([below](#the-swift-package)).
 3. Any exclusion list it must **not** be in.
 4. The test target, if it has tests.
 5. **The `.github/workflows/ci.yml` "iOS bridge typecheck" file list**, if the
-   file is one the package manifest excludes. This is the one most often
+   file is one the harness manifest excludes. This is the one most often
    forgotten, because the local recipe globs the directory while CI enumerates
    explicitly: the local harness stays green and CI fails with `cannot find
    'YourNewType' in scope`.
@@ -237,6 +239,58 @@ manual clock, and `PeerStreamFramingTests` replays the chapter's vectors. The
 manager's session handling (advertise, browse, invite) is not covered in CI
 (C9).
 
+## S9. Every object is built for the pod's deployment target
+
+No object in the iOS library declares a minimum OS newer than the one the
+podspec declares. The arm64 simulator slice is held to iOS 14.0 where the
+pod's target is below that, because no arm64 simulator exists before 14.0 and
+the toolchain raises the slice to it.
+
+Two compilers read `IPHONEOS_DEPLOYMENT_TARGET`, and they fall back
+differently when it is unset. The Rust compiler falls back to the target's own
+floor, which is below anything the pod would declare. The C compiler behind
+`cc-rs`, which builds the C and assembly in `ring` and `oslog`, falls back to
+the version of the installed SDK. So with the variable unset those objects
+were stamped for whichever Xcode built the release, and the linker of every
+application using the pod warned about each of them.
+
+Three things hold the invariant:
+
+- `bindings/react-native/scripts/build-uniffi-ios.sh` reads the target out of
+  the podspec and exports it before it builds. The number is written once, in
+  the podspec. The SDK's own Rust code is compiled for it too.
+- `package_xcframework` reads every object in every slice before it packages
+  anything, and refuses an archive that holds one too new. An archive it
+  could not read fails the same way: one with no stamp in it, and one
+  `otool` read part of before giving up. The check is inside the packaging
+  function, not beside the call, so the pod's XCFramework cannot be packaged
+  without it. The Swift package's XCFramework is built by
+  `scripts/package-swiftpm-xcframework.sh`, which does not check; the
+  `Swift Package` job runs the check on its archive as a step of its own.
+- The gate needs `otool`, so in CI it runs where the library is built on a
+  Mac: in a release, on all three archives, and in the `Swift Package` job,
+  on the simulator archive of every pull request.
+  `scripts/tests/test-ios-min-os.sh`, at the repository root, runs on every
+  pull request on Linux. It covers what can go wrong without `otool`: the
+  parser, the podspec reader, a failing `otool`, and the packaging function
+  itself, driven with stand-ins for `otool`, `lipo` and `xcodebuild`: each
+  archive is held to its own ceiling, and a refused one packages nothing.
+
+The podspec has one reader, `ios_deployment_target` in
+`bindings/react-native/scripts/shared/xcframework.sh`.
+`scripts/ios-deployment-target.sh` calls it for the Swift package and its CI
+job. It takes the line only when it is there once, with a version of two or
+three components. Two readers with two rules disagreed on some podspecs, and
+the release would have built for a number the package refused.
+
+A target directory built for one deployment target keeps its Rust objects
+when the target changes, because cargo does not rebuild a crate for a new
+value of the variable. Only the C compiled through `cc-rs` is redone. A
+lowered target therefore fails the gate on Rust objects until `cargo clean`.
+Both CI caches that hold iOS objects, the `Swift Package` job's and the
+release's, add the podspec's hash to their key, so a changed target starts
+from a cold cache there.
+
 ## Testing
 
 ```bash
@@ -255,9 +309,9 @@ current set rather than trusting this sentence.
 
 **Error mapping is not in that list.** `ProtocolErrorBridge` depends on the
 generated UniFFI module, so both it and its test suite are excluded from the
-package manifest; they ride the app build only. The same holds for the mesh
-controller and the Bluetooth discovery bootstrap policy: suites exist, `swift
-test` does not run them.
+harness manifest. The same holds for the mesh controller and the Bluetooth
+discovery bootstrap policy: suites exist, `swift test` does not run them. The
+`Swift Package` job does, as described at the end of this section.
 
 **Excluded from `swift test` does not mean unchecked.** A separate CI step,
 "iOS bridge typecheck (files excluded from the SwiftPM harness)", runs `swiftc
@@ -283,3 +337,52 @@ source in `ios/` by glob, so a new file is covered without being listed.
 
 The exclusion list in `Package.swift` remains the source of truth for what
 `swift test` skips.
+
+**The `Swift Package` job runs every suite, the excluded three included.** It
+builds the Rust library for the simulator, assembles the package with
+`--bridge-tests` and runs it with `xcodebuild test`
+([bindings/swift](../../bindings/swift/README.md#build-and-test-it)). That is
+the only place the mesh controller, the BLE discovery bootstrap policy and
+the error mapping suites execute, and the only place anything in the bridge
+is linked against the library: `LinkTests` calls into Rust, and runs the
+storage conformance suite against the built-in state store (C11). The job
+then builds `bindings/swift/consumer-check`, which depends on the package as
+an application would, with a plain import, and calls into the library from
+outside the module.
+
+## The Swift package
+
+The Swift package is these sources, assembled. It is not a second copy of
+the bridge. `scripts/assemble-swift-package.sh`
+writes a directory Swift Package Manager can build, from the sources in
+`bindings/react-native/ios` and the generated bindings, beside a manifest
+rendered from `bindings/swift/Package.swift.template`
+([C13](README.md#c13-a-shared-bridge-source-compiles-without-react),
+[ADR 0025](../adr/0025-native-packages-are-assembled-in-place.md)).
+
+Four things about it fail in ways that do not point at their cause:
+
+- **The Swift module is `OfflineProtocolSDK`, not `OfflineProtocol`.** The
+  generated bindings declare a class called `OfflineProtocol`, and a module
+  that shares a name with one of its own types cannot be used to qualify
+  anything in it.
+- **The test harness's stand-ins are behind `OFFLINE_PROTOCOL_HARNESS_SHIMS`,
+  not `SWIFT_PACKAGE`.** Swift Package Manager defines `SWIFT_PACKAGE` for
+  every package it builds. Under that switch the package declared
+  `MlsStorageError`, `MlsStorageProvider` and `ProtocolStateStorageProvider`
+  twice, once as a stand-in and once generated.
+- **The header sits in `Headers/offline_protocolFFI/` inside each slice, not
+  in `Headers/`.** Xcode copies the headers of every binary an application
+  links into one directory, and a module map is always called
+  `module.modulemap`, so two libraries that ship one at the top overwrite
+  each other. Every library UniFFI generates ships one.
+- **The manifest stays at tools version 5.9.** It selects the Swift 5
+  language mode. Under Swift 6 the storage providers do not compile.
+
+The XCFramework the pod ships has no headers in it, because the podspec
+supplies search paths. `scripts/package-swiftpm-xcframework.sh` builds the
+package's own from the same archives.
+
+The package takes a source at the top level of `ios/`, or under `ble/` or
+`mesh/`, without being told, which is what the podspec takes. A source in a
+new directory is in neither until it is named in both.

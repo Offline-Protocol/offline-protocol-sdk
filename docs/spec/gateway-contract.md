@@ -1,9 +1,11 @@
 # The gateway contract
 
 A **gateway** bridges a zone (a governed BLE / Wi-Fi Direct flood) to somewhere
-a zone cannot reach: the internet, or a wide-area Reticulum backbone. This
-document specifies what a gateway must do to be one, and the wire protocol a
-device speaks to a gateway daemon over local IP.
+a zone cannot reach: the internet, or a wide-area backbone. This document
+specifies what a gateway must do to be one, the wire protocol a device speaks
+to a gateway daemon over local IP, and what a backbone owes a gateway. The
+backbone is the gateway's property: a device never touches one, and learns
+that one exists only as a token at attach.
 
 The contract is deliberately a *reframing* rather than an invention. The
 internet relay already implements every verb below; naming them is what lets a
@@ -69,8 +71,10 @@ It is the reason the contract exists. A device's transport policy is otherwise
 blind to where the recipient is: a carrier being up counts as reachable for
 every recipient. The verdict is the only thing that contradicts that.
 
-- A Reticulum gateway MUST implement Verdict, or it is not a gateway. This is
-  what closes the Reticulum half of the mixed-neighbourhood residual.
+- A gateway daemon MUST implement Verdict, whatever backbone stands behind it,
+  or it is not a gateway. This is what closes the daemon half of the
+  mixed-neighbourhood residual, recorded against Reticulum when that was the
+  only backbone.
 - **Nostr structurally cannot implement Verdict.** A broadcast relay reports no
   per-recipient delivery. Nostr therefore remains a carrier and never becomes a
   gateway, and its half of the residual is permanent. This is recorded so the
@@ -89,10 +93,11 @@ delivery.
 The wire protocol between a zone device and a gateway daemon reachable over
 local IP (venue Wi-Fi, or a hotspot the gateway box provides).
 
-This promotes the protocol both mobile bridges already speak to a configurable
-`daemonAddress` (default `localhost:4242`), rather than designing a fresh one:
-the client side is already implemented twice, and every field this chapter adds
-to it is additive, so a daemon built to the earlier shape is unaffected.
+This promotes the protocol the iOS, Android and Python clients already speak
+to a configurable `daemonAddress` (default `localhost:4242`), rather than
+designing a fresh one: the client side is already implemented three times,
+and every field this chapter adds to it is additive, so a daemon built to the
+earlier shape is unaffected.
 
 ### Framing
 
@@ -345,6 +350,12 @@ outlives the gateway that made it.
 Capability tokens MUST NOT drive a security decision. They gate features, and
 an attacker who can set them is already the gateway.
 
+`backbone_reticulum_v1` is one member of the family
+[`backbone_<kind>_v1`](#the-backbone-token), which is how a gateway says what
+stands behind it. The family's rules, including that a client ignores a kind
+it does not know and that a gateway may advertise no backbone at all, are in
+the backbone section.
+
 ### Status
 
 ```
@@ -364,42 +375,123 @@ A gateway that wants to speak to the zone speaks ordinary frames.
 
 ## The backbone
 
-Between gateways, the wide-area carrier is Reticulum. Wide-area routing over
-intermittent, slow, heterogeneous links is the problem Reticulum spent a decade
-solving, and this protocol does not reinvent it.
+Between gateways runs a wide-area carrier this document calls the backbone.
+It is the gateway's property, never the device's: a device opens no backbone
+link, holds no backbone identity, and learns that a backbone exists only as a
+capability token at attach. Everything in this section binds the gateway. The
+device half of this chapter is complete without it, which is what lets a
+gateway change its backbone, or run with none, and have no device notice more
+than a token.
+
+### What a backbone owes a gateway
+
+A carrier is a backbone for a gateway when the gateway can get four things
+from it. Each is stated with what its absence costs, because a backbone that
+provides three of the four fails in a way the device cannot see.
+
+1. **Gateway-to-gateway presence.** A gateway MUST be able to ask its peer
+   gateways whether a recipient is attached to them, and MUST answer the
+   same question when asked. This is the Presence verb reused between
+   gateways, and it is what turns "not attached here" into a verdict rather
+   than a guess: without it every recipient outside the local zone is
+   unreachable and the backbone carries nothing.
+2. **Arbitrary-size framing.** A frame accepted from a device MUST reach the
+   peer gateway whole, up to the largest line the daemon link accepts (the
+   daemon's own line bound; the reference clients' is 1 MiB, per
+   [Framing](#framing)). How the backbone segments, sequences and
+   checks it is the backbone's business. A gateway MUST NOT ask a device to
+   size its frames to the backbone, because the device does not know what
+   the backbone is.
+3. **A provisioned peer list.** The gateways a gateway asks and forwards to
+   are configuration, installed with it
+   ([ADR 0016](../adr/0016-gateways-are-provisioned-not-emergent.md)). A
+   backbone MAY offer discovery of its own, and a gateway MAY layer it on
+   later without changing the query shape; nothing here depends on it.
+4. **A declared rate class.** Every backbone kind has one, and the gateway
+   applies it at its own egress. Two classes exist:
+
+   | Class | Links | What egresses |
+   |-------|-------|---------------|
+   | `scarce` | A few bps up to LoRa-class kbps | Direct messages, acknowledgements and control frames only. Media MUST be excluded. |
+   | `broad` | Broadband | Whatever the daemon link accepts, under the gateway's budgets. |
+
+   The class is a property of the kind, given in the [table of
+   kinds](#the-backbone-token); a kind not in that table is `scarce`. The
+   exclusion is the gateway's to enforce. The device side only prefers
+   against it: media pins to whichever carrier is current and the daemon
+   carrier is absent from the fallback order, so a device whose current
+   carrier is the daemon link does hand it media. A scarce gateway then
+   refuses each chunk with a plain-failure verdict (`budget_exceeded` or
+   `frame_too_large`, never `recipient_unreachable`) and the pinned
+   transfer fails on its retry ladder; the device does not know the class
+   (invariant 3), and that cost is the price of not knowing.
+
+### The backbone token
+
+A gateway advertises each backbone it can reach as one capability token of
+the family
+
+```
+backbone_<kind>_v1
+```
+
+where `<kind>` is a lowercase name; the kinds this revision defines are in
+the table below.
+
+- A gateway MAY advertise zero backbone tokens. A gateway with no backbone is
+  a conforming gateway: it attaches devices, answers verdicts for the
+  recipients it can see, and reports the rest unreachable. The zone gets mesh
+  fallback for everyone beyond it, which is invariant 3 doing its job.
+- A client MUST ignore a kind it does not recognise and MUST keep the session.
+  An unknown kind is a gateway newer than the client, not a broken one.
+- The token is **advisory, never a routing input.** A device MUST NOT choose
+  a carrier, park a message or size a frame on the strength of a backbone
+  token. What a device may do with one is show it, log it and hand it to the
+  application. The reference implementation stores the set and reads no
+  token from it, and
+  [ADR 0026](../adr/0026-the-backbone-is-a-gateway-property.md) records why
+  that is a decision and not an omission: a token is set by whoever holds
+  the socket, so a routing choice that trusts it is a routing choice the
+  gateway makes for the device.
+- One kind per token. A gateway with two backbones of different kinds
+  advertises two tokens.
+
+| Kind | Rate class | Mechanism |
+|------|------------|-----------|
+| `reticulum` | `scarce` | [The Reticulum backbone](#the-reticulum-backbone) |
+
+`backbone_reticulum_v1` is the first member of the family and the only one
+this revision defines. It was the token before the family was named, so a
+gateway or client built to the earlier text agrees with this one.
+
+### One attached daemon at a time
+
+A device attaches to one gateway daemon at a time. Every gateway answer is
+recorded against the carrier that gave it, and the daemon link is one carrier
+however many backbones stand behind it. A second daemon on the same device
+would therefore overwrite the first one's verdicts and presence answers with
+its own, recipient by recipient, with neither wrong on its own terms. Two
+daemons need two carriers, which is a change to the transport set and is
+deferred, with that reason, in ADR 0026. A device that wants a second
+gateway's reach gets it the way the zone does: the two gateways are peers
+over the backbone, and the one daemon answers for both.
 
 ### Gateway-owned destinations
 
-Reticulum announces are signed by the destination's own identity key.
-Per-device backbone destinations would therefore require either phones running a
-Reticulum stack (they do not) or gateways holding device private keys
-(unacceptable). So:
-
-- Each gateway announces **one** destination under its own Reticulum identity.
-- An egress frame is wrapped: the outer layer is a link to the destination
-  gateway, the inner layer is the ordinary Offline Protocol wire message naming
-  the `off1` recipient. The gateway sees ciphertext and routing metadata only.
-- A gateway locates a recipient's gateway from its own attach sessions and zone
-  presence, and by asking its peer gateways (the Presence verb, reused
-  gateway-to-gateway). The peer list is provisioned configuration; announce-based
-  discovery MAY layer on later without changing the query shape.
+The invariant, independent of the backbone kind: **a gateway is reachable on
+the backbone under its own identity, and only under its own identity.** A
+device's key never leaves the device, so no gateway can sign for a device,
+and no gateway is handed a device key so that it could. It follows that a
+device is reachable across the backbone only through the gateway it is
+attached to, and that a device moving between zones moves nothing on the
+backbone: the new gateway starts answering presence for it and the old one
+stops.
 
 Recorded alternative, rejected for v1: device-signed announce blobs, where a
-phone pre-signs its own announce and gateways republish it. It buys true device
-mobility across zones at the cost of a new device-side crypto surface, lifetime
-coupling between the `off1` identity and a Reticulum identity, and pressure on
-the announce bandwidth budget.
-
-### Framing and the scarce path
-
-The Reticulum MDU is 465 bytes and this protocol's frames routinely exceed it.
-Gateway-to-gateway transfer therefore uses links with resources, which handle
-sequencing, compression and integrity for arbitrary sizes, and gateways keep
-long-lived links to provisioned peers.
-
-Backbone links range from LoRa-class kbps down to a few bps, so **backbone
-egress is a scarce path by default**: direct messages, acknowledgements and
-control frames only. Media MUST be excluded unless a capability says otherwise.
+device pre-signs its own backbone announce and gateways republish it. It buys
+true device mobility across zones at the cost of a new device-side crypto
+surface, lifetime coupling between the `off1` identity and a backbone
+identity, and pressure on the backbone's announce budget.
 
 ### Re-origination into the zone
 
@@ -410,6 +502,38 @@ frames the local bridge intercepts and replaces, with acknowledgement disabled
 and transport pinned ([ADR 0015](../adr/0015-relay-hint-frames-unacked-and-pinned.md));
 a re-originated frame is the opposite disposition in both respects and needs no
 amendment to that decision.
+
+### The Reticulum backbone
+
+The reference backbone, and the one the bundled managers were written against,
+is [Reticulum](https://reticulum.network/). Wide-area routing over
+intermittent, slow, heterogeneous links is the problem Reticulum spent a decade
+solving, and this protocol does not reinvent it. This subsection is how
+Reticulum meets the four obligations; nothing in it binds a gateway on another
+backbone.
+
+- **Presence** is the Presence verb carried gateway-to-gateway over a
+  Reticulum link.
+- **Framing.** The Reticulum MDU is 465 bytes and this protocol's frames
+  routinely exceed it, so gateway-to-gateway transfer uses links with
+  resources, which handle sequencing, compression and integrity for
+  arbitrary sizes, and gateways keep long-lived links to their provisioned
+  peers.
+- **Peers** are provisioned destination hashes. Reticulum's own announces
+  MAY inform the list later without changing the query shape.
+- **Rate class** `scarce`: Reticulum links range from LoRa-class kbps down
+  to a few bps.
+
+Destinations follow from the invariant above and from how Reticulum signs
+them. A Reticulum announce is signed by the destination's own identity key, so
+a per-device destination would need either a Reticulum stack on every device
+(there is none) or gateways holding device private keys (which the invariant
+forbids). Each gateway therefore announces **one** destination under its own
+Reticulum identity. An egress frame is wrapped: the outer layer is a link to
+the destination gateway, the inner layer is the ordinary Offline Protocol wire
+message naming the `off1` recipient, and the gateway sees ciphertext and
+routing metadata only. A gateway locates a recipient's gateway from its own
+attach sessions and zone presence, and by asking its peer gateways.
 
 ## Provisioning
 
@@ -430,8 +554,9 @@ a chokepoint, and nothing in this contract prevents a second.
 
 A gateway MUST bound what one attached device can consume: token-bucket budgets
 per attached device and per peer gateway, the pattern the zone's own forwarding
-governor already applies per peer. Combined with the scarce-path rule, this caps
-what a single device can do to a multi-bps backbone link.
+governor already applies per peer. The budgets are sized to the backbone's
+declared rate class, and combined with the class's exclusions they cap what a
+single device can do to a multi-bps backbone link.
 
 The threats a gateway introduces (a fake gateway, verdict abuse, zone metadata
 at the operator, backbone exhaustion) are enumerated in the

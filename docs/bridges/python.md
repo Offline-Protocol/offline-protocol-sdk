@@ -225,6 +225,116 @@ bounds as literals (`4`, `1_048_576`, `96`) for the C5 reason. DNS-SD needs
 the optional extra (`pip install 'offline-protocol-sdk[lan]'`); the base
 install carries no LGPL dependency.
 
+The same type carries service instances under the subtype `_svc._sub`
+([DNS-SD mapping](../spec/dns-sd-mapping.md)), published and read by
+`dnssd_bridge.py` over the same optional extra. Two rules of that chapter are
+the binding's to hold, because nothing in the core can see a LAN record: an
+import is delivered with `source: "lan"` and never reaches
+`register_service` (a registration made from an unsigned LAN record would go
+out in signed discovery responses under this node's identity), and a peer
+browser ignores any record carrying `sid` (each published service would
+otherwise be one more connector to the same host). `test_dnssd_bridge.py`
+asserts the chapter's bounds (`200`, `255`, `1300`, `63`) and the subtype as
+literals for the C5 reason, and `services.py` mirrors the engine's closed
+status set (`ok`, `not_found`, `error`) as a literal pinned the same way.
+
+## P10. Freeing a core object never blocks, wherever the interpreter frees it
+
+The generated bindings keep every callback object in one handle map behind
+one lock. Rust goes through that map on every callback it makes (a lookup)
+and on every callback it drops (a removal). The collector runs between any
+two bytecodes, those inside the map's critical section included, and a core
+object it finalizes there drops the callbacks the core holds, each of which
+asks for the map's lock on the thread that already has it. With the plain
+lock the generator emits, that thread waits for itself and the process
+hangs.
+
+A core object reaches the collector whenever it sits in a reference cycle,
+and the ordinary shapes are cycles: an event handler that is a method of the
+object owning the manager, an exception whose traceback names the manager.
+It could not happen while a stopped manager was never freed at all, which is
+why it arrived with the fix for that leak.
+
+The package installs a re-entrant lock on every handle map when it is
+imported (`_callback_reentrancy.py`), before any callback exists. Re-entry
+is removal only, since a finalizer drops callbacks and never registers one,
+and each of the map's critical sections is one dictionary operation or a
+read followed by an insert under a fresh handle. The generated file cannot
+carry the change itself: it is regenerated from the UDL and the drift gate
+compares it byte for byte.
+
+`test_callback_reentrancy.py` frees a core while holding the map's lock, in
+a process of its own so that a regression fails one test instead of hanging
+the suite, and finds the maps by looking rather than by name, so a
+regenerated binding that moves the map or adds a second one is caught.
+
+Releasing the file stores does not depend on any of this. `close()` asks
+the core to release them (`close_file_stores`), and the directories are free
+when it returns, whatever still refers to the manager.
+
+## P11. A gateway session is announced only once it is bound, and a frame is settled only on its verdict
+
+`GatewayManager` is the host's client for the gateway-daemon contract
+([the chapter](../spec/gateway-contract.md)) behind the slot the FFI names
+`reticulum`: newline-delimited JSON over TCP to a daemon on local IP. Two
+things it promises, and the shape that keeps each:
+
+**The carrier is offered to the core only for a session the gateway bound
+to this device's address.** `reticulum_status_changed(True)` is called from
+one place, on `StatusUpdate(connected)`, and only after the gateway's
+`AddressDeclared` echoed the address `local_address()` holds. The
+`Capabilities` frame is handed to the core as it arrives, and the contract
+puts it before the announcement, so on a conforming gateway the core knows
+what the gateway can do before the flush the announcement triggers. A
+session announced before it is bound is closed rather than kept: it is verdict-only on the gateway's side, so
+nothing addressed to this device would ever arrive over it, and a transport
+that can only refuse must not be offered to the selector. An echo of
+someone else's address, a refused declaration, a challenge that is not 32
+bytes, or a gateway that says nothing for ten seconds each cost the
+connection, and the reconnect ladder decides when to try again. The ladder
+resets only on a bound and announced session, never on the TCP open: reset
+there, a refusing gateway was retried at the floor forever with a signature
+spent per turn. The declaration itself comes from the core
+(`gateway_address_declaration`); the module names no signing domain, and a
+Rust guard reads it to keep that true.
+
+**The socket write is not the outcome.** Every `SendMessage` carries the
+core's message id and is held in a verdict tracker until the gateway's
+`MessageSent` or `DeliveryError` names it; only then is
+`reticulum_confirm_sent` or `reticulum_send_failed_with_reason` called.
+Confirming on the write is what the first clients of this contract did,
+and it is why `recipient_unreachable`, the one verdict that parks a message
+and offers it to the mesh, never reached the core from them. Verdicts are
+correlated by id, never by order, because a gateway answers submissions as
+their routing resolves. At most eight frames are unanswered at once, an id
+already in flight is not sent again when the core re-queues it, and every
+outstanding id is settled exactly once: a duplicate verdict is ignored, a
+connection that closes fails what it carried with `Connection lost`, and a
+gateway silent for sixty seconds has the frame failed under
+`gateway_silent`, which the core reads as a retry. Sixty is chosen to stay
+under the core's own 120 s pending-confirmation expiry; the Rust guard
+`gateway_manager_constants_match_across_both_bridges` reads the Python
+policy beside the two mobile ones and holds that relationship.
+
+This is the first client on this carrier to read the two optional verdict
+flags. `stored` on a `DeliveryError` is reported as `relay_stored`,
+`pushed` on a `MessageSent` as `relay_pushed`, and both together as
+`relay_pushed_stored`: the relay client's own mapping, so a gateway with a
+mailbox or a push parks a plain message the way the relay does and
+fast-fails nothing the push may have delivered. Each flag is a statement
+about the one frame the verdict names, never about the recipient.
+
+The decisions and frame shapes are pure functions in
+`gateway_attach_policy.py`, `gateway_verdict_tracker.py` and
+`presence_watch_policy.py`, ports of the Swift files of the same names,
+with no socket and no core; `test_gateway_attach_policy.py` and
+`test_presence_watch_policy.py` pin their hand-mirrored constants as
+literals (C5, the seventh and eighth sets). `test_gateway_manager.py`
+drives the manager against a fake daemon on a real loopback socket and
+pins the attach order, the correlation, the flags and what a dead
+connection owes. No daemon has been run against it; a conforming daemon is
+a deployment this repository does not ship.
+
 ## Testing
 
 ```bash

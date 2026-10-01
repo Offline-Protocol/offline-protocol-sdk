@@ -7,10 +7,11 @@ binding.
 | Document | Scope |
 |----------|-------|
 | This file | The contract every binding shares |
-| [Swift](swift.md) | iOS native and the React Native iOS bridge |
-| [Kotlin](kotlin.md) | Android native and the React Native Android bridge |
+| [Swift](swift.md) | iOS native, the Swift package and the React Native iOS bridge |
+| [Kotlin](kotlin.md) | Android native, the Android library and the React Native Android bridge |
 | [Python](python.md) | Desktop and tooling |
 | [TypeScript](typescript.md) | The React Native JavaScript surface |
+| [Local API](local-api.md) | A server fronting one engine for several local clients over a socket, and the reference server |
 
 Integration **guides** live elsewhere: [iOS](../ios-integration.md),
 [Android](../android-integration.md),
@@ -186,28 +187,36 @@ than the engine hands every silent-relay resolution to the sweep instead of to
 the bridge that knows which relays replied. Nothing on either side of the
 boundary would show that, so the guard asserts the ordering too.
 
-**The gateway attach constants** are the seventh: the Swift and Kotlin
-`GatewayAttachPolicy` each hold the protocol version, the challenge length, the
-attach and verdict timeouts, the in-flight cap and the presence-peer cap, and a
-Rust guard reads both sources. Like the Nostr deadline, one of these is pinned
-for a *relationship* as well as a spelling: the 60s verdict timeout has to stay
-below the core's 120s pending-confirmation expiry, because two clocks describe
-the same frame and if the bridge's were the longer one the core would settle the
-frame first and the verdict would then land on an id it had already moved past.
+**The gateway attach constants** are the seventh: the Swift, Kotlin and Python
+`GatewayAttachPolicy` (`gateway_attach_policy.py` in Python) each hold the
+protocol version, the challenge length, the attach and verdict timeouts, the
+line cap, the address-echo bound, the in-flight cap and the presence-peer cap,
+and a Rust guard reads all three sources. Like the Nostr deadline, one of
+these is pinned for a *relationship* as well as a spelling: the 60s verdict
+timeout has to stay below the core's 120s pending-confirmation expiry, because
+two clocks describe the same frame and if the client's were the longer one the
+core would settle the frame first and the verdict would then land on an id it
+had already moved past. Python also pins its spellings per language, in
+`test_gateway_attach_policy.py`, for the reason the relay domain does below;
+the relationship it cannot pin, because the core's constant is not visible
+from Python, so that one stays with the Rust guard.
 
 The signing domain is deliberately **not** in this list, though the relay's is.
 The gateway proof commits only this device's own address, so it is built and
-signed in the core and pinned by a conformance vector CI executes; no bridge
+signed in the core and pinned by a conformance vector CI executes; no client
 holds a copy of the layout, and there is nothing to mirror. A `GatewayAttachPolicy`
 that grew one would be reintroducing the problem the relay's copy already is,
-which is why a sibling guard asserts neither bridge, nor either policy, contains the domain string.
+which is why a sibling guard asserts that no manager and no policy, in any of
+the three languages, contains the domain string.
 
 **The presence-watch defaults** are the eighth, and were unpinned for as long as
 they have existed: `PresenceWatchPolicy`'s idle TTL, per-tick query cap and tick
-interval are hand-mirrored in Swift and Kotlin, and both the relay and gateway
-managers now drive from them. A tick interval that drifted apart would give the
-two platforms different presence latency, which reads in the field as a device
-problem rather than as a constant.
+interval are hand-mirrored in Swift, Kotlin and Python
+(`presence_watch_policy.py`), and the relay and gateway managers drive from
+them. A tick interval that drifted apart would give the platforms different
+presence latency, which reads in the field as a device problem rather than as
+a constant. The Rust guard reads all three; Python pins its three as literals
+too.
 
 **The iOS selector table** is the ninth, and the only one that is not a
 constant. `OfflineProtocolModule.m` mirrors every `@objc` method of
@@ -306,6 +315,7 @@ alone.
 | Reticulum available reported **only after** the gateway binds the session | An unbound session may submit and be told a verdict, and is never a recipient, so offering it to the selector offers a transport that can only refuse |
 | Relay capabilities cleared **on** internet drop | Otherwise a stale capability keeps the broadcast gate open |
 | Per-peer end-to-end capabilities restored **before** queued sends flush | Otherwise the startup flush emits downgraded envelopes to every established peer |
+| `close_file_stores()` **after** `stop()`, and nothing after it | A running engine writes to its stores, so the call is refused until the protocol is stopped; afterwards the engine holds closed stores, so `start()`, `enable_telemetry()` and both `initialize_mls` entry points are refused |
 
 ## C8. The identifier the bridge reports must match the namespace it is asked for
 
@@ -410,10 +420,13 @@ binary and empty values, overwrite semantics, delete idempotence, key-type
 isolation, listing accuracy, composed and long key ids, large records, and
 delete completeness. Each check exists because that defect is invisible
 until data is missing. The suite writes only under its own probe key types
-and deletes everything it wrote, which keeps a live store intact only if the
-backend keeps key types apart: on one that merges them, listing a probe key
-type names real records too, and the suite's cleanup deletes what it lists.
-Probe a new backend on a scratch instance until it is green.
+and deletes everything it wrote. That keeps a live store intact only if the
+backend keeps key types apart, since on one that merges them, listing a
+probe key type names real records too. So isolation is checked first, with
+point writes and point deletes of ids nothing else uses, including a probe
+type that ends like another (the SDK's own key types are related that way),
+and a failure ends the run before anything is listed and deleted. Probe a
+new backend on a scratch instance until it is green all the same.
 
 Green on either suite is not a persistence test. Every check runs against one
 open instance, so a backend that forgets everything on reopen, or that
@@ -424,13 +437,31 @@ The built-in Rust file stores, `FileProtocolStateStorage` and
 `SealedFileMlsStorage`, are the worked example: each is green on its suite in
 the engine's tests, and each has a reopen test, including one that restarts an
 engine over both and finds the same address and the same sealed document
-([MLS integration](../mls-integration.md#built-in-file-stores)). No binding
-exposes them yet. A Rust host that uses them owns both directories, which
-includes removing them on logout, after both stores (and the engine holding
-them) are dropped: each store holds a lock on its directory while it is open.
-With telemetry enabled, call `disable_telemetry()` before dropping the engine:
-the drop alone detaches the uploader thread, which holds the protocol-state
-store until its final flush ends, up to three seconds later.
+([MLS integration](../mls-integration.md#built-in-file-stores)). A binding
+reaches them through `initialize_mls_with_file_stores`; only the Python
+`ProtocolManager` wires it (`store_key=` or `store_key_env=`), because the
+mobile modules have a platform keystore. A host that uses them owns both
+directories, which includes removing them on logout, after both stores are
+closed: each store holds a lock on its directory while it is open.
+
+**Release the directories with `close_file_stores()`, never by dropping the
+instance.** Dropping releases them too, but a binding does not decide when
+its object is dropped: the host runtime does. A reference the application
+kept, a callback cycle that runs through Rust, an exception whose traceback
+names the object, each holds the instance, and with it both locks, so every
+later instance over the same directories is refused. None of those is
+visible from the binding's own code, and a test that drops its last
+reference proves only that the test held no other. The call is only valid
+after `stop()`, and the instance cannot run again afterwards. It disables
+telemetry itself and waits for the uploader's final flush, up to three
+seconds, because the uploader keeps its queue in the protocol-state store;
+call it off the main thread.
+
+A Rust host opens the two with `FileStorePair::open`, which refuses the
+pairs the engine would lose data over, and closes them with the pair's
+`close()`, after `disable_telemetry()` and the engine's stop. Dropping the engine
+alone detaches the uploader thread, which holds the protocol-state store
+until its final flush ends, up to three seconds later.
 
 The MLS storage trait has a suite of its own,
 `offline_protocol::mls_storage_conformance::run` (`run_json` for the same JSON
@@ -540,13 +571,47 @@ forwarded a platform string, a session that never closes because the app
 never told the pipe it backgrounded, or a main-thread watchdog kill on
 `disableTelemetry`.
 
+## C13. A shared bridge source compiles without React
+
+Every hand-written bridge source compiles with no React on the classpath,
+except the ones named as needing it:
+
+| Platform | Needs React |
+|----------|-------------|
+| Android | `OfflineProtocolModule.kt`, `OfflineProtocolPackage.kt`, `MeshHeadlessWakeService.kt` |
+| iOS | `OfflineProtocolModule.swift`, `OfflineProtocolModule.m` |
+
+The Swift package and the Android library are built from the files the React
+Native module compiles, where they are, less those five
+([ADR 0025](../adr/0025-native-packages-are-assembled-in-place.md)). So a
+transport manager that takes a `Promise`, or a policy class that imports
+React for one type, still builds in React Native and breaks both native
+packages for every application that uses them.
+
+The check is the package build, on every pull request: the `Swift Package`
+job builds the package and runs it on a simulator, and the `Android Library`
+job compiles the library and its suite. Each list of what to leave out is
+checked the other way too. A name on it that matches no file is a rename
+nobody carried over, and both builds refuse it, because the renamed file
+would otherwise be taken.
+
+**A value the React Native package declares, and that would drift without
+anything failing, is read and not written again.** The packages read the iOS
+deployment target, the Android SDK levels, every dependency version, the
+compiler and the manifest from where the module declares them. A value that
+has to change is changed there.
+
+The failure this prevents: a native package that stops building, or builds
+against a different version of a dependency than the code was tested with,
+found by the first application to update.
+
 ## What each binding owes
 
 | Binding | Owes |
 |---------|------|
 | Swift | The manual Objective-C bridge kept in step with every `@objc` method; secure storage backed by Keychain; a live-instance check before emitting; the telemetry session boundary inside a background task (C12); a Multipeer manager that announces a peer only under the address its preamble proved, one per address (S8) |
 | Kotlin | Secure storage backed by Keystore; no blocking work on the main looper; awareness that platform callbacks arrive on binder threads; the telemetry session boundary from an `Application.ActivityLifecycleCallbacks` watcher, never `onHostPause` (C12); a Wi-Fi Direct manager that announces a peer only under the address its preamble proved, one per address (K8) |
-| Python | Nothing platform-specific; it is the thinnest binding and therefore the best place to smoke-test an ABI change; the host platform for telemetry from `platform`; a BLE peripheral that serves the address and the core-built identity assertion, and a central that verifies before it announces (P8); a peer-stream manager that announces a host only under the address its preamble proved, and keeps one announced stream per address (P9) |
+| Python | Nothing platform-specific; it is the thinnest binding and therefore the best place to smoke-test an ABI change; a re-entrant lock on the generated callback handle map, installed at import, because the collector can free a core object inside a callback lookup and the core's drop then asks for that lock again (P10); the host platform for telemetry from `platform`; a BLE peripheral that serves the address and the core-built identity assertion, and a central that verifies before it announces (P8); a peer-stream manager that announces a host only under the address its preamble proved, and keeps one announced stream per address (P9); a gateway-daemon client that announces a session only once the gateway bound it to this device's address, and settles a frame only on the gateway's verdict, never on the write (P11) |
 | TypeScript | Config normalization, event typing kept in step with the core, no assumption that a native method exists in an older binary, and no telemetry lifecycle code of its own |
 
 A storage adapter written in any of them owes the same thing: a green

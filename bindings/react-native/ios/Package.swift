@@ -9,9 +9,10 @@
 // exactly the Foundation-only helpers those suites cover — nothing that
 // imports React, CoreBluetooth, or the Generated UniFFI module.
 //
-// The storage providers are included for compile coverage: under SWIFT_PACKAGE
-// they bind to the local protocol shims in ProtocolStateStorage.swift instead
-// of the Generated ones. Only the file-backed state store is exercised at
+// The storage providers are included for compile coverage: under
+// OFFLINE_PROTOCOL_HARNESS_SHIMS, which the library target below defines, they
+// bind to the local protocol shims in ProtocolStateStorage.swift instead of
+// the Generated ones. Only the file-backed state store is exercised at
 // runtime — the Keychain-backed one would touch the developer's login keychain,
 // so its policy lives in LegacyStoreAdoption, which is tested directly.
 //
@@ -67,6 +68,7 @@ let package = Package(
                 "InboundFragmentBuffer.swift",
                 "LegacyRelayMessage.swift",
                 "LegacyStoreAdoption.swift",
+                "CustodyConfigReader.swift",
                 "MeshRelayConfigReader.swift",
                 "MlsSecureStorage.swift",
                 "MonotonicClock.swift",
@@ -91,6 +93,11 @@ let package = Package(
                 "StorageNamespace.swift",
                 "SupersededLatchPolicy.swift",
                 "WriteStallWatchdog.swift"
+            ],
+            // Not SWIFT_PACKAGE, which SwiftPM defines by itself for every
+            // package: see the shims in ProtocolStateStorage.swift.
+            swiftSettings: [
+                .define("OFFLINE_PROTOCOL_HARNESS_SHIMS")
             ]
         ),
         .testTarget(
@@ -98,8 +105,9 @@ let package = Package(
             dependencies: ["OfflineProtocol"],
             path: "tests",
             // The remaining suites cover classes that drag in the Generated
-            // UniFFI module or platform frameworks; they still ride the app
-            // build until they get a harness of their own.
+            // UniFFI module or platform frameworks, which this harness cannot
+            // compile. They run in the Swift package's CI job, which builds
+            // them against the real module (bindings/swift/README.md).
             exclude: [
                 "BleDiscoveryBootstrapPolicyTests.swift",
                 "MeshControllerTests.swift",
@@ -119,6 +127,7 @@ let package = Package(
                 "InboundFragmentBufferTests.swift",
                 "LegacyRelayMessageTests.swift",
                 "LegacyStoreAdoptionTests.swift",
+                "CustodyConfigReaderTests.swift",
                 "MeshRelayConfigReaderTests.swift",
                 "NostrQueryTrackerTests.swift",
                 "OutboundFragmentQueueTests.swift",

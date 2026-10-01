@@ -49,6 +49,14 @@ pub const CONFORMANCE_KEY_TYPE_OTHER: &str = "mls_storage_conformance_probe_othe
 /// untouched category is empty and not an error.
 const CONFORMANCE_KEY_TYPE_UNUSED: &str = "mls_storage_conformance_probe_unused";
 
+/// A key type that ends with [`CONFORMANCE_KEY_TYPE`], the way the SDK's
+/// own key types are related: `key_package` ends `contact_key_package` and
+/// `openmls_key_package`, and `group_state` ends `openmls_group_state`. The
+/// two probe types above are related by prefix only, so a backend that lists
+/// by suffix passed every check and then listed every OpenMLS record as a
+/// group. The isolation check writes its listing probe here too.
+const CONFORMANCE_KEY_TYPE_SUFFIXED: &str = "suffixed_mls_storage_conformance_probe";
+
 /// The id the isolation check writes under both probe key types. Nothing
 /// else uses it, so a point write or delete of it cannot touch a real
 /// record even on a backend that ignores the key type.
@@ -532,6 +540,9 @@ fn key_types_are_isolated(storage: &dyn MlsStorage) -> Result<(), String> {
             .and_then(|()| {
                 storage.store(CONFORMANCE_KEY_TYPE_OTHER, ISOLATION_LISTING_PROBE_ID, b"x")
             })
+            .and_then(|()| {
+                storage.store(CONFORMANCE_KEY_TYPE_SUFFIXED, ISOLATION_LISTING_PROBE_ID, b"x")
+            })
             .map_err(|err| {
                 format!("store failed, so isolation could not be checked and nothing was deleted: {err}")
             })?;
@@ -555,6 +566,7 @@ fn key_types_are_isolated(storage: &dyn MlsStorage) -> Result<(), String> {
         (CONFORMANCE_KEY_TYPE, ISOLATION_PROBE_ID),
         (CONFORMANCE_KEY_TYPE_OTHER, ISOLATION_PROBE_ID),
         (CONFORMANCE_KEY_TYPE_OTHER, ISOLATION_LISTING_PROBE_ID),
+        (CONFORMANCE_KEY_TYPE_SUFFIXED, ISOLATION_LISTING_PROBE_ID),
     ] {
         let _ = storage.delete(key_type, key_id);
     }
@@ -736,6 +748,7 @@ mod tests {
         AbsentIsAnError,
         DeleteOfAbsentFails,
         IgnoresKeyType,
+        ListsBySuffix,
         ListReturnsFirstPageOnly,
         ListOfUnknownTypeFails,
         KeepsIdUpToFirstColon,
@@ -852,7 +865,12 @@ mod tests {
                 .lock()
                 .unwrap()
                 .keys()
-                .filter(|(kt, _)| *kt == key_type)
+                .filter(|(kt, _)| match self.fault {
+                    // Matching the tail of the name, which the SDK's own
+                    // key types share (see CONFORMANCE_KEY_TYPE_SUFFIXED).
+                    Fault::ListsBySuffix => kt.ends_with(key_type.as_str()),
+                    _ => *kt == key_type,
+                })
                 .map(|(_, id)| id.clone())
                 .collect();
             match self.fault {
@@ -899,6 +917,7 @@ mod tests {
         // nothing, so each check is shown failing the defect it exists for.
         let cases = [
             (Fault::IgnoresKeyType, "key_types_are_separate_namespaces"),
+            (Fault::ListsBySuffix, "key_types_are_separate_namespaces"),
             (Fault::CorruptsValues, "store_then_load"),
             (Fault::StringTypedValues, "binary_values_round_trip"),
             (Fault::EmptyReadsAsMissing, "empty_value_is_not_missing"),
@@ -964,6 +983,29 @@ mod tests {
             .expect("the check failed");
         assert!(failure.detail.contains("KeyNotFound"), "{}", failure.detail);
     }
+    #[test]
+    fn a_backend_that_lists_by_suffix_stops_the_run_before_any_delete() {
+        // Listing one key type by the tail of its name reaches every type
+        // that ends the same way. The run stops at the isolation check, and
+        // a real record in such a type is untouched.
+        let storage = Faulty::new(Fault::ListsBySuffix);
+        storage
+            .store("prefixed_mls_storage_conformance_probe", "real", b"kept")
+            .unwrap();
+        let report = run(&storage);
+        assert!(report.passed.is_empty(), "{:?}", report.passed);
+        assert_eq!(
+            report.failures[0].check,
+            "key_types_are_separate_namespaces"
+        );
+        assert_eq!(
+            storage
+                .load("prefixed_mls_storage_conformance_probe", "real")
+                .unwrap(),
+            Some(b"kept".to_vec())
+        );
+    }
+
     #[test]
     fn a_backend_that_merges_key_types_stops_the_run_before_any_delete() {
         // The isolation check runs first because every listed delete after

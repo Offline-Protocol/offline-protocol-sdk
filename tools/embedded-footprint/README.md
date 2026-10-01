@@ -53,6 +53,12 @@ That is the same reason `offline-protocol-core` is linked
 `--no-default-features` here: this harness is the leaf configuration, not a
 reduced version of the mobile one.
 
+It measures a Cortex-M33 only. The leaf crate also compiles for ESP32 RISC-V
+parts and for Cortex-M0, but this harness is built on `cortex-m-rt`, an xG24
+memory map and an allocator that assumes compare-and-swap, so a second figure
+means a second runtime. It waits until a specific board is the target, because
+a row for a configuration nobody ships is worse than no row.
+
 ## What the number is not
 
 It is **the protocol layer only**. A door lock also needs, and this does not

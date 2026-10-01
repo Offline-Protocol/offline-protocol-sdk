@@ -932,6 +932,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_canc
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer(
 ): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores(
+): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite(
@@ -945,6 +947,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session(
 ): Short
@@ -967,6 +971,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats(
 ): Short
@@ -1021,6 +1027,8 @@ external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls(
+): Short
+external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores(
 ): Short
 external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused(
 ): Short
@@ -1427,6 +1435,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_con
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_group(`ptr`: Long,`groupName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_invite(`ptr`: Long,`petname`: RustBuffer.ByValue,`sign`: Byte,uniffi_out_err: UniffiRustCallStatus, 
@@ -1440,6 +1450,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_enable_telemetry(`ptr`: Long,`config`: RustBuffer.ByValue,`appState`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_end_telemetry_session(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_erase_custody(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_establish_secure_session(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1462,6 +1474,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_active
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_battery_level(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_blocked_users(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_custody_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_dedup_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
@@ -1516,6 +1530,8 @@ external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pendin
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_identity_assertion(`ptr`: Long,`signedData`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(`ptr`: Long,`secureStorage`: Long,`protocolStateStorage`: Long,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls_with_file_stores(`ptr`: Long,`mlsRoot`: RustBuffer.ByValue,`stateRoot`: RustBuffer.ByValue,`storeKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declaration_refused(`ptr`: Long,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -2046,6 +2062,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 6632.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores() != 28531.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 8723.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -2065,6 +2084,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session() != 51941.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody() != 5086.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session() != 25919.toShort()) {
@@ -2098,6 +2120,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users() != 24603.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats() != 42535.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats() != 43759.toShort()) {
@@ -2179,6 +2204,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 43685.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores() != 58803.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused() != 30965.toShort()) {
@@ -4194,6 +4222,8 @@ public interface OfflineProtocolInterface {
     
     fun `cancelFileTransfer`(`fileId`: kotlin.String)
     
+    fun `closeFileStores`()
+    
     fun `createGroup`(`groupName`: kotlin.String): MlsGroupInfo
     
     fun `createInvite`(`petname`: kotlin.String?, `sign`: kotlin.Boolean): kotlin.String
@@ -4207,6 +4237,8 @@ public interface OfflineProtocolInterface {
     fun `enableTelemetry`(`config`: TelemetryConfig, `appState`: AppState)
     
     fun `endTelemetrySession`()
+    
+    fun `eraseCustody`()
     
     fun `establishSecureSession`(`peerId`: kotlin.String): MlsWelcomeMessage?
     
@@ -4229,6 +4261,8 @@ public interface OfflineProtocolInterface {
     fun `getBatteryLevel`(): kotlin.UByte?
     
     fun `getBlockedUsers`(): List<kotlin.String>
+    
+    fun `getCustodyStats`(): CustodyStats
     
     fun `getDedupStats`(): DedupStats
     
@@ -4283,6 +4317,8 @@ public interface OfflineProtocolInterface {
     fun `identityAssertion`(`signedData`: List<kotlin.UByte>): List<kotlin.UByte>
     
     fun `initializeMls`(`secureStorage`: MlsStorageProvider, `protocolStateStorage`: ProtocolStateStorageProvider)
+    
+    fun `initializeMlsWithFileStores`(`mlsRoot`: kotlin.String, `stateRoot`: kotlin.String, `storeKey`: kotlin.ByteArray)
     
     fun `internetAddressDeclarationRefused`(`reason`: kotlin.String)
     
@@ -4827,6 +4863,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     
 
     
+    @Throws(ProtocolException::class)override fun `closeFileStores`()
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores(
+        it,
+        _status)
+}
+    }
+    
+    
+
+    
     @Throws(ProtocolException::class)override fun `createGroup`(`groupName`: kotlin.String): MlsGroupInfo {
             return FfiConverterTypeMlsGroupInfo.lift(
     callWithHandle {
@@ -4910,6 +4959,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     callWithHandle {
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_end_telemetry_session(
+        it,
+        _status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `eraseCustody`()
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_erase_custody(
         it,
         _status)
 }
@@ -5056,6 +5118,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     callWithHandle {
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_blocked_users(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
+    override fun `getCustodyStats`(): CustodyStats {
+            return FfiConverterTypeCustodyStats.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_custody_stats(
         it,
         _status)
 }
@@ -5419,6 +5494,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(
         it,
         FfiConverterTypeMlsStorageProvider.lower(`secureStorage`),FfiConverterTypeProtocolStateStorageProvider.lower(`protocolStateStorage`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(ProtocolException::class)override fun `initializeMlsWithFileStores`(`mlsRoot`: kotlin.String, `stateRoot`: kotlin.String, `storeKey`: kotlin.ByteArray)
+        = 
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls_with_file_stores(
+        it,
+        FfiConverterString.lower(`mlsRoot`),FfiConverterString.lower(`stateRoot`),FfiConverterByteArray.lower(`storeKey`),_status)
 }
     }
     
@@ -7002,6 +7090,213 @@ public object FfiConverterTypeBleFragment: FfiConverterRustBuffer<BleFragment> {
     override fun write(value: BleFragment, buf: ByteBuffer) {
             FfiConverterString.write(value.`recipientId`, buf)
             FfiConverterSequenceUByte.write(value.`data`, buf)
+    }
+}
+
+
+
+data class CustodyConfig (
+    var `enabled`: kotlin.Boolean? = null 
+    , 
+    var `holdMs`: kotlin.ULong? = null 
+    , 
+    var `maxEntriesPerDepositor`: kotlin.ULong? = null 
+    , 
+    var `maxBytesPerDepositor`: kotlin.ULong? = null 
+    , 
+    var `maxEntries`: kotlin.ULong? = null 
+    , 
+    var `maxBytes`: kotlin.ULong? = null 
+    , 
+    var `strangerMaxEntries`: kotlin.ULong? = null 
+    , 
+    var `strangerMaxBytes`: kotlin.ULong? = null 
+    , 
+    var `overflowPolicy`: OverflowPolicy? = null 
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCustodyConfig: FfiConverterRustBuffer<CustodyConfig> {
+    override fun read(buf: ByteBuffer): CustodyConfig {
+        return CustodyConfig(
+            FfiConverterOptionalBoolean.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalULong.read(buf),
+            FfiConverterOptionalTypeOverflowPolicy.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CustodyConfig) = (
+            FfiConverterOptionalBoolean.allocationSize(value.`enabled`) +
+            FfiConverterOptionalULong.allocationSize(value.`holdMs`) +
+            FfiConverterOptionalULong.allocationSize(value.`maxEntriesPerDepositor`) +
+            FfiConverterOptionalULong.allocationSize(value.`maxBytesPerDepositor`) +
+            FfiConverterOptionalULong.allocationSize(value.`maxEntries`) +
+            FfiConverterOptionalULong.allocationSize(value.`maxBytes`) +
+            FfiConverterOptionalULong.allocationSize(value.`strangerMaxEntries`) +
+            FfiConverterOptionalULong.allocationSize(value.`strangerMaxBytes`) +
+            FfiConverterOptionalTypeOverflowPolicy.allocationSize(value.`overflowPolicy`)
+    )
+
+    override fun write(value: CustodyConfig, buf: ByteBuffer) {
+            FfiConverterOptionalBoolean.write(value.`enabled`, buf)
+            FfiConverterOptionalULong.write(value.`holdMs`, buf)
+            FfiConverterOptionalULong.write(value.`maxEntriesPerDepositor`, buf)
+            FfiConverterOptionalULong.write(value.`maxBytesPerDepositor`, buf)
+            FfiConverterOptionalULong.write(value.`maxEntries`, buf)
+            FfiConverterOptionalULong.write(value.`maxBytes`, buf)
+            FfiConverterOptionalULong.write(value.`strangerMaxEntries`, buf)
+            FfiConverterOptionalULong.write(value.`strangerMaxBytes`, buf)
+            FfiConverterOptionalTypeOverflowPolicy.write(value.`overflowPolicy`, buf)
+    }
+}
+
+
+
+data class CustodyStats (
+    var `held`: kotlin.ULong
+    , 
+    var `heldBytes`: kotlin.ULong
+    , 
+    var `accepted`: kotlin.ULong
+    , 
+    var `delivered`: kotlin.ULong
+    , 
+    var `reOriginated`: kotlin.ULong
+    , 
+    var `expired`: kotlin.ULong
+    , 
+    var `duplicates`: kotlin.ULong
+    , 
+    var `evicted`: kotlin.ULong
+    , 
+    var `receiptsSent`: kotlin.ULong
+    , 
+    var `receiptsDropped`: kotlin.ULong
+    , 
+    var `receiptsReceived`: kotlin.ULong
+    , 
+    var `receiptsIgnored`: kotlin.ULong
+    , 
+    var `refusedDisabled`: kotlin.ULong
+    , 
+    var `refusedNoRequest`: kotlin.ULong
+    , 
+    var `refusedUnknownClass`: kotlin.ULong
+    , 
+    var `refusedNotSealed`: kotlin.ULong
+    , 
+    var `refusedUnprovenPeer`: kotlin.ULong
+    , 
+    var `refusedNotDepositor`: kotlin.ULong
+    , 
+    var `refusedStranger`: kotlin.ULong
+    , 
+    var `refusedDepositorFull`: kotlin.ULong
+    , 
+    var `refusedStoreFull`: kotlin.ULong
+    , 
+    var `refusedBattery`: kotlin.ULong
+    
+){
+    
+
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCustodyStats: FfiConverterRustBuffer<CustodyStats> {
+    override fun read(buf: ByteBuffer): CustodyStats {
+        return CustodyStats(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: CustodyStats) = (
+            FfiConverterULong.allocationSize(value.`held`) +
+            FfiConverterULong.allocationSize(value.`heldBytes`) +
+            FfiConverterULong.allocationSize(value.`accepted`) +
+            FfiConverterULong.allocationSize(value.`delivered`) +
+            FfiConverterULong.allocationSize(value.`reOriginated`) +
+            FfiConverterULong.allocationSize(value.`expired`) +
+            FfiConverterULong.allocationSize(value.`duplicates`) +
+            FfiConverterULong.allocationSize(value.`evicted`) +
+            FfiConverterULong.allocationSize(value.`receiptsSent`) +
+            FfiConverterULong.allocationSize(value.`receiptsDropped`) +
+            FfiConverterULong.allocationSize(value.`receiptsReceived`) +
+            FfiConverterULong.allocationSize(value.`receiptsIgnored`) +
+            FfiConverterULong.allocationSize(value.`refusedDisabled`) +
+            FfiConverterULong.allocationSize(value.`refusedNoRequest`) +
+            FfiConverterULong.allocationSize(value.`refusedUnknownClass`) +
+            FfiConverterULong.allocationSize(value.`refusedNotSealed`) +
+            FfiConverterULong.allocationSize(value.`refusedUnprovenPeer`) +
+            FfiConverterULong.allocationSize(value.`refusedNotDepositor`) +
+            FfiConverterULong.allocationSize(value.`refusedStranger`) +
+            FfiConverterULong.allocationSize(value.`refusedDepositorFull`) +
+            FfiConverterULong.allocationSize(value.`refusedStoreFull`) +
+            FfiConverterULong.allocationSize(value.`refusedBattery`)
+    )
+
+    override fun write(value: CustodyStats, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`held`, buf)
+            FfiConverterULong.write(value.`heldBytes`, buf)
+            FfiConverterULong.write(value.`accepted`, buf)
+            FfiConverterULong.write(value.`delivered`, buf)
+            FfiConverterULong.write(value.`reOriginated`, buf)
+            FfiConverterULong.write(value.`expired`, buf)
+            FfiConverterULong.write(value.`duplicates`, buf)
+            FfiConverterULong.write(value.`evicted`, buf)
+            FfiConverterULong.write(value.`receiptsSent`, buf)
+            FfiConverterULong.write(value.`receiptsDropped`, buf)
+            FfiConverterULong.write(value.`receiptsReceived`, buf)
+            FfiConverterULong.write(value.`receiptsIgnored`, buf)
+            FfiConverterULong.write(value.`refusedDisabled`, buf)
+            FfiConverterULong.write(value.`refusedNoRequest`, buf)
+            FfiConverterULong.write(value.`refusedUnknownClass`, buf)
+            FfiConverterULong.write(value.`refusedNotSealed`, buf)
+            FfiConverterULong.write(value.`refusedUnprovenPeer`, buf)
+            FfiConverterULong.write(value.`refusedNotDepositor`, buf)
+            FfiConverterULong.write(value.`refusedStranger`, buf)
+            FfiConverterULong.write(value.`refusedDepositorFull`, buf)
+            FfiConverterULong.write(value.`refusedStoreFull`, buf)
+            FfiConverterULong.write(value.`refusedBattery`, buf)
     }
 }
 
@@ -8678,6 +8973,8 @@ data class ProtocolConfig (
     , 
     var `meshRelay`: MeshRelayConfig? = null 
     , 
+    var `custody`: CustodyConfig? = null 
+    , 
     var `dataEnabled`: kotlin.Boolean = true 
     , 
     var `controlFreshnessEnforced`: kotlin.Boolean = true 
@@ -8726,6 +9023,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalTypeMeshRelayConfig.read(buf),
+            FfiConverterOptionalTypeCustodyConfig.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
         )
@@ -8763,6 +9061,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.allocationSize(value.`richPayloadEnabled`) +
             FfiConverterBoolean.allocationSize(value.`cryptoRecoveryEnabled`) +
             FfiConverterOptionalTypeMeshRelayConfig.allocationSize(value.`meshRelay`) +
+            FfiConverterOptionalTypeCustodyConfig.allocationSize(value.`custody`) +
             FfiConverterBoolean.allocationSize(value.`dataEnabled`) +
             FfiConverterBoolean.allocationSize(value.`controlFreshnessEnforced`)
     )
@@ -8799,6 +9098,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterBoolean.write(value.`richPayloadEnabled`, buf)
             FfiConverterBoolean.write(value.`cryptoRecoveryEnabled`, buf)
             FfiConverterOptionalTypeMeshRelayConfig.write(value.`meshRelay`, buf)
+            FfiConverterOptionalTypeCustodyConfig.write(value.`custody`, buf)
             FfiConverterBoolean.write(value.`dataEnabled`, buf)
             FfiConverterBoolean.write(value.`controlFreshnessEnforced`, buf)
     }
@@ -11075,6 +11375,38 @@ public object FfiConverterOptionalTypeBleFragment: FfiConverterRustBuffer<BleFra
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeCustodyConfig: FfiConverterRustBuffer<CustodyConfig?> {
+    override fun read(buf: ByteBuffer): CustodyConfig? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeCustodyConfig.read(buf)
+    }
+
+    override fun allocationSize(value: CustodyConfig?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeCustodyConfig.allocationSize(value)
+        }
+    }
+
+    override fun write(value: CustodyConfig?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeCustodyConfig.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeFileProgress: FfiConverterRustBuffer<FileProgress?> {
     override fun read(buf: ByteBuffer): FileProgress? {
         if (buf.get().toInt() == 0) {
@@ -11609,6 +11941,38 @@ public object FfiConverterOptionalTypeMlsVerbosity: FfiConverterRustBuffer<MlsVe
         } else {
             buf.put(1)
             FfiConverterTypeMlsVerbosity.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeOverflowPolicy: FfiConverterRustBuffer<OverflowPolicy?> {
+    override fun read(buf: ByteBuffer): OverflowPolicy? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeOverflowPolicy.read(buf)
+    }
+
+    override fun allocationSize(value: OverflowPolicy?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeOverflowPolicy.allocationSize(value)
+        }
+    }
+
+    override fun write(value: OverflowPolicy?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeOverflowPolicy.write(value, buf)
         }
     }
 }

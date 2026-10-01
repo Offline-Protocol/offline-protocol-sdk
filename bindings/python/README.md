@@ -98,6 +98,36 @@ await pm.peer_stream.start()
 A peer is announced only under the address its preamble proves, and
 `pm.stop()` stops the stream layer with everything else.
 
+### Services, and services on the LAN
+
+`Services` wraps the generated `MeshServices` and keeps the one thing the
+engine cannot give back: the list of what this node registered. `respond`
+refuses a status the engine would refuse (`ok`, `not_found` and `error` are
+the whole set) with the reason instead of an opaque core error.
+
+```python
+from offline_protocol_sdk.services import Services
+from offline_protocol_sdk.dnssd_bridge import DnsSdBridge
+
+services = Services(pm.protocol)
+services.register("weather.v1", "2.0", {"format": "json"})   # before or after pm.start()
+
+# Publish this node's registrations on the LAN and import the neighbours'.
+# Needs: pip install 'offline-protocol-sdk[lan]'
+bridge = DnsSdBridge(services, on_event=handle_event)
+await bridge.start(address=pm.local_address, port=pm.peer_stream.listen_port)
+...
+await bridge.stop()   # before pm.stop()
+```
+
+A LAN import arrives at `handle_event` as a `service_discovered` event with
+`source: "lan"` and is kept in `bridge.lan_services()`; it is an unsigned
+claim by whoever answered on the segment, never a discovery, and the bridge
+never registers it with the engine. Registrations that do not fit the record
+(a service id over 200 bytes, a capability key DNS-SD cannot carry, a record
+over 1300 bytes) are kept on the mesh and not published, with a warning. The
+mapping is [docs/spec/dns-sd-mapping.md](../../docs/spec/dns-sd-mapping.md).
+
 ## Architecture
 
 ```
@@ -106,6 +136,11 @@ offline_protocol_sdk/
 ├── protocol_manager.py      # High-level wrapper (processing loop, lifecycle)
 ├── internet_manager.py      # WebSocket transport (websockets library)
 ├── peer_stream_manager.py   # TCP peer streams + DNS-SD (the wifi_direct slot)
+├── gateway_manager.py       # Gateway-daemon client over TCP (the reticulum slot)
+├── gateway_attach_policy.py # Its decisions and frame shapes, socket-free
+├── gateway_verdict_tracker.py, presence_watch_policy.py
+├── services.py              # Service registry wrappers with the copy the engine lacks
+├── dnssd_bridge.py          # Services on the LAN: publish own, import neighbours' (optional extra `lan`)
 ├── ble_manager.py           # BLE transport (bleak library)
 ├── secure_storage.py        # MLS key storage (keyring library)
 ├── state_storage.py         # Restartable protocol state (application data)
@@ -119,7 +154,7 @@ offline_protocol_sdk/
 | Internet/WebSocket | `websockets` | All | Primary transport for desktop |
 | BLE | `bleak` | All | Central (scanner) role only; peripheral/GATT server requires `bless` |
 | Peer stream (the `wifi_direct` slot) | `asyncio` sockets; `zeroconf` for LAN discovery (optional extra `lan`) | All | `PeerStreamManager`: TCP streams to configured `host:port` peers or hosts found over DNS-SD, each proved by the identity-assertion preamble ([spec](../../docs/spec/stream-framing.md)). Start it after `ProtocolManager.start()`; binds every interface unless `listen_host` narrows it |
-| Reticulum | Built-in | All | Handled in Rust core; `ProtocolManager` wires a stub callback when `reticulum_enabled=True` — apps driving Reticulum themselves replace it via `protocol.set_reticulum_transport_callback(...)` |
+| Reticulum (a gateway daemon) | `asyncio` sockets | All | `GatewayManager` as `pm.gateway` when `reticulum_enabled=True`: the [gateway-daemon contract](../../docs/spec/gateway-contract.md) over TCP to a daemon on local IP (`configure(daemon_address="localhost:4242")`, then `await pm.gateway.start()` after `pm.start()`). Attaches with a signed address declaration, settles each send on the gateway's verdict, watches presence. What answers is a daemon built to the contract; this package ships the device half. Apps driving the slot themselves replace the callback via `protocol.set_reticulum_transport_callback(...)` |
 | Nostr | Built-in | All | Handled in Rust core (BIP-340 signing); `ProtocolManager` wires a stub callback when `nostr_enabled=True` — apps driving Nostr themselves replace it via `protocol.set_nostr_transport_callback(...)` |
 
 ### Secure Storage
@@ -141,8 +176,141 @@ reach `AppStateStorage`. On a plaintext backend that key sits in a readable
 file, so the sealing gives you separation of *lifecycle* but not of
 *confidentiality*: anyone who can read the credential store can open every
 sealed protocol-state record. Install a real secret service (gnome-keyring,
-kwallet) for any deployment where that matters, or supply your own
-`MlsStorageProvider`.
+kwallet) for any deployment where that matters, supply your own
+`MlsStorageProvider`, or use the built-in file stores below.
+
+### Run as a service: the local API
+
+One process can own the engine and serve several local applications at once,
+over JSON-RPC 2.0 on a WebSocket. The contract is
+[the local API chapter](../../docs/spec/local-api.md); the reference server
+ships in this package as `offline_protocol_sdk.local_api` and as the
+`offline-protocol-service` command:
+
+```bash
+export OFFLINE_PROTOCOL_STORE_KEY="$(openssl rand -hex 32)"   # once; keep it
+offline-protocol-service --config config.json \
+    --mls-root /var/lib/example/keys --state-root /var/lib/example/state \
+    --socket /run/example/api.sock --listen 0.0.0.0:7878 --peer 10.0.0.2:7878
+```
+
+`config.json` holds the `ProtocolConfig` fields by name; the socket is
+created owner-only. A client opens the socket, sends `hello` with its
+application id, and calls the engine's own methods by name:
+
+```python
+import asyncio, json
+from websockets.asyncio.client import unix_connect
+
+async def main():
+    async with unix_connect("/run/example/api.sock", uri="ws://localhost/") as ws:
+        await ws.send(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "hello",
+                                  "params": {"app_id": "notes"}}))
+        print(json.loads(await ws.recv())["result"]["local_address"])
+
+asyncio.run(main())
+```
+
+Every message a `notes` client sends is stamped with that id, and a
+`message_received` for `notes` reaches only `notes` clients; what the server
+holds for an application whose client is away, and what it never puts on the
+wire, is the chapter's. `--policy policy.json` adds the optional rules
+(`spaces`, `denied`); `--tcp PORT --token-file PATH` serves loopback TCP with
+a per-launch token instead of the socket. See
+[the bridge contract](../../docs/bridges/local-api.md) for what the server
+owes.
+
+The guide is [docs/local-api.md](../../docs/local-api.md). Two clients ship
+as examples and are run by the test suite against an in-process server:
+[`examples/local_api_client.py`](examples/local_api_client.py) (this package's
+`websockets` dependency, Unix socket or TCP) and
+[`examples/local-api/client.mjs`](../../examples/local-api/client.mjs) at the
+repository root (Node 22 or later, no dependencies, TCP with the token).
+
+### Headless hosts: the built-in file stores
+
+A server or container usually has no secret service at all. Pass a store key
+and `ProtocolManager` uses the SDK's built-in file stores instead of
+`SecureStorage` and `AppStateStorage`: every MLS record is sealed on disk under
+that key, and protocol state is written in the same format `AppStateStorage`
+writes.
+
+```python
+pm = ProtocolManager(
+    config,
+    store_key_env="OFFLINE_PROTOCOL_STORE_KEY",  # 64 hex digits or base64
+    mls_root="/var/lib/example/keys",            # or OFFLINE_PROTOCOL_MLS_ROOT
+    state_root="/var/lib/example/state",         # or OFFLINE_PROTOCOL_STATE_ROOT
+)
+await pm.start()
+```
+
+- **The store key is 32 random bytes, generated once and kept.** Generate it
+  with `openssl rand -hex 32`, and hand it to the process the way the service
+  manager hands it any secret. Pass `store_key=<bytes>` instead if the host
+  already holds it. Never derive it from a password or a host name.
+- **`mls_root` holds this device's identity.** It must survive an upgrade,
+  and losing it gives the device a new address. `state_root` is scoped to
+  the installation. Keep them apart: the same directory for both, or one
+  inside the other, is refused with `ProtocolError.InvalidArgument`. That
+  includes two spellings of one directory on a volume that folds case
+  (`keys` and `Keys` on macOS or Windows). That is found only once the
+  directory exists, so the refusal leaves the directory it created, with
+  no record written.
+- **Moving an existing deployment onto the file stores starts a new
+  identity.** Nothing is carried over from the keyring: the device gets a
+  new address, and its sessions and queued messages stay with the old one.
+  Point `state_root` at a fresh directory. Both modes read
+  `OFFLINE_PROTOCOL_STATE_ROOT`, so a kept one is the easy mistake, and it
+  is refused with `ProtocolError.InvalidConfiguration`: the new identity
+  cannot unseal the old records, and the first restore would delete the
+  messages it could not read. The same refusal covers a lost `mls_root`
+  next to a surviving `state_root`, and it still applies after an attempt
+  that failed part-way. It also covers an `mls_root` that holds an
+  identity, but not the one that wrote the state: the first run over a pair
+  binds the two directories to each other, so a `state_root` put back after
+  a run over a fresh one is refused. A damaged key inside the store is not
+  refused, then or on any later start over the same `mls_root`: the SDK
+  replaces it and reports the
+  messages it lost as failed. A directory the process cannot read is
+  refused rather than taken for empty. No refusal changes or deletes a
+  record.
+- **`start()` raises instead of starting without the identity.** A wrong key
+  raises `ProtocolError.InvalidConfiguration` and changes no record. A
+  `state_root` that cannot be created also raises it, after the MLS store
+  has created its own directory; fixing the root and retrying is safe. A
+  directory another process holds raises `ProtocolError.InvalidState`. The
+  keyring path logs its own initialisation failures and carries on; this one
+  does not, because an operator who supplied a key asked for the sealed store.
+- **One manager per account directory, and `close()` gives the directory
+  up.** Each store holds a lock on its directory while open, in this
+  process or another. `await pm.close()` stops the manager and releases
+  both directories before it returns, whatever still refers to the manager
+  or to `pm.protocol`, so a new manager can open them at once. A closed
+  manager cannot be started again. Leaving
+  `async with ProtocolManager(...) as pm` closes it, so two blocks over the
+  same directories need nothing between them, and a block whose entry
+  failed closes what that entry had opened. `close()` raises
+  `ProtocolError.InvalidState` when the engine could not be stopped:
+  nothing was released, and the call can be repeated.
+- **`stop()` keeps the directories, for a restart in place.** Call `stop()`
+  then `start()` on the same manager. A `stop()` or `close()` that was
+  cancelled or raised part-way can be called again to finish; a `close()`
+  cancelled while the core was already releasing the stores finishes by
+  itself a moment later. Do not rely
+  on dropping a stopped manager to release the directories: that happens
+  when the interpreter frees the core object, which a kept `pm.protocol`,
+  an event handler that refers back to the manager, or an exception whose
+  traceback names it can each put off. A `start()` that raises releases
+  the callbacks itself, whether the stores refused or the engine did; call
+  `close()` if the manager is not going to be started again.
+- **A forked child holds the directories.** A child made with a bare
+  `os.fork()` while the stores are open inherits their locks and holds
+  them until it exits, whatever the parent closes; start subprocesses with
+  `subprocess` or the `spawn` method instead.
+
+What the stores guarantee, and what a copied directory reveals, is in the
+[MLS integration guide](../../docs/mls-integration.md#built-in-file-stores).
 
 Restartable message-plane state is kept separately by `AppStateStorage`, outside
 the credential store. The built-in stores derive an opaque account namespace
@@ -296,3 +464,15 @@ Both license texts, along with `THIRD-PARTY-NOTICES.md`, are also installed with
 package under `offline_protocol_sdk-<version>.dist-info/licenses/`. The links above are
 absolute because this file is the PyPI long description, and PyPI does not resolve
 repository-relative links.
+
+### Optional dependencies
+
+`THIRD-PARTY-NOTICES.md` covers the Rust crates compiled into the native
+library. The `lan` extra (`pip install 'offline-protocol-sdk[lan]'`) adds two
+runtime dependencies that pip installs from PyPI and that are never
+redistributed in this wheel: [python-zeroconf](https://pypi.org/project/zeroconf/)
+(LGPL-2.1-or-later), used by `peer_stream_manager.py` and `dnssd_bridge.py`
+for DNS-SD, and [ifaddr](https://pypi.org/project/ifaddr/) (MIT), used to
+list the interface addresses a record publishes. Both are imported only when a
+manager or bridge is asked to advertise or discover; the base install imports
+neither.

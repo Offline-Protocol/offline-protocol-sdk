@@ -27,6 +27,9 @@ offline-protocol-mls = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# Scrubs this side's copy of the store key handed to
+# `initialize_mls_with_file_stores`.
+zeroize = { workspace = true }
 # `log` turns every `tracing` macro in the workspace into a `log` record when
 # no subscriber is installed, which is how the core's output reaches the host
 # logger in `host_log.rs`; see that module for why.

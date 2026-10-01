@@ -584,8 +584,21 @@ class WifiDirectManager(
         if (connected && hasRequiredPermissions()) {
             wifiP2pManager?.requestConnectionInfo(channel) { info ->
                 info?.let {
+                    val previousOwner = groupOwnerAddress
                     isGroupOwner = it.isGroupOwner
                     groupOwnerAddress = it.groupOwnerAddress?.hostAddress
+                    // A new connection starts its redial ladder from the
+                    // bottom. The delay doubles on each failed dial and was
+                    // reset only by a proved stream or stop(), so a new group's
+                    // first failed dial waited out the old group's backoff.
+                    // Group owners on Android nearly always take the same
+                    // address, so this compares against the null the
+                    // disconnect branch below leaves, not one owner with
+                    // another: it resets on every connection after a
+                    // disconnect, the same group rejoined included.
+                    if (groupOwnerAddress != previousOwner) {
+                        reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)
+                    }
 
                     emitDiagnostic("info", "Connection info", mapOf(
                         "isGroupOwner" to isGroupOwner,

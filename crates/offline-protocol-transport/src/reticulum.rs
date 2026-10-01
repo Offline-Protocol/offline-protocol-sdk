@@ -1,10 +1,12 @@
-//! Reticulum mesh transport queue engine.
+//! The gateway daemon transport's queue engine.
 //!
-//! Long-range, low-bandwidth, resilient mesh networking via the Reticulum
-//! network stack (LoRa, TCP, UDP, serial, I2P, and other mediums). No
-//! Reticulum link is opened here: the platform side bridges to a running
-//! Reticulum daemon (sidecar, TCP gateway, or embedded Python); the Rust
-//! side manages queues, metrics, and the confirmation loop.
+//! Named after Reticulum, its reference backbone: long-range, low-bandwidth,
+//! resilient mesh networking over LoRa, TCP, UDP, serial, I2P and other
+//! mediums. The name is the slot's, not a requirement on what stands
+//! behind the daemon. No backbone link is opened here: the platform side
+//! bridges to a gateway daemon over local IP, the daemon owns whatever
+//! backbone it has, and the Rust side manages queues, metrics, and the
+//! confirmation loop.
 //!
 //! The bridge contract: the platform reports daemon connectivity via
 //! [`ReticulumTransport::on_status_changed`], drains outbound wire bytes
@@ -23,11 +25,12 @@ use std::time::{Duration, Instant};
 
 use crate::common::recalculate_delivery_ratios;
 
-/// Reticulum mesh transport implementation.
+/// The gateway daemon transport, named after its reference backbone.
 ///
-/// Provides connectivity via the Reticulum network for long-range,
-/// low-bandwidth, resilient mesh networking. The platform bridges to a
-/// gateway daemon speaking the contract in `docs/spec/gateway-contract.md`.
+/// The platform bridges to a gateway daemon speaking the contract in
+/// `docs/spec/gateway-contract.md`. The backbone behind that daemon,
+/// Reticulum or another, is the gateway's property and reaches this crate
+/// as nothing more than a capability token (ADR 0026).
 ///
 /// Reconnection, the attach handshake and the verdict loop are the platform
 /// bridge's, not this type's: it never opens a socket, so a timeout or a

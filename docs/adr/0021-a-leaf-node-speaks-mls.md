@@ -225,6 +225,32 @@ sticker is not, so the second person to scan one gets a collision. Pairing keeps
 the shape it already has: the static artifact carries `{address, pubkey}`, and a
 fresh key package flows over the pairing radio.
 
+### The store handle follows the target
+
+Added after the decision, when the leaf was first built for parts without
+atomic compare-and-swap. It changes nothing above, and is recorded here because
+it is the kind of thing someone will tidy back.
+
+A device and the adapters it builds share one store, so the handle is reference
+counted. `alloc::sync::Arc` exists only where the processor has pointer-width
+compare-and-swap, which leaves out ESP32-C3, ESP32-C2 and every Cortex-M0. On
+those the handle is `portable_atomic_util::Arc`, which is what mls-rs already
+does for its own handles, and one module, `shared`, is the only place that
+chooses. The two are distinct types, so the crate exports `SharedStore` and a
+`shared_store` constructor rather than asking callers to name either. Where
+atomics exist, `SharedStore` is `alloc::sync::Arc<dyn LeafStore>`, the same type
+as `std::sync::Arc` wherever `std` is present.
+
+Two limits come with it. No atomics backend is chosen by this crate, because
+which one is sound is a fact about the chip, so a firmware on those parts links
+a critical-section implementation, and the reference count is only as sound as
+it is. And ESP32-C3 and ESP32-C2 cannot yet be built on esp-hal at all: mls-rs
+0.56.0 enables portable-atomic's `critical-section` backend on them, esp-hal
+enables `unsafe-assume-single-core`, and portable-atomic refuses the pair at
+compile time. That is upstream of this crate and is monitored with the rest of
+the mls-rs dependency. ESP32-C6 and ESP32-H2 have compare-and-swap and are not
+affected.
+
 ## Consequences
 
 A door lock can hold a real end-to-end encrypted conversation with a phone,
@@ -244,6 +270,13 @@ The device class picks up obligations the SDK has not had to state before: a
 time source at pairing, durable state before emission, and an entropy source
 that is real. They are written down here because they are invisible in a passing
 build and expensive on a bench.
+
+The same crate is the leaf on a WebAssembly host, on the WASI target only:
+there `getrandom` reads the runtime's `random_get`, so the entropy obligation
+moves to the runtime unchanged. `wasm32-unknown-unknown` is not claimed,
+because on that target the pinned MLS library enables `getrandom`'s `js`
+feature, which is selected ahead of a host-registered backend, so a passing
+build there says nothing about a non-browser host.
 
 Two risks are accepted with open eyes. mls-rs has not had a third-party security
 audit and its only `no_std` crypto provider is the one its own authors label

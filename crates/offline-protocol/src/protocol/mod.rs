@@ -2,6 +2,8 @@
 
 mod blocking;
 mod config_accessors;
+mod custodian;
+pub(crate) mod custody;
 #[cfg(feature = "data")]
 pub(crate) mod data;
 #[cfg(feature = "data")]
@@ -23,9 +25,12 @@ pub(crate) mod state_crypto;
 mod storage;
 mod types;
 
+pub use custody::{CustodyRefusal, CustodyStats};
 pub(crate) use decryption_queue::PendingDecryptionQueue;
 pub use decryption_queue::PendingQueueMetrics;
 pub(crate) use prefixes::*;
+#[cfg(feature = "file-store")]
+pub(crate) use storage::{sealed_state_key_types, stored_state_record_key, StoredRecordKey};
 pub(crate) use storage::{PruneAllowance, RestorableRecord};
 pub(crate) use types::*;
 pub use types::{GatewayCarrier, MediaSendOptions, ProtocolState, SendMessageOptions};
@@ -131,6 +136,24 @@ pub struct OfflineProtocol {
     /// delivery has to be retried.
     pub(crate) mesh_relay: MeshRelayGovernor,
 
+    /// Frames held in custody for a neighbour, with the quotas and the
+    /// counters (`docs/spec/custody.md`). Disjoint from
+    /// [`Self::mesh_relay`]'s suppression cache by construction: accepting a
+    /// frame never records its id there, and redelivering one never consults
+    /// it, so a custodian never blanks the route it is holding.
+    pub(crate) custody: custody::CustodyStore,
+
+    /// Receipts this device holds as a *depositor*: for each outbox entry,
+    /// the custodians holding it and until when a further deposit request
+    /// toward each is suppressed, in Unix milliseconds from the receipt's own
+    /// timestamp. In memory only, bounded by the outbox and
+    /// by [`custody::MAX_CUSTODY_RECEIPTS_PER_MESSAGE`]; losing it at a
+    /// restart costs one duplicate deposit, which the custodian absorbs.
+    pub(crate) custody_receipts: HashMap<MessageId, HashMap<String, i64>>,
+
+    /// When the custody store was last swept for expired records.
+    custody_last_sweep: Instant,
+
     /// Shared mutable state.
     shared_state: Arc<Mutex<SharedState>>,
 
@@ -170,11 +193,17 @@ pub struct OfflineProtocol {
     /// seams. In-memory only, and absent facts mean today's behaviour.
     pub(crate) reachability: reachability::ReachabilityFacts,
 
-    /// Capability tokens the attached Reticulum gateway advertised.
+    /// Capability tokens the attached gateway daemon advertised.
     ///
     /// Delivered at attach, before the bridge reports the carrier available,
     /// and cleared when the carrier drops: a stale advertisement outlives the
     /// gateway that made it, and a reconnect may land on a different one.
+    ///
+    /// Stored and never read on a decision. The backbone behind the daemon
+    /// is the gateway's own property and reaches this device only as a
+    /// `backbone_<kind>_v1` token in this set; the set is for an application
+    /// to show, and the first production reader would turn a string set by
+    /// whoever holds the socket into a routing input (ADR 0026).
     ///
     /// Kept apart from `group_mesh.relay_capabilities` deliberately, though
     /// both are capability sets from a gateway. That one gates the relay
@@ -478,6 +507,15 @@ pub struct OfflineProtocol {
     /// received key package, in either direction.
     peer_data_group_blob_attested: std::collections::HashSet<String>,
 
+    /// Peers whose key package advertised the custody receipt
+    /// ([`DATA_CUSTODY_V1`] in `data_versions`), so this device may answer
+    /// their deposits with one. Gates the receipt and nothing else: a deposit
+    /// is judged by the quotas. Persisted inside `PeerCapabilities`, restored
+    /// on `initialize_mls`, bounded like `key_package_sent_to`.
+    ///
+    /// [`DATA_CUSTODY_V1`]: crate::protocol::types::DATA_CUSTODY_V1
+    peer_data_custody: std::collections::HashSet<String>,
+
     /// Peers already flagged with a `PlaintextSend` security warning, so the
     /// explicit-opt-out plaintext path warns once per peer instead of once
     /// per message.
@@ -553,6 +591,15 @@ pub struct OfflineProtocol {
     /// of traffic that should be rate limited rather than merely small.
     #[cfg(feature = "data")]
     pub(crate) last_data_sync_offer: HashMap<String, Instant>,
+
+    /// Settle offers waiting for local commits to a space to go quiet, keyed
+    /// by space: when the offer is due, and the documents committed since
+    /// the last one. Pushed out by every local commit and removed when it
+    /// fires. See [`DATA_SYNC_SETTLE_DELAY`].
+    ///
+    /// [`DATA_SYNC_SETTLE_DELAY`]: crate::protocol::data_sync::DATA_SYNC_SETTLE_DELAY
+    #[cfg(feature = "data")]
+    pub(crate) data_sync_settle: HashMap<String, (Instant, std::collections::BTreeSet<String>)>,
 
     /// Attachment fetches asked for and not yet answered, keyed by space and
     /// blob hash, valued by the last sign that an answer is coming: the
@@ -1041,6 +1088,9 @@ impl OfflineProtocol {
                 config.profile.clone(),
                 config.mesh_relay.clone(),
             ),
+            custody: custody::CustodyStore::new(config.custody.clone()),
+            custody_receipts: HashMap::new(),
+            custody_last_sweep: Instant::now(),
             local_id: config.profile.clone(),
             identity_established: false,
             shared_state: Arc::new(Mutex::new(SharedState::new())),
@@ -1073,6 +1123,7 @@ impl OfflineProtocol {
             peer_data_interest: std::collections::HashSet::new(),
             peer_data_group_blob: std::collections::HashSet::new(),
             peer_data_group_blob_attested: std::collections::HashSet::new(),
+            peer_data_custody: std::collections::HashSet::new(),
             peer_rich_attested: std::collections::HashSet::new(),
             plaintext_send_warned: std::collections::HashSet::new(),
             plaintext_receive_warned: std::collections::HashSet::new(),
@@ -1086,6 +1137,8 @@ impl OfflineProtocol {
             data: data::DataLayer::default(),
             #[cfg(feature = "data")]
             last_data_sync_offer: HashMap::new(),
+            #[cfg(feature = "data")]
+            data_sync_settle: HashMap::new(),
             #[cfg(feature = "data")]
             pending_attachment_fetches: HashMap::new(),
             blob_request_windows: HashMap::new(),
@@ -1380,6 +1433,7 @@ impl OfflineProtocol {
         let restore_result = (|| {
             self.restore_pending_messages(&mut pending_prunes)?;
             self.restore_pending_decrypt_entries(&mut inbound_prunes);
+            self.restore_custody(&mut inbound_prunes);
             self.restore_lamport_clock();
             self.restore_dedup_seen(&mut inbound_prunes);
             self.restore_encryption_capable_peers();
@@ -1519,6 +1573,7 @@ impl OfflineProtocol {
         let mut inbound_prunes = PruneAllowance::pool();
         self.restore_pending_messages(&mut pending_prunes)?;
         self.restore_pending_decrypt_entries(&mut inbound_prunes);
+        self.restore_custody(&mut inbound_prunes);
         self.restore_lamport_clock();
         self.restore_dedup_seen(&mut inbound_prunes);
         self.restore_encryption_capable_peers();
@@ -2195,6 +2250,7 @@ impl OfflineProtocol {
         self.peer_data_interest.remove(peer);
         self.peer_data_group_blob.remove(peer);
         self.peer_data_group_blob_attested.remove(peer);
+        self.peer_data_custody.remove(peer);
         // A peer we have stopped replicating with cannot answer anything we
         // asked them for, so the questions go too. Left behind they would
         // hold slots against the fetch bound until they timed out.
@@ -2283,6 +2339,10 @@ impl OfflineProtocol {
 
         // Flush any pending outbox messages destined for this peer
         self.flush_outbox_for_peer_via(peer_id, unpark_via);
+
+        // Held frames for this neighbour, or to try through it
+        // (`docs/spec/custody.md`, "Redelivery").
+        self.redeliver_custody_to(peer_id);
 
         // A Welcome that stalled or expired while this peer was unreachable now
         // has a fresh delivery opportunity over the carrier that surfaced this
@@ -2566,7 +2626,7 @@ impl OfflineProtocol {
         }
     }
 
-    /// Records what the attached Reticulum gateway says it can do.
+    /// Records what the attached gateway daemon says it can do.
     ///
     /// Wholesale replace, like the relay's: each attach describes the gateway
     /// actually connected now. The bridge calls this **before** it reports the
@@ -3284,6 +3344,16 @@ impl OfflineProtocol {
             return Some(InternalMessageResult::Consumed);
         }
 
+        // A custody receipt from a neighbour holding one of our frames. Past
+        // the control gate like every signed frame; it suppresses re-deposit
+        // toward that custodian and settles nothing (`docs/spec/custody.md`).
+        // Consumed whatever the body says: a malformed one is refused
+        // silently, and a receipt never requests an acknowledgement.
+        if let Some(data) = content.strip_prefix(internal_prefixes::CUSTODY_RECEIPT) {
+            self.handle_custody_receipt(sender, data, message.timestamp.as_millis());
+            return Some(InternalMessageResult::Consumed);
+        }
+
         // --- Group (mesh/MLS) messages ---
 
         if let Some(data) = content.strip_prefix(internal_prefixes::GROUP_MLS_MSG) {
@@ -3375,6 +3445,9 @@ impl OfflineProtocol {
         // own retries are not — a frame held too long is dropped rather than
         // sent late.
         self.flush_mesh_relays();
+        // Held frames past their hold, and receipt suppressions past their
+        // end. Throttled inside; hours-long holds need no per-tick walk.
+        self.sweep_custody();
 
         self.process_retry_queue()?;
         self.process_welcome_retry_queue()?;
@@ -3392,6 +3465,8 @@ impl OfflineProtocol {
         // change threshold or a time cadence, never per message.
         self.persist_dedup_seen_if_due();
         self.pump_media_transfers();
+        #[cfg(feature = "data")]
+        self.send_due_data_settle_offers(Instant::now());
         self.refresh_nostr_key_package_slots();
         self.refresh_nostr_discovery_claim();
         // A relay is free never to send end-of-stored-events, and that is the

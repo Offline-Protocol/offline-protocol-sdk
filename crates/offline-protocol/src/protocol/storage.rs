@@ -5,8 +5,8 @@ use super::{
     lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
     PeerCapabilities, PendingDecryptRecord, PendingMessage, PendingMessageRecord,
     ReceivedKeyPackage, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
-    DATA_GROUP_BLOB_V1, DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1, DATA_SYNC_V1,
-    DATA_TOMBSTONE_V1, MAX_BLOCKED_USERS, MAX_KEY_PACKAGE_SENT_TO,
+    DATA_CUSTODY_V1, DATA_GROUP_BLOB_V1, DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1,
+    DATA_SYNC_V1, DATA_TOMBSTONE_V1, MAX_BLOCKED_USERS, MAX_KEY_PACKAGE_SENT_TO,
     MAX_MIGRATED_PENDING_WRITES_PER_LAUNCH, MAX_PENDING_KEY_PACKAGES, MAX_PENDING_MESSAGES_GLOBAL,
     MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
     MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_PERSISTED_CAPABILITY_VERSIONS,
@@ -58,6 +58,12 @@ pub(crate) enum StateCategory {
     /// [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`], which has no pre-split
     /// data to inherit for it.
     PendingDecryptEntries,
+    /// Frames held in custody for a neighbour. Sealed for the reason the
+    /// pending-decrypt records are: other people's ciphertext plus routing
+    /// metadata about them, outliving the process. Post-split only, and
+    /// absent from [`storage_keys::ADOPTABLE_STATE_KEY_TYPES`] like
+    /// [`Self::PendingDecryptEntries`].
+    Custody,
     Outbox,
     MediaDescriptors,
     PeerKeyPackages,
@@ -120,6 +126,7 @@ impl StateCategory {
             storage_keys::PENDING_MESSAGES => Self::PendingMessages,
             storage_keys::PENDING_MESSAGE_ENTRIES => Self::PendingMessageEntries,
             storage_keys::PENDING_DECRYPT_ENTRIES => Self::PendingDecryptEntries,
+            storage_keys::CUSTODY => Self::Custody,
             storage_keys::OUTBOX => Self::Outbox,
             storage_keys::MEDIA_DESCRIPTORS => Self::MediaDescriptors,
             storage_keys::PEER_KEY_PACKAGES => Self::PeerKeyPackages,
@@ -143,7 +150,8 @@ impl StateCategory {
         })
     }
 
-    /// Every category, for tests that must cover the whole set.
+    /// Every category: for [`sealed_state_key_types`], and for tests that
+    /// must cover the whole set.
     ///
     /// [`Self::requires_sealing`] is an exhaustive `match`, so a new variant
     /// cannot be added without deciding its sensitivity. Nothing forces the
@@ -153,11 +161,12 @@ impl StateCategory {
     /// list plus `every_category_maps_back_from_its_key_type` closes that
     /// gap, so the omission is a failing test rather than a production
     /// write path that never worked.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "file-store"))]
     pub(crate) const ALL: &'static [Self] = &[
         Self::PendingMessages,
         Self::PendingMessageEntries,
         Self::PendingDecryptEntries,
+        Self::Custody,
         Self::Outbox,
         Self::MediaDescriptors,
         Self::PeerKeyPackages,
@@ -183,12 +192,13 @@ impl StateCategory {
     ///
     /// The inverse of [`Self::from_key_type`], and an exhaustive `match`, so
     /// a new variant has to name its key type here before it compiles.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "file-store"))]
     pub(crate) fn key_type(self) -> &'static str {
         match self {
             Self::PendingMessages => storage_keys::PENDING_MESSAGES,
             Self::PendingMessageEntries => storage_keys::PENDING_MESSAGE_ENTRIES,
             Self::PendingDecryptEntries => storage_keys::PENDING_DECRYPT_ENTRIES,
+            Self::Custody => storage_keys::CUSTODY,
             Self::Outbox => storage_keys::OUTBOX,
             Self::MediaDescriptors => storage_keys::MEDIA_DESCRIPTORS,
             Self::PeerKeyPackages => storage_keys::PEER_KEY_PACKAGES,
@@ -302,6 +312,7 @@ impl StateCategory {
             Self::PendingMessages
             | Self::PendingMessageEntries
             | Self::PendingDecryptEntries
+            | Self::Custody
             | Self::Outbox
             | Self::MediaDescriptors
             | Self::PeerKeyPackages
@@ -322,6 +333,66 @@ impl StateCategory {
             | Self::NostrWatermark
             | Self::StateAdoption => false,
         }
+    }
+}
+
+/// The key types whose values are sealed before they reach the store: what a
+/// reader has to look at to learn whether a store's sealed records open under
+/// a given record key.
+#[cfg(feature = "file-store")]
+pub(crate) fn sealed_state_key_types() -> impl Iterator<Item = &'static str> {
+    StateCategory::ALL
+        .iter()
+        .filter(|category| category.requires_sealing())
+        .map(|category| category.key_type())
+}
+
+/// What a secure store holds where the protocol-state record key belongs.
+pub(crate) enum StoredRecordKey {
+    /// A key of the right length, as the cipher built from it.
+    Usable(StateRecordCipher),
+    /// No record: a store that has never sealed protocol state.
+    Absent,
+    /// A record that is not the key and never will be: the wrong length, or
+    /// one the store itself reports as permanently lost. The reason is for
+    /// the log.
+    Unrecoverable(String),
+}
+
+/// Reads the protocol-state record key from `storage`, changing nothing.
+///
+/// There is one reading of this record, used twice: by
+/// `restore_or_init_state_record_key`, which decides from it whether to
+/// generate a key, and by the file stores' probe
+/// ([`crate::FileProtocolStateStorage::sealed_state`]), which decides from it
+/// whether a protocol-state store belongs with this secure store. Two
+/// readings would come to disagree about which failures are permanent, and
+/// the probe would then pass a pair that restore goes on to delete from.
+///
+/// `Err` is a read that failed and may succeed on a later launch. The storage
+/// contract (`MlsStorage::load`) reserves `CorruptedData` for permanent
+/// losses (a transient failure is `LoadFailed`), so that one is an answer:
+/// the wrong-length case, reported by the store rather than found here.
+pub(crate) fn stored_state_record_key(
+    storage: &dyn MlsStorage,
+) -> std::result::Result<StoredRecordKey, StorageError> {
+    match storage.load(
+        storage_keys::STATE_RECORD_KEY,
+        storage_keys::STATE_RECORD_KEY_ID,
+    ) {
+        Ok(Some(bytes)) if bytes.len() == STATE_RECORD_KEY_BYTES => {
+            let bytes = Zeroizing::new(bytes);
+            let mut key = Zeroizing::new([0u8; STATE_RECORD_KEY_BYTES]);
+            key.copy_from_slice(&bytes);
+            Ok(StoredRecordKey::Usable(StateRecordCipher::new(&key)))
+        }
+        Ok(None) => Ok(StoredRecordKey::Absent),
+        Ok(Some(bytes)) => Ok(StoredRecordKey::Unrecoverable(format!(
+            "stored key is {} bytes, expected {STATE_RECORD_KEY_BYTES}",
+            bytes.len()
+        ))),
+        Err(StorageError::CorruptedData(reason)) => Ok(StoredRecordKey::Unrecoverable(reason)),
+        Err(err) => Err(err),
     }
 }
 
@@ -931,7 +1002,7 @@ impl<'a> PruneBudget<'a> {
     /// Claims one delete. Refuses — and records that this walk's share is gone
     /// — only for a refusing budget; a counting one always allows the delete
     /// and just charges for it.
-    fn claim(&mut self) -> bool {
+    pub(super) fn claim(&mut self) -> bool {
         if self.is_spent() {
             self.exhausted = true;
             if self.refusable {
@@ -1621,29 +1692,14 @@ impl OfflineProtocol {
             return;
         };
 
-        let unrecoverable = match storage.load(
-            storage_keys::STATE_RECORD_KEY,
-            storage_keys::STATE_RECORD_KEY_ID,
-        ) {
-            Ok(Some(bytes)) if bytes.len() == STATE_RECORD_KEY_BYTES => {
-                let bytes = Zeroizing::new(bytes);
-                let mut key = Zeroizing::new([0u8; STATE_RECORD_KEY_BYTES]);
-                key.copy_from_slice(&bytes);
+        let unrecoverable = match stored_state_record_key(storage.as_ref()) {
+            Ok(StoredRecordKey::Usable(cipher)) => {
                 debug!("Restored protocol state record key from secure storage");
-                self.state_record_cipher = Some(StateRecordCipher::new(&key));
+                self.state_record_cipher = Some(cipher);
                 return;
             }
-            Ok(None) => None,
-            Ok(Some(bytes)) => Some(format!(
-                "stored key is {} bytes, expected {STATE_RECORD_KEY_BYTES}",
-                bytes.len()
-            )),
-            // The store read the record and it is not the key. The storage
-            // contract (`MlsStorage::load`) reserves `CorruptedData` for
-            // permanent losses (a transient failure is `LoadFailed`), so this
-            // is the wrong-length case reported by the store rather than
-            // found here.
-            Err(StorageError::CorruptedData(reason)) => Some(reason),
+            Ok(StoredRecordKey::Absent) => None,
+            Ok(StoredRecordKey::Unrecoverable(reason)) => Some(reason),
             Err(e) => {
                 warn!(
                     error = %e,
@@ -3187,6 +3243,13 @@ impl OfflineProtocol {
             }
             if self.config.data.enabled && caps.data_versions.contains(&DATA_GROUP_BLOB_V1) {
                 self.peer_data_group_blob.insert(peer_id.clone());
+            }
+            // And the custody receipt. Cheapest of all to skip: a deposit
+            // taken on before the peer's next key package would simply go
+            // unanswered, and the depositor deposits again on its next retry.
+            // Restored anyway, because the record is already here.
+            if self.config.data.enabled && caps.data_versions.contains(&DATA_CUSTODY_V1) {
+                self.peer_data_custody.insert(peer_id.clone());
             }
             if self.config.data.enabled && caps.attested_data_versions.contains(&DATA_GROUP_BLOB_V1)
             {

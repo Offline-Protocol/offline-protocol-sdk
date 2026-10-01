@@ -14,7 +14,8 @@ use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use super::key::{StoreKeyError, StoreKeyProvider, STORE_KEY_BYTES};
-use super::records::{self, BoundedRead, DirectoryLock, StoreLock, SweepMemo, MAX_FRAME_BYTES};
+use super::pair::{StoredPairing, PAIRING_ID_BYTES};
+use super::records::{self, BoundedRead, StoreLock, SweepMemo, MAX_FRAME_BYTES};
 use super::{account_directory, lock_directory, FileStoreError};
 
 /// Magic of a sealed record file. Distinct from the plain frame's `OPS1`, so
@@ -55,6 +56,12 @@ const KEY_CHECK_PROBE_LIMIT: usize = 64;
 /// The lock file this store holds in its account directory. Distinct from
 /// the protocol-state store's, so the two can share a root.
 const LOCK_FILE: &str = "mls-store.lock";
+
+/// The pairing id this store shares with the protocol-state store beside it,
+/// sealed like the key check. In the account directory, outside every type
+/// directory, so [`SealedFileMlsStorage::holds_records`] never takes it for an
+/// identity: it is written before the engine has minted one.
+pub(super) const PAIRING_FILE: &str = "mls-store.pair";
 
 /// MLS storage in files, every record sealed under a key derived from the
 /// operator's store key.
@@ -98,7 +105,6 @@ pub struct SealedFileMlsStorage {
     /// packages and groups often, and a damaged record stays damaged, so one
     /// warning per file per store says everything without flooding the log.
     listing_warned: Mutex<HashSet<PathBuf>>,
-    _directory_lock: DirectoryLock,
 }
 
 impl std::fmt::Debug for SealedFileMlsStorage {
@@ -116,6 +122,19 @@ enum Probe {
     NoneOpened,
 }
 
+/// What one record file turned out to be.
+///
+/// A file that could not be read is not a file that did not open. Folding
+/// the two together sent a permission or disk error to the operator as "does
+/// not open under this store key", and counted it towards refusing the key.
+enum Opened {
+    Record(String, String),
+    /// Removed between the listing and the read.
+    Absent,
+    /// Read, and does not authenticate under this key and name.
+    DoesNotOpen,
+}
+
 impl SealedFileMlsStorage {
     /// Opens (creating if needed) the store at `<root>/<namespace>/`, sealed
     /// under the key `provider` supplies.
@@ -129,7 +148,7 @@ impl SealedFileMlsStorage {
     /// [`FileStoreError::KeyCheckUnverifiable`], which names the check file.
     ///
     /// A second store over the same directory is refused with
-    /// [`FileStoreError::InUse`] while this one lives.
+    /// [`FileStoreError::InUse`] until this one is closed or dropped.
     ///
     /// `root` should be a directory that survives an upgrade: this store holds
     /// the device's identity, and losing it gives the device a new address.
@@ -148,10 +167,9 @@ impl SealedFileMlsStorage {
             directory,
             cipher: ChaCha20Poly1305::new(Key::from_slice(seal_key.as_slice())),
             name_key,
-            lock: StoreLock::default(),
+            lock: StoreLock::new(directory_lock),
             swept: SweepMemo::default(),
             listing_warned: Mutex::default(),
-            _directory_lock: directory_lock,
         };
         store.verify_store_key()?;
         Ok(store)
@@ -160,6 +178,96 @@ impl SealedFileMlsStorage {
     /// The directory this store owns.
     pub fn directory(&self) -> &Path {
         &self.directory
+    }
+
+    /// Releases the directory and refuses every later operation.
+    ///
+    /// The lock goes at once, whoever still holds the store: an engine that
+    /// was handed it, a host object its runtime has not freed yet. An
+    /// operation in flight finishes first. Afterwards every operation is an
+    /// error naming the directory, and a new store may open over it. Closing
+    /// twice is closing once.
+    pub fn close(&self) {
+        self.lock.close();
+    }
+
+    /// Whether `<root>/<namespace>/` holds MLS records, without opening,
+    /// creating or locking anything.
+    ///
+    /// A record file, not the directory and not a type directory. An open
+    /// refused after the account directory was made (a wrong key, a
+    /// protocol-state root that could not be created) leaves the directory,
+    /// its lock file and its key check, and no identity. A first write that
+    /// failed (a full disk, a crash) leaves a type directory with nothing in
+    /// it but a temporary. A directory that cannot be read, at either level,
+    /// is an [`FileStoreError::Io`], never "no records".
+    pub fn holds_records(root: impl AsRef<Path>, namespace: &str) -> Result<bool, FileStoreError> {
+        super::account_holds(root.as_ref(), namespace, |path, name| {
+            if !name.starts_with(TYPE_PREFIX) {
+                return Ok(false);
+            }
+            // A file that merely carries the prefix holds no record. Asked
+            // of the entry, not left to the error a directory read gives for
+            // a file, which differs by platform. `metadata`, not `is_dir`:
+            // an account directory that can be listed but not searched
+            // fails here, and `is_dir` would answer "not a directory", which
+            // reads as "no records".
+            if !std::fs::metadata(path)?.is_dir() {
+                return Ok(false);
+            }
+            records::holds_entry(path, ENTRY_PREFIX)
+        })
+    }
+
+    /// The pairing id this store holds, read under the store key.
+    ///
+    /// `Damaged` is a file that is there and does not open: it names no
+    /// state root, and the pair falls back to asking the records.
+    pub(super) fn pairing(&self) -> Result<StoredPairing, FileStoreError> {
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| FileStoreError::Closed(self.directory.clone()))?;
+        let path = self.directory.join(PAIRING_FILE);
+        let raw = match records::read_bounded(&path, PAIRING_ID_BYTES + SEAL_OVERHEAD).map_err(
+            |source| FileStoreError::Io {
+                path: path.clone(),
+                source,
+            },
+        )? {
+            BoundedRead::Bytes(raw) => raw,
+            BoundedRead::Absent => return Ok(StoredPairing::Absent),
+            BoundedRead::Oversized => return Ok(StoredPairing::Damaged),
+        };
+        Ok(match self.open_sealed(PAIRING_FILE, &raw) {
+            Some(plain) if plain.len() == PAIRING_ID_BYTES => {
+                let mut id = [0u8; PAIRING_ID_BYTES];
+                id.copy_from_slice(&plain);
+                StoredPairing::Present(id)
+            }
+            _ => StoredPairing::Damaged,
+        })
+    }
+
+    /// Records `id` as this store's pairing id, durably.
+    pub(super) fn set_pairing(&self, id: &[u8; PAIRING_ID_BYTES]) -> Result<(), FileStoreError> {
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| FileStoreError::Closed(self.directory.clone()))?;
+        let sealed = self.seal(PAIRING_FILE, id).ok_or_else(|| {
+            FileStoreError::StoreKey(StoreKeyError::Unavailable(
+                "sealing the pairing id failed".to_string(),
+            ))
+        })?;
+        let path = self.directory.join(PAIRING_FILE);
+        records::write_atomic(&self.directory, &path, &sealed)
+            .map_err(|source| FileStoreError::Io { path, source })
+    }
+
+    /// What a closed store answers.
+    fn closed(&self) -> String {
+        format!("the store at {} is closed", self.directory.display())
     }
 
     fn keyed_name(&self, prefix: &str, parts: &[&[u8]]) -> String {
@@ -251,22 +359,49 @@ impl SealedFileMlsStorage {
             .map(Zeroizing::new)
     }
 
-    /// Opens one record file into its `(key_type, key_id)`, or `None` when it
-    /// does not authenticate under this key and name. The value is not
+    /// Opens one record file into its `(key_type, key_id)`. An error is a
+    /// read that failed, never a record that does not open. The value is not
     /// copied: the only plaintext is the zeroizing buffer, dropped here.
-    fn open_record(&self, path: &Path, name: &str) -> Option<(String, String)> {
-        let BoundedRead::Bytes(raw) = records::read_bounded(path, MAX_SEALED_BYTES).ok()? else {
-            return None;
+    fn open_record(&self, path: &Path, name: &str) -> std::io::Result<Opened> {
+        let raw = match records::read_bounded(path, MAX_SEALED_BYTES)? {
+            BoundedRead::Bytes(raw) => raw,
+            BoundedRead::Absent => return Ok(Opened::Absent),
+            BoundedRead::Oversized => return Ok(Opened::DoesNotOpen),
         };
-        let plain = self.open_sealed(name, &raw)?;
-        let header = records::parse_header(&plain)?;
-        Some((header.key_type, header.key_id))
+        let opened = self
+            .open_sealed(name, &raw)
+            .and_then(|plain| records::parse_header(&plain))
+            .map_or(Opened::DoesNotOpen, |header| {
+                Opened::Record(header.key_type, header.key_id)
+            });
+        Ok(opened)
+    }
+
+    /// Whether this is the first listing to warn about `path` since the file
+    /// there was last written or removed.
+    fn first_listing_warning(&self, path: &Path) -> bool {
+        self.listing_warned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(path.to_path_buf())
+    }
+
+    /// Forgets that a listing warned about `path`, once the file there has
+    /// been written or removed: a record damaged again later is news.
+    fn forget_listing_warning(&self, path: &Path) {
+        self.listing_warned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(path);
     }
 
     /// Proves the store key against the check file, minting the file on a
     /// fresh store and rebuilding it when a record proves the key.
     fn verify_store_key(&self) -> Result<(), FileStoreError> {
-        let _guard = self.lock.lock();
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| FileStoreError::Closed(self.directory.clone()))?;
         // The check is the one file written into the account directory, so
         // a crash mid-write orphans its temporary here, where no store write
         // would ever sweep.
@@ -299,7 +434,7 @@ impl SealedFileMlsStorage {
         // path. A check that does not open with no records to prove anything
         // stays a refusal; there is nothing sealed to lose, and the operator
         // can remove the check file to start the store afresh.
-        match self.probe_existing_records().map_err(io)? {
+        match self.probe_existing_records()? {
             Probe::Opened => {
                 if check_present {
                     tracing::warn!(
@@ -324,11 +459,23 @@ impl SealedFileMlsStorage {
         records::write_atomic(&self.directory, &path, &sealed).map_err(io)
     }
 
-    fn probe_existing_records(&self) -> std::io::Result<Probe> {
+    /// Tries up to [`KEY_CHECK_PROBE_LIMIT`] records against the store key.
+    ///
+    /// A record that cannot be read says nothing about the key, so it is
+    /// skipped rather than counted against it, and a readable record later in
+    /// the walk can still prove the key. Only when none opens is a read
+    /// failure the answer, naming the record: refusing the key as wrong over
+    /// a permission error would send the operator after the wrong fault.
+    fn probe_existing_records(&self) -> Result<Probe, FileStoreError> {
+        let directory_error = |source| FileStoreError::Io {
+            path: self.directory.clone(),
+            source,
+        };
         let mut probe = Probe::NoRecords;
         let mut tried = 0usize;
-        for type_entry in std::fs::read_dir(&self.directory)? {
-            let type_entry = type_entry?;
+        let mut unreadable: Option<FileStoreError> = None;
+        for type_entry in std::fs::read_dir(&self.directory).map_err(directory_error)? {
+            let type_entry = type_entry.map_err(directory_error)?;
             let is_type_dir = type_entry
                 .file_name()
                 .to_str()
@@ -337,27 +484,48 @@ impl SealedFileMlsStorage {
             if !is_type_dir {
                 continue;
             }
+            let type_directory = type_entry.path();
             records::for_each_entry(
-                &type_entry.path(),
+                &type_directory,
                 ENTRY_PREFIX,
                 KEY_CHECK_PROBE_LIMIT,
                 |path, name| {
                     if matches!(probe, Probe::Opened) || tried >= KEY_CHECK_PROBE_LIMIT {
                         return;
                     }
-                    tried += 1;
-                    probe = if self.open_record(path, name).is_some() {
-                        Probe::Opened
-                    } else {
-                        Probe::NoneOpened
-                    };
+                    match self.open_record(path, name) {
+                        Ok(Opened::Record(..)) => {
+                            tried += 1;
+                            probe = Probe::Opened;
+                        }
+                        Ok(Opened::DoesNotOpen) => {
+                            tried += 1;
+                            probe = Probe::NoneOpened;
+                        }
+                        // Removed meanwhile: not a record.
+                        Ok(Opened::Absent) => {}
+                        Err(source) => {
+                            unreadable.get_or_insert(FileStoreError::Io {
+                                path: path.to_path_buf(),
+                                source,
+                            });
+                        }
+                    }
                 },
-            )?;
+            )
+            .map_err(|source| FileStoreError::Io {
+                path: type_directory.clone(),
+                source,
+            })?;
             if matches!(probe, Probe::Opened) || tried >= KEY_CHECK_PROBE_LIMIT {
                 break;
             }
         }
-        Ok(probe)
+        match (probe, unreadable) {
+            (Probe::Opened, _) => Ok(Probe::Opened),
+            (_, Some(err)) => Err(err),
+            (probe, None) => Ok(probe),
+        }
     }
 }
 
@@ -389,17 +557,26 @@ impl MlsStorage for SealedFileMlsStorage {
         let sealed = self
             .seal(&name, &framed)
             .ok_or_else(|| StorageError::StoreFailed("sealing the record failed".to_string()))?;
-        let _guard = self.lock.lock();
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| StorageError::StoreFailed(self.closed()))?;
         let directory = self.type_directory(key_type);
         records::private_mkdir(&directory)
             .map_err(|err| StorageError::StoreFailed(err.to_string()))?;
         self.swept.sweep_once(&directory);
-        records::write_atomic(&directory, &directory.join(&name), &sealed)
-            .map_err(|err| StorageError::StoreFailed(err.to_string()))
+        let path = directory.join(&name);
+        records::write_atomic(&directory, &path, &sealed)
+            .map_err(|err| StorageError::StoreFailed(err.to_string()))?;
+        self.forget_listing_warning(&path);
+        Ok(())
     }
 
     fn load(&self, key_type: &str, key_id: &str) -> StorageResult<Option<Vec<u8>>> {
-        let _guard = self.lock.lock();
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| StorageError::LoadFailed(self.closed()))?;
         let name = self.entry_name(key_type, key_id);
         let path = self.type_directory(key_type).join(&name);
         let raw = match records::read_bounded(&path, MAX_SEALED_BYTES)
@@ -429,35 +606,51 @@ impl MlsStorage for SealedFileMlsStorage {
     }
 
     fn delete(&self, key_type: &str, key_id: &str) -> StorageResult<()> {
-        let _guard = self.lock.lock();
-        records::remove(&self.entry_path(key_type, key_id))
-            .map(|_| ())
-            .map_err(|err| StorageError::DeleteFailed(err.to_string()))
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| StorageError::DeleteFailed(self.closed()))?;
+        let path = self.entry_path(key_type, key_id);
+        records::remove(&path).map_err(|err| StorageError::DeleteFailed(err.to_string()))?;
+        self.forget_listing_warning(&path);
+        Ok(())
     }
 
     fn list_keys(&self, key_type: &str) -> StorageResult<Vec<String>> {
-        let _guard = self.lock.lock();
+        let _guard = self
+            .lock
+            .open()
+            .ok_or_else(|| StorageError::LoadFailed(self.closed()))?;
         let mut keys = BTreeSet::new();
         records::for_each_entry(
             &self.type_directory(key_type),
             ENTRY_PREFIX,
             records::MAX_LISTED_ENTRIES,
             |path, name| match self.open_record(path, name) {
-                Some((record_type, record_id)) if record_type == key_type => {
+                Ok(Opened::Record(record_type, record_id)) if record_type == key_type => {
                     keys.insert(record_id);
+                }
+                // Deleted since the directory was read: not a record.
+                Ok(Opened::Absent) => {}
+                // Left out of the listing, and named with the real cause. A
+                // listing that failed outright on one unreadable file would
+                // stop an engine from finding any of its groups.
+                Err(err) => {
+                    if self.first_listing_warning(path) {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %err,
+                            "sealed MLS record could not be read; left out of the listing"
+                        );
+                    }
                 }
                 // The listing is how the engine finds its groups, so a record
                 // skipped here is one the engine never learns it had. Same
                 // level and same path as `load` reports: names are keyed
                 // digests, and the path is the only way to find the file.
                 // Once per file per store: listings are frequent.
-                _ => {
-                    let first = self
-                        .listing_warned
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .insert(path.to_path_buf());
-                    if first {
+                Ok(Opened::Record(..) | Opened::DoesNotOpen) => {
+                    if self.first_listing_warning(path) {
                         tracing::warn!(
                             path = %path.display(),
                             "sealed MLS record does not open under this store key; \
@@ -498,6 +691,90 @@ mod tests {
                 (p, bytes)
             })
             .collect()
+    }
+
+    /// An open leaves a lock file and a key check and no record, so the
+    /// directory existing says nothing about an identity. Only a stored
+    /// record counts, and the probe itself creates nothing.
+    #[test]
+    fn holds_records_counts_records_not_the_directory() {
+        let root = TempRoot::new("mls-holds");
+        let probe = || SealedFileMlsStorage::holds_records(root.path(), &namespace());
+        assert!(!probe().expect("absent"));
+        assert!(
+            files_under(root.path()).is_empty(),
+            "the probe creates nothing"
+        );
+        let store = open(&root, 1);
+        assert!(!probe().expect("lock and key check only"));
+
+        // What a first write that failed leaves: the type directory, and a
+        // temporary in it. Neither is an identity. Nor is a file that merely
+        // carries a type directory's prefix.
+        let type_directory = store.type_directory("identity");
+        std::fs::create_dir(&type_directory).expect("type directory");
+        assert!(!probe().expect("an empty type directory"));
+        std::fs::write(
+            type_directory.join(format!("{}crashed", records::TEMP_PREFIX)),
+            b"half a record",
+        )
+        .expect("temporary");
+        std::fs::write(store.directory().join("c_not-a-directory"), b"").expect("stray file");
+        assert!(!probe().expect("a temporary and a stray file"));
+
+        store.store("identity", "self", b"key").expect("store");
+        assert!(probe().expect("a record"));
+        assert!(matches!(
+            SealedFileMlsStorage::holds_records(root.path(), "../escape"),
+            Err(FileStoreError::InvalidNamespace)
+        ));
+    }
+
+    /// Closing releases the directory while the store is still held, which
+    /// is the point: a host whose runtime has not freed the object yet must
+    /// not keep the next store out. What the closed store then answers is a
+    /// failed operation, never a lost record, because the engine settles a
+    /// lost record as gone for good and regenerates a lost record key.
+    #[test]
+    fn a_closed_store_releases_the_directory_and_refuses_every_operation() {
+        let root = TempRoot::new("mls-close");
+        let store = open(&root, 1);
+        store.store("identity", "self", b"key").expect("store");
+        assert!(matches!(
+            SealedFileMlsStorage::open(root.path(), &namespace(), &key(1)),
+            Err(FileStoreError::InUse(_))
+        ));
+
+        store.close();
+        store.close();
+        let next = open(&root, 1);
+        assert_eq!(
+            next.load("identity", "self").expect("load"),
+            Some(b"key".to_vec()),
+            "the record written before the close is the next store's to read"
+        );
+
+        assert!(matches!(
+            store.store("identity", "self", b"other"),
+            Err(StorageError::StoreFailed(m)) if m.contains("closed")
+        ));
+        assert!(matches!(
+            store.load("identity", "self"),
+            Err(StorageError::LoadFailed(m)) if m.contains("closed")
+        ));
+        assert!(matches!(
+            store.delete("identity", "self"),
+            Err(StorageError::DeleteFailed(m)) if m.contains("closed")
+        ));
+        assert!(matches!(
+            store.list_keys("identity"),
+            Err(StorageError::LoadFailed(m)) if m.contains("closed")
+        ));
+        assert_eq!(
+            next.load("identity", "self").expect("load"),
+            Some(b"key".to_vec()),
+            "a closed store changes nothing in a directory it no longer holds"
+        );
     }
 
     #[test]
@@ -760,6 +1037,184 @@ mod tests {
             .lock()
             .expect("memo")
             .contains(&damaged));
+    }
+
+    /// A record written or removed after a listing warned about it is a new
+    /// file: damaged again later, it is warned about again.
+    #[test]
+    fn a_record_rewritten_after_a_warning_is_warned_about_again() {
+        let root = TempRoot::new("mls-list-rewarn");
+        let store = open(&root, 1);
+        store.store("group_state", "a", b"one").expect("store");
+        let damaged = store.entry_path("group_state", "a");
+        let damage = || {
+            let mut bytes = std::fs::read(&damaged).expect("read");
+            bytes[SEALED_MAGIC.len() + NONCE_BYTES] ^= 1;
+            std::fs::write(&damaged, bytes).expect("write");
+        };
+        damage();
+
+        let _callsite = listing_warning_callsite();
+        let warnings = Warnings::default();
+        let _default = tracing::dispatcher::set_default(&tracing::Dispatch::new(warnings.clone()));
+        tracing::callsite::rebuild_interest_cache();
+        let path = damaged.display().to_string();
+        let named = || {
+            warnings
+                .0
+                .lock()
+                .expect("warnings")
+                .iter()
+                .filter(|w| w.contains(&path))
+                .count()
+        };
+
+        assert!(store.list_keys("group_state").expect("list").is_empty());
+        assert_eq!(named(), 1);
+
+        store.store("group_state", "a", b"again").expect("store");
+        damage();
+        assert!(store.list_keys("group_state").expect("list").is_empty());
+        assert_eq!(
+            named(),
+            2,
+            "a rewritten record damaged again was not reported"
+        );
+
+        store.delete("group_state", "a").expect("delete");
+        assert!(
+            !store
+                .listing_warned
+                .lock()
+                .expect("memo")
+                .contains(&damaged),
+            "a removed record's warning is still remembered"
+        );
+    }
+
+    /// Makes `path` unreadable, or answers false where the test runs with
+    /// the power to read it anyway.
+    #[cfg(unix)]
+    fn make_unreadable(path: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        std::fs::read(path).is_err()
+    }
+
+    #[cfg(unix)]
+    fn make_readable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    }
+
+    /// A record that cannot be read is not evidence against the store key.
+    /// Counted as one that does not open, a permission error on the only
+    /// record refused the right key as a wrong one.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_record_is_an_io_error_not_a_wrong_key() {
+        let root = TempRoot::new("mls-unreadable-probe");
+        let (check, record) = {
+            let store = open(&root, 1);
+            store.store("group_state", "a", b"one").expect("store");
+            (
+                store.directory().join(KEY_CHECK_FILE),
+                store.entry_path("group_state", "a"),
+            )
+        };
+        std::fs::remove_file(&check).expect("remove check");
+        if !make_unreadable(&record) {
+            return;
+        }
+        let outcome = SealedFileMlsStorage::open(root.path(), &namespace(), &key(1));
+        make_readable(&record);
+        match outcome {
+            Err(FileStoreError::Io { path, .. }) => {
+                assert_eq!(path, record, "the error does not name the record");
+            }
+            Err(other) => panic!("expected an I/O error naming the record, got {other}"),
+            Ok(_) => panic!("an unreadable record proved the key"),
+        }
+        assert!(
+            !check.exists(),
+            "no key check was minted on an unread record"
+        );
+        open(&root, 1);
+        assert!(check.exists(), "once readable, the record proves the key");
+    }
+
+    /// An unreadable record does not stand in the way of a readable one that
+    /// proves the key, whichever the directory lists first.
+    ///
+    /// File names are keyed digests, so the order the probe meets records in
+    /// is not the test's to choose. Four of five are unreadable, so a probe
+    /// that stopped at the first unreadable record fails here on most runs.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_record_does_not_hide_one_that_proves_the_key() {
+        let root = TempRoot::new("mls-unreadable-beside-good");
+        let ids = ["a", "b", "c", "d", "e"];
+        let (check, unreadable) = {
+            let store = open(&root, 1);
+            for id in ids {
+                store.store("group_state", id, b"value").expect("store");
+            }
+            (
+                store.directory().join(KEY_CHECK_FILE),
+                ids[1..]
+                    .iter()
+                    .map(|id| store.entry_path("group_state", id))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        std::fs::remove_file(&check).expect("remove check");
+        if !unreadable.iter().all(|path| make_unreadable(path)) {
+            unreadable.iter().for_each(|path| make_readable(path));
+            return;
+        }
+        let outcome = SealedFileMlsStorage::open(root.path(), &namespace(), &key(1));
+        unreadable.iter().for_each(|path| make_readable(path));
+        outcome.expect("a readable record proves the key");
+        assert!(check.exists(), "the key check is rebuilt");
+    }
+
+    /// The listing names a read failure as one, not as a record sealed under
+    /// another key, and still returns the records it could read.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_record_is_listed_as_unreadable() {
+        let root = TempRoot::new("mls-unreadable-list");
+        let store = open(&root, 1);
+        store.store("group_state", "a", b"one").expect("store");
+        store.store("group_state", "b", b"two").expect("store");
+        let record = store.entry_path("group_state", "a");
+        if !make_unreadable(&record) {
+            return;
+        }
+
+        let _callsite = listing_warning_callsite();
+        let warnings = Warnings::default();
+        let _default = tracing::dispatcher::set_default(&tracing::Dispatch::new(warnings.clone()));
+        tracing::callsite::rebuild_interest_cache();
+
+        let listed = store.list_keys("group_state");
+        make_readable(&record);
+        assert_eq!(listed.expect("list"), vec!["b"]);
+        let path = record.display().to_string();
+        let said: Vec<String> = warnings
+            .0
+            .lock()
+            .expect("warnings")
+            .iter()
+            .filter(|w| w.contains(&path))
+            .cloned()
+            .collect();
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].contains("could not be read") && !said[0].contains("store key"),
+            "the warning blames the key for a read failure: {}",
+            said[0]
+        );
     }
 
     /// Nothing to write down in a record's name, so the error must carry the

@@ -200,6 +200,14 @@ Consequences for application teams are in
 [Delivery and ACKs](../state-machines/delivery-and-acks.md). The headline: **a
 missing acknowledgement is not proof of non-delivery.**
 
+A frame delivered out of [custody](../spec/custody.md) hours after it was
+sent is answered by exactly these rules and no others: the custodian's
+receipt is not an acknowledgement, the recipient's acknowledgement travels
+the ordinary ladder to the sender and never to the custodian, and a copy
+sealed to an epoch the recipient has left is withheld like any other desync.
+Custody widens nobody's view of the acknowledgement channel in this version,
+because acknowledgements are not carried.
+
 ## Known residual risks
 
 Stated plainly, because a threat model that lists only what it defeats is
@@ -459,10 +467,18 @@ enumeration above and is unchanged.
 
 **Mitigations specified but not enforceable from here**: the per-device and
 per-peer token-bucket budgets against backbone exhaustion are the gateway's own
-to apply, so a device cannot verify that its gateway applies them. This is
-listed apart from the others on purpose: a threat model that reads as
-protection when the protection is somebody else's to implement is the failure
-this document exists to prevent.
+to apply, so a device cannot verify that its gateway applies them. They are
+sized per [rate class](../spec/gateway-contract.md#what-a-backbone-owes-a-gateway):
+a scarce-class backbone (a few bps up to LoRa-class kbps) carries direct
+messages, acknowledgements and control frames and excludes media, and a
+broad one carries what the daemon link accepts under the same budgets. The
+class follows from the kind the gateway advertises, a token the device
+stores and never acts on, so a gateway that applies the wrong class delays
+every device behind it (the latency-and-battery cost above) and changes no
+decision on any of them.
+This is listed apart from the others on purpose: a threat model that reads
+as protection when the protection is somebody else's to implement is the
+failure this document exists to prevent.
 
 **What would close it:** nothing closes the lying-gateway case, because the lie
 is about someone else's state. Provisioning is the real control: gateways are
@@ -765,6 +781,102 @@ directory modes are a Unix property; on Windows the directories inherit the
 parent's access list. And a restored backup of the key directory rolls MLS
 state back: it cannot leak a message, but it reinstates spent ratchet secrets
 on disk and breaks the sessions until they are re-established.
+
+### R19. Custody-borne re-key pressure
+
+A [custodian](../spec/custody.md) holds ciphertext it cannot re-seal, for
+hours, and delivers it when a path appears. If the pair re-keyed in the
+meantime, the copy classifies at the recipient as a session desync **when
+crypto recovery is enabled, which is the default**: the acknowledgement is
+withheld and the identifier unmarked, so nothing settles falsely, and the same
+branch schedules a rate-limited re-key and emits the `SESSION_REKEY_TRIGGERED`
+security warning. Benign late delivery therefore raises the rate of a signal
+this document, and the configuration documentation, tell integrators to read
+as injection.
+
+With crypto recovery disabled, the same copy is a terminal decrypt failure
+instead: dropped and acknowledged, and the acknowledgement settles the
+depositor's outbox entry for a frame the recipient never read. Custody is what
+makes that path reachable, because a direct resend is re-sealed to the live
+epoch and never arrives stale. For the one class carried, the recipient's
+version vector still lacks the change and the next version-offer exchange
+re-offers it, so the loss is a delay rather than a divergence; that is one of
+the reasons only replication frames are carried, and a deployment that
+disables crypto recovery anywhere should leave custody off.
+
+**Why it stands:** the recipient cannot tell a stale custody copy from an
+injected wrong-epoch frame, for the reason R2 gives: every pre-authentication
+verdict is structurally outside the reach of the credential check. The
+re-key floor bounds the work, not the signal.
+
+**What bounds it:** this version carries only replication frames, and a
+replication frame that dies with an epoch is re-derivable from state, so
+the copy that fails is one the depositor's own re-sealing resend replaces.
+The floor (`REKEY_INTERVAL_SECS`) holds one re-key per peer per window
+whatever the cause. The hold is strictly shorter than the outbox lifetime,
+so a copy never outlives the sender's own ladder.
+
+**What integrators should read:** in a deployment with custody enabled, a
+re-key warning that follows a `peer_rediscovered` event for the same pair by
+seconds is the expected shape of a late custody copy, and a sustained rate
+with no rediscovery is still the injection signature. The implementation
+does not distinguish the two on the warning itself; doing so would need the
+custodian to be trusted about provenance, which it is not.
+
+### R20. A custodian retains routing metadata about third parties
+
+A sealed payload is opaque at every hop, but the outer frame is not: sender,
+recipient, identifier, application id, priority, hop fields, timestamp and
+size are readable by whoever holds it. A forwarder learns them for five
+seconds in memory. A custodian keeps them for hours, on disk, for traffic
+between two other parties, and an A1 or A2 adversary who volunteers as a
+custodian collects them by design.
+
+**Why it stands:** routing needs the recipient, and a custodian needs the
+identifier to deduplicate and the sender to key its quotas. Sealing the
+held record protects the directory, not the custodian, which is the party
+the exposure is to.
+
+**What bounds it:** custody is off by default; the stranger tier defaults to
+zero, so a device that has met nobody holds nothing and a device holds only
+for peers it has a session with; the hold is bounded and validated; every
+record is erased on the data-layer wipe and at start when custody is
+disabled. Quotas bound volume, not observation: an attacker who wants to
+observe a pair needs only to be their neighbour with custody on, which is
+the same position A1 already has for five seconds per frame. What custody
+adds is retention, and the opt-in documentation MUST say so in those words.
+
+### R21. Deposit spam
+
+A deposit is a metadata key on the depositor's own frame, authenticated by
+nothing beyond the transport identity of the peer that handed it over, and
+the class it asserts cannot be checked by the custodian. An A2 adversary can
+therefore offer frames for custody as fast as the mesh admits them, assert
+`data` on any sealed body, and spend the custodian's durable writes and
+storage.
+
+**Why it stands:** a custodian cannot see inside a sealed frame, so the
+assertion cannot be verified, and a deposit cannot be signed by anything
+the custodian could check that the transport identity does not already
+prove.
+
+**What bounds it:** acceptance requires the frame's `sender` to be the
+address the transport proved for the peer that handed it over, so a deposit
+cannot be made on another device's behalf, and the quotas, the receipt and
+the capability lookup all key on one address the transport proved. Every
+forwarder strips the deposit key from a third-party frame before transmitting
+it, so an attacker cannot recruit honest forwarders to deposit its frames at
+custodians it never touched. The stranger tier is zero by default, so the
+attacker must first complete a session, which costs a key package exchange
+and gives the operator a name. Per-depositor entry and byte budgets cap what
+one address can hold, the global budgets cap the store, the forwarding
+governor's per-neighbour rate limit is applied before a frame ever reaches
+the custody decision, and a duplicate identifier is never stored twice. A
+false class assertion costs the depositor's own recipient exactly what a
+direct resend would, because the recipient's deduplication and its terminal
+data-layer outcomes apply unchanged, so it buys the attacker nothing a
+direct send does not. Refusals are silent and counted, so the quotas are not
+an oracle.
 
 ## Network egress
 

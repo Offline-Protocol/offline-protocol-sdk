@@ -30,7 +30,7 @@ __pycache__/
 *.py[cod]
 
 # Node
-node_modules/
+node_modules
 examples/react-native-app/node_modules/
 *.log
 npm-debug.log*

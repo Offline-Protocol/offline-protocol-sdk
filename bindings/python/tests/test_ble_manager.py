@@ -628,3 +628,46 @@ class TestPeerCleanup:
 
         assert addr not in manager._last_seen
         assert addr not in manager._peer_device_ids
+
+
+# ---------------------------------------------------------------------------
+# A stop() cancelled part-way
+# ---------------------------------------------------------------------------
+
+
+class TestInterruptedStop:
+    @pytest.mark.asyncio
+    async def test_a_stop_cancelled_inside_the_scanner_can_be_finished(
+        self, manager, mock_protocol
+    ):
+        """A shutdown deadline lands inside the scanner's own stop, after the
+        state moved to STOPPING. The retry has to run the teardown again: one
+        that returned at once would leave the scanner scanning and every
+        client connected, behind a transport that no `stop()` can reach."""
+        release = asyncio.Event()
+
+        async def a_scanner_that_does_not_let_go() -> None:
+            await release.wait()
+
+        scanner = MagicMock()
+        scanner.stop = AsyncMock(side_effect=a_scanner_that_does_not_let_go)
+        client = MagicMock()
+        client.disconnect = AsyncMock()
+        manager._scanner = scanner
+        manager._clients["AA:BB:CC:DD:EE:FF"] = client
+        manager._state = TransportState.RUNNING
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(manager.stop(), 0.05)
+        assert manager.state == TransportState.STOPPING
+        client.disconnect.assert_not_awaited()
+
+        release.set()
+        await manager.stop()
+
+        assert manager.state == TransportState.STOPPED
+        assert scanner.stop.await_count == 2
+        client.disconnect.assert_awaited_once()
+        assert manager._scanner is None
+        assert manager._clients == {}
+        mock_protocol.ble_status_changed.assert_called_once_with(is_available=False)

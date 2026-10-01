@@ -8,8 +8,11 @@ wraps the UniFFI ``OfflineProtocol`` instance with transport managers, a
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
+import os
 import platform
 import sys
 from pathlib import Path
@@ -23,6 +26,7 @@ from .offline_protocol import (
     NostrTransportCallback,
     OfflineProtocol,
     ProtocolConfig,
+    ProtocolError,
     AppState,
     ReticulumTransportCallback,
     TelemetryConfig,
@@ -32,10 +36,11 @@ from .offline_protocol import (
 )
 from .ble_manager import BleManager
 from .ble_peripheral import BlePeripheral
+from .gateway_manager import GatewayManager
 from .internet_manager import InternetManager
 from .peer_stream_manager import PeerStreamManager
 from .secure_storage import SecureStorage
-from .state_storage import AppStateStorage
+from .state_storage import _STATE_ROOT_ENV, AppStateStorage
 from .storage_namespace import account_storage_namespace
 
 logger = logging.getLogger(__name__)
@@ -112,12 +117,170 @@ class _NostrTransportCallbackImpl(NostrTransportCallback):
 
 
 class _ReticulumTransportCallbackImpl(ReticulumTransportCallback):
-    """Stub — no desktop Reticulum manager; apps driving Reticulum manually
-    must call ``protocol.set_reticulum_transport_callback()`` with their own
-    impl."""
+    """Forwards the ``reticulum`` slot's wake to :class:`GatewayManager`.
+
+    The core fires it when a frame is queued for this carrier; the manager
+    drains only once the gateway has bound the session, so a wake for an
+    unattached manager is one drain that returns at once. An application
+    that drives the slot itself replaces this through
+    ``protocol.set_reticulum_transport_callback``.
+    """
+
+    def __init__(self, manager: GatewayManager | None) -> None:
+        self._manager = manager
 
     def on_messages_available(self) -> None:
-        pass
+        if self._manager is not None:
+            self._manager.on_messages_available()
+
+
+#: Where :class:`ProtocolManager` finds the sealed MLS store's root when
+#: ``mls_root`` is not given.
+_MLS_ROOT_ENV = "OFFLINE_PROTOCOL_MLS_ROOT"
+#: Length of a store key.
+_STORE_KEY_BYTES = 32
+
+
+def _decode_store_key_text(variable: str, text: str) -> bytes:
+    """A store key from its text form: 64 hex digits, or standard base64.
+
+    The same forms the Rust ``EnvStoreKey`` accepts, so one secret works
+    whichever side reads it. Base64 must be canonical (it re-encodes to the
+    same text), as the Rust decoder requires.
+    """
+    text = text.strip()
+    if len(text) == 2 * _STORE_KEY_BYTES and all(c in "0123456789abcdefABCDEF" for c in text):
+        return bytes.fromhex(text)
+    unpadded = text.rstrip("=")
+    try:
+        raw = base64.b64decode(unpadded + "=" * (-len(unpadded) % 4), validate=True)
+    except (binascii.Error, ValueError):
+        raw = b""
+    canonical = base64.b64encode(raw).decode("ascii")
+    if len(raw) == _STORE_KEY_BYTES and text in (canonical, canonical.rstrip("=")):
+        return raw
+    raise ValueError(
+        f"{variable} must hold a {_STORE_KEY_BYTES}-byte store key as 64 hex "
+        "digits or as base64"
+    )
+
+
+def _run_here(call: Callable[[], Any]) -> asyncio.Future[Any]:
+    """Runs ``call`` on this thread and returns a future that is already
+    done, carrying its result or its error."""
+    done: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+    try:
+        done.set_result(call())
+    except Exception as err:
+        done.set_exception(err)
+    return done
+
+
+def _forget_frames(err: BaseException) -> None:
+    """Drops the traceback of an exception a teardown caught and logged.
+
+    The traceback holds the teardown's frames, and through them the
+    manager. The executor future that carried the exception keeps it, in a
+    reference cycle that Python 3.10 frees only when the collector runs, so
+    a stopped or closed manager outlived ``del`` there (3.11 and later free
+    it at once). Nothing reads the traceback once it is logged.
+    """
+    err.__traceback__ = None
+
+
+def _hand_off(call: Callable[[], Any]) -> asyncio.Future[Any]:
+    """Starts a blocking core call off the loop and returns its future.
+
+    A teardown must be able to finish on any loop it is asked to finish on.
+    A loop whose default executor has been shut down refuses the hand-off
+    before anything is submitted, so the call runs here instead: blocking
+    the loop for one teardown step is better than a manager that can never
+    release what it holds.
+    """
+    try:
+        return asyncio.get_running_loop().run_in_executor(None, call)
+    except RuntimeError:
+        return _run_here(call)
+
+
+def _require_root(value: str | Path | None, variable: str, what: str) -> str:
+    if value is not None and str(value).strip():
+        return str(value)
+    configured = os.environ.get(variable)
+    if configured and configured.strip():
+        # A service manager's environment file can carry stray whitespace;
+        # the key text is trimmed for the same reason. An argument is taken
+        # as given, since a path may legitimately end in a space.
+        return configured.strip()
+    raise ValueError(f"the file stores need {what}; pass it or set {variable}")
+
+
+class _FileStores:
+    """The built-in file stores: where they live and where the key comes from.
+
+    The roots are resolved at construction so a missing one fails there.
+    The key is read when :meth:`initialize` runs and handed to the core; a
+    key passed as bytes is dropped once the core has taken it, and one read
+    from the environment is never kept.
+    """
+
+    def __init__(
+        self,
+        *,
+        mls_root: str | Path | None,
+        state_root: str | Path | None,
+        store_key: bytes | bytearray | None,
+        store_key_env: str | None,
+    ) -> None:
+        if store_key is not None and store_key_env is not None:
+            raise ValueError("pass store_key or store_key_env, not both")
+        if store_key is not None:
+            if not isinstance(store_key, (bytes, bytearray)):
+                raise TypeError("store_key must be bytes")
+            if len(store_key) != _STORE_KEY_BYTES:
+                raise ValueError(
+                    f"store_key must be {_STORE_KEY_BYTES} bytes, got {len(store_key)}"
+                )
+            if not any(store_key):
+                raise ValueError(
+                    "store_key is all zero: an unset buffer, not a key"
+                )
+        if store_key_env is not None and not store_key_env.strip():
+            raise ValueError("store_key_env must name an environment variable")
+        self._mls_root = _require_root(mls_root, _MLS_ROOT_ENV, "mls_root")
+        self._state_root = _require_root(state_root, _STATE_ROOT_ENV, "state_root")
+        # A snapshot, not the caller's buffer: a bytearray the caller reuses
+        # before `start()` would otherwise create a new store sealed under
+        # whatever the buffer holds by then, and the real key would be
+        # refused on every later run.
+        self._store_key: bytes | None = (
+            bytes(store_key) if store_key is not None else None
+        )
+        self._store_key_env = store_key_env
+
+    def _key(self) -> bytes:
+        if self._store_key is not None:
+            return self._store_key
+        variable = self._store_key_env or ""
+        text = os.environ.get(variable)
+        if text is None:
+            raise ValueError(f"the environment variable {variable} is not set")
+        return _decode_store_key_text(variable, text)
+
+    def forget_key(self) -> None:
+        """Drops a key the core will never take: the manager was closed."""
+        self._store_key = None
+
+    def initialize(self, protocol: OfflineProtocol) -> None:
+        # A restart of the same manager: the stores are already open, and
+        # the key was dropped when the core took it.
+        if protocol.is_mls_initialized():
+            return
+        protocol.initialize_mls_with_file_stores(
+            self._mls_root, self._state_root, self._key()
+        )
+        # Kept until the core accepted it, so a refused start can be retried.
+        self._store_key = None
 
 
 class ProtocolManager:
@@ -138,6 +301,12 @@ class ProtocolManager:
         ...
         await pm.stop()
 
+    :meth:`stop` leaves the manager ready for another :meth:`start`.
+    :meth:`close` is final: it stops, and with the file stores it releases
+    their directories at once, so a new manager can open them while this one
+    still exists. Leaving ``async with`` closes a manager that uses the file
+    stores and stops any other.
+
     Parameters
     ----------
     config:
@@ -153,8 +322,32 @@ class ProtocolManager:
         must select an application-owned directory that the installer removes
         with the application.
     state_root:
-        Root directory for the built-in :class:`AppStateStorage`. Ignored when
-        ``state_storage`` is supplied.
+        Root directory for protocol state: the built-in
+        :class:`AppStateStorage`, or the file stores' protocol-state half.
+        Ignored when ``state_storage`` is supplied.
+    store_key:
+        Selects the SDK's built-in file stores instead of ``SecureStorage``
+        and ``AppStateStorage``: 32 bytes that seal every MLS record (the
+        identity, group state, and the key that seals protocol state). For a
+        host with a filesystem and no platform keyring, such as a headless
+        Linux service. Exclusive with ``store_key_env``, ``storage`` and
+        ``state_storage``.
+    store_key_env:
+        Selects the file stores like ``store_key``, reading the key when
+        :meth:`start` runs from this environment variable, as 64 hex digits
+        or as base64 (conventionally ``OFFLINE_PROTOCOL_STORE_KEY``). This is
+        how a service manager usually hands a process a secret; unset the
+        variable after :meth:`start` if nothing else needs it.
+    mls_root:
+        Root directory of the sealed MLS store in file-store mode, or
+        ``OFFLINE_PROTOCOL_MLS_ROOT``. It holds this device's identity, so it
+        must survive an upgrade, and it should not be ``state_root``.
+
+    With the file stores, :meth:`start` raises when MLS cannot be
+    initialised (a wrong key, a directory another process holds) instead of
+    starting without encryption: an operator who supplied a key asked for
+    the sealed store, and a service that runs without it has lost its
+    identity without saying so.
     """
 
     def __init__(
@@ -165,23 +358,45 @@ class ProtocolManager:
         state_storage: Any | None = None,
         *,
         state_root: str | Path | None = None,
+        store_key: bytes | bytearray | None = None,
+        store_key_env: str | None = None,
+        mls_root: str | Path | None = None,
     ) -> None:
         self._config = config
         self._event_handler = event_handler
 
         profile = config.profile  # type: ignore[union-attr]
         app_id = config.app_id  # type: ignore[union-attr]
-        storage_namespace = account_storage_namespace(app_id, profile)
-        self._storage = (
-            storage
-            if storage is not None
-            else SecureStorage(namespace=storage_namespace)
-        )
-        self._state_storage = (
-            state_storage
-            if state_storage is not None
-            else AppStateStorage(root=state_root, namespace=storage_namespace)
-        )
+
+        # The built-in file stores, when a store key was given. Opened by
+        # the core in `start()`; nothing on this side holds them.
+        self._file_stores: _FileStores | None = None
+        if store_key is not None or store_key_env is not None:
+            if storage is not None or state_storage is not None:
+                raise ValueError(
+                    "store_key/store_key_env select the built-in file stores; "
+                    "they cannot be combined with storage= or state_storage="
+                )
+            self._file_stores = _FileStores(
+                mls_root=mls_root,
+                state_root=state_root,
+                store_key=store_key,
+                store_key_env=store_key_env,
+            )
+            self._storage: Any | None = None
+            self._state_storage: Any | None = None
+        else:
+            storage_namespace = account_storage_namespace(app_id, profile)
+            self._storage = (
+                storage
+                if storage is not None
+                else SecureStorage(namespace=storage_namespace)
+            )
+            self._state_storage = (
+                state_storage
+                if state_storage is not None
+                else AppStateStorage(root=state_root, namespace=storage_namespace)
+            )
 
         # Create the core protocol instance
         self._protocol = OfflineProtocol(config)
@@ -213,9 +428,31 @@ class ProtocolManager:
         if getattr(config, "wifi_direct_enabled", False):
             self.peer_stream = PeerStreamManager(self._protocol)
 
+        # The gateway-daemon client behind the `reticulum` slot: TCP to a
+        # daemon built to the gateway contract, attached with a signed
+        # address declaration, each send settled on the gateway's verdict.
+        # Configured and started by the caller after `start()`, once this
+        # device has an address to declare; stopped here.
+        self.gateway: GatewayManager | None = None
+        if getattr(config, "reticulum_enabled", False):
+            self.gateway = GatewayManager(self._protocol, device_id)
+
         # Processing loop task
         self._process_task: asyncio.Task[None] | None = None
         self._running = False
+        # Set while a teardown has begun and not run to its end: a `stop()`
+        # cancelled part-way, or one whose engine stop raised. `_running` is
+        # already False then, so without this a retry would return at once
+        # and leave the callbacks, and with them the store locks, held.
+        self._teardown_pending = False
+        # One teardown at a time. A second stop() (a signal handler racing an
+        # `async with` exit) would otherwise stop the engine and release the
+        # callbacks while the first is still inside a transport, and two
+        # transport stops would interleave over the same sockets.
+        self._stop_lock = asyncio.Lock()
+        # Set by `close()`. The core has given up its stores by then, so a
+        # later `start()` would run an engine that cannot write.
+        self._closed = False
 
         # Registry of objects whose pointers are held by the Rust/UniFFI side.
         # Prevents garbage collection while the protocol is alive.
@@ -239,6 +476,11 @@ class ProtocolManager:
 
     async def start(self) -> None:
         """Wire callbacks, initialise MLS, and start the processing loop."""
+        if self._closed:
+            raise RuntimeError(
+                "this ProtocolManager is closed: close() released its stores "
+                "for good, create a new manager"
+            )
         if self._running:
             return
 
@@ -267,18 +509,17 @@ class ProtocolManager:
 
         self._reticulum_cb: _ReticulumTransportCallbackImpl | None = None
         if getattr(self._config, "reticulum_enabled", False):
-            self._reticulum_cb = _ReticulumTransportCallbackImpl()
+            self._reticulum_cb = _ReticulumTransportCallbackImpl(self.gateway)
             self._protocol.set_reticulum_transport_callback(self._reticulum_cb)
 
         # Keep strong references to all objects passed to the Rust/UniFFI
         # side so that Python's GC cannot collect them while Rust holds
         # raw callback pointers.
-        self._prevent_gc = [
-            self._event_cb,
-            self._ble_cb,
-            self._storage,
-            self._state_storage,
-        ]
+        self._prevent_gc = [self._event_cb, self._ble_cb]
+        if self._storage is not None:
+            self._prevent_gc.append(self._storage)
+        if self._state_storage is not None:
+            self._prevent_gc.append(self._state_storage)
         if self._wifi_cb is not None:
             self._prevent_gc.append(self._wifi_cb)
         if self._nostr_cb is not None:
@@ -287,13 +528,32 @@ class ProtocolManager:
             self._prevent_gc.append(self._reticulum_cb)
 
         # Initialise MLS encryption
-        try:
-            self._protocol.initialize_mls(self._storage, self._state_storage)
-        except Exception as exc:
-            logger.warning("MLS initialisation failed (non-fatal): %s", exc)
+        if self._file_stores is not None:
+            # Fails closed: a refused key or a held directory raises here,
+            # before the engine starts, rather than running without the
+            # identity the operator's key protects. The callbacks above are
+            # already registered and `stop()` does nothing for a manager
+            # that never ran, so release them here or the core (and, through
+            # a handler that reaches it, the manager) outlives every refusal.
+            try:
+                self._file_stores.initialize(self._protocol)
+            except BaseException:
+                self._release_callbacks()
+                raise
+        else:
+            try:
+                self._protocol.initialize_mls(self._storage, self._state_storage)
+            except Exception as exc:
+                logger.warning("MLS initialisation failed (non-fatal): %s", exc)
 
-        # Start the protocol engine
-        self._protocol.start()
+        # Start the protocol engine. A refusal here comes after the stores
+        # opened, and `stop()` does nothing for a manager that never ran, so
+        # release the callbacks now or the stores stay held for good.
+        try:
+            self._protocol.start()
+        except BaseException:
+            self._release_callbacks()
+            raise
         self._running = True
 
         # Start the 100 ms processing loop
@@ -302,20 +562,106 @@ class ProtocolManager:
         logger.info("ProtocolManager started (address=%s)", self.local_address)
 
     async def stop(self) -> None:
-        """Stop all transports and the processing loop."""
-        if not self._running:
+        """Stop all transports and the processing loop.
+
+        The manager can be started again. With the file stores, the
+        directories stay open for that restart: use :meth:`close` to give
+        them up.
+        """
+        async with self._stop_lock:
+            await self._stop_locked()
+
+    async def close(self) -> None:
+        """Stop, and release what this manager holds, for good.
+
+        With the file stores, both directories are released before this
+        returns, whatever still refers to the manager or to ``protocol``: a
+        name the application kept, an event handler, an exception. A new
+        manager can open them at once. Without an explicit release the
+        directories stay locked until the core object is freed, and when
+        that happens is the interpreter's decision, not the caller's.
+
+        The manager cannot be started again; create a new one. Safe to call
+        twice, and on a manager that never started. Raises
+        ``ProtocolError.InvalidState`` when the engine could not be stopped:
+        nothing was released, the manager is not closed, and the call can be
+        repeated. A call cancelled while the core is releasing the stores
+        still releases them, and the manager is closed once it has.
+        """
+        await self.stop()
+        if self._file_stores is None:
+            # Nothing of this manager's outlives a stopped engine, and the
+            # core has no stores to ask, so an engine that would not stop is
+            # reported here.
+            if self._teardown_pending:
+                raise ProtocolError.InvalidState(
+                    "close() could not stop the engine, so the manager is "
+                    "not closed; call close() again"
+                )
+            self._closed = True
+            return
+        # Off the loop: when `stop()` could not disable telemetry, the core
+        # does it here, and the uploader's final flush can block for up to
+        # three seconds. Shielded, and marked from the hand-off itself: a
+        # caller's cancel does not stop the core, so the manager has to end
+        # up closed whether or not anyone is still waiting for it.
+        release = _hand_off(self._protocol.close_file_stores)
+        if release.done():
+            # Already over (the call ran here, or its worker was quick). A
+            # callback added now would run on a later loop turn, after this
+            # method had returned a manager not yet marked closed.
+            self._closed_by(release)
+            release.result()
+            return
+        release.add_done_callback(self._closed_by)
+        await asyncio.shield(release)
+
+    def _closed_by(self, release: asyncio.Future[Any]) -> None:
+        """Marks the manager closed once the core released the stores."""
+        if release.cancelled() or release.exception() is not None:
+            return
+        self._closed = True
+        if self._file_stores is not None:
+            self._file_stores.forget_key()
+        if self._teardown_pending:
+            # `stop()` could not finish (telemetry would not disable, or the
+            # engine lock was poisoned), and the core released the stores
+            # anyway, which it does only for an engine that runs no more.
+            # What `stop()` held back for a running engine can go.
+            self._release_callbacks()
+            self._prevent_gc.clear()
+            self._teardown_pending = False
+
+    async def _stop_locked(self) -> None:
+        if not self._running and not self._teardown_pending:
             return
 
         self._running = False
+        self._teardown_pending = True
 
         # Cancel processing loop
         if self._process_task is not None and not self._process_task.done():
             self._process_task.cancel()
-            try:
-                await self._process_task
-            except asyncio.CancelledError:
-                pass
+            # Waited on, never awaited. A CancelledError raised here is then
+            # always the caller's (a shutdown deadline), never the process
+            # task's own: awaiting the task would raise for both, and a
+            # handler that swallowed the task's would swallow the caller's
+            # cancel with it and run the teardown to its end regardless.
+            await asyncio.wait({self._process_task})
         self._process_task = None
+
+        # One loop turn, always. A caller that retries after a cancelled
+        # stop() is still inside the task step that threw the CancelledError,
+        # and that step holds the exception (and through its traceback the
+        # first stop()'s frames, so this manager) until the task next
+        # suspends. Nothing below is certain to suspend: on Python 3.13+ an
+        # executor hand-off whose worker already finished completes in
+        # place. Without this turn the manager outlived `del` about one time
+        # in fifty, and the next manager was refused its directories. Taken
+        # here, after the process loop was cancelled, and not on entry: a
+        # turn before the cancel lets that loop run one more tick, and
+        # deliver one more message, after `stop()` was called.
+        await asyncio.sleep(0)
 
         # Stop transports
         if self.ble is not None:
@@ -326,6 +672,8 @@ class ProtocolManager:
             await self.internet.stop()
         if self.peer_stream is not None:
             await self.peer_stream.stop()
+        if self.gateway is not None:
+            await self.gateway.stop()
 
         # Give the telemetry pipe its final flush while the process is still
         # ours to block: the pipe would also stop when the protocol is
@@ -335,20 +683,25 @@ class ProtocolManager:
         try:
             # Off the loop: the final flush blocks for up to three seconds,
             # and every other awaitable in this teardown would wait behind it.
-            await asyncio.to_thread(self.disable_telemetry)
-        except Exception:
+            await _hand_off(self.disable_telemetry)
+        except Exception as err:
             teardown_clean = False
             logger.debug(
                 "disable_telemetry raised during stop (non-fatal)",
                 exc_info=True,
             )
+            _forget_frames(err)
 
         # Stop protocol engine
         try:
             self._protocol.stop()
-        except Exception:
+        except Exception as err:
             teardown_clean = False
             logger.debug("protocol.stop() raised (non-fatal)", exc_info=True)
+            _forget_frames(err)
+
+        if teardown_clean:
+            self._release_callbacks()
 
         # Only release GC pins once Rust has confirmed it no longer holds
         # callback handles. If either teardown step raised, Rust may still
@@ -357,6 +710,7 @@ class ProtocolManager:
         # callback fire.
         if teardown_clean:
             self._prevent_gc.clear()
+            self._teardown_pending = False
         elif self._prevent_gc:
             logger.warning(
                 "ProtocolManager stop() encountered errors; retaining %d GC "
@@ -366,8 +720,44 @@ class ProtocolManager:
 
         logger.info("ProtocolManager stopped")
 
+    def _release_callbacks(self) -> None:
+        """Replaces the callbacks that can reach this manager with inert ones.
+
+        The core holds every registered callback. The BLE, peer-stream and
+        gateway callbacks hold their managers, the event callback holds the
+        application's handler (often a bound method of the object that owns
+        this manager, or a closure over it), and an application that drives
+        Nostr or the gateway slot itself registers its own callback, which
+        needs the core to drain it. Each of those reaches
+        the core again, and the cycle runs through Rust, so Python's
+        collector cannot see it, let alone break it: without this a stopped
+        manager is never freed. With the file stores that is not a leak but
+        an outage, because the core holds each store's directory lock and
+        every later manager over the same directories is refused.
+        :meth:`start` registers the real callbacks again.
+        """
+        # Every slot, whether or not this manager registered it: the app
+        # may have. Each in its own `try`, so one refusal cannot leave the
+        # rest held. Every setter accepts a callback for a disabled transport.
+        core = self._protocol
+        for register, inert in (
+            (core.set_event_callback, _EventCallbackImpl(None)),
+            (core.set_ble_transport_callback, _BleTransportCallbackImpl(None, None)),
+            (
+                core.set_wifi_direct_transport_callback,
+                _WifiDirectTransportCallbackImpl(None),
+            ),
+            (core.set_nostr_transport_callback, _NostrTransportCallbackImpl()),
+            (core.set_reticulum_transport_callback, _ReticulumTransportCallbackImpl(None)),
+        ):
+            try:
+                register(inert)
+            except Exception:
+                logger.debug("releasing a callback raised (non-fatal)", exc_info=True)
+
     def __del__(self) -> None:
-        if self._running:
+        # A constructor that raised (a refused argument) leaves no `_running`.
+        if getattr(self, "_running", False):
             logger.error(
                 "ProtocolManager garbage-collected while still running! "
                 "Call await stop() before discarding the manager to avoid "
@@ -375,11 +765,34 @@ class ProtocolManager:
             )
 
     async def __aenter__(self) -> ProtocolManager:
-        await self.start()
+        try:
+            await self.start()
+        except BaseException:
+            # `__aexit__` does not run for an entry that failed, and
+            # `async with ProtocolManager(...)` leaves the caller no name to
+            # close. A start that fails after the stores opened would hold
+            # the directories for as long as the exception lives.
+            if self._file_stores is not None:
+                try:
+                    await self.close()
+                except Exception:
+                    logger.debug(
+                        "close() after a failed start raised (non-fatal)",
+                        exc_info=True,
+                    )
+            raise
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
-        await self.stop()
+        # The file stores hold their directories until they are closed, and
+        # the name bound by `async with ... as pm` outlives the block, so a
+        # stop alone would refuse the next block over the same directories.
+        # Any other manager keeps the exit it always had, and can be entered
+        # again.
+        if self._file_stores is not None:
+            await self.close()
+        else:
+            await self.stop()
 
     # -- event handling -------------------------------------------------------
 

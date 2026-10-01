@@ -1,5 +1,6 @@
 //! Send pipeline, outbox management, and delivery tracking.
 
+use super::custody::CUSTODY_META_KEY;
 use super::{
     base64_encode, internal_prefixes, lifetime_expired, lock_shared_state,
     ConnectionAcceptedPayload, ConnectionRequestPayload, KeyPackagePayload, MediaSendOptions,
@@ -1017,6 +1018,7 @@ impl OfflineProtocol {
                     super::types::DATA_TOMBSTONE_V1,
                     super::types::DATA_INTEREST_V1,
                     super::types::DATA_GROUP_BLOB_V1,
+                    super::types::DATA_CUSTODY_V1,
                 ];
             }
         }
@@ -3261,6 +3263,9 @@ impl OfflineProtocol {
         // staging is consumed at entry creation; this covers the id being torn
         // down before that ever happened.
         self.pending_reseal.remove(message_id);
+        // A receipt names an outbox entry; with the entry gone it names
+        // nothing, and keeping it would only grow the map.
+        self.custody_receipts.remove(message_id);
         if let Some(entry) = self.outbox.remove(message_id) {
             self.clear_outbox_entry_from_storage(message_id);
             return Some(entry);
@@ -3678,6 +3683,14 @@ impl OfflineProtocol {
             )
         };
 
+        // The deposit request (`docs/spec/custody.md`, "What the depositor
+        // writes"): a class token on this device's own sealed replication
+        // frame, judged from the plaintext retained for re-sealing, written
+        // only here, where the frame is handed to proven mesh neighbours
+        // because the recipient is out of reach. Never toward a custodian
+        // whose receipt for this frame is still live.
+        let custody_class = self.custody_class_for(message);
+
         let mut handed_to = 0usize;
         for target in targets {
             // Metered against the same ceiling as carrying other people's
@@ -3697,7 +3710,20 @@ impl OfflineProtocol {
                 break;
             }
 
-            match self.transport_manager.send_to_neighbor(&target, message) {
+            let deposit;
+            let frame: &Message = match custody_class {
+                Some(class) if !self.custody_suppressed_toward(&message.id, &target) => {
+                    let mut stamped = message.clone();
+                    stamped
+                        .metadata
+                        .insert(CUSTODY_META_KEY.to_string(), class.to_string());
+                    deposit = stamped;
+                    &deposit
+                }
+                _ => message,
+            };
+
+            match self.transport_manager.send_to_neighbor(&target, frame) {
                 Ok(transport) => {
                     handed_to += 1;
                     debug!(
@@ -3705,6 +3731,7 @@ impl OfflineProtocol {
                         recipient = %message.recipient,
                         next_hop = %target,
                         transport = ?transport,
+                        deposit = frame.metadata.contains_key(CUSTODY_META_KEY),
                         "Handed message to a neighbor to carry"
                     );
                 }
@@ -5700,7 +5727,8 @@ impl OfflineProtocol {
             }
         }
 
-        // Reticulum excluded: LoRa bandwidth (~0.7 KB/s typical) is unsuitable for media transfer.
+        // The daemon carrier is left out of the fallback order: its reference
+        // backbone is scarce-class (gateway-contract.md, rate class).
         for preferred in [
             TransportType::Internet,
             TransportType::WiFiDirect,

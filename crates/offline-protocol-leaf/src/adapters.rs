@@ -7,7 +7,7 @@
 //! is a confidentiality bug rather than a lost message. So firmware implements
 //! one blob store and these adapters do the rest.
 
-use alloc::{format, string::String, sync::Arc, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 use mls_rs_core::{
     error::IntoAnyError,
     group::{EpochRecord, GroupState, GroupStateStorage},
@@ -18,6 +18,8 @@ use mls_rs_core::{
     mls_rs_codec::{MlsDecode, MlsEncode},
 };
 use zeroize::Zeroizing;
+
+use crate::shared::Arc;
 
 use crate::store::{LeafStore, StoreError, KEY_TYPE_GROUP_EPOCH, KEY_TYPE_GROUP_STATE};
 use crate::store::{KEY_TYPE_KEY_PACKAGE, KEY_TYPE_PEER};

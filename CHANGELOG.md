@@ -15,6 +15,128 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Python has a gateway-daemon client.** `GatewayManager`, as
+  `ProtocolManager.gateway` when `reticulum_enabled=True`, speaks the
+  [gateway-daemon contract](docs/spec/gateway-contract.md) over TCP to a
+  daemon on local IP: it attaches with the core-built address declaration,
+  offers the carrier to the core only once the gateway has bound the session
+  to this device's address (its capabilities are handed to the core on their
+  own frame, which the contract puts before the announcement), settles every
+  send on the gateway's verdict rather than on the socket write, fails what a
+  dead or silent connection owes (sixty seconds, under the core's own expiry),
+  and asks about the core's presence watchlist. It is the first client on this
+  carrier to read the `stored` and `pushed` verdict flags, reported as
+  `relay_stored`, `relay_pushed` and `relay_pushed_stored`, the relay client's
+  mapping. The stub callback the manager used to install for this slot is
+  gone; an application that drives the slot itself still replaces the callback
+  the same way. `configure(daemon_address=...)` and `start()` it after
+  `ProtocolManager.start()`; `stop()` stops it with the rest. The decisions
+  live in `gateway_attach_policy.py`, `gateway_verdict_tracker.py` and
+  `presence_watch_policy.py`, ports of the Swift files, with their
+  hand-mirrored constants pinned as literals and read by the Rust guards
+  beside the Swift and Kotlin copies (P11 in `docs/bridges/python.md`). No
+  daemon has been run against it.
+
+- **A local API guide and two client examples.** `docs/local-api.md` is
+  the guide to running the SDK as a service several local applications
+  share; `bindings/python/examples/local_api_client.py` (Python) and
+  `examples/local-api/client.mjs` (Node 22, no dependencies) each show
+  `hello`, `subscribe`, a send with its delivery event, a document edit read
+  back, and the one-shot idiom. The Python suite runs both against an
+  in-process server, the Node one when `node` is on the path.
+- **The Python reference server for the local API.**
+  `offline_protocol_sdk.local_api` and the `offline-protocol-service` command
+  front one engine for any number of local applications over JSON-RPC 2.0 on
+  a WebSocket, on an owner-only Unix domain socket by default or on loopback
+  TCP with a per-launch token. The server owns the run loop and the drain;
+  a client declares its application id once in `hello`, every send is
+  stamped with it, and every event is relayed as the engine serialised it to
+  the clients the chapter's rules select (by application id, by an
+  identifier the server issued, or to everyone), with the stamped inbound
+  events held for an application whose client is away. The method table is
+  generated from the interface definition and checked in
+  (`local_api/table.py`), every declaration is classified as exposed or
+  platform-only in `dispatch.py`, and a Rust guard in the FFI crate holds
+  the chapter, the definition and that classification to one another, so
+  an unclassified method is a failing test rather than a method every local
+  application can reach. Optional rules from one JSON file: a space
+  allow-list and method denials per application id, which once configured
+  refuse a `hello` under an id no rule names. A test over two servers on
+  one host exchanges a message over the peer-stream transport.
+- **The local API chapter.** `docs/spec/local-api.md` specifies how one
+  server process fronts one engine for several local applications: JSON-RPC
+  2.0 over a WebSocket on a Unix domain socket by default (TCP on loopback
+  with a per-launch token as the opt-in), a `hello` that declares the
+  client's application id once and stamps it on every send, and the events
+  relayed unchanged as notifications. It is the first complete catalogue of
+  the engine's events: all seventy-five tags with their fields and the
+  vocabularies of the enum-valued ones, and how each is routed (by
+  application id, by an identifier the server issued, or to everyone). The
+  method table partitions the interface definition into the 127 methods a
+  client may call and the 93 platform operations it never can, including the
+  run loop and the drain, which the server owns because the engine delivers
+  a message only when something drains. Errors keep the engine's
+  twenty-five-variant taxonomy: the JSON-RPC code is the variant's position
+  in the append-only enum. There is no HTTP request path: the pinned
+  WebSocket library drops any non-`GET` handshake without a response, which
+  the chapter records so it is not re-added. `docs/bridges/local-api.md`
+  states which shared bridge rules the server inherits and the new rule that
+  a Rust guard pins the three tables to the definition, the engine and the
+  reference server. Nothing ships in this entry but the contract; the
+  reference server follows it.
+
+- **Custody v1.** A device can now hold a neighbour's replication frames for
+  hours instead of the five seconds a forwarder gives them
+  (`docs/spec/custody.md`), off by default. `ProtocolConfig::custody`
+  (`custody` in every binding) switches it on and sets the hold and the
+  quotas; the hold is validated strictly shorter than the outbox lifetime. The
+  depositor's engine writes the one-hop request on its own sealed `delta`,
+  `snap`, `vv` and `blob_gone` frames when it offers them to neighbours, from
+  the plaintext it retains for re-sealing and never after a restart; every
+  forwarder strips the request from a third-party frame it transmits. A
+  custodian judges a frame at the drop point, after the forwarding identifier
+  is released, so it never blanks its own route; answers a depositor that
+  advertises `data_versions` entry 7 with the signed `__CUSTODY_RECEIPT__`
+  once, over the arrival link; redelivers on neighbour discovery through a
+  dedicated governor intake, at most once per neighbour per hold and straight
+  to the recipient when it appears; expires records in wall time against the
+  hold in force; and keeps them sealed under the new `custody_entries` storage
+  category, restored at launch. A receipt settles nothing. `custody_stats()`
+  (`get_custody_stats()` over the FFI) reports the counters, every refusal
+  reason included, and `erase_custody()` drops every record; the data-layer
+  wipe calls it. The receipt body has frozen vectors at
+  `crates/offline-protocol/tests/data/custody-receipt-v1.vectors.json`.
+
+- **The custody chapter.** `docs/spec/custody.md` specifies how a device
+  holds a neighbour's replication frame for hours instead of the five
+  seconds a forwarder gives it today: an explicit deposit in which the
+  depositor asserts the class and this version carries only `delta`, `snap`,
+  `vv` and `blob_gone`; a signed receipt that settles nothing; a hold that is
+  validated strictly shorter than the outbox lifetime, because a custodian
+  holds ciphertext it cannot re-seal; acceptance only for what the mesh could
+  not forward, at the point where the forwarding identifier is already
+  released, so a custodian never blanks its own route; redelivery as an
+  ordinary forward; entry and byte quotas per depositor with a stranger tier
+  of zero; and an erase of its own, because no global wipe exists. The
+  control-message registry and the engine's prefix list reserve
+  `__CUSTODY_RECEIPT__`, the wire-format chapter reserves the metadata key
+  `__custody`, and `data_versions` gains entry 7 for the receipt. The threat
+  model gains R19 (custody-borne re-key pressure), R20 (a custodian retains
+  third-party routing metadata) and R21 (deposit spam). Custody v1, above,
+  implements it.
+
+- **The leaf node builds for ESP32 RISC-V parts and for Cortex-M0.**
+  `offline-protocol-leaf` now compiles, and CI lints it, for
+  `riscv32imac-unknown-none-elf` (ESP32-C6, ESP32-H2),
+  `riscv32imc-unknown-none-elf` (ESP32-C3, ESP32-C2) and `thumbv6m-none-eabi`
+  (every Cortex-M0), beside the Cortex-M33. The last two have no atomic
+  compare-and-swap, so a firmware on them must link a critical-section
+  implementation. The crate exports `SharedStore` and `shared_store` for the
+  store handle; where atomics exist `SharedStore` is `Arc<dyn LeafStore>`, so
+  existing code is unchanged. This is a compile result only: nothing has run
+  on an Espressif board, the Xtensa chips were not tried, and ESP32-C3 and
+  ESP32-C2 cannot yet be built on esp-hal, because mls-rs and esp-hal select
+  portable-atomic backends that refuse to coexist.
 - **A send can name the application it is for.** `SendMessageOptions` and
   `MediaSendOptions` take an optional `app_id` (React Native: `appId` on
   `sendMessage` and `sendMedia`), stamped on that message or on every chunk of
@@ -58,11 +180,24 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   record proves the key; a damaged check over an empty store fails with
   `FileStoreError::KeyCheckUnverifiable`, naming the file to remove. The
   sealed store never deletes a record on a read; a damaged one is reported
-  as `CorruptedData` naming its file, and one the listing skips is logged,
-  once per store, as a warning naming its file. Each store holds an
+  as `CorruptedData` naming its file, and one the listing skips is logged
+  as a warning naming its file, once until that file is written or removed.
+  A record that cannot be read is reported as a read failure, never as one
+  sealed under another key, and never counts towards refusing the store key. Each store holds an
   exclusive lock on its directory while open, so a second engine over the
   same directories fails with `FileStoreError::InUse` instead of silently
-  diverging the MLS state.
+  diverging the MLS state. `close()` on either store releases its directory
+  at once, whoever still holds the store, and every later operation on it
+  is an error (a failed operation, never a lost record).
+  `FileStorePair::open` opens the two stores together and refuses the
+  pairs the engine would lose data over (see the next entry); its first open
+  binds the two with one pairing id, so a later open knows they belong
+  together whatever the engine does to its record key.
+  `FileProtocolStateStorage::sealed_state` says whether the sealed records
+  in a state store open under the record key an MLS store holds, without
+  changing either: `Empty`, `Opens`, `Foreign` (sealed under another key,
+  or under one this identity lost and replaced) or `KeyDamaged` (the record
+  key itself is damaged, which no refusal helps).
   On Windows the lock file shares read access, so a backup tool that shares
   write access, as they usually do, can read a live store. A failed
   directory flush fails the write on Unix rather than acknowledging it, and
@@ -71,12 +206,221 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   derivation. Both stores pass their conformance suites, and an
   engine restarted over them keeps its address and its sealed documents. The
   `replicated_notes` example now runs on them. The stores sit behind the
-  default-on `file-store` feature. Rust only; the FFI entry is separate
-  work. The threat model records the store key's exposure on a host without
-  a keystore as residual risk R18.
+  default-on `file-store` feature. The threat model records the store key's
+  exposure on a host without a keystore as residual risk R18.
+- **Bindings can open the built-in file stores.**
+  `initialize_mls_with_file_stores(mls_root, state_root, store_key)` opens
+  both stores in place of `initialize_mls`, in the account directory derived
+  from the instance's own `app_id` and `profile`. It keeps `initialize_mls`'s
+  lifecycle, and its refusals use existing error variants
+  (`InvalidArgument`, `InvalidConfiguration` for a wrong key, `InvalidState`
+  for a directory another store holds), so the error enum is unchanged. The
+  Python `ProtocolManager` takes `store_key=` or `store_key_env=` (64 hex
+  digits or base64, as the Rust `EnvStoreKey` reads), with `mls_root=` or
+  `OFFLINE_PROTOCOL_MLS_ROOT`, and uses the file stores instead of the
+  keyring. On that path `start()` raises when MLS cannot be initialised,
+  rather than logging and starting without the identity, and releases the
+  callbacks it registered. Swift and Kotlin get the generated methods and
+  keep their platform keystores.
+- **The file-store entry point refuses a pair of roots it would lose data
+  over.** The engine deletes a sealed protocol-state record that does not
+  open, which is right for one damaged record and wrong for a whole state
+  root sealed under another identity. Moving onto the file stores starts a
+  new identity, so each of these is refused, and no refusal changes or
+  deletes a record: a state root that holds records with no MLS record
+  beside it (asked of record files, so neither an earlier attempt that
+  failed nor a first write that failed can disarm it); a state root that
+  holds records and belongs with another MLS store (an identity is in
+  place, but not the one that wrote the state), decided by the pairing ids
+  the two stores' first open wrote, and for a state root never bound, or
+  bound to another id, by whether its sealed records open under this MLS
+  store's record key, which only this identity's do; an
+  account directory that cannot be read, which is never taken for empty;
+  and roots that are one directory
+  or one inside the other, compared as spelled before anything is created
+  and again as directories once both exist, because a volume that folds
+  case makes one directory of two spellings. A damaged record key is not
+  refused, on the launch that finds it or on any launch after while the MLS
+  root keeps its pairing file: the engine's
+  new key is what settles the messages lost with it, and the records it
+  cannot delete that launch stay under the lost key without making the
+  state look like another identity's. Rust hosts get the same refusals
+  from `FileStorePair::open`.
+- **`close_file_stores()` releases the file stores without waiting for the
+  instance to be freed.** When a host object is freed is the host runtime's
+  decision: a kept reference, a callback cycle, an exception that still
+  names the object. Until then the directories stayed locked and every
+  later instance over them was refused. The new FFI method releases both
+  locks at once, after `stop()` (or after a panic poisoned the engine
+  lock, which `stop()` cannot take again), and stops telemetry first so
+  the uploader's final flush reaches its queue. The instance cannot run
+  again afterwards, and it is a no-op on an instance that never opened the
+  file stores. The Python `ProtocolManager` gets `close()`, which stops
+  and then releases, and leaving `async with` closes a manager that uses
+  the file stores, so two blocks over the same directories need no `del`
+  between them; a block whose entry failed after the stores opened closes
+  them too. Any other manager is stopped by the block, as before, and can
+  be entered again. A `close()` cancelled while the core is releasing
+  still releases, and the manager is closed once it has.
+- **A Swift package and an Android library, built without React Native.**
+  Both are built from the bridge sources the React Native module compiles,
+  where they are: the transport managers, the storage providers and the
+  generated bindings, less the five files that need React. The Swift package
+  is `OfflineProtocolSDK`, assembled by `scripts/assemble-swift-package.sh`.
+  The Android library is `com.offlineprotocol:offline-protocol-android`,
+  built by the Gradle build in `bindings/kotlin`. CI builds and tests both
+  on every pull request, and builds an application against each. Neither is
+  published yet. What is public in them is what the React Native module
+  happened to need public, not a chosen API, and on iOS that leaves out the
+  storage providers, so an application cannot construct the built-in stores
+  there. Both carry the license, the commercial license, the third-party
+  notices and the export notice.
+- **Three iOS suites run for the first time.** The mesh controller, the BLE
+  discovery bootstrap policy and the error mapping suites are excluded from
+  the SwiftPM test harness, and nothing else ran them. They run in the Swift
+  package's job. Two mesh controller tests were failing: they registered two
+  peers in a mesh with room for four, so the eviction they assert was never
+  weighed. They now fill the mesh, as their Kotlin twins have since #120.
+- **The leaf node builds for WASI, and CI gates it.** `offline-protocol-leaf`
+  compiles for `wasm32-wasip1` in both halves: without default features,
+  where `getrandom` reads the runtime's `random_get` and the firmware-style
+  `bare-metal-rng` feature is not used, and with `std` through the new
+  `wasi_host_shim` example, which drives a device from a runtime over its
+  standard streams with the time and the frames supplied by the host. The
+  claim is WASI only: `wasm32-unknown-unknown` is not gated, because there
+  the pinned MLS library enables `getrandom`'s `js` feature ahead of any
+  host-registered backend, so a green build on that target proves nothing
+  about a non-browser host. This is a compile result plus a native run of
+  the shim; nothing has run under a WebAssembly runtime.
+
+- **Services on the LAN, and the first Python service wrappers.** A new
+  specification chapter, `docs/spec/dns-sd-mapping.md`, lays a
+  `ServiceDescriptor` out as a DNS-SD instance under the subtype
+  `_svc._sub._offlineprotocol._tcp`: a digest instance name, a TXT record
+  (`txtvers`, `sid`, `ver`, `addr`, one `c.<key>` per capability) and its
+  bounds (a service id over 200 bytes, a record over 1300 bytes or a
+  capability key DNS-SD cannot carry is refused, never truncated). An
+  imported LAN record is unsigned: it arrives as a `service_discovered`
+  event with `source: "lan"`, is kept in an application-level registry, and
+  is never registered with the engine, because a registration made from it
+  would go out in signed discovery responses under this node's identity.
+  A peer-stream browser now ignores a record carrying `sid`, so a published
+  service is not one more connector to the same host. In Python,
+  `services.Services` wraps the generated `MeshServices` with the copy of
+  this node's registrations the engine cannot enumerate, and refuses a
+  response status outside the engine's closed set with the reason;
+  `dnssd_bridge.DnsSdBridge` publishes those registrations and imports the
+  LAN's, over the existing optional `lan` extra, re-resolving an import at
+  half its time to live and dropping it at the whole. The service discovery
+  guide is corrected where it disagreed with the engine: discovery responses
+  go to the peer the query came from and are forwarded toward the
+  originator, the response status is one of exactly three values, the
+  version is opaque, and the peer-tracking hook is `on_neighbor_discovered`.
 
 ### Fixed
 
+- **Closing the file stores no longer loses unflushed document edits.** An
+  edit waits in memory until a flush, and the engine flushes what is left
+  when it is dropped. With the built-in file stores that drop runs after
+  `close_file_stores()` has closed them and every write is refused, so a
+  clean shutdown (Python `ProtocolManager.close()`, and the local API
+  service on `SIGTERM`) dropped every edit made since the application last
+  called `flush`. `close_file_stores()` now flushes the documents first.
+
+- **The local API service runs its reviewed hardening again.** The squash
+  merge of the client examples carried a pre-review copy of the reference
+  server and replaced the reviewed one, so `main` ran engine calls on the
+  event loop again (a media send stalled every client and the run loop),
+  chmod'ed and unlinked whatever sat at `--socket`, kept every issued
+  message id for the life of the process, closed the connection on a
+  malformed request instead of answering it, and accepted a misspelled
+  `denied` entry as denying nothing. The reviewed server, its twelve tests
+  and its bridge-contract rows are restored.
+
+- **The local API service starts the gateway client.** With `reticulum`
+  enabled, `ProtocolManager` builds the gateway client and leaves starting it
+  to its owner, and the service never did, so the slot was a dead carrier.
+  The service now starts a configured client with the engine, and
+  `offline-protocol-service --gateway HOST:PORT` names the daemon (default
+  `localhost:4242`).
+
+- **The iOS config readers read `0` and `1` as numbers.** The Foundation-only
+  readers behind `meshRelay` and `custody` excluded JSON booleans with an
+  `is Bool` test that Swift also answers true for the numbers 0 and 1, so a
+  `fanout: 1`, an `activityIdleWindows: 1` or a `jitterMinMs: 0` written from
+  React Native reached the core as unset and the dial silently stayed at its
+  default. Both readers now exclude booleans by their CoreFoundation type.
+
+- **The storage conformance suite no longer deletes a merging backend's
+  records.** `runStorageConformance` cleaned up its probe records by listing
+  a probe key type and deleting what it listed, before any check had run.
+  On a backend that merges key types, or lists them by the tail of the name,
+  that listing names real records too, and the cleanup deleted them. The
+  suite now checks key-type isolation first, with point writes and point
+  deletes only, and a failure ends the run there with that one check
+  reported. A run that passes it still has thirteen checks, under the same
+  names.
+- **Relay timestamps parse on Android 7.** The Android bridge parsed them
+  with `java.time.Instant`, which exists from Android 8 (API 26), while the
+  SDK supports Android 7 (API 24). On Android 7 the call threw
+  `NoClassDefFoundError`, which the surrounding `catch (e: Exception)` does
+  not catch, for a legacy relay message and an ISO-8601 last-seen timestamp.
+  An application that enables core library desugaring was not affected. The
+  timestamp is now parsed without `java.time`, as RFC 3339, and gives the
+  answers `Instant` gave for every timestamp a relay sends. At the edges it
+  is stricter than `Instant`: hour 24, a fraction with no digits, lowercase
+  `t` or `z` and a leap second are refused. A Rust guard refuses a new
+  `java.time` call in the bridge. Not run on an Android 7 device.
+- **An opted-in mesh wake with no wake service stops at once.** A sticky
+  restart that wakes JavaScript started the wake service by name, and
+  `startService` returns null rather than throwing when no such service is
+  declared. The keep-alive then held "Mesh Active" over no mesh until the
+  wake watchdog fired. It now checks that the service resolves, and stops as
+  it does without the opt-in. A React Native application declares the
+  service, so this reached only the native Android library.
+- **The iOS deployment target has one reader.** The release build and the
+  Swift package read the podspec with two parsers that disagreed on a bare
+  major version, a trailing dot and a second declaration. There is one now,
+  and it refuses all three. The Swift package's CI job runs the release's
+  deployment-target gate on the library it builds, on every pull request.
+- **An Android application that minifies can build against the SDK.** Tink,
+  which `androidx.security:security-crypto` brings for the MLS store, refers
+  to Error Prone's annotation classes and does not ship them, and R8 stops a
+  release build on a class it cannot find. The SDK's consumer rules now tell
+  R8 to disregard them. A React Native application was affected only if
+  nothing else in it brought the annotations.
+- **A stopped Python `ProtocolManager` is freed.** The core kept every
+  callback the manager registered, and those reached the manager again
+  through Rust, where the collector cannot see the cycle, so a stopped
+  manager lived as long as the process. `stop()` now replaces all five
+  callbacks with inert ones, including one the application registered
+  itself for Nostr or Reticulum, so the event handler receives nothing after
+  `stop()`. A `stop()` that was cancelled or whose engine stop raised can be
+  called again to finish, including one cancelled inside a transport's own
+  stop: each transport's `stop()` now resumes from the stopping state
+  instead of returning. Overlapping `stop()` calls run one teardown, in
+  order, and the BLE peripheral no longer swallows a cancel of its `stop()`.
+  `stop()` always takes one loop turn, once the process loop is cancelled:
+  a caller retrying after a cancelled `stop()` is inside the task step that
+  threw the cancellation, which holds the manager through the exception's
+  traceback until the task next suspends, and on Python 3.13 and later
+  nothing else in `stop()` is certain to suspend. A teardown also finishes
+  on a loop whose default executor was shut down, by running its blocking
+  steps in place. A teardown step that raised (a telemetry disable, the
+  engine's stop) no longer keeps the manager alive through the logged
+  exception's traceback, which Python 3.10 freed only when the collector ran;
+  the Python Bindings job now runs the suite on 3.10 as well.
+  `__del__` no longer raises on a manager whose constructor raised.
+- **Freeing a Python core object can no longer hang the process.** The
+  generated bindings guard their callback handle map with a plain lock,
+  taken on every callback lookup and removal. The collector can run a
+  finalizer inside that critical section, a core object's drop releases
+  the callbacks it holds, and each release asked for the same lock on the
+  same thread, which then waited for itself. It needed a core object in a
+  reference cycle (an event handler that is a method of the manager's
+  owner is enough) and a collection at the wrong bytecode, and it could
+  not happen while stopped managers were never freed at all. The package
+  now gives the handle map a re-entrant lock when it is imported.
 - **A protocol-state record key the store reports as corrupt is regenerated.**
   The engine regenerated a record key of the wrong length but treated a
   `CorruptedData` error as a failed load, so a store that seals its records
@@ -127,8 +471,47 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   accepts some forged assertions the strict check refuses. They now call
   `verifyIdentityAssertion`, the same check the Python central and both
   peer-stream managers use.
+- **A lost last document change of a burst comes back in seconds.** A
+  change that arrives after one lost in transit is held and the gap asked for
+  at once, but the last change of a burst has nothing after it, so a peer that
+  missed it waited for the acknowledgement retry: 10 seconds at the earliest,
+  longer under backoff, and never once the retry budget was spent. Three
+  seconds after a device's local flushes to a space go quiet, it now sends one
+  version offer naming the documents it flushed, and a replica that is behind
+  asks for what it lacks. Only a local flush arms it, so it cannot echo or
+  chain. Each one
+  draws a full version list back from the 1:1 peer or from every group member.
+- **iOS: a burst of Bluetooth LE traffic no longer tears messages.** The
+  fragment drain pulled the whole backlog out of the core into a bounded
+  per-peer queue faster than CoreBluetooth sent it, and the queue then evicted
+  its oldest fragments, leaving slices that reassemble into garbage. The drain
+  now stops pulling once a peer's queue is three quarters full, on both the
+  central write path and the peripheral NOTIFY path, and resumes when the
+  queue drains or after one second.
+- **The iOS library is built for the pod's deployment target.** The C and
+  assembly objects inside it, from `ring` and `oslog`, were stamped for the
+  newest iOS the release machine's Xcode knew, so an application linking the
+  pod got one linker warning for each of them. The build now reads the pod's
+  target, iOS 13.0, hands it to every compiler, and refuses to package an
+  archive holding an object built for anything newer. The arm64 simulator
+  slice is held to 14.0, the oldest system that simulator has. The SDK's own
+  Rust code is compiled for the pod's target as well, where it was compiled
+  for the Rust target's floor of iOS 10.
 
 ### Changed
+
+- **iOS: an overflowing outbound fragment queue is discarded whole.** Both
+  outbound queues, central write and peripheral NOTIFY, used to drop their
+  oldest fragments when full. They now discard the whole per-peer queue, as
+  Android and the inbound side already did, because a partial cut splits a
+  message. The messages lost are re-sent by the acknowledgement retry or by
+  data-sync anti-entropy.
+
+- **Documents replicate only when flushed.** This was always true and is now
+  documented: an edit changes the open document in memory, and nothing is
+  stored or sent to peers until `flush()` or `flushAll()` runs. Flush on a
+  short throttle while the user edits, at most about twice a second, and once
+  more when editing stops.
 
 - **iOS: the Multipeer service type is `offlineprotocol`.** It was
   `offline-proto`. An app that enables the `wifiDirect` transport on iOS must
@@ -143,6 +526,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   argument with no default, because the default was the fixed id above.
   `ProtocolManager` already passes it, so only code that builds an
   `InternetManager` directly needs `app_id=`.
+
+- **The backbone is a gateway property.** The gateway contract's backbone
+  section is restated as what any backbone owes a gateway (gateway-to-gateway
+  presence, arbitrary-size framing, a provisioned peer list, a declared rate
+  class), with Reticulum as the reference backbone in a subsection of its
+  own. A gateway advertises each backbone as a `backbone_<kind>_v1`
+  capability token; a client ignores a kind it does not know, a gateway may
+  advertise none, and the token is advisory and never a routing input. A
+  device attaches to one gateway daemon at a time, because every gateway
+  answer is recorded against the one daemon carrier. No frame, verb or
+  token spelling changes: `backbone_reticulum_v1` is the family's first
+  member. The `reticulum_*` entry points keep their names and their doc
+  comments now say what they name, the gateway daemon carrier after its
+  reference backbone. [ADR 0026](docs/adr/0026-the-backbone-is-a-gateway-property.md)
+  records the decision.
 
 ## [0.27.0] — 2026-09-25
 

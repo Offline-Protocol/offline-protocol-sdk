@@ -274,6 +274,16 @@ public class WifiDirectManager: NSObject, TransportManager {
         advertiser?.stopAdvertisingPeer()
         advertiser = nil
 
+        // The session is forgotten first. The state-change and data callbacks
+        // check `self.session === session` on linkQueue, so from here a .connected
+        // that was already queued finds nothing to attach to. Cleared after
+        // endAll(), such a callback created a link in the just-emptied table,
+        // start() never clears it, and a remote that kept its MCPeerID met a
+        // stale refused link after a restart: no preamble, a refusal at its
+        // deadline, and one wasted round before the disconnect cleared it.
+        let old = session
+        session = nil
+
         // Report every proved peer lost while the core still holds its link,
         // on linkQueue so no delivery lands after a loss report. The session's
         // own .notConnected callbacks then find nothing left to report.
@@ -281,9 +291,7 @@ public class WifiDirectManager: NSObject, TransportManager {
             peers.endAll()
         }
 
-        // Disconnect session
-        session?.disconnect()
-        session = nil
+        old?.disconnect()
         
         // Notify protocol
         try? protocolInstance.wifiDirectStatusChanged(isConnected: false)

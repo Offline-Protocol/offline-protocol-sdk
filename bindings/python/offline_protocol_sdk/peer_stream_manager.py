@@ -568,7 +568,14 @@ class PeerStreamManager(TransportManager):
         )
 
     async def stop(self) -> None:
-        if self._state not in (TransportState.RUNNING, TransportState.STARTING):
+        # STOPPING too: a stop() cancelled part-way (a shutdown deadline)
+        # leaves the transport there, and a retry that returned at once would
+        # leave it half torn down for good. Every step below is idempotent.
+        if self._state not in (
+            TransportState.RUNNING,
+            TransportState.STARTING,
+            TransportState.STOPPING,
+        ):
             return
         self._update_state(TransportState.STOPPING)
         await self._close_everything()
@@ -1259,6 +1266,13 @@ def peers_from_record(info: Any) -> list[PeerEntry]:
     unscoped one cannot be connected to.
     """
     properties = getattr(info, "properties", None) or {}
+    # A record carrying `sid` is a service instance under the DNS-SD mapping
+    # chapter, published under a subtype of this type. It names the same
+    # host and address as the peer record and would become a second
+    # connector to it per service; the chapter's invariant 5 has a peer
+    # browser ignore it.
+    if b"sid" in properties:
+        return []
     raw = properties.get(b"addr")
     if raw is None:
         return []

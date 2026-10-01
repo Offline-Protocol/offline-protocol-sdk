@@ -30,8 +30,9 @@ pub mod transport_manager;
 pub mod visualization;
 
 pub use config::{
-    DataConfig, EncryptionConfig, GroupConfig, OverflowPolicy, PendingQueueConfig, ProtocolConfig,
-    SecurityConfig, DEFAULT_PENDING_TTL_MS,
+    CustodyConfig, DataConfig, EncryptionConfig, GroupConfig, OverflowPolicy, PendingQueueConfig,
+    ProtocolConfig, SecurityConfig, CUSTODY_MIN_BYTES_PER_DEPOSITOR, DEFAULT_CUSTODY_HOLD_MS,
+    DEFAULT_PENDING_TTL_MS,
 };
 pub use error::{Error, EstablishmentState, Result, SessionStateError};
 pub use events::{
@@ -42,7 +43,8 @@ pub use events::{
 #[cfg(feature = "file-store")]
 pub use file_store::{
     account_storage_namespace, EnvStoreKey, FileProtocolStateStorage, FileStoreError,
-    SealedFileMlsStorage, StaticStoreKey, StoreKeyError, StoreKeyProvider,
+    FileStorePair, SealedFileMlsStorage, SealedState, StaticStoreKey, StoreKeyError,
+    StoreKeyProvider,
 };
 pub use group_mesh::{
     GroupRichReadiness, GroupSendOptions, RelaySyncState, MAX_RELAY_CAPABILITIES,
@@ -56,6 +58,7 @@ pub use group_mesh::{
 #[cfg(feature = "data")]
 pub use offline_protocol_data::{DataValue, DOC_SIZE_WARN_BYTES, MAX_DOC_BYTES, MAX_VALUE_BYTES};
 pub use offline_protocol_services::MeshServices;
+pub use protocol::custody::{CustodyRefusal, CustodyStats};
 pub use protocol::mesh_relay::{MeshRelayConfig, MeshRelayStats};
 pub use protocol::{GatewayCarrier, MediaSendOptions, OfflineProtocol, SendMessageOptions};
 pub use protocol_state_storage::{

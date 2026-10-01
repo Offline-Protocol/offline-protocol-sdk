@@ -21,16 +21,28 @@ final class PeerStreamFramingTests: XCTestCase {
     private struct Refused: Error {}
 
     private static let vectors: [String: Any] = {
-        // tests/ -> ios/ -> react-native/ -> bindings/ -> repository root
-        let root = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let url = root.appendingPathComponent(
-            "crates/offline-protocol-transport/tests/data/stream-framing-v1.vectors.json")
-        let data = try! Data(contentsOf: url)
+        let data = try! Data(contentsOf: vectorFile())
         return try! JSONSerialization.jsonObject(with: data) as! [String: Any]
     }()
+
+    /// Walks up from this file until the vectors are beside it, as the Kotlin
+    /// twin does. A fixed number of levels held only while this file sat in
+    /// `ios/tests`, and the Swift package builds a copy of it somewhere else.
+    private static func vectorFile() -> URL {
+        let rel = "crates/offline-protocol-transport/tests/data/stream-framing-v1.vectors.json"
+        // Standardized first: deleting the last component of a path that
+        // ends in `..` appends another, and the walk never reaches the root.
+        var dir = URL(fileURLWithPath: #filePath).standardizedFileURL
+            .deletingLastPathComponent()
+        while dir.path != "/" {
+            let candidate = dir.appendingPathComponent(rel)
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate
+            }
+            dir = dir.deletingLastPathComponent()
+        }
+        fatalError("cannot find \(rel) above \(#filePath)")
+    }
 
     private func hex(_ s: String) -> Data {
         var out = Data(capacity: s.count / 2)

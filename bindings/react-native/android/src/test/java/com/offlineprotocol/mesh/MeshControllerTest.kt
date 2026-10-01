@@ -62,6 +62,8 @@ class MeshControllerTest {
 
         assertEquals(MeshController.ConnectionIntent.INTRA_CLUSTER, decision.intent)
         assertEquals("weak", decision.evictPeerId)
+        // Won on score. Without this the test passes on a bridge swap too.
+        assertEquals("swap_low_score_peer", decision.reason)
     }
 
     @Test

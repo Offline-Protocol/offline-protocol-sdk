@@ -1564,3 +1564,41 @@ class TestAdaptiveSendLoop:
             "every inbound frame must wake the send loop; the reply the core "
             "queues while handling it would otherwise wait out a poll interval"
         )
+
+
+class TestInterruptedStop:
+    @pytest.mark.asyncio
+    async def test_a_stop_cancelled_inside_the_close_can_be_finished(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        """A relay that never answers the close handshake holds `stop()`
+        until a shutdown deadline cancels it, after the state moved to
+        STOPPING. The retry has to run the teardown again: one that returned
+        at once would leave the socket open for the life of the process."""
+        mgr = InternetManager(mock_protocol, "dev-1", server_url="ws://x.com", app_id="test-app")
+        mgr._connected = True
+        mgr._authenticated = True
+        mgr._state = TransportState.RUNNING
+
+        release = asyncio.Event()
+
+        async def a_relay_that_never_answers_the_close() -> None:
+            await release.wait()
+
+        ws = MagicMock()
+        ws.close = AsyncMock(side_effect=a_relay_that_never_answers_the_close)
+        mgr._ws = ws
+
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(mgr.stop(), 0.05)
+        assert mgr.state == TransportState.STOPPING
+        assert mgr._ws is ws
+
+        release.set()
+        await mgr.stop()
+
+        assert mgr.state == TransportState.STOPPED
+        assert ws.close.await_count == 2
+        assert mgr._ws is None
+        assert mgr.get_metrics()["is_connected"] is False
+        mock_protocol.internet_status_changed.assert_called_once_with(is_connected=False)

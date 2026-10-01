@@ -13,7 +13,13 @@
 import CryptoKit
 import Foundation
 
-#if SWIFT_PACKAGE
+// Stand-ins for three generated types, for the test harness only
+// (`Package.swift`, which cannot compile the generated module and sets this
+// flag). The switch used to be `SWIFT_PACKAGE`, which SwiftPM sets for every
+// package it builds: the distributed Swift package compiles this file beside
+// the generated module, and under that switch each of the three was declared
+// twice.
+#if OFFLINE_PROTOCOL_HARNESS_SHIMS
 enum MlsStorageError: Error, Equatable {
     case StoreFailed(message: String)
     case LoadFailed(message: String)
@@ -218,10 +224,11 @@ final class AppContainerProtocolStateStorage: ProtocolStateStorageProvider {
     /// Applied twice: to the directory, so entries created in it inherit the
     /// class, and to each write, so a record does not depend on that
     /// inheritance holding. `#if os(iOS)` because data protection does not
-    /// exist on the macOS host the SwiftPM suites run on — which is also why
-    /// nothing here is covered at runtime. To check the branch still compiles:
+    /// exist on the macOS host the SwiftPM suites run on, so those suites
+    /// cover the other branch. This one runs in the Swift package's CI job,
+    /// on a simulator. To check it still compiles without one:
     ///
-    ///     xcrun swiftc -typecheck -DSWIFT_PACKAGE -target arm64-apple-ios15.0 \
+    ///     xcrun swiftc -typecheck -DOFFLINE_PROTOCOL_HARNESS_SHIMS -target arm64-apple-ios15.0 \
     ///       -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
     ///       ProtocolStateStorage.swift StorageNamespace.swift
     #if os(iOS)

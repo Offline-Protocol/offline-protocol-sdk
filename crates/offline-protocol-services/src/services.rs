@@ -68,14 +68,15 @@ pub enum ServiceAction {
 /// and service request/response routing. All methods return **actions** (messages
 /// to send, events to emit) rather than performing I/O directly.
 ///
-/// ## Multi-hop discovery limitation
+/// ## Multi-hop discovery
 ///
-/// Discovery **queries** are forwarded across multiple hops via gossip. However,
-/// discovery **responses** are currently sent only to the direct sender of the
-/// query (one hop back) rather than being relayed all the way to the original
-/// querier. In practice this means that services more than one hop away will
-/// generate responses that reach intermediate forwarders but not the node that
-/// initiated the query. Multi-hop response relay is planned for a future release.
+/// Discovery **queries** are forwarded across multiple hops via gossip.
+/// Discovery **responses** are sent to the direct sender of the query, never
+/// to the `originator` the payload names, so that a spoofed originator cannot
+/// make a provider leak its service list to an arbitrary peer. A node that
+/// receives a response it did not originate forwards it as a unicast toward
+/// the originator (see `try_handle_discover_response`) and emits no event of
+/// its own; only the originator emits `ServiceDiscovered`.
 pub struct MeshServices {
     local_services: HashMap<String, ServiceDescriptor>,
     seen_discovery_queries: HashMap<String, Instant>,
@@ -113,8 +114,8 @@ impl MeshServices {
     /// Generates a discovery broadcast to known peers, capped at
     /// [`DISCOVERY_INITIAL_BROADCAST_MAX`] recipients.
     ///
-    /// See the [multi-hop limitation](MeshServices#multi-hop-discovery-limitation)
-    /// note on `MeshServices`.
+    /// See the [multi-hop discovery](MeshServices#multi-hop-discovery) note on
+    /// `MeshServices` for where the responses go.
     pub fn discover_services(
         &mut self,
         user_id: &str,

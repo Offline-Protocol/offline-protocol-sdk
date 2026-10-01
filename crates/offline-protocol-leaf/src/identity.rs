@@ -23,7 +23,7 @@
 //! of its own: doing so would let a device link and run with entropy this
 //! crate invented, which is the one failure that leaves no trace anywhere.
 
-use alloc::{format, string::ToString, sync::Arc, vec, vec::Vec};
+use alloc::{format, string::ToString, vec, vec::Vec};
 use mls_rs::client_builder::MlsConfig;
 use mls_rs::identity::basic::{BasicCredential, BasicIdentityProvider};
 use mls_rs::identity::SigningIdentity;
@@ -35,6 +35,7 @@ use offline_protocol_sealed::{derive_address, LEAF_KEY_PACKAGE_LIFETIME};
 
 use crate::adapters::{GroupStateAdapter, KeyPackageAdapter};
 use crate::error::{LeafError, Result};
+use crate::shared::Arc;
 use crate::store::{LeafStore, KEY_TYPE_IDENTITY};
 
 /// The one ciphersuite this protocol uses, and never negotiates.

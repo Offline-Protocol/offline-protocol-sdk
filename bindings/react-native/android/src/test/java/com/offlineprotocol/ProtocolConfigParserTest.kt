@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import uniffi.offline_protocol.OverflowPolicy
 
 /**
  * Locks down the create()-config parsing: a silent regression here reverts a
@@ -448,6 +449,84 @@ class ProtocolConfigParserTest {
         assertNull(mesh.activityWindowMs)
         assertNull(mesh.activityMinForwards)
         assertNull(mesh.activityIdleWindows)
+    }
+
+    // ------------------------------------------------------------------
+    // Custody section
+    // ------------------------------------------------------------------
+
+    @Test
+    fun custodySectionIsAbsentWhenOmitted() {
+        // Nil, not an object of nulls: the core's default is off, and a
+        // section materialised here would be this parser deciding it.
+        val config = parse("""{"appId":"app","userId":"alice"}""")
+        assertNull(config.custody)
+    }
+
+    @Test
+    fun custodySectionReadsItsNestedHome() {
+        val config = parse(
+            """{"appId":"app","userId":"alice","custody":{"enabled":true,"holdMs":3600000,"maxEntriesPerDepositor":16,"maxBytesPerDepositor":131072,"maxEntries":128,"maxBytes":4194304,"strangerMaxEntries":2,"strangerMaxBytes":65536,"overflowPolicy":"drop_newest"}}"""
+        )
+        val custody = config.custody!!
+        assertEquals(true, custody.enabled)
+        assertEquals(3600000L, custody.holdMs!!.toLong())
+        assertEquals(16L, custody.maxEntriesPerDepositor!!.toLong())
+        assertEquals(131072L, custody.maxBytesPerDepositor!!.toLong())
+        assertEquals(128L, custody.maxEntries!!.toLong())
+        assertEquals(4194304L, custody.maxBytes!!.toLong())
+        assertEquals(2L, custody.strangerMaxEntries!!.toLong())
+        assertEquals(65536L, custody.strangerMaxBytes!!.toLong())
+        assertEquals(OverflowPolicy.DROP_NEWEST, custody.overflowPolicy)
+    }
+
+    @Test
+    fun custodySectionReadsNestedSnakeCase() {
+        val config = parse(
+            """{"appId":"app","userId":"alice","custody":{"enabled":false,"hold_ms":7200000,"max_entries_per_depositor":8,"max_bytes_per_depositor":65536,"max_entries":64,"max_bytes":1048576,"stranger_max_entries":1,"stranger_max_bytes":65536,"overflow_policy":"drop_oldest"}}"""
+        )
+        val custody = config.custody!!
+        assertEquals(false, custody.enabled)
+        assertEquals(7200000L, custody.holdMs!!.toLong())
+        assertEquals(8L, custody.maxEntriesPerDepositor!!.toLong())
+        assertEquals(65536L, custody.maxBytesPerDepositor!!.toLong())
+        assertEquals(64L, custody.maxEntries!!.toLong())
+        assertEquals(1048576L, custody.maxBytes!!.toLong())
+        assertEquals(1L, custody.strangerMaxEntries!!.toLong())
+        assertEquals(65536L, custody.strangerMaxBytes!!.toLong())
+        assertEquals(OverflowPolicy.DROP_OLDEST, custody.overflowPolicy)
+    }
+
+    @Test
+    fun custodyLeavesUnnamedFieldsNull() {
+        // The ordinary case: an app switches custody on and names nothing
+        // else. Every other field must arrive null so the core keeps its own
+        // value, and an unknown policy spelling stays null too.
+        val config = parse(
+            """{"appId":"app","userId":"alice","custody":{"enabled":true,"overflowPolicy":"keep_everything"}}"""
+        )
+        val custody = config.custody!!
+        assertEquals(true, custody.enabled)
+        assertNull(custody.holdMs)
+        assertNull(custody.maxEntriesPerDepositor)
+        assertNull(custody.maxBytesPerDepositor)
+        assertNull(custody.maxEntries)
+        assertNull(custody.maxBytes)
+        assertNull(custody.strangerMaxEntries)
+        assertNull(custody.strangerMaxBytes)
+        assertNull(custody.overflowPolicy)
+    }
+
+    @Test
+    fun custodyNegativeNumbersClampToZeroRatherThanWrapping() {
+        // App-supplied JS: a negative would wrap to something enormous through
+        // toULong(). Clamped low it reaches the core's own validation.
+        val config = parse(
+            """{"appId":"app","userId":"alice","custody":{"holdMs":-5,"maxEntries":-1}}"""
+        )
+        val custody = config.custody!!
+        assertEquals(0L, custody.holdMs!!.toLong())
+        assertEquals(0L, custody.maxEntries!!.toLong())
     }
 
     @Test

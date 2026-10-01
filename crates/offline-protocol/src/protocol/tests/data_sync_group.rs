@@ -22,8 +22,8 @@ use crate::protocol::data_sync::{SyncChannel, MAX_GROUP_BLOB_CHUNKS, MAX_SYNC_BL
 use crate::protocol::prefixes::internal_prefixes;
 use crate::protocol::tests::{create_test_config_for_user, id};
 use crate::protocol::types::{
-    DATA_GROUP_BLOB_V1, DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1, DATA_SYNC_V1,
-    DATA_TOMBSTONE_V1,
+    DATA_CUSTODY_V1, DATA_GROUP_BLOB_V1, DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1,
+    DATA_SYNC_V1, DATA_TOMBSTONE_V1,
 };
 use crate::protocol::{OfflineProtocol, TestProtocolStateStorage};
 
@@ -753,7 +753,8 @@ fn the_group_capability_is_advertised_and_recorded() {
             DATA_MEDIA_V1,
             DATA_TOMBSTONE_V1,
             DATA_INTEREST_V1,
-            DATA_GROUP_BLOB_V1
+            DATA_GROUP_BLOB_V1,
+            DATA_CUSTODY_V1
         ],
         "a build that intercepts group frames has to say so, or no peer \
          will ever send it one. The media entry rides the same list and is \
@@ -2309,4 +2310,183 @@ fn a_refusal_from_a_member_the_question_was_not_put_to_is_ignored() {
         1,
         "the fetch did not survive a refusal from the wrong member"
     );
+}
+
+/// Make every settle offer `member` is holding due now, as if its commits
+/// had gone quiet for [`DATA_SYNC_SETTLE_DELAY`].
+///
+/// Brought forward rather than waited out, so the suite does not sleep; the
+/// tick that sends it is still the real [`OfflineProtocol::process`].
+///
+/// [`DATA_SYNC_SETTLE_DELAY`]: crate::protocol::data_sync::DATA_SYNC_SETTLE_DELAY
+fn let_commits_go_quiet(member: &mut Member) {
+    let now = std::time::Instant::now();
+    for (due, _) in member.protocol.data_sync_settle.values_mut() {
+        *due = now;
+    }
+}
+
+/// Group frames a member has handed its transport, of any kind.
+///
+/// Counted without decrypting them, because decrypting spends the
+/// recipient's key for that generation and the frame could then never be
+/// delivered. Nothing in these tests sends group chat, so every one of these
+/// is a replication frame.
+fn group_frames_sent(member: &Member) -> usize {
+    member
+        .transport
+        .sent_messages()
+        .iter()
+        .filter(|message| {
+            message
+                .content
+                .starts_with(internal_prefixes::GROUP_MLS_MSG)
+        })
+        .count()
+}
+
+#[test]
+fn a_lost_final_delta_heals_once_local_commits_go_quiet() {
+    // The failure the settle offer exists for. A delta that parks behind a
+    // lost predecessor is noticed when the next one arrives; the last delta
+    // of a burst has no next one. The per-member ACK ladder would re-send it
+    // after the ACK timeout; the settle offer is what asks sooner, and what
+    // still asks once that ladder has given up. No ACK timeout passes here.
+    let (mut alice, mut bob, mut carol, group) = trio();
+
+    write(&mut alice, &group, "notes", "a", "1");
+    write(&mut alice, &group, "notes", "b", "2");
+    settle(&mut alice, &mut bob, &mut carol);
+
+    // The tail of the burst, lost in transit to every member.
+    write(&mut alice, &group, "notes", "c", "3");
+    alice.transport.clear_sent_messages();
+    settle(&mut alice, &mut bob, &mut carol);
+
+    // A tick before the quiet period is over sends nothing.
+    alice.protocol.process().expect("process");
+    assert_eq!(
+        group_frames_sent(&alice),
+        0,
+        "a settle offer went out before local commits had gone quiet"
+    );
+    for member in [&mut bob, &mut carol] {
+        assert_eq!(read(member, &group, "notes", "c"), None);
+    }
+
+    let_commits_go_quiet(&mut alice);
+    alice.protocol.process().expect("process");
+    let rounds = settle(&mut alice, &mut bob, &mut carol);
+
+    for (label, member) in [("bob", &mut bob), ("carol", &mut carol)] {
+        assert_eq!(
+            read(member, &group, "notes", "c"),
+            Some(DataValue::text("3")),
+            "{label} never recovered the lost tail of the burst"
+        );
+    }
+    assert_eq!(
+        rounds.last(),
+        Some(&0),
+        "the settle exchange has to stop (rounds: {rounds:?})"
+    );
+}
+
+#[test]
+fn a_settle_offer_does_not_cascade_into_further_offers() {
+    // The settle offer is an ordinary offer, so what bounds it is what
+    // bounds every offer: answers are replies, replies are never answered
+    // with offers, and only a local commit arms another one. An import on
+    // the far side is not a local commit, so it must not arm theirs.
+    let (mut alice, mut bob, mut carol, group) = trio();
+
+    write(&mut alice, &group, "notes", "a", "1");
+    settle(&mut alice, &mut bob, &mut carol);
+    write(&mut alice, &group, "notes", "b", "2");
+    alice.transport.clear_sent_messages();
+
+    let_commits_go_quiet(&mut alice);
+    alice.protocol.process().expect("process");
+
+    // Alice: one offer per member, one ciphertext. Each member: one reply
+    // to Alice, possibly promoted to the roster for the ratchet budget.
+    // Alice: the catch-up each of them lacks, likewise. Then nothing.
+    let mut passes = Vec::new();
+    for _ in 0..6 {
+        let carried = pass_group_frames(&mut alice, &mut bob, &mut carol);
+        passes.push(carried);
+        if carried == 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        passes.last(),
+        Some(&0),
+        "the settle exchange never went quiet (group frames per pass: {passes:?})"
+    );
+    let total: usize = passes.iter().sum();
+    assert!(
+        total <= 2 + 2 * 2 + 2 * 2,
+        "a settle offer cost more than offer, reply and catch-up can \
+         (group frames per pass: {passes:?})"
+    );
+
+    assert_eq!(
+        read(&mut bob, &group, "notes", "b"),
+        Some(DataValue::text("2"))
+    );
+    for (label, member) in [("alice", &alice), ("bob", &bob), ("carol", &carol)] {
+        assert!(
+            member.protocol.data_sync_settle.is_empty(),
+            "{label} armed a settle offer without committing anything locally"
+        );
+    }
+
+    // And a second quiet period with no commit in it sends nothing at all.
+    alice.protocol.process().expect("process");
+    assert_eq!(group_frames_sent(&alice), 0, "a settle offer fired twice");
+}
+
+#[test]
+fn a_burst_of_commits_is_settled_by_one_offer() {
+    // Debounced per space, not per commit: a burst of flushes is one offer
+    // at the end of it, naming every document it touched.
+    let (mut alice, mut bob, mut carol, group) = trio();
+
+    for i in 0..5 {
+        write(&mut alice, &group, "notes", &format!("k{i}"), "v");
+    }
+    write(&mut alice, &group, "todo", "k", "v");
+    settle(&mut alice, &mut bob, &mut carol);
+
+    let_commits_go_quiet(&mut alice);
+    alice.protocol.process().expect("process");
+
+    assert_eq!(
+        data_frames_sent(&alice, &mut bob, &group),
+        1,
+        "six commits across two documents must settle with one offer"
+    );
+    assert_eq!(data_frames_sent(&alice, &mut carol, &group), 1);
+}
+
+/// One pass of every member's outbound frames to the others, returning how
+/// many group frames it carried.
+fn pass_group_frames(alice: &mut Member, bob: &mut Member, carol: &mut Member) -> usize {
+    let mut carried = group_frames_sent(alice);
+    {
+        let (b, c) = (&mut *bob, &mut *carol);
+        pump(alice, &mut [b, c]);
+    }
+    carried += group_frames_sent(bob);
+    {
+        let (a, c) = (&mut *alice, &mut *carol);
+        pump(bob, &mut [a, c]);
+    }
+    carried += group_frames_sent(carol);
+    {
+        let (a, b) = (&mut *alice, &mut *bob);
+        pump(carol, &mut [a, b]);
+    }
+    carried
 }

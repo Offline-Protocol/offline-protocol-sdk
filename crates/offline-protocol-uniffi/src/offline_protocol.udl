@@ -61,7 +61,10 @@ namespace offline_protocol {
     // — swappability that cannot be verified is a promise, not a property.
     //
     // The suite writes only under its own probe key types and deletes
-    // everything it wrote, so it is safe against a live store.
+    // everything it wrote. Key-type isolation is checked first, with point
+    // writes and deletes, and a failure ends the run before anything is
+    // listed and deleted, so a backend that merges key types keeps its real
+    // records. Probe a new backend on a scratch instance until it is green.
     string run_storage_conformance(ProtocolStateStorageProvider storage);
 };
 
@@ -631,6 +634,98 @@ dictionary MeshRelayStats {
     u64 dropped_for_capacity;
 };
 
+// Custody: holding a neighbour's replication frames for hours instead of the
+// seconds a forwarder gives them (docs/spec/custody.md). Off by default, and
+// every dial is the custodian's: a device that never enables it behaves
+// exactly as before. Absent means "keep the core default", like
+// MeshRelayConfig, so a section naming one dial moves only that dial. The
+// core validates the bounds: the hold strictly shorter than
+// retry.outbox_max_lifetime_ms, positive session-tier caps, a byte cap that
+// admits one replication frame at its ceiling, and a stranger tier that is
+// both zero (the default: no deposits from peers without a session) or both
+// set. Applied at construction; there is no runtime update.
+dictionary CustodyConfig {
+    // Whether this device accepts deposits. The off switch.
+    boolean? enabled = null;
+    // How long an accepted frame is held, in milliseconds, judged in wall
+    // time against the value in force at each sweep: lowering it expires
+    // records already held.
+    u64? hold_ms = null;
+    // Held frames one depositor with an established session may have at once.
+    u64? max_entries_per_depositor = null;
+    // Bytes one depositor with an established session may have at once.
+    u64? max_bytes_per_depositor = null;
+    // Held frames across every depositor.
+    u64? max_entries = null;
+    // Bytes across every depositor.
+    u64? max_bytes = null;
+    // Held frames one proven peer without a session may have at once. Zero
+    // means such peers are refused, which is the default.
+    u64? stranger_max_entries = null;
+    // Bytes one proven peer without a session may have at once.
+    u64? stranger_max_bytes = null;
+    // What happens when a budget is full: evict the oldest held frame to
+    // admit the new one, or refuse the new one.
+    OverflowPolicy? overflow_policy = null;
+};
+
+// What this device has done as a custodian and as a depositor, and what it
+// is holding right now (docs/spec/custody.md).
+//
+// `held` and `held_bytes` are gauges. Everything else is cumulative since
+// start-up or the last erase_custody(). Aggregate and never per depositor,
+// because a per-depositor answer would be the quota oracle the chapter
+// refuses to be. Every refusal reason in the acceptance table has a counter,
+// so "custody is off" can be told from "nobody asked".
+dictionary CustodyStats {
+    // Frames in custody right now.
+    u64 held;
+    // Bytes in custody right now.
+    u64 held_bytes;
+    // Deposits accepted.
+    u64 accepted;
+    // Held frames handed to their recipient directly, and released.
+    u64 delivered;
+    // Held frames re-originated toward a neighbour that is not the recipient.
+    u64 re_originated;
+    // Held frames dropped at the end of their hold.
+    u64 expired;
+    // Deposits of an identifier already held: not stored, not answered.
+    u64 duplicates;
+    // Held frames evicted to admit a newer deposit under drop-oldest.
+    u64 evicted;
+    // Receipts put on the arrival link.
+    u64 receipts_sent;
+    // Receipts not sent: the depositor does not parse them, the link was
+    // gone, or this device cannot sign.
+    u64 receipts_dropped;
+    // Receipts this device received for an entry still in its outbox.
+    u64 receipts_received;
+    // Receipts this device received naming nothing in its outbox, or that it
+    // could not parse.
+    u64 receipts_ignored;
+    // Refused: custody is off.
+    u64 refused_disabled;
+    // Refused: no deposit request on the frame.
+    u64 refused_no_request;
+    // Refused: unknown class token.
+    u64 refused_unknown_class;
+    // Refused: not a sealed frame.
+    u64 refused_not_sealed;
+    // Refused: the arrival link was not identified.
+    u64 refused_unproven_peer;
+    // Refused: the sender is not the peer the frame arrived from.
+    u64 refused_not_depositor;
+    // Refused: a peer without a session while the stranger tier is closed.
+    u64 refused_stranger;
+    // Refused: the depositor's budget is full.
+    u64 refused_depositor_full;
+    // Refused: the global budget is full.
+    u64 refused_store_full;
+    // Refused: the battery is below the relay floor.
+    u64 refused_battery;
+};
+
 // ACK configuration
 dictionary AckConfig {
     u64 default_timeout_ms;
@@ -862,6 +957,10 @@ dictionary ProtocolConfig {
     // inside it — see MeshRelayConfig. Applied at construction: the governor
     // takes its snapshot there, and there is no runtime update path.
     MeshRelayConfig? mesh_relay = null;
+    // Whether this device holds a neighbour's replication frames for hours,
+    // and under what quotas (docs/spec/custody.md). Null, and any field left
+    // null inside it, keeps the core default: off. Applied at construction.
+    CustodyConfig? custody = null;
     // Whether the replicated-document layer accepts work. On by default,
     // now that replication has landed: a space replicates with the peer
     // whose address names it, and an application that never opens a store
@@ -1380,10 +1479,13 @@ interface OfflineProtocol {
     void reticulum_address_declaration_refused(string reason);
 
     // Reticulum: capability tokens from the gateway's Capabilities answer
-    // (e.g. "gateway_v1", "backbone_reticulum_v1"). MUST be called BEFORE
-    // reticulum_status_changed(true) on each attach — the contract's own
-    // ordering, so a device never drains into a gateway whose features it has
-    // not been told. Wholesale replace; the SDK clears the set itself when
+    // (e.g. "gateway_v1", "backbone_reticulum_v1"). A backbone_<kind>_v1
+    // token says what stands behind the daemon; the SDK stores it and reads
+    // nothing from it, and a kind it does not know is kept like any other
+    // token. MUST be called BEFORE reticulum_status_changed(true) on each
+    // attach: the contract's own ordering, so a device never drains into a
+    // gateway whose features it has not been told. Wholesale replace; the
+    // SDK clears the set itself when
     // the transport drops. Bounded like the relay's (64 tokens of 128 bytes)
     // and kept in its own set, so a token from whatever box is on the venue
     // Wi-Fi cannot open the relay's group-broadcast gate.
@@ -1391,8 +1493,8 @@ interface OfflineProtocol {
     void reticulum_gateway_capabilities(sequence<string> capabilities);
 
     // Reticulum: gateway-sourced presence for a peer (PresenceStatus).
-    // online=true records the fact against Reticulum and re-drives that
-    // peer's parked messages OVER RETICULUM, because that is the carrier that
+    // online=true records the fact against this carrier and re-drives that
+    // peer's parked messages OVER THIS CARRIER, because it is the one that
     // just proved it can reach them; online=false parks pending welcomes
     // without burning retry budget. Emits presence_updated with
     // source: reticulum, except for self, blocked, or empty peer ids.
@@ -1581,6 +1683,17 @@ interface OfflineProtocol {
     // exact thing the optional *input* exists to prevent.
     MeshRelayStats get_mesh_relay_stats();
     MeshRelayTunables get_mesh_relay_tunables();
+
+    // Custody: what this device holds for its neighbours and has done as a
+    // depositor (docs/spec/custody.md). Read through to the core.
+    CustodyStats get_custody_stats();
+    // Drops every held frame and resets the custody counters. Callable on
+    // its own; the data layer's wipe_all() calls it too, because a custody
+    // store that survived a logout would hold other people's traffic past
+    // the point the user asked for erasure. Attempts every record and fails
+    // only when one could not be deleted.
+    [Throws=ProtocolError]
+    void erase_custody();
     
     // ========================================================================
     // MLS (END-TO-END ENCRYPTION) OPERATIONS
@@ -1592,6 +1705,85 @@ interface OfflineProtocol {
         MlsStorageProvider secure_storage,
         ProtocolStateStorageProvider protocol_state_storage
     );
+
+    // Initialize MLS over the SDK's built-in file stores, for a host with a
+    // filesystem and no platform keystore (a headless Linux service). The MLS
+    // store opens at `mls_root`, every record sealed under `store_key` (32
+    // bytes, never all zero); the protocol-state store opens at `state_root`.
+    // Both use the account directory derived from this instance's app_id and
+    // profile. `mls_root` must survive an upgrade (it holds the identity);
+    // `state_root` should be removed with the installation.
+    //
+    // Same lifecycle as initialize_mls: before start(), idempotent, and a
+    // repeated call opens nothing. No refusal changes or deletes a record.
+    // Refusals map onto existing variants.
+    //
+    // InvalidArgument: an empty root; roots that are one directory or one
+    // inside the other; a key that is not 32 bytes. Roots are compared as
+    // spelled before anything is created, and again as directories once
+    // both exist, because a volume that folds case makes one directory of
+    // two spellings. That second refusal leaves the directory it created.
+    //
+    // InvalidConfiguration, before anything is created: protocol state with
+    // no MLS record beside it (a state root kept from another store, or an
+    // mls_root that was lost), or an account directory that cannot be read.
+    // As each store opens, MLS first: a directory that cannot be created
+    // (the message names the path), a wrong key, or a key check that cannot
+    // prove the key. After both opened: protocol state that belongs with
+    // another MLS store. The first open of a pair binds the two with one
+    // pairing id, and later opens compare the ids. When either store holds
+    // no id, or the ids differ, the state root is asked whether its sealed
+    // records open under this MLS store's record key, and one that opens
+    // admits it. State that belongs with another MLS store is refused
+    // because the engine deletes what its restore reads of it, queued and
+    // parked messages among them. A refusal
+    // after the MLS store opened leaves its directory, lock file and key
+    // check, and no record, so the first refusal above still applies to a
+    // retry.
+    //
+    // A damaged record key is not refused, on the launch that finds it or
+    // on any launch after while the MLS root keeps its pairing file.
+    // Nothing opens the state sealed under it again, so a refusal would save
+    // no record, and the engine's new key and its settlement of that state
+    // as failed is how the application learns which messages were lost. What that launch cannot delete stays sealed
+    // under the lost key, and the pairing ids, not those records, say the
+    // state is still this identity's.
+    //
+    // InvalidState: another store already holds the directory, in this
+    // process or another; start() has already run; or close_file_stores()
+    // has.
+    [Throws=ProtocolError]
+    void initialize_mls_with_file_stores(
+        string mls_root,
+        string state_root,
+        bytes store_key
+    );
+
+    // Release the built-in file stores this instance opened: both directory
+    // locks, at once, while the instance still exists. Freeing the instance
+    // releases them too, but when a host object is freed is the host
+    // runtime's decision (a kept reference, a callback cycle, an exception
+    // that still names it), and until then every later instance over the
+    // same directories is refused.
+    //
+    // Only after stop(): InvalidState otherwise. The instance cannot run
+    // again afterwards: start(), enable_telemetry() and both initialize_mls
+    // entry points are refused with InvalidState, and the next run needs a
+    // new instance. Idempotent. A no-op on an instance that never opened
+    // the file stores, which stays usable. An engine lock poisoned by a
+    // panic counts as stopped: stop() cannot take it again, and the
+    // directories must not wait for the instance to be freed.
+    //
+    // Nothing a closed instance is asked to do afterwards is persisted. A
+    // call that needs its stores fails; one for which the engine treats
+    // persistence as best effort completes in memory only.
+    //
+    // Disables telemetry first, exactly as disable_telemetry() does, so it
+    // can block for the uploader's final flush (up to three seconds): the
+    // uploader keeps its queue in the protocol-state store. Call it off the
+    // main thread.
+    [Throws=ProtocolError]
+    void close_file_stores();
     
     // Check if MLS is initialized
     boolean is_mls_initialized();
