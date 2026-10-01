@@ -93,10 +93,11 @@ delivery.
 The wire protocol between a zone device and a gateway daemon reachable over
 local IP (venue Wi-Fi, or a hotspot the gateway box provides).
 
-This promotes the protocol both mobile bridges already speak to a configurable
-`daemonAddress` (default `localhost:4242`), rather than designing a fresh one:
-the client side is already implemented twice, and every field this chapter adds
-to it is additive, so a daemon built to the earlier shape is unaffected.
+This promotes the protocol the iOS, Android and Python clients already speak
+to a configurable `daemonAddress` (default `localhost:4242`), rather than
+designing a fresh one: the client side is already implemented three times,
+and every field this chapter adds to it is additive, so a daemon built to the
+earlier shape is unaffected.
 
 ### Framing
 
