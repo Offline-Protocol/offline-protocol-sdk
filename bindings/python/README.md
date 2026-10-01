@@ -167,9 +167,10 @@ MLS cryptographic key material is stored using the `keyring` library:
 | Linux | Secret Service (GNOME Keyring / KWallet) |
 | Windows | Windows Credential Locker |
 
-On a host with none of those available, `keyring` falls back to a null or
-plaintext backend. `SecureStorage` logs a warning when it detects one, but it
-does not refuse to run — and on Python that warning is louder than it looks.
+On a host with none of those available, `keyring` falls back to its failing
+backend (every call raises), or to a plaintext one if `keyrings.alt` is
+installed. `SecureStorage` logs a warning when it detects either, but it
+does not refuse to run, and on Python that warning is louder than it looks.
 The credential store also holds `protocol_state_record_key`, the per-install key
 that seals pending messages, outbox entries, and media descriptors before they
 reach `AppStateStorage`. On a plaintext backend that key sits in a readable

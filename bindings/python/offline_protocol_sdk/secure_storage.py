@@ -14,6 +14,7 @@ import logging
 import threading
 
 import keyring
+import keyring.backends.chainer
 
 from . import legacy_store_adoption
 from .offline_protocol import MlsStorageError, MlsStorageProvider
@@ -104,12 +105,24 @@ class SecureStorage(MlsStorageProvider):
         # failing and null backends are both classes named plain ``Keyring``
         # (in ``keyring.backends.fail`` and ``keyring.backends.null``), so the
         # module is checked as well as the class name; the failing one is what a
-        # host without a secret service gets.
+        # host without a secret service gets. When two or more backends are
+        # viable, keyring hands back a ``ChainerBackend`` instead, which is how a
+        # plaintext backend from ``keyrings.alt`` usually arrives on such a host,
+        # so the backend judged is the first one it chains: the one writes reach.
         try:
-            backend_cls = type(keyring.get_keyring())
+            backend = keyring.get_keyring()
+            # A chain with nothing in it stores nothing, like the null backend.
+            empty_chain = False
+            if isinstance(backend, keyring.backends.chainer.ChainerBackend):
+                chained = backend.backends
+                empty_chain = not chained
+                if chained:
+                    backend = chained[0]
+            backend_cls = type(backend)
             backend_name = f"{backend_cls.__module__}.{backend_cls.__name__}"
             if (
-                backend_cls.__module__ in _INSECURE_KEYRING_MODULES
+                empty_chain
+                or backend_cls.__module__ in _INSECURE_KEYRING_MODULES
                 or "Fail" in backend_cls.__name__
                 or "Null" in backend_cls.__name__
                 or "PlaintextKeyring" in backend_cls.__name__
@@ -117,7 +130,9 @@ class SecureStorage(MlsStorageProvider):
                 logger.warning(
                     "keyring backend is '%s': MLS keys will NOT be stored "
                     "securely. Install a platform secret service (e.g. "
-                    "gnome-keyring, kwallet) for production use.",
+                    "gnome-keyring, kwallet), or on a headless host pass "
+                    "store_key or store_key_env to ProtocolManager to use the "
+                    "built-in file stores.",
                     backend_name,
                 )
         except Exception:

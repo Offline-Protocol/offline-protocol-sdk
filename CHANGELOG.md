@@ -436,8 +436,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   warning about a backend that cannot hold MLS keys checked only the class name,
   and keyring's failing and null backends are both classes named `Keyring`, so a
   headless Linux host or container (which gets `keyring.backends.fail.Keyring`)
-  was never warned. The check now also recognises those modules, and the warning
-  names the backend in full (`keyring.backends.fail.Keyring`). Log output only;
+  was never warned. The check now also recognises those modules, and judges the
+  first backend inside keyring's `ChainerBackend`, which is what a host gets with
+  `keyrings.alt` installed and which hid a plaintext backend the same way. The
+  warning names the backend in full (`keyring.backends.fail.Keyring`) and points
+  a headless host at the built-in file stores (`store_key`). Log output only;
   storage behaviour is unchanged.
 - **Frames a bridge builds for the core carried a fixed application id.** The
   iOS, Android and Python bridges stamped `"offline-messenger"` on every relay
