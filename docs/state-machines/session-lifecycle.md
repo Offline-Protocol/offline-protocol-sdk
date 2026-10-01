@@ -75,6 +75,15 @@ Only a peer already pushed to qualifies. The first push stays discovery's,
 and a first push that failed to send is still not recorded, so the next
 discovery makes it.
 
+**A lost reset push is not healed by this rule.** The repeat push always
+carries `session_reset = false`, so a receiver only refreshes its stored copy
+of our package. When the lost push was a reset (a re-key or an unblock), we
+have already dropped our session and the peer still holds its own; the
+repeat push cannot make it let go, and the pair stays split until the peer
+re-enters the desync path. Repeating the reset flag would tear down a
+replacement session whose Welcome is in flight, so it belongs with the
+split-session work rather than here.
+
 ### Both-create convergence
 
 Both peers can create a session simultaneously. The tiebreaker orders the two

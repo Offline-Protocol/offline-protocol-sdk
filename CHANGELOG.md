@@ -352,7 +352,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   there, as it was documented to be, and everything else is unchanged. Found
   by the first run of the Python suite against a Windows wheel.
 
-- **A lost key package no longer leaves a pair without a session forever.**
+- **A lost first key package no longer leaves a pair without a session
+  forever.**
   The engine pushed its key package to a peer once and then treated the
   peer as exchanged with, so when that one frame was lost nothing ever sent
   it again. Two peers that dial each other at once lose both pushes when the
@@ -363,7 +364,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   repeated on the next discovery of the peer, or on the reconciliation tick
   while a message waits for that peer. It is the same package, so no key
   material is minted, and the interval is a floor so that discovery on every
-  inbound body cannot turn into a stream of key packages
+  inbound body cannot turn into a stream of key packages. A lost reset push
+  (a re-key or an unblock) is not covered: the repeat carries no reset, so a
+  peer that kept its session keeps it
   ([session lifecycle](docs/state-machines/session-lifecycle.md#a-push-that-produced-no-session-is-pushed-again)).
 
 - **Closing the file stores no longer loses unflushed document edits.** An

@@ -1320,23 +1320,26 @@ impl OfflineProtocol {
     /// discovery. The stamp is taken before the send, so a send that fails
     /// still waits out the interval instead of being retried on every tick.
     pub(super) fn rearm_key_package_for_peer(&mut self, peer_id: &str) {
-        if !self.config.encryption.enabled || !self.config.encryption.auto_key_exchange {
+        if !self.config.encryption.enabled
+            || !self.config.encryption.auto_key_exchange
+            || self.confirmed_sessions.contains(peer_id)
+        {
             return;
         }
-        let Some(sent_at) = self.key_package_sent_to.get(peer_id) else {
+        let Some(sent_at) = self.key_package_sent_to.get_mut(peer_id) else {
             return;
         };
         if sent_at.elapsed() < StdDuration::from_secs(KEY_PACKAGE_RESEND_INTERVAL_SECS) {
             return;
         }
-        // Checked after the floor: it is storage I/O, and discovery runs on
-        // every inbound body.
+        // Stamped whatever the storage check below says: it is storage I/O,
+        // and discovery runs on every inbound body, so an unconfirmed session
+        // (or a failing read) must cost one check per interval, not one per
+        // frame.
+        *sent_at = Instant::now();
         match self.has_mls_session(peer_id) {
             Ok(false) => {}
             Ok(true) | Err(_) => return,
-        }
-        if let Some(sent_at) = self.key_package_sent_to.get_mut(peer_id) {
-            *sent_at = Instant::now();
         }
         debug!(peer_id = %peer_id, "Key package produced no session, pushing it again");
         if let Err(e) = self.send_key_package_to(peer_id, false) {

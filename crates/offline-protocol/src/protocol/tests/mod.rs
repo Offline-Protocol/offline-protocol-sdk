@@ -16117,6 +16117,22 @@ fn a_key_package_is_not_pushed_again_inside_the_interval_or_once_a_session_exist
         !bob_h.sent_messages().iter().any(is_key_package),
         "a peer with a session is never pushed to again"
     );
+
+    // An unconfirmed session reaches the storage check, which must re-stamp
+    // the floor so the next discoveries skip it rather than reading storage
+    // on every inbound body.
+    bob.confirmed_sessions.remove(&id("alice"));
+    age_key_package_pushes(&mut bob);
+    bob.on_neighbor_discovered(&id("alice"));
+    assert!(
+        bob.key_package_sent_to[&id("alice")].elapsed()
+            < Duration::from_secs(KEY_PACKAGE_RESEND_INTERVAL_SECS),
+        "a session found in storage re-stamps the floor"
+    );
+    assert!(
+        !bob_h.sent_messages().iter().any(is_key_package),
+        "a peer with an unconfirmed session is not pushed to either"
+    );
 }
 
 /// The deferred-ACK headline: an *evicted* pending entry (not merely a drained
