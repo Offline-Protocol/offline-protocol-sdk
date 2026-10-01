@@ -317,6 +317,23 @@ final class PeerStreamSessionTests: XCTestCase {
         XCTAssertEqual(disconnected, ["in"], "the held stream proved itself; no deadline fires")
     }
 
+    /// What a stream's preamble proved, which the manager uses to tell a
+    /// record that cannot prove its address from a dial that lost the
+    /// tie-break.
+    func testProvedAddressIsWhatThePreambleProvedNotWhatTheStreamHolds() {
+        prove("out", as: "peer-b")
+        prove("in", as: "peer-b")
+        XCTAssertEqual(disconnected, ["in"], "the losing duplicate")
+        XCTAssertEqual(session.provedAddress(of: "in"), "peer-b")
+
+        session.claim("peer-c", for: "liar")
+        prove("liar", as: "peer-d")
+        XCTAssertNil(session.provedAddress(of: "liar"))
+
+        session.ended("in")
+        XCTAssertNil(session.provedAddress(of: "in"), "forgotten with the stream")
+    }
+
     func testEndAllReportsEachAnnouncedPeerOnce() {
         prove("h1", as: "peer-b")
         prove("h2", as: "peer-c")

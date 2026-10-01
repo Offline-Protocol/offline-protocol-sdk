@@ -665,15 +665,16 @@ public class WifiDirectManager: NSObject, TransportManager {
                     case .success(let frame):
                         stream.heard = true
                         self.peers.received(frame, from: stream)
+                        if !stream.proved, let address = stream.dialed,
+                           self.peers.provedAddress(of: stream) == address {
+                            stream.proved = true
+                            self.dialPolicy.proved(address)
+                        }
                     case .failure(let refusal):
                         self.emitDiagnostic("warning", "Peer stream refused", context: ["reason": refusal.reason])
                         stream.connection.cancel()
                         return
                     }
-                }
-                if !stream.proved, let address = stream.dialed, self.peers.handle(for: address) == stream {
-                    stream.proved = true
-                    self.dialPolicy.proved(address)
                 }
             }
             if isComplete || error != nil {
@@ -694,12 +695,12 @@ public class WifiDirectManager: NSObject, TransportManager {
         stream.writes.reset()
         stream.connection.cancel()
         // Answered by a peer that never proved the address its record
-        // advertises, while no stream holds it (so not a lost race): a
-        // device on the LAN claiming another's address, or one that moved.
-        // Redialing it would fail the same way on the ladder for as long as
-        // the record lives, and keep the real record for the address undialed.
-        if let address = stream.dialed, stream.heard, !stream.proved,
-           peers.handle(for: address) == nil, let local = protocolInstance.localAddress() {
+        // advertises: a device on the LAN claiming another's address, or one
+        // that moved. Redialing it would fail the same way on the ladder for
+        // as long as the record lives, and keep the real record for the
+        // address undialed. A dial that lost the tie-break did prove it.
+        if stream.dialed != nil, stream.heard, !stream.proved,
+           let local = protocolInstance.localAddress() {
             unprovable.insert(stream.connection.endpoint)
             recordAdverts(browser?.browseResults ?? [], fresh: [], local: local)
         }

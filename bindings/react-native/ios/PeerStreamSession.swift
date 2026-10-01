@@ -108,6 +108,13 @@ final class PeerStreamSession<Handle: Hashable> {
         links.handle(for: address)
     }
 
+    /// The address `handle`'s preamble proved, until the stream ends, or nil.
+    /// Whether or not the stream went on to hold it: one refused as the
+    /// losing duplicate proved its address all the same. The owner's queue.
+    func provedAddress(of handle: Handle) -> String? {
+        linkStates[handle]?.preamble.address
+    }
+
     /// Whether any peer has proved an address. Any thread.
     var isEmpty: Bool {
         links.isEmpty
