@@ -109,6 +109,27 @@ async def test_framing_refusals_use_the_standard_codes(harness):
         with pytest.raises(RpcFailure) as err:
             await client.call(platform_op)
         assert err.value.code == codec.METHOD_NOT_FOUND, platform_op
+    # Values the decoders did not foresee are refusals on an open
+    # connection, never a closed socket: a lone surrogate is valid JSON and
+    # not valid UTF-8, and an integer JSON spells but a double cannot hold.
+    surrogate = await harness.client(server)
+    with pytest.raises(RpcFailure) as err:
+        await surrogate.call("hello", {"app_id": "\ud800"})
+    assert err.value.variant == "InvalidArgument"
+    assert (await surrogate.hello("fine"))["api_version"] == API_VERSION
+    huge = await client.call_raw(
+        {
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "data.counter_increment",
+            "params": {"space_id": "s", "doc_id": "d", "collection": "c", "amount": int("9" * 400)},
+        }
+    )
+    assert huge["error"]["code"] == codec.INVALID_PARAMS
+    assert await client.call("get_state") == "Running"
+    # A fractional id is a number to JSON-RPC 2.0 and comes back unchanged.
+    fractional = await client.call_raw({"jsonrpc": "2.0", "id": 1.5, "method": "get_state"})
+    assert fractional["id"] == 1.5 and fractional["result"] == "Running"
 
 
 async def test_parse_errors_batches_and_notifications(harness):
@@ -239,6 +260,14 @@ async def test_tcp_requires_the_per_launch_token(harness):
     assert json.loads(await ws.recv())["error"]["data"]["variant"] == "PermissionDenied"
     with pytest.raises(websockets.exceptions.ConnectionClosed):
         await ws.recv()
+    # A token that is not ASCII is wrong, not an internal error: the
+    # constant-time compare takes ASCII only and would raise on it.
+    ws = await connect(f"ws://127.0.0.1:{server.port}/")
+    await ws.send(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": {"app_id": "a", "token": "é" * 64}}))
+    assert json.loads(await ws.recv())["error"]["data"]["variant"] == "PermissionDenied"
+    with pytest.raises(websockets.exceptions.ConnectionClosed) as closed:
+        await ws.recv()
+    assert closed.value.rcvd.code == 1008
     # The token from the file works.
     client = await harness.client(server)
     result = await client.hello("a", token=server.token_path.read_text().strip())
@@ -451,3 +480,170 @@ async def test_policy_from_dict_refuses_unknown_sections_and_names():
     # A list of applications on its own configures no rule, so it restricts nothing.
     assert Policy.from_dict({"applications": ["c"]}).admits("anyone")
     assert policy.denies("b", "force_transport") and not policy.denies("a", "force_transport")
+    # A deny that names nothing on the wire is refused at load, naming the
+    # entry: it would otherwise deny nothing while the operator believed
+    # the signing oracle withheld.
+    with pytest.raises(ValueError, match="sign_dat"):
+        Policy.from_dict({"denied": {"kiosk": ["sign_dat", "tuning"]}})
+    with pytest.raises(ValueError, match="tunning"):
+        Policy.from_dict({"denied": {"kiosk": ["sign_data", "tunning"]}})
+    with pytest.raises(ValueError, match="process"):
+        Policy.from_dict({"denied": {"kiosk": ["process"]}})
+    accepted = Policy.from_dict({"denied": {"kiosk": ["data.flush_all", "manual_mls", "sign_data"]}})
+    assert accepted.denies("kiosk", "mls_decrypt") and accepted.denies("kiosk", "data.flush_all")
+
+
+# -- failures the decoders did not foresee ------------------------------------
+
+
+async def test_a_failure_inside_the_server_is_an_error_object_on_an_open_connection(harness, caplog):
+    server = await harness.server()
+    client = await harness.client(server)
+    await client.hello("notes")
+
+    async def broken(session, method, params):
+        raise RuntimeError("secret detail")
+
+    server._dispatcher.call = broken
+    with caplog.at_level("ERROR", logger="offline_protocol_sdk.local_api.server"):
+        with pytest.raises(RpcFailure) as err:
+            await client.call("get_state")
+    assert err.value.code == codec.INTERNAL_ERROR
+    assert err.value.message == "get_state: internal error"
+    assert "secret detail" not in err.value.message and err.value.variant is None
+    assert any("secret detail" in (r.exc_text or "") for r in caplog.records)
+    # The connection is still open and still answers.
+    del server._dispatcher.call
+    assert await client.call("get_state") == "Running"
+
+
+# -- the socket's directory and path ------------------------------------------
+
+
+async def test_a_wide_pre_existing_directory_is_refused_and_not_narrowed(harness):
+    wide = harness._tmp / "wide"
+    wide.mkdir()
+    os.chmod(wide, 0o755)
+    manager = ProtocolManager(make_config(profile="unix-wide"))
+    server = LocalApiServer(manager, socket_path=wide / "api.sock")
+    with pytest.raises(ValueError, match="no group or other"):
+        await server.start()
+    assert stat.S_IMODE(os.stat(wide).st_mode) == 0o755
+    assert not (wide / "api.sock").exists()
+
+
+async def test_a_regular_file_at_the_socket_path_is_refused_and_kept(harness):
+    directory = harness._tmp / "kept"
+    directory.mkdir(mode=0o700)
+    path = directory / "api.sock"
+    path.write_text("not a socket")
+    manager = ProtocolManager(make_config(profile="unix-file"))
+    server = LocalApiServer(manager, socket_path=path)
+    with pytest.raises(ValueError, match="not a socket"):
+        await server.start()
+    assert path.read_text() == "not a socket"
+
+
+async def test_an_owner_only_pre_existing_directory_is_used_as_is(harness):
+    directory = harness._tmp / "mine"
+    directory.mkdir(mode=0o700)
+    os.chmod(directory, 0o700)
+    manager = ProtocolManager(make_config(profile="unix-mine"))
+    server = LocalApiServer(manager, socket_path=directory / "api.sock")
+    await server.start()
+    try:
+        assert stat.S_IMODE(os.stat(directory).st_mode) == 0o700
+        assert stat.S_IMODE(os.stat(server.socket_path).st_mode) == 0o600
+        client = await harness.client(server)
+        assert (await client.hello("a"))["state"] == "Running"
+    finally:
+        await server.stop()
+    assert not server.socket_path.exists()
+
+
+# -- the loop keeps ticking while a call runs ---------------------------------
+
+
+async def test_a_slow_call_leaves_the_loop_ticking_and_other_calls_waiting(harness):
+    import time
+
+    server = await harness.server(tcp=True)
+    engine = server.manager.protocol
+    ticks = [0]
+    real_process = engine.process
+
+    def counting_process():
+        ticks[0] += 1
+        return real_process()
+
+    def slow():
+        time.sleep(1.0)
+        return 0
+
+    engine.process = counting_process
+    engine.get_pending_ack_count = slow
+    # Held for an application whose client arrives during the stall.
+    server._on_engine_event({"type": "message_received", "message_id": "held-1", "app_id": "late"})
+
+    loop = asyncio.get_running_loop()
+    a = await harness.client(server)
+    await a.hello("a", token=server.token)
+    slow_call = asyncio.ensure_future(a.call("get_pending_ack_count"))
+    await asyncio.sleep(0.15)
+    assert not slow_call.done()
+    ticks_before = ticks[0]
+
+    # During the stall: health answers, a late client is greeted and gets
+    # its held event, and the loop ticks the engine.
+    reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", server.port), 0.5)
+    writer.write(b"GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    await writer.drain()
+    head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 0.5)
+    assert head.startswith(b"HTTP/1.1 200")
+    writer.close()
+    late = await harness.client(server)
+    await asyncio.wait_for(late.hello("late", token=server.token), 0.5)
+    held = await late.wait_event("message_received", timeout=0.5, message_id="held-1")
+    assert held["message_id"] == "held-1"
+    assert not slow_call.done()
+
+    # Another client's engine call is serialised behind the slow one.
+    b = await harness.client(server)
+    await b.hello("b", token=server.token)
+    started = loop.time()
+    assert await b.call("get_state") == "Running"
+    waited = loop.time() - started
+    assert slow_call.done() and await slow_call == 0
+    assert waited >= 0.3, waited
+    assert ticks[0] - ticks_before >= 3, ticks
+
+
+async def test_a_loop_event_for_the_calls_own_id_reaches_only_the_caller(harness):
+    """The window between the executor's completion and the wakeup that
+    records the call's result, driven without timing: the fake engine call
+    schedules a loop-thread `message_sent` for the id it is about to return,
+    ahead of its own completion, exactly as a `process()` tick landing in
+    that window would emit it."""
+    server = await harness.server()
+    loop = asyncio.get_running_loop()
+    engine = server.manager.protocol
+
+    def fake_send(**kwargs):
+        loop.call_soon_threadsafe(
+            server._route,
+            {"type": "message_sent", "message_id": "fake-1", "sender": "a", "recipient": "b", "content": "private"},
+        )
+        return "fake-1"
+
+    engine.send_message_rich = fake_send
+    notes = await harness.client(server)
+    other = await harness.client(server)
+    await notes.hello("notes")
+    await other.hello("other")
+    message_id = await notes.call("send_message", {"recipient": "off1qb", "content": "private", "priority": "Low"})
+    assert message_id == "fake-1"
+    sent = await notes.wait_event("message_sent", timeout=5, message_id="fake-1")
+    assert sent["content"] == "private"
+    await asyncio.sleep(0.3)
+    assert other.events_of("message_sent") == []
+    assert server.router.parked_count() == 0
