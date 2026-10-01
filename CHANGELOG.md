@@ -296,7 +296,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   for it exists in this repository. The wheels used to be built
   as `py3-none-any`, four files with one name and a different library inside;
   each is now tagged for its platform, the Linux ones `manylinux_2_N` for the
-  newest glibc symbol their library needs, and numbered from the tag in
+  newest glibc symbol their library needs (2.34 as of this release: Debian 12,
+  Ubuntu 22.04, RHEL 9 or newer; the old `manylinux_2_17` claim was never
+  true of the library), and numbered from the tag in
   Python's spelling, so `v0.28.0-rc.1` builds `0.28.0rc1` rather than taking
   `0.28.0`. See [Cutting a Release](CONTRIBUTING.md#the-native-packages-and-pypi).
 - **Three iOS suites run for the first time.** The mesh controller, the BLE
