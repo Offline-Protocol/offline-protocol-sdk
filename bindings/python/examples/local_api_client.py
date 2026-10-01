@@ -161,6 +161,13 @@ async def run(args: argparse.Namespace) -> int:
         # Not a refusal from the engine: the socket, the token file, or a wait ran out.
         print(json.dumps({"error": {"message": str(exc) or type(exc).__name__}}), file=sys.stderr)
         return 1
+    except NotImplementedError:
+        # asyncio has no Unix sockets on Windows, where the service listens on TCP.
+        print(
+            json.dumps({"error": {"message": "Unix sockets are not available on this platform; use --tcp and --token-file"}}),
+            file=sys.stderr,
+        )
+        return 1
     finally:
         if client is not None:
             await client.close()

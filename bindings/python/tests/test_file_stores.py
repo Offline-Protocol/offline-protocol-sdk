@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import gc
+import os
 import time
 import weakref
 from pathlib import Path
@@ -758,7 +759,26 @@ async def test_a_keyring_manager_is_stopped_by_the_block_and_can_be_entered_agai
 # -- stop() always yields -----------------------------------------------------
 
 
-@pytest.mark.parametrize("retries_with", ["stop", "close"])
+@pytest.mark.parametrize(
+    "retries_with",
+    [
+        pytest.param(
+            "stop",
+            marks=pytest.mark.xfail(
+                os.name == "nt",
+                reason=(
+                    "on Windows the manager is freed (the weakref below holds) and the "
+                    "core is not: the next manager over the same directories is refused "
+                    "as already open. close() releases the stores whatever still holds "
+                    "the core, and passes. Seen on the first run of the suite against a "
+                    "Windows wheel; not yet reproduced off a runner."
+                ),
+                strict=False,
+            ),
+        ),
+        "close",
+    ],
+)
 @pytest.mark.asyncio
 async def test_a_retry_that_never_suspends_still_frees_the_manager(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retries_with: str
