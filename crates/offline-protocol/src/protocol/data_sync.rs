@@ -680,7 +680,10 @@ impl OfflineProtocol {
     ///
     /// The probe itself is capability-agnostic and guarded by
     /// `key_package_sent_to`, so a group that stays closed does not re-probe
-    /// on every commit or every rediscovery.
+    /// on every commit or every rediscovery. A member already probed is
+    /// pushed to again only by `rearm_key_package_for_peer`, on its doubling
+    /// backoff, so a closed group costs at most one push per member per
+    /// window.
     #[cfg_attr(not(feature = "data"), allow(dead_code))]
     fn probe_group_data_capabilities(&mut self, space: &str, members: &[String]) {
         let unknown = self.group_data_unknown_members(members);

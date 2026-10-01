@@ -111,6 +111,9 @@ pub(crate) const KEY_PACKAGE_RESEND_INTERVAL_SECS: u64 = 30;
 /// Ceiling on the doubling key-package resend window, matching
 /// [`WELCOME_UNREACHABLE_RETRY_CAP_SECS`].
 pub(crate) const KEY_PACKAGE_RESEND_CAP_SECS: u64 = 600;
+// The re-arm doubles at most five times (`<< min(5)`, which also keeps the
+// shift from wrapping the wait to zero); this keeps the cap reachable.
+const _: () = assert!(KEY_PACKAGE_RESEND_INTERVAL_SECS << 5 >= KEY_PACKAGE_RESEND_CAP_SECS);
 /// Number of welcome retry records processed per tick.
 pub(crate) const WELCOME_RETRY_BATCH_SIZE: usize = 20;
 /// Hard TTL for outbound welcome lifecycle records.

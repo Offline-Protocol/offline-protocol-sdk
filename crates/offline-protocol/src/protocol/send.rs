@@ -1375,7 +1375,9 @@ impl OfflineProtocol {
     /// an old-SDK inviter): send them our key package so their
     /// `auto_key_exchange` reply teaches us theirs. Guarded by
     /// `key_package_sent_to`, so repeated gate-failing group sends don't
-    /// re-probe the same peer; a peer that never replies is either
+    /// re-probe the same peer (the only repeat is
+    /// `rearm_key_package_for_peer`, on its doubling backoff); a peer that
+    /// never replies is either
     /// unreachable, old-SDK, or opted out — all of which correctly leave
     /// the gate closed.
     pub(crate) fn backfill_group_rich_capabilities(&mut self, unknown_members: &[String]) {
@@ -5679,10 +5681,11 @@ impl OfflineProtocol {
                 // Re-stamped, never reset: the repeat count is the re-arm's
                 // backoff and only a removal (session reset, neighbour lost)
                 // starts it over.
+                let now = Instant::now();
                 self.key_package_sent_to
                     .entry(peer_id.to_string())
-                    .or_insert((Instant::now(), 0))
-                    .0 = Instant::now();
+                    .or_insert((now, 0))
+                    .0 = now;
                 debug!(peer_id = %peer_id, message_id = %message.id, "Sent key package");
                 Ok(())
             }
