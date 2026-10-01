@@ -59,7 +59,7 @@ frames are dropped with no loss reported, as
 requires. If both pushes were on it, both sides have recorded the peer as
 sent to, and before this rule nothing ever sent again.
 
-Three bounds keep it cheap:
+Four bounds keep it cheap and correct:
 
 - **The interval is a floor, and it backs off.** Discovery fires on every
   inbound body, so a peer that never answers (an old SDK, encryption opted
@@ -69,6 +69,9 @@ Three bounds keep it cheap:
   push or forgetting the peer (a session reset, the neighbour lost) starts
   it over. The floor is
   stamped before the send, so a send that fails waits it out too.
+- **A blocked peer is never pushed to.** A block leaves the queued messages
+  that make the tick re-arm a peer, and blocking is bidirectional, so the
+  re-arm checks it itself rather than relying on each trigger's caller.
 - **A session stops it.** A session that exists but is unconfirmed belongs to
   the Welcome lifecycle and the confirmation probes, which own that half.
 - **It is the same package.** The pool hands a peer its own live package

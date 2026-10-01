@@ -1319,10 +1319,16 @@ impl OfflineProtocol {
     /// Only a peer already pushed to qualifies; the first push belongs to
     /// discovery. The stamp is taken before the send, so a send that fails
     /// still waits out the interval instead of being retried on every tick.
+    ///
+    /// A blocked peer is never pushed to. Blocking is bidirectional, and the
+    /// tick reaches this for any peer with a queued message, which a block
+    /// leaves in place; without the check the tick would advertise our
+    /// presence and key package to the blocked peer every window.
     pub(super) fn rearm_key_package_for_peer(&mut self, peer_id: &str) {
         if !self.config.encryption.enabled
             || !self.config.encryption.auto_key_exchange
             || self.confirmed_sessions.contains(peer_id)
+            || self.is_user_blocked(peer_id)
         {
             return;
         }

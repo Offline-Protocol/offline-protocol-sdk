@@ -16182,6 +16182,27 @@ fn a_key_package_repeat_backs_off() {
     );
 }
 
+/// Blocking is bidirectional, and a block leaves the queued message that makes
+/// the tick re-arm the peer. The tick must still never advertise to it.
+#[test]
+fn a_blocked_peer_is_not_pushed_a_key_package_from_the_tick() {
+    let (mut alice, alice_h, _bob, _bob_h, _bob_rx) = pair_with_both_first_key_packages_lost();
+    alice.block_user(&id("bob")).unwrap();
+    alice_h.clear_sent_messages();
+
+    age_key_package_pushes(&mut alice);
+    alice.last_reconciliation_at = None;
+    alice.process().unwrap();
+
+    assert!(
+        !alice_h
+            .sent_messages()
+            .iter()
+            .any(|m| m.content.starts_with(internal_prefixes::KEY_PACKAGE)),
+        "a blocked peer must never be sent our key package"
+    );
+}
+
 /// The deferred-ACK headline: an *evicted* pending entry (not merely a drained
 /// one) still recovers on the sender's next resend, precisely because the
 /// eviction never produced an ACK. With a 1-slot per-peer queue and `DropOldest`,
