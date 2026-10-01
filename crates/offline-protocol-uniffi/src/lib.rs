@@ -17018,7 +17018,8 @@ mod tests {
             swift.contains(
                 "onLinkQueueSync { generation += 1 \
                  let old = (listener: listener, browser: browser, streams: streams) \
-                 listener = nil browser = nil streams = [] adverts = [:] dialPolicy.reset() \
+                 listener = nil browser = nil streams = [] adverts = [:] unprovable = [] \
+                 dialPolicy.reset() \
                  peers.endAll() old.listener?.cancel()"
             ),
             "ios/WifiDirectManager.swift: stop() must forget every stream before endAll()"
@@ -17287,7 +17288,8 @@ mod tests {
         assert!(
             ios_manager.contains(
                 "for result in stream.reader.append(content) { switch result { \
-                 case .success(let frame): self.peers.received(frame, from: stream)"
+                 case .success(let frame): stream.heard = true \
+                 self.peers.received(frame, from: stream)"
             ),
             "ios/WifiDirectManager.swift: every received chunk must go through PeerStreamReader"
         );
@@ -17325,7 +17327,8 @@ mod tests {
         // by address dropped the live one's too, so the peer was never redialed.
         assert!(
             ios_manager.contains(
-                "adverts = PeerStreamDialPolicy.adverts(records, fresh: fresh, current: adverts)"
+                "adverts = PeerStreamDialPolicy.adverts( \
+                 records, fresh: fresh, current: adverts, unprovable: unprovable)"
             ) && !ios_manager.contains("adverts.removeValue(forKey:"),
             "ios/WifiDirectManager.swift: the browser must rebuild its adverts from the full result set"
         );
@@ -17344,6 +17347,15 @@ mod tests {
                 "if let delay = dialPolicy.noSlot(address) { scheduleDial(address, after: delay) }"
             ),
             "ios/WifiDirectManager.swift: a dial with no free slot must be retried on the ladder"
+        );
+        // A record whose dial was answered without proving its address is left
+        // out until it is reported again. Redialed, it failed the same way on
+        // the ladder for as long as it lived, and the real record for the
+        // address was never dialed.
+        assert!(
+            ios_manager.contains("unprovable.insert(stream.connection.endpoint)")
+                && ios_manager.contains("unprovable.subtract(fresh)"),
+            "ios/WifiDirectManager.swift: an unprovable record must be left out until reported again"
         );
 
         // A group client redials the owner the group has NOW. On a group

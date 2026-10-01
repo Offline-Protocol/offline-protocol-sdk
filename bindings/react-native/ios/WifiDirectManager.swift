@@ -123,6 +123,12 @@ public class WifiDirectManager: NSObject, TransportManager {
         let reader = PeerStreamReader()
         let writes = WriteStallWatchdog(timeoutMs: WifiDirectManager.WRITE_STALL_MS)
         var queuedBytes = 0
+        /// Whether the peer sent a whole frame, and whether a dialed stream
+        /// proved the address it was dialed toward. Heard and never proved is
+        /// a record that does not hold the address it advertises; a stream cut
+        /// mid-preamble has not been heard.
+        var heard = false
+        var proved = false
 
         init(connection: NWConnection, outbound: Bool, dialed: String?) {
             self.connection = connection
@@ -140,6 +146,10 @@ public class WifiDirectManager: NSObject, TransportManager {
     private var streams = Set<Stream>()
     /// The endpoint each advertised address is reachable at, while it is.
     private var adverts: [String: NWEndpoint] = [:]
+    /// Records whose dial was answered by a peer that did not prove the
+    /// address they advertise. Left out of `adverts` until the browser reports
+    /// the record again, so another record for the address is dialed, or none.
+    private var unprovable = Set<NWEndpoint>()
     /// When to dial each advertised address, and when to dial it again.
     private var dialPolicy = PeerStreamDialPolicy()
     /// Bumped by every start() and stop(), so a timer armed for one run finds
@@ -286,6 +296,7 @@ public class WifiDirectManager: NSObject, TransportManager {
             browser = nil
             streams = []
             adverts = [:]
+            unprovable = []
             dialPolicy.reset()
 
             // Report every proved peer lost while the core still holds its
@@ -503,6 +514,7 @@ public class WifiDirectManager: NSObject, TransportManager {
         browser?.cancel()
         browser = nil
         adverts = [:]
+        unprovable = []
     }
 
     private func browserChanged(_ newState: NWBrowser.State) {
@@ -538,17 +550,14 @@ public class WifiDirectManager: NSObject, TransportManager {
     /// ours is skipped by its address.
     private func advertsChanged(_ results: Set<NWBrowser.Result>, _ changes: Set<NWBrowser.Result.Change>) {
         guard let local = protocolInstance.localAddress() else { return }
-        var records: [(address: String, endpoint: NWEndpoint)] = []
-        for result in results {
-            guard let address = Self.advertisedAddress(result), address != local else { continue }
-            records.append((address, result.endpoint))
-        }
         var fresh = Set<NWEndpoint>()
         for change in changes {
             if case .added(let result) = change { fresh.insert(result.endpoint) }
             if case .changed(_, let result, _) = change { fresh.insert(result.endpoint) }
         }
-        adverts = PeerStreamDialPolicy.adverts(records, fresh: fresh, current: adverts)
+        // A record reported again may now hold what it advertises.
+        unprovable.subtract(fresh)
+        recordAdverts(results, fresh: fresh, local: local)
         for (address, endpoint) in adverts where fresh.contains(endpoint) {
             // The lower address's stream is the one both ends keep, so the
             // lower one dials at once and the higher gives it time.
@@ -559,6 +568,17 @@ public class WifiDirectManager: NSObject, TransportManager {
                 scheduleDial(address, after: delay)
             }
         }
+    }
+
+    private func recordAdverts(_ results: Set<NWBrowser.Result>, fresh: Set<NWEndpoint>, local: String) {
+        var records: [(address: String, endpoint: NWEndpoint)] = []
+        for result in results {
+            guard let address = Self.advertisedAddress(result), address != local else { continue }
+            records.append((address, result.endpoint))
+        }
+        unprovable.formIntersection(records.map { $0.endpoint })
+        adverts = PeerStreamDialPolicy.adverts(
+            records, fresh: fresh, current: adverts, unprovable: unprovable)
     }
 
     /// The peer address a record advertises, or nil for a record that is not
@@ -642,6 +662,7 @@ public class WifiDirectManager: NSObject, TransportManager {
                 for result in stream.reader.append(content) {
                     switch result {
                     case .success(let frame):
+                        stream.heard = true
                         self.peers.received(frame, from: stream)
                     case .failure(let refusal):
                         self.emitDiagnostic("warning", "Peer stream refused", context: ["reason": refusal.reason])
@@ -649,7 +670,8 @@ public class WifiDirectManager: NSObject, TransportManager {
                         return
                     }
                 }
-                if let address = stream.dialed, self.peers.handle(for: address) == stream {
+                if !stream.proved, let address = stream.dialed, self.peers.handle(for: address) == stream {
+                    stream.proved = true
                     self.dialPolicy.proved(address)
                 }
             }
@@ -670,6 +692,16 @@ public class WifiDirectManager: NSObject, TransportManager {
         peers.ended(stream)
         stream.writes.reset()
         stream.connection.cancel()
+        // Answered by a peer that never proved the address its record
+        // advertises, while no stream holds it (so not a lost race): a
+        // device on the LAN claiming another's address, or one that moved.
+        // Redialing it would fail the same way on the ladder for as long as
+        // the record lives, and keep the real record for the address undialed.
+        if let address = stream.dialed, stream.heard, !stream.proved,
+           peers.handle(for: address) == nil, let local = protocolInstance.localAddress() {
+            unprovable.insert(stream.connection.endpoint)
+            recordAdverts(browser?.browseResults ?? [], fresh: [], local: local)
+        }
         guard let address = stream.dialed,
               let delay = dialPolicy.ended(
                 address, advertised: adverts[address] != nil,

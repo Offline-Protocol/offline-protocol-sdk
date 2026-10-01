@@ -141,4 +141,14 @@ final class PeerStreamDialPolicyTests: XCTestCase {
         XCTAssertNil(policy.discovered(peer, weAreLower: true, held: false), "one dial at a time")
         XCTAssertEqual(policy.noSlot(peer), 2 * PeerStreamDialPolicy.redialInitialDelay)
     }
+
+    /// A record that answered without proving its address gives way to
+    /// another for the address, or leaves it unadvertised so the ladder stops.
+    func testAnUnprovableRecordIsLeftOut() {
+        let records = [(address: peer, endpoint: "liar"), (address: peer, endpoint: "real")]
+        XCTAssertEqual(PeerStreamDialPolicy.adverts(
+            records, fresh: ["liar"], current: [peer: "liar"], unprovable: ["liar"])[peer], "real")
+        XCTAssertNil(PeerStreamDialPolicy.adverts(
+            [(address: peer, endpoint: "liar")], fresh: [], current: [:], unprovable: ["liar"])[peer])
+    }
 }

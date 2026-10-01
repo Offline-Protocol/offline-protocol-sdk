@@ -367,17 +367,20 @@ struct PeerStreamDialPolicy {
     /// it, and with no advert the address was never dialed again. Of two
     /// records for one address, one in `fresh` (added or changed by this
     /// change) wins, being the newest; then the one in `current`, which a dial
-    /// may already be using.
+    /// may already be using. A record in `unprovable` is left out: its dial
+    /// was answered by a peer that did not prove the address it advertises,
+    /// and dialing it again would only fail the same way.
     static func adverts<Endpoint: Hashable>(
         _ records: [(address: String, endpoint: Endpoint)],
         fresh: Set<Endpoint>,
-        current: [String: Endpoint]
+        current: [String: Endpoint],
+        unprovable: Set<Endpoint> = []
     ) -> [String: Endpoint] {
         func rank(_ address: String, _ endpoint: Endpoint) -> Int {
             fresh.contains(endpoint) ? 2 : current[address] == endpoint ? 1 : 0
         }
         var out: [String: Endpoint] = [:]
-        for record in records {
+        for record in records where !unprovable.contains(record.endpoint) {
             if let kept = out[record.address],
                rank(record.address, kept) >= rank(record.address, record.endpoint) { continue }
             out[record.address] = record.endpoint

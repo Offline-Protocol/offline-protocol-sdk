@@ -244,7 +244,11 @@ can be advertised by the record it just published and by its old one still in
 our cache, and removing the old one by address took the live one's address
 with it, so the peer was never dialed again. The instance name is a digest of
 the address, as on Python, so a restarted listener replaces its record
-instead of adding a second. A dial with no path yet (`.waiting`) gets ten
+instead of adding a second. A record whose dial is answered by a peer that
+does not prove the address it advertises is left out until the browser
+reports it again, so another record for the address is dialed, or none;
+redialed, it failed the same way for as long as it lived and kept the real
+record undialed. A dial with no path yet (`.waiting`) gets ten
 seconds, the connect timeout, before the redial ladder takes it over.
 
 Writes follow Android's bounds: a body is dropped (the core retries it) when
