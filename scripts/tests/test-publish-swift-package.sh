@@ -67,7 +67,10 @@ remote_ref() { git -C "$1" rev-parse --verify --quiet "$2" || true; }
 seed_remote() {
   local remote="$1" seed
   seed="$WORK/seed-$(basename "$remote" .git)"
-  git init --quiet --bare "$remote"
+  # Named: a bare repository's HEAD points at git's configured default
+  # branch, which is `master` where nothing set it, and a clone of it then
+  # checks out nothing while main holds the workflow.
+  git init --quiet --bare --initial-branch=main "$remote"
   git init --quiet -b main "$seed"
   mkdir -p "$seed/.github/workflows"
   echo "name: Publish" >"$seed/.github/workflows/publish.yml"
