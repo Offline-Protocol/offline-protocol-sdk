@@ -72,8 +72,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   the engine's events: all seventy-five tags with their fields and the
   vocabularies of the enum-valued ones, and how each is routed (by
   application id, by an identifier the server issued, or to everyone). The
-  method table partitions the interface definition into the 126 methods a
-  client may call and the 92 platform operations it never can, including the
+  method table partitions the interface definition into the 127 methods a
+  client may call and the 93 platform operations it never can, including the
   run loop and the drain, which the server owns because the engine delivers
   a message only when something drains. Errors keep the engine's
   twenty-five-variant taxonomy: the JSON-RPC code is the variant's position
@@ -122,9 +122,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `__CUSTODY_RECEIPT__`, the wire-format chapter reserves the metadata key
   `__custody`, and `data_versions` gains entry 7 for the receipt. The threat
   model gains R19 (custody-borne re-key pressure), R20 (a custodian retains
-  third-party routing metadata) and R21 (deposit spam). Nothing ships in this
-  entry but the contract and the reservations; the store, the quotas and the
-  receipt follow it, and custody stays off until they do.
+  third-party routing metadata) and R21 (deposit spam). Custody v1, above,
+  implements it.
 
 - **The leaf node builds for ESP32 RISC-V parts and for Cortex-M0.**
   `offline-protocol-leaf` now compiles, and CI lints it, for
@@ -319,6 +318,31 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   version is opaque, and the peer-tracking hook is `on_neighbor_discovered`.
 
 ### Fixed
+
+- **Closing the file stores no longer loses unflushed document edits.** An
+  edit waits in memory until a flush, and the engine flushes what is left
+  when it is dropped. With the built-in file stores that drop runs after
+  `close_file_stores()` has closed them and every write is refused, so a
+  clean shutdown (Python `ProtocolManager.close()`, and the local API
+  service on `SIGTERM`) dropped every edit made since the application last
+  called `flush`. `close_file_stores()` now flushes the documents first.
+
+- **The local API service runs its reviewed hardening again.** The squash
+  merge of the client examples carried a pre-review copy of the reference
+  server and replaced the reviewed one, so `main` ran engine calls on the
+  event loop again (a media send stalled every client and the run loop),
+  chmod'ed and unlinked whatever sat at `--socket`, kept every issued
+  message id for the life of the process, closed the connection on a
+  malformed request instead of answering it, and accepted a misspelled
+  `denied` entry as denying nothing. The reviewed server, its twelve tests
+  and its bridge-contract rows are restored.
+
+- **The local API service starts the gateway client.** With `reticulum`
+  enabled, `ProtocolManager` builds the gateway client and leaves starting it
+  to its owner, and the service never did, so the slot was a dead carrier.
+  The service now starts a configured client with the engine, and
+  `offline-protocol-service --gateway HOST:PORT` names the daemon (default
+  `localhost:4242`).
 
 - **The iOS config readers read `0` and `1` as numbers.** The Foundation-only
   readers behind `meshRelay` and `custody` excluded JSON booleans with an

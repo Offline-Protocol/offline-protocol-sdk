@@ -52,7 +52,9 @@ offline-protocol-service --config config.json \
 
 `config.json` holds the `ProtocolConfig` fields by name (see
 [Configuration](configuration.md)); `--listen` and `--peer` drive the
-peer-stream transport when the configuration enables it. Two carriers:
+peer-stream transport when the configuration enables it, and `--gateway
+HOST:PORT` names the gateway daemon when it enables `reticulum` (default
+`localhost:4242`, see [the gateway contract](spec/gateway-contract.md)). Two carriers:
 
 | Carrier | How | Credential |
 |---|---|---|

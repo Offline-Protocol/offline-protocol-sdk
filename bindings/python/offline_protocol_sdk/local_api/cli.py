@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ..gateway_manager import DEFAULT_DAEMON_ADDRESS
 from ..protocol_manager import ProtocolManager
 from . import codec
 from .authz import Policy
@@ -71,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
     mesh = parser.add_argument_group("peer stream")
     mesh.add_argument("--listen", metavar="HOST:PORT", help="where the peer-stream transport accepts streams")
     mesh.add_argument("--peer", action="append", default=[], metavar="ENTRY", help="a peer to keep a stream to: host:port or off1...@host:port")
+    parser.add_argument(
+        "--gateway",
+        metavar="HOST:PORT",
+        help=f"the gateway daemon to attach to when the config enables reticulum (default: {DEFAULT_DAEMON_ADDRESS})",
+    )
     parser.add_argument("--policy", help="JSON file with the space allow-lists and method denials")
     parser.add_argument("--no-health", action="store_true", help="do not answer GET /health")
     parser.add_argument("--log-level", default="INFO")
@@ -103,6 +109,13 @@ def build_manager(args: argparse.Namespace) -> ProtocolManager:
                 raise SystemExit("--listen takes HOST:PORT")
             listen_host, listen_port = host.strip("[]"), int(port)
         manager.peer_stream.configure(listen_host=listen_host, listen_port=listen_port, peers=args.peer)
+    if manager.gateway is not None:
+        try:
+            manager.gateway.configure(daemon_address=args.gateway or DEFAULT_DAEMON_ADDRESS)
+        except ValueError as exc:
+            raise SystemExit(f"--gateway: {exc}") from None
+    elif args.gateway:
+        raise SystemExit("--gateway needs reticulum_enabled in the config")
     return manager
 
 

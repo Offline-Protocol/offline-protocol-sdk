@@ -686,6 +686,56 @@ fn close_file_stores_releases_the_directories_while_the_instance_lives() {
     assert!(first.mls_generate_key_package().is_err());
 }
 
+/// An edit is held in memory until a flush, and the engine flushes what is
+/// left when it is dropped. With file stores that drop comes after
+/// `close_file_stores`, when every write is refused, so the close itself has
+/// to persist the batch, or a service that shuts down cleanly loses the
+/// edits made since its clients last flushed.
+#[test]
+fn close_file_stores_persists_edits_that_were_never_flushed() {
+    let root = TempRoot::new("close-flush");
+    let (mls, state) = (root.dir("mls"), root.dir("state"));
+    let service = || {
+        OfflineProtocol::new(ProtocolConfig {
+            profile: "close-flush-user".to_string(),
+            data_enabled: true,
+            ..create_test_config()
+        })
+        .expect("protocol")
+    };
+
+    let first = service();
+    first
+        .initialize_mls_with_file_stores(mls.clone(), state.clone(), KEY.to_vec())
+        .expect("init");
+    first.start().expect("start");
+    first
+        .data_create_doc("demo-space".into(), "notes".into())
+        .expect("create");
+    first
+        .data_map_set(
+            "demo-space".into(),
+            "notes".into(),
+            "meta".into(),
+            "title".into(),
+            data_value_from_json(r#"{"kind":"text","value":"kept"}"#).expect("value"),
+        )
+        .expect("set");
+    first.stop().expect("stop");
+    first.close_file_stores().expect("close");
+
+    let second = service();
+    second
+        .initialize_mls_with_file_stores(mls, state, KEY.to_vec())
+        .expect("reopen while `first` is still alive");
+    assert_eq!(
+        second
+            .data_doc_json("demo-space".into(), "notes".into())
+            .expect("read"),
+        r#"{"meta":{"title":"kept"}}"#
+    );
+}
+
 /// A running engine writes to its stores, so they are not released under it.
 #[test]
 fn close_file_stores_is_refused_until_the_protocol_is_stopped() {

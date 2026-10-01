@@ -6506,10 +6506,18 @@ impl OfflineProtocol {
 
         // The engine lock: no engine call is part-way through a write when
         // the stores go, and none starts one after.
-        let _protocol = self.lock_inner_recovering();
+        let mut protocol = self.lock_inner_recovering();
         let mut held = recover_mutex(&self.file_stores, "file_stores");
         if !ready(&held)? {
             return Ok(());
+        }
+        // Edits wait in memory for a flush, and the engine's Drop flushes
+        // what is left, but that drop runs after the stores below are closed
+        // and every write is refused. Without this, a clean shutdown loses
+        // every edit made since the application last flushed. A poisoned
+        // engine is not trusted to write.
+        if !engine_lost {
+            let _ = protocol.data_flush_all();
         }
         if let FileStoreState::Open(stores) = &*held {
             stores.close();

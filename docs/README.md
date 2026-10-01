@@ -62,6 +62,7 @@ implementation written against these documents should interoperate.
 | [Leaf node provisioning](spec/leaf-provisioning.md) | What a constrained device owes at pairing, the never-committing profile |
 | [Bluetooth LE framing](spec/ble-framing.md) | The GATT contract, the fragment header, and what a receiver owes on reassembly |
 | [Peer-stream framing](spec/stream-framing.md) | The preamble that proves a stream's peer, the length-prefixed message frame, and the LAN discovery hint |
+| [DNS-SD mapping](spec/dns-sd-mapping.md) | A service descriptor as a DNS-SD instance: the subtype, the instance name, the TXT record and its bounds, and what an unsigned LAN import may never become |
 | [Username discovery and invites](spec/username-discovery.md) | The self-certifying invite payload, the username directory, and the signing-domain registry |
 | [The gateway contract](spec/gateway-contract.md) | What a gateway is, the five verbs, the daemon wire protocol, and the backbone |
 | [The local API](spec/local-api.md) | One server, several local applications: JSON-RPC over a WebSocket, the method and event tables, routing, replay, errors |
@@ -91,7 +92,7 @@ implementation written against these documents should interoperate.
 
 | Document | Scope |
 |----------|-------|
-| [ADR index](adr/README.md) | Twenty-five decisions that are expensive to reverse or easy to undo by accident |
+| [ADR index](adr/README.md) | Twenty-six decisions that are expensive to reverse or easy to undo by accident |
 
 If something in the codebase looks redundant or over-engineered, check here
 before simplifying it.
