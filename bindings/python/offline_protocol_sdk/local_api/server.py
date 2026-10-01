@@ -195,6 +195,11 @@ class LocalApiServer:
         try:
             if self._manager.peer_stream is not None:
                 await self._manager.peer_stream.start()
+            # Only once configured: an unconfigured gateway client has no
+            # daemon to dial, and starting it would refuse the whole server.
+            gateway = self._manager.gateway
+            if gateway is not None and gateway.is_available():
+                await gateway.start()
             engine = self._manager.protocol
             services = generated.MeshServices(engine)
             data: Any

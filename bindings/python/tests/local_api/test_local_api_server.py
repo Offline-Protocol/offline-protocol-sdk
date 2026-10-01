@@ -647,3 +647,85 @@ async def test_a_loop_event_for_the_calls_own_id_reaches_only_the_caller(harness
     await asyncio.sleep(0.3)
     assert other.events_of("message_sent") == []
     assert server.router.parked_count() == 0
+
+
+async def test_a_configured_gateway_is_started_with_the_server(harness):
+    """`ProtocolManager` builds the gateway client when the config enables
+    the slot and leaves starting it to its owner; the server is the owner,
+    so a configured client that the server never started is a dead carrier."""
+    dialled = asyncio.Event()
+
+    async def on_connection(reader, writer):
+        dialled.set()
+        writer.close()
+
+    daemon = await asyncio.start_server(on_connection, "127.0.0.1", 0)
+    try:
+        port = daemon.sockets[0].getsockname()[1]
+        manager = ProtocolManager(make_config(profile="gateway-user", reticulum_enabled=True))
+        manager.gateway.configure(daemon_address=f"127.0.0.1:{port}", auto_reconnect=False)
+        await harness.server(manager=manager)
+        await asyncio.wait_for(dialled.wait(), 5)
+    finally:
+        daemon.close()
+
+
+async def test_an_unconfigured_gateway_does_not_stop_the_server(harness):
+    manager = ProtocolManager(make_config(profile="idle-gateway-user", reticulum_enabled=True))
+    server = await harness.server(manager=manager)
+    client = await harness.client(server)
+    result = await client.hello("notes")
+    assert result["state"] == "Running"
+    assert not manager.gateway.is_available()
+
+
+def _cli_args(tmp_path, *extra, **config):
+    from offline_protocol_sdk.local_api import cli
+
+    fields = {
+        "app_id": "server-app",
+        "profile": "cli-user",
+        "ble_enabled": False,
+        "wifi_direct_enabled": False,
+        "internet_enabled": True,
+        "reticulum_enabled": False,
+        "nostr_enabled": False,
+        "prefer_online": True,
+        "initial_ttl": 3,
+        "encryption_enabled": False,
+        "require_encryption": False,
+        "auto_key_exchange": False,
+        "store_pending": True,
+        "max_pending_per_peer": 100,
+        "max_pending_global": 1000,
+        "pending_ttl_ms": 60000,
+        "overflow_policy": "DropOldest",
+    }
+    fields.update(config)
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(fields))
+    os.environ["OP_TEST_CLI_KEY"] = "ab" * 32
+    argv = [
+        "--config", str(path),
+        "--mls-root", str(tmp_path / "mls"),
+        "--state-root", str(tmp_path / "state"),
+        "--store-key-env", "OP_TEST_CLI_KEY",
+        *extra,
+    ]
+    return cli, cli.build_parser().parse_args(argv)
+
+
+async def test_the_cli_configures_the_gateway_from_its_option(tmp_path):
+    cli, args = _cli_args(tmp_path, "--gateway", "127.0.0.1:4343", reticulum_enabled=True)
+    manager = cli.build_manager(args)
+    try:
+        assert manager.gateway.is_available()
+        assert (manager.gateway._daemon_host, manager.gateway._daemon_port) == ("127.0.0.1", 4343)
+    finally:
+        await manager.close()
+
+
+async def test_the_cli_refuses_a_gateway_the_config_does_not_enable(tmp_path):
+    cli, args = _cli_args(tmp_path, "--gateway", "127.0.0.1:4343")
+    with pytest.raises(SystemExit, match="reticulum_enabled"):
+        cli.build_manager(args)
