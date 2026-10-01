@@ -4,8 +4,9 @@
 // Pins when the iOS peer-stream manager dials an advertised address and when
 // it dials again (ADR 0027): the lower address at once, the higher after a
 // grace delay, a redial ladder that climbs only on a redial actually
-// scheduled, no dial toward an address a stream already holds, and an
-// address that stays advertised while any record for it is live. The
+// scheduled, no dial toward an address a stream already holds, an address
+// that stays advertised while any record for it is live, and how many
+// inbound streams the listener takes. The
 // manager owns the timers and connections, which need a device; this is the
 // decision it makes with them.
 //
@@ -114,5 +115,20 @@ final class PeerStreamDialPolicyTests: XCTestCase {
             XCTAssertEqual(PeerStreamDialPolicy.adverts(
                 records, fresh: [], current: [peer: current])[peer], current)
         }
+    }
+
+    /// One machine on the LAN cannot fill the listener, and a full listener
+    /// leaves room to dial.
+    func testInboundIsBoundedPerHostAndLeavesRoomToDial() {
+        let one = Array(repeating: "10.0.0.9", count: PeerStreamDialPolicy.maxInboundPerHost)
+        XCTAssertFalse(PeerStreamDialPolicy.admitsInbound(from: "10.0.0.9", inboundFrom: one, open: one.count))
+        XCTAssertTrue(PeerStreamDialPolicy.admitsInbound(from: "10.0.0.7", inboundFrom: one, open: one.count))
+
+        let many = (0..<PeerStreamDialPolicy.maxInbound).map { "10.0.1.\($0)" }
+        XCTAssertFalse(PeerStreamDialPolicy.admitsInbound(from: "10.0.2.1", inboundFrom: many, open: many.count))
+        XCTAssertLessThan(PeerStreamDialPolicy.maxInbound, PeerStreamDialPolicy.maxStreams,
+                          "dials keep a share of the budget")
+        XCTAssertFalse(PeerStreamDialPolicy.admitsInbound(
+            from: "10.0.2.1", inboundFrom: [String](), open: PeerStreamDialPolicy.maxStreams))
     }
 }

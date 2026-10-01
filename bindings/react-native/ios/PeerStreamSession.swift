@@ -290,6 +290,19 @@ struct PeerStreamDialPolicy {
     static let higherAddressDelay: TimeInterval = 5.0
     static let redialInitialDelay: TimeInterval = 1.0
     static let redialMaxDelay: TimeInterval = 60.0
+    /// Streams open at once, proved or not. Android's `Limits.maxStreams`.
+    static let maxStreams = 16
+    /// The inbound share of `maxStreams`. The rest is left to dials, so a
+    /// listener full of strangers' sockets never stops this device reaching
+    /// the peers it browses.
+    static let maxInbound = 12
+    /// Inbound streams one remote host may hold, proved or not. A host needs
+    /// one, two while it reconnects past its own stale stream. Without the
+    /// bound one machine on the LAN fills the inbound share alone, with silent
+    /// sockets that each hold a slot for the preamble deadline, or with as
+    /// many self-made identities. The Python manager's `MAX_STREAMS_PER_HOST`,
+    /// scaled to this budget.
+    static let maxInboundPerHost = 4
 
     /// Addresses with a dial scheduled or an outbound stream open.
     private var dialing = Set<String>()
@@ -326,6 +339,13 @@ struct PeerStreamDialPolicy {
     mutating func reset() {
         dialing = []
         redialDelay = [:]
+    }
+
+    /// Whether the listener takes a connection from `host`, given the hosts
+    /// of the inbound streams open now and the count of all open streams.
+    static func admitsInbound<Host: Equatable>(from host: Host, inboundFrom hosts: [Host], open: Int) -> Bool {
+        return open < maxStreams && hosts.count < maxInbound
+            && hosts.filter { $0 == host }.count < maxInboundPerHost
     }
 
     /// The record each advertised address is dialed at, from every peer

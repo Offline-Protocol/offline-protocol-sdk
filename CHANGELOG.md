@@ -583,7 +583,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `NSLocalNetworkUsageDescription` is still required. A denied local-network
   permission is now reported as an `error` diagnostic instead of failing
   silently. The seven-peer cap Multipeer imposed is gone; at most sixteen
-  streams are open. The hop is plain TCP, as on Android and Python, where
+  streams are open, twelve of them inbound and four from any one host. The
+  hop is plain TCP, as on Android and Python, where
   Multipeer encrypted it; payloads are sealed either way. Both ends of a pair
   now dial, and of two streams for one address both keep the one the lower
   address opened, the Python manager's rule

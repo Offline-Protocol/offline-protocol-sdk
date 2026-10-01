@@ -70,8 +70,9 @@ public class WifiDirectManager: NSObject, TransportManager {
     /// How long a connected peer may take to prove its address. Local policy,
     /// not wire format (stream-framing.md).
     private let PREAMBLE_TIMEOUT: TimeInterval = 10.0
-    /// Open streams, proved or not. Android's `Limits.maxStreams`.
-    private static let MAX_STREAMS = 16
+    /// Open streams, proved or not. The inbound share and the per-host bound
+    /// are `PeerStreamDialPolicy.admitsInbound`'s.
+    private static let MAX_STREAMS = PeerStreamDialPolicy.maxStreams
     /// A listener or browser that failed is rebuilt after this long.
     private static let REBUILD_DELAY: TimeInterval = 5.0
     /// How long a dialed stream may wait for a path before it is ended and
@@ -453,7 +454,10 @@ public class WifiDirectManager: NSObject, TransportManager {
         }
         listener.newConnectionHandler = { [weak self, weak listener] connection in
             guard let self = self, let listener = listener, listener === self.listener,
-                  self.streams.count < Self.MAX_STREAMS else {
+                  PeerStreamDialPolicy.admitsInbound(
+                      from: Self.host(of: connection),
+                      inboundFrom: self.streams.filter { !$0.outbound }.map { Self.host(of: $0.connection) },
+                      open: self.streams.count) else {
                 connection.cancel()
                 return
             }
@@ -461,6 +465,13 @@ public class WifiDirectManager: NSObject, TransportManager {
         }
         self.listener = listener
         listener.start(queue: linkQueue)
+    }
+
+    /// The remote host an accepted connection came from, nil if unknown
+    /// (unknowns share one bound).
+    private static func host(of connection: NWConnection) -> String? {
+        guard case .hostPort(let host, _) = connection.endpoint else { return nil }
+        return "\(host)"
     }
 
     /// A digest of the address, as the Python manager names its own. A

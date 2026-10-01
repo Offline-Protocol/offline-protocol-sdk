@@ -251,7 +251,11 @@ Writes follow Android's bounds: a body is dropped (the core retries it) when
 more than 4 MiB is queued toward a peer whose oldest write has been
 outstanding for two seconds, and a write outstanding for thirty seconds ends
 the stream. Every stream carries TCP keepalive with the Python manager's
-timers. At most sixteen streams are open. A local-network denial is reported
+timers. At most sixteen streams are open, at most twelve of them inbound so
+the listener never takes the slots a dial needs, and at most four inbound
+from one remote host, the Python manager's per-host bound scaled to this
+budget: the listener is open to the whole LAN, and without it one machine's
+silent sockets hold every slot. A local-network denial is reported
 as a diagnostic naming `NSBonjourServices`.
 
 `PeerStreamSessionTests` drives the session with string handles, a fake

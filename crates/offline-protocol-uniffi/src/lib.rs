@@ -17323,6 +17323,13 @@ mod tests {
             ) && !ios_manager.contains("adverts.removeValue(forKey:"),
             "ios/WifiDirectManager.swift: the browser must rebuild its adverts from the full result set"
         );
+        // The listener is open to the whole LAN: without the per-host bound
+        // and the inbound share, one machine's silent sockets hold every slot,
+        // and no peer can reach this device or be dialed by it.
+        assert!(
+            ios_manager.contains("PeerStreamDialPolicy.admitsInbound("),
+            "ios/WifiDirectManager.swift: the listener must admit through the per-host bound"
+        );
 
         // A group client redials the owner the group has NOW. On a group
         // switch the new owner's dial loses the one-outbound-socket flag to
