@@ -613,11 +613,14 @@ public class WifiDirectManager: NSObject, TransportManager {
     }
 
     /// Opens a stream toward `address`, unless it went away or is already
-    /// held (an inbound stream got here first).
+    /// held (an inbound stream got here first), or later when no slot is free.
     private func dial(_ address: String) {
-        guard !isPaused, let endpoint = adverts[address], peers.handle(for: address) == nil,
-              streams.count < Self.MAX_STREAMS else {
+        guard !isPaused, let endpoint = adverts[address], peers.handle(for: address) == nil else {
             dialPolicy.abandoned(address)
+            return
+        }
+        guard streams.count < Self.MAX_STREAMS else {
+            if let delay = dialPolicy.noSlot(address) { scheduleDial(address, after: delay) }
             return
         }
         let stream = Stream(

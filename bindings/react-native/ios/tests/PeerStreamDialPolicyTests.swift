@@ -131,4 +131,14 @@ final class PeerStreamDialPolicyTests: XCTestCase {
         XCTAssertFalse(PeerStreamDialPolicy.admitsInbound(
             from: "10.0.2.1", inboundFrom: [String](), open: PeerStreamDialPolicy.maxStreams))
     }
+
+    /// A dial that found no free slot is tried again, later each time, and
+    /// stays the one dial under way for its address.
+    func testADialWithNoSlotIsTriedAgainOnTheLadder() {
+        var policy = PeerStreamDialPolicy()
+        _ = policy.discovered(peer, weAreLower: true, held: false)
+        XCTAssertEqual(policy.noSlot(peer), PeerStreamDialPolicy.redialInitialDelay)
+        XCTAssertNil(policy.discovered(peer, weAreLower: true, held: false), "one dial at a time")
+        XCTAssertEqual(policy.noSlot(peer), 2 * PeerStreamDialPolicy.redialInitialDelay)
+    }
 }

@@ -17330,6 +17330,15 @@ mod tests {
             ios_manager.contains("PeerStreamDialPolicy.admitsInbound("),
             "ios/WifiDirectManager.swift: the listener must admit through the per-host bound"
         );
+        // A dial that finds no free slot goes onto the redial ladder. Abandoned,
+        // it was never dialed again: an ending stream redials only its own
+        // address, and a browse change dials only a fresh record.
+        assert!(
+            ios_manager.contains(
+                "if let delay = dialPolicy.noSlot(address) { scheduleDial(address, after: delay) }"
+            ),
+            "ios/WifiDirectManager.swift: a dial with no free slot must be retried on the ladder"
+        );
 
         // A group client redials the owner the group has NOW. On a group
         // switch the new owner's dial loses the one-outbound-socket flag to

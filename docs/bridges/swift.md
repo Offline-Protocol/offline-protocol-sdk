@@ -261,8 +261,8 @@ as a diagnostic naming `NSBonjourServices`.
 `PeerStreamSessionTests` drives the session with string handles, a fake
 carrier and a manual clock, `PeerStreamReaderTests` the reader with every
 chunking, `PeerStreamDialPolicyTests` when to dial and redial (the ladder
-climbs only on a redial actually scheduled, and a stale record never takes
-a live one's address), and `PeerStreamFramingTests`
+climbs only on a redial actually scheduled, a dial that finds no free slot
+waits on it, and a stale record never takes a live one's address), and `PeerStreamFramingTests`
 replays the chapter's vectors. The manager's own use of Network framework
 (advertise, browse, connect) is not covered in CI (C9).
 

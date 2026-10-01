@@ -325,10 +325,19 @@ struct PeerStreamDialPolicy {
         return delay
     }
 
-    /// A scheduled dial opened nothing (the advert went, the address is now
-    /// held, the transport paused, or the stream budget is spent).
+    /// A scheduled dial opened nothing because it is not due: the advert
+    /// went, the address is now held, or the transport paused (resuming
+    /// rebuilds the browser, which reports every record again).
     mutating func abandoned(_ address: String) {
         dialing.remove(address)
+    }
+
+    /// A scheduled dial found every stream slot taken. The delay to try again
+    /// after, on the redial ladder. Abandoning it lost the peer for good: an
+    /// ending stream redials only its own address, and a browse change dials
+    /// only a fresh record, so nothing would have dialed it again.
+    mutating func noSlot(_ address: String) -> TimeInterval? {
+        return ended(address, advertised: true, held: false)
     }
 
     /// An outbound stream toward `address` proved it: the ladder starts over.
