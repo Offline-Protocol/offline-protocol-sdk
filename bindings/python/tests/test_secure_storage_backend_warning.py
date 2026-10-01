@@ -4,9 +4,11 @@ On a host without a secret service (a headless Linux server, a container), the
 keyring library selects ``keyring.backends.fail.Keyring``, whose every call
 raises. Both it and ``keyring.backends.null.Keyring`` are classes named just
 ``Keyring``, so a check on the class name alone never recognised the case the
-warning exists for. With two or more viable backends (``keyrings.alt``
-installed on such a host, typically), keyring returns a ``ChainerBackend``
-instead, and the backend that matters is the first one it chains.
+warning exists for. With two or more viable backends keyring returns a
+``ChainerBackend`` instead, and the backend that matters is the first one it
+chains, since writes go there. (A host whose only viable backend is
+``keyrings.alt``'s plaintext file gets that backend directly; the chain cases
+here are defensive.)
 """
 
 from __future__ import annotations
@@ -28,6 +30,11 @@ NAMESPACE = account_storage_namespace("backend-warning-test", "p")
 def _plaintext_backend():
     # keyrings.alt is not a dependency; its file backend is a class of this name.
     return type("PlaintextKeyring", (keyring.backends.null.Keyring,), {"__module__": "keyrings.alt.file"})()
+
+
+def _named(name):
+    # A third-party backend: only the class name marks it as insecure.
+    return lambda: type(name, (keyring.backends.null.Keyring,), {"__module__": "keyrings.vendor"})()
 
 
 def _platform_backend():
@@ -69,8 +76,8 @@ def _warnings(caplog) -> list[str]:
 
 
 @pytest.mark.parametrize("make", [keyring.backends.fail.Keyring, keyring.backends.null.Keyring,
-                                  _plaintext_backend],
-                         ids=["fail", "null", "plaintext"])
+                                  _plaintext_backend, _named("FailKeyring"), _named("NullKeyring")],
+                         ids=["fail", "null", "plaintext", "third_party_fail", "third_party_null"])
 def test_insecure_backend_is_warned_about(backend, caplog, make):
     instance = backend(make())
     with caplog.at_level(logging.WARNING, logger="offline_protocol_sdk.secure_storage"):

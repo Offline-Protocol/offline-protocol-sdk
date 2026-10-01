@@ -106,9 +106,11 @@ class SecureStorage(MlsStorageProvider):
         # (in ``keyring.backends.fail`` and ``keyring.backends.null``), so the
         # module is checked as well as the class name; the failing one is what a
         # host without a secret service gets. When two or more backends are
-        # viable, keyring hands back a ``ChainerBackend`` instead, which is how a
-        # plaintext backend from ``keyrings.alt`` usually arrives on such a host,
-        # so the backend judged is the first one it chains: the one writes reach.
+        # viable, keyring hands back a ``ChainerBackend`` instead, and writes go
+        # to the first backend it chains, so that is the backend judged. (A host
+        # whose only viable backend is ``keyrings.alt``'s plaintext file gets
+        # that backend directly, not a chain; the unwrap is for a chain that
+        # happens to rank an insecure backend first.)
         try:
             backend = keyring.get_keyring()
             # A chain with nothing in it stores nothing, like the null backend.
@@ -123,6 +125,8 @@ class SecureStorage(MlsStorageProvider):
             if (
                 empty_chain
                 or backend_cls.__module__ in _INSECURE_KEYRING_MODULES
+                # keyring's own failing and null backends are caught by module
+                # above; the name markers catch third-party backends.
                 or "Fail" in backend_cls.__name__
                 or "Null" in backend_cls.__name__
                 or "PlaintextKeyring" in backend_cls.__name__
