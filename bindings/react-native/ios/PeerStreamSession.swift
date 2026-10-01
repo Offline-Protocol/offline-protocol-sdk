@@ -303,12 +303,15 @@ struct PeerStreamDialPolicy {
     /// listener full of strangers' sockets never stops this device reaching
     /// the peers it browses.
     static let maxInbound = 12
-    /// Inbound streams one remote host may hold, proved or not. A host needs
-    /// one, two while it reconnects past its own stale stream. Without the
-    /// bound one machine on the LAN fills the inbound share alone, with silent
-    /// sockets that each hold a slot for the preamble deadline, or with as
-    /// many self-made identities. The Python manager's `MAX_STREAMS_PER_HOST`,
-    /// scaled to this budget.
+    /// Inbound streams one remote address may hold, proved or not. A host
+    /// needs one, two while it reconnects past its own stale stream. Without
+    /// the bound one address on the LAN fills the inbound share alone, with
+    /// silent sockets that each hold a slot for the preamble deadline, or with
+    /// as many self-made identities. The Python manager's
+    /// `MAX_STREAMS_PER_HOST`, scaled to this budget. It counts addresses,
+    /// not machines: one with many IPv6 addresses is many hosts here. What
+    /// keeps dials possible whatever the listener holds is `maxInbound`'s
+    /// reserve, so raising `maxInbound` to `maxStreams` gives that up.
     static let maxInboundPerHost = 4
 
     /// Addresses with a dial scheduled or an outbound stream open.

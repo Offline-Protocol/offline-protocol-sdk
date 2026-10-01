@@ -96,8 +96,10 @@ seconds idle, 5 between probes, 3 probes.
   Android still do not talk directly.
 - The stream budget is 16 open streams, as on Android, instead of seven.
   Unlike a Wi-Fi Direct group, the listener is open to the whole LAN, so at
-  most 12 are inbound and at most 4 come from one remote host, as the Python
-  manager bounds its own.
+  most 12 are inbound, leaving 4 for dials whatever the listener holds, and
+  at most 4 come from one remote address, as the Python manager bounds its
+  own. One machine with many addresses can still fill the inbound share; the
+  reserve is what keeps it from stopping this device's dials.
 - The first contact between two iPhones may open two streams if the lower
   one's dial takes longer than five seconds. One closes without a report,
   which the chapter's one-stream-per-address rule already covers.
