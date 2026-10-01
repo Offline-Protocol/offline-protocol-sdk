@@ -96,6 +96,16 @@ pub(crate) const CONFIRMATION_PROBE_INTERVAL_SECS: i64 = 5;
 /// it — so an attacker cannot defeat it by interleaving replays with legit
 /// traffic (see `schedule_session_rekey`).
 pub(crate) const REKEY_INTERVAL_SECS: i64 = 30;
+/// Minimum interval between two pushes of our key package to the same peer
+/// while no session with that peer exists.
+///
+/// The first push is fire-once over a carrier that may lose it without saying
+/// so (a superseded peer stream drops its late frames, `docs/spec/stream-framing.md`), so a
+/// push that produced no session is re-armed. The floor is what keeps the
+/// re-arm from becoming a key-package storm: discovery fires on every inbound
+/// body, and a peer that never answers (an old SDK, encryption opted out) gets
+/// one advertisement per window rather than one per frame.
+pub(crate) const KEY_PACKAGE_RESEND_INTERVAL_SECS: u64 = 30;
 /// Number of welcome retry records processed per tick.
 pub(crate) const WELCOME_RETRY_BATCH_SIZE: usize = 20;
 /// Hard TTL for outbound welcome lifecycle records.

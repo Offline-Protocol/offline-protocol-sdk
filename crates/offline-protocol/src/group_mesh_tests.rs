@@ -9043,7 +9043,9 @@ fn test_key_package_sent_to_cleared_after_invite_consumption() {
     let (mut alice, _bob, _group_id) = setup_alice_bob_group("KP Test");
 
     // Simulate that Alice has already sent a key package to Bob
-    alice.key_package_sent_to.insert(id("bob"));
+    alice
+        .key_package_sent_to
+        .insert(id("bob"), std::time::Instant::now());
 
     // Simulate Alice consuming Bob's key package for an invite.
     // After invite_to_group, the key_package_sent_to for the invitee
@@ -9053,7 +9055,7 @@ fn test_key_package_sent_to_cleared_after_invite_consumption() {
     // test the field directly after the clear logic.
     alice.key_package_sent_to.remove(&id("bob"));
     assert!(
-        !alice.key_package_sent_to.contains(&id("bob")),
+        !alice.key_package_sent_to.contains_key(&id("bob")),
         "key_package_sent_to should be cleared for invitee after invite"
     );
 }
@@ -9066,12 +9068,13 @@ fn test_welcome_handler_clears_key_package_sent_to() {
     // processing the Welcome (so he can send a fresh key package).
     // In setup_alice_bob_group, bob manually joins, so let's verify
     // the behavior by checking that the field can be cleared.
-    bob.key_package_sent_to.insert(id("alice"));
+    bob.key_package_sent_to
+        .insert(id("alice"), std::time::Instant::now());
 
     // Simulate the clear that happens in handle_group_mls_welcome
     bob.key_package_sent_to.remove(&id("alice"));
     assert!(
-        !bob.key_package_sent_to.contains(&id("alice")),
+        !bob.key_package_sent_to.contains_key(&id("alice")),
         "key_package_sent_to should be cleared for inviter after Welcome"
     );
 }

@@ -1380,7 +1380,7 @@ impl OfflineProtocol {
     /// the gate closed.
     pub(crate) fn backfill_group_rich_capabilities(&mut self, unknown_members: &[String]) {
         for member in unknown_members {
-            if self.key_package_sent_to.contains(member.as_str()) {
+            if self.key_package_sent_to.contains_key(member.as_str()) {
                 continue;
             }
             if let Err(e) = self.send_key_package_to(member, false) {
@@ -5671,12 +5671,13 @@ impl OfflineProtocol {
                 // flood (each reply routes through here) would grow it without
                 // bound. Reset at capacity like `plaintext_receive_warned` — the
                 // only cost of forgetting a peer is one idempotent re-send.
-                if !self.key_package_sent_to.contains(peer_id)
+                if !self.key_package_sent_to.contains_key(peer_id)
                     && self.key_package_sent_to.len() >= MAX_KEY_PACKAGE_SENT_TO
                 {
                     self.key_package_sent_to.clear();
                 }
-                self.key_package_sent_to.insert(peer_id.to_string());
+                self.key_package_sent_to
+                    .insert(peer_id.to_string(), Instant::now());
                 debug!(peer_id = %peer_id, message_id = %message.id, "Sent key package");
                 Ok(())
             }

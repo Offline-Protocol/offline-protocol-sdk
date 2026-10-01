@@ -27,6 +27,7 @@ stateDiagram-v2
     None --> KeyPackageSent: push our key package
     None --> Establishing: peer's key package received
     KeyPackageSent --> Joined: peer built a Welcome against it
+    KeyPackageSent --> KeyPackageSent: no session after the interval, push again
 
     Establishing --> Owner: we created the group
     Establishing --> Joined: we processed a Welcome
@@ -40,6 +41,39 @@ stateDiagram-v2
 
     Confirmed --> [*]
 ```
+
+### A push that produced no session is pushed again
+
+**A key package we pushed stands in for an exchange only until the resend
+interval (30 seconds) lapses.** Past it, no session with the peer means the
+push is treated as lost, and the next chance to send repeats it: a discovery
+of the peer, or the reconciliation tick while a message waits for that
+peer's session.
+
+The failure this prevents is a pair that never forms a session. The push is
+one unacknowledged frame, and a carrier can lose it without reporting
+anything: two peers that dial each other at once each push over the first
+stream, the second stream supersedes it, and the superseded stream's late
+frames are dropped with no loss reported, as
+[the stream chapter](../spec/stream-framing.md#what-a-receiver-owes)
+requires. If both pushes were on it, both sides have recorded the peer as
+sent to, and before this rule nothing ever sent again.
+
+Three bounds keep it cheap:
+
+- **The interval is a floor.** Discovery fires on every inbound body, and a
+  peer that never answers (an old SDK, encryption opted out) gets one push
+  per interval, not one per frame. The floor is stamped before the send, so
+  a send that fails waits it out too.
+- **A session stops it.** A session that exists but is unconfirmed belongs to
+  the Welcome lifecycle and the confirmation probes, which own that half.
+- **It is the same package.** The pool hands a peer its own live package
+  until a Welcome consumes it (see [Key package pool](#key-package-pool)), so
+  a repeat push mints no key material and leaves E4 intact.
+
+Only a peer already pushed to qualifies. The first push stays discovery's,
+and a first push that failed to send is still not recorded, so the next
+discovery makes it.
 
 ### Both-create convergence
 

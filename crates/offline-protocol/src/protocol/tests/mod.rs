@@ -1817,12 +1817,14 @@ fn test_on_neighbor_lost_clears_tracking() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Simulate that we've sent a key package to a peer (by inserting into tracking set)
-    protocol.key_package_sent_to.insert(id("peer123"));
-    assert!(protocol.key_package_sent_to.contains(&id("peer123")));
+    protocol
+        .key_package_sent_to
+        .insert(id("peer123"), std::time::Instant::now());
+    assert!(protocol.key_package_sent_to.contains_key(&id("peer123")));
 
     // Neighbor lost should remove from tracking
     protocol.on_neighbor_lost(&id("peer123"));
-    assert!(!protocol.key_package_sent_to.contains(&id("peer123")));
+    assert!(!protocol.key_package_sent_to.contains_key(&id("peer123")));
 }
 
 #[test]
@@ -15997,6 +15999,126 @@ fn test_desync_dm_heals_end_to_end_when_detector_id_is_smaller() {
     );
 }
 
+/// Two engines whose first key packages are both lost, the way a superseded
+/// peer stream drops its late frames without reporting a loss
+/// (`docs/spec/stream-framing.md`). Alice has a message queued for Bob behind
+/// the session that never formed, and the superseding stream's own
+/// announcement, inside the resend interval, has changed nothing.
+fn pair_with_both_first_key_packages_lost() -> (
+    OfflineProtocol,
+    MockTransport,
+    OfflineProtocol,
+    MockTransport,
+    Arc<Mutex<Vec<String>>>,
+) {
+    let (mut alice, alice_h) = make_encrypted_protocol("alice");
+    let (mut bob, bob_h) = make_encrypted_protocol("bob");
+    let bob_rx: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let h = Arc::clone(&bob_rx);
+        bob.on_event(move |e| {
+            if let Event::MessageReceived { content, .. } = e {
+                h.lock().unwrap().push(content);
+            }
+        });
+    }
+    alice.start().unwrap();
+    bob.start().unwrap();
+
+    alice.on_neighbor_discovered(&id("bob"));
+    bob.on_neighbor_discovered(&id("alice"));
+    assert!(!alice_h.sent_messages().is_empty() && !bob_h.sent_messages().is_empty());
+    alice_h.clear_sent_messages();
+    bob_h.clear_sent_messages();
+
+    alice
+        .send_message(&id("bob"), "after-loss", None, None::<String>)
+        .unwrap();
+    alice.on_neighbor_discovered(&id("bob"));
+    bob.on_neighbor_discovered(&id("alice"));
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+    assert!(
+        bob_rx.lock().unwrap().is_empty(),
+        "nothing can be delivered before a key package gets through"
+    );
+    (alice, alice_h, bob, bob_h, bob_rx)
+}
+
+/// Moves every key-package push `protocol` made back past the resend interval.
+fn age_key_package_pushes(protocol: &mut OfflineProtocol) {
+    let aged = std::time::Instant::now()
+        .checked_sub(Duration::from_secs(KEY_PACKAGE_RESEND_INTERVAL_SECS + 1))
+        .unwrap();
+    for sent_at in protocol.key_package_sent_to.values_mut() {
+        *sent_at = aged;
+    }
+}
+
+/// A rediscovery past the interval pushes the lost key package again, so the
+/// pair forms a session and the queued message is delivered. Before the fix
+/// every rediscovery returned early on the "already sent" marker and the pair
+/// stayed session-less until something cleared it.
+#[test]
+fn a_lost_key_package_is_pushed_again_on_rediscovery() {
+    let (mut alice, alice_h, mut bob, bob_h, bob_rx) = pair_with_both_first_key_packages_lost();
+
+    age_key_package_pushes(&mut bob);
+    bob.on_neighbor_discovered(&id("alice"));
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+
+    assert!(
+        bob_rx.lock().unwrap().iter().any(|c| c == "after-loss"),
+        "the queued message must arrive once the key package is pushed again (got {:?})",
+        bob_rx.lock().unwrap()
+    );
+}
+
+/// The same recovery with no rediscovery at all, which a quiet pair never
+/// produces: the queued message is reason enough to push again from the tick.
+#[test]
+fn a_lost_key_package_is_pushed_again_from_the_tick_while_a_message_waits() {
+    let (mut alice, alice_h, mut bob, bob_h, bob_rx) = pair_with_both_first_key_packages_lost();
+
+    age_key_package_pushes(&mut alice);
+    alice.last_reconciliation_at = None;
+    alice.process().unwrap();
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+
+    assert!(
+        bob_rx.lock().unwrap().iter().any(|c| c == "after-loss"),
+        "the queued message must arrive once the key package is pushed again (got {:?})",
+        bob_rx.lock().unwrap()
+    );
+}
+
+/// Discovery fires on every inbound body, so the re-push must be bounded: not
+/// inside the interval, and never once a session exists.
+#[test]
+fn a_key_package_is_not_pushed_again_inside_the_interval_or_once_a_session_exists() {
+    let (mut alice, alice_h, mut bob, bob_h, _bob_rx) = pair_with_both_first_key_packages_lost();
+    let is_key_package = |m: &Message| m.content.starts_with(internal_prefixes::KEY_PACKAGE);
+
+    for _ in 0..5 {
+        bob.on_neighbor_discovered(&id("alice"));
+    }
+    assert!(
+        !bob_h.sent_messages().iter().any(is_key_package),
+        "inside the interval"
+    );
+
+    age_key_package_pushes(&mut bob);
+    bob.on_neighbor_discovered(&id("alice"));
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+    assert!(bob.has_mls_session(&id("alice")).unwrap());
+
+    age_key_package_pushes(&mut bob);
+    bob.on_neighbor_discovered(&id("alice"));
+    assert!(
+        !bob_h.sent_messages().iter().any(is_key_package),
+        "a peer with a session is never pushed to again"
+    );
+}
+
 /// The deferred-ACK headline: an *evicted* pending entry (not merely a drained
 /// one) still recovers on the sender's next resend, precisely because the
 /// eviction never produced an ACK. With a 1-slot per-peer queue and `DropOldest`,
@@ -17722,7 +17844,9 @@ fn test_on_neighbor_lost_clears_confirmed_session() {
 
     // Add a confirmed session
     protocol.confirmed_sessions.insert("peer123".to_string());
-    protocol.key_package_sent_to.insert(id("peer123"));
+    protocol
+        .key_package_sent_to
+        .insert(id("peer123"), std::time::Instant::now());
 
     assert!(protocol.confirmed_sessions.contains("peer123"));
 
@@ -17730,7 +17854,7 @@ fn test_on_neighbor_lost_clears_confirmed_session() {
     // (confirmed_sessions might still remain - it's the crypto state)
     protocol.on_neighbor_lost(&id("peer123"));
 
-    assert!(!protocol.key_package_sent_to.contains(&id("peer123")));
+    assert!(!protocol.key_package_sent_to.contains_key(&id("peer123")));
 }
 
 #[test]
@@ -22365,7 +22489,9 @@ fn test_known_peers_capacity_evicts_least_recently_seen() {
 
     // Backdate one entry so the eviction victim is deterministic
     *protocol.known_peers.get_mut("peer-7").unwrap() -= Duration::from_secs(60);
-    protocol.key_package_sent_to.insert("peer-7".to_string());
+    protocol
+        .key_package_sent_to
+        .insert("peer-7".to_string(), std::time::Instant::now());
 
     // A new peer discovered at capacity is tracked; the least-recently-seen
     // entry is evicted (issue #140: a local BLE neighbor must never be
@@ -22376,7 +22502,7 @@ fn test_known_peers_capacity_evicts_least_recently_seen() {
     assert!(!protocol.known_peers.contains_key("peer-7"));
     // Eviction mirrors on_neighbor_lost: the key-package marker is cleared
     // so the peer receives a fresh key package if it re-appears.
-    assert!(!protocol.key_package_sent_to.contains("peer-7"));
+    assert!(!protocol.key_package_sent_to.contains_key("peer-7"));
 
     // Explicit loss still frees capacity
     protocol.on_neighbor_lost("peer-overflow");
@@ -22390,7 +22516,9 @@ fn test_known_peers_ttl_eviction() {
 
     protocol.on_neighbor_discovered("alice");
     protocol.on_neighbor_discovered("bob");
-    protocol.key_package_sent_to.insert("alice".to_string());
+    protocol
+        .key_package_sent_to
+        .insert("alice".to_string(), std::time::Instant::now());
 
     // Fresh entries survive a sweep at the current instant
     protocol.prune_stale_known_peers(std::time::Instant::now());
@@ -22402,7 +22530,7 @@ fn test_known_peers_ttl_eviction() {
     protocol.prune_stale_known_peers(past_ttl);
     assert!(protocol.known_peers.is_empty());
     assert!(!protocol.is_known_peer("alice"));
-    assert!(!protocol.key_package_sent_to.contains("alice"));
+    assert!(!protocol.key_package_sent_to.contains_key("alice"));
 }
 
 #[test]
@@ -36400,14 +36528,14 @@ fn nostr_resolution_arms_the_reverse_exchange_that_heals_a_replayed_record() {
     };
 
     assert!(
-        !bob.key_package_sent_to.contains(&id("alice")),
+        !bob.key_package_sent_to.contains_key(&id("alice")),
         "precondition: bob has not pushed his package to alice yet"
     );
 
     bob.handle_resolved_key_package(&plaintext).unwrap();
 
     assert!(
-        bob.key_package_sent_to.contains(&id("alice")),
+        bob.key_package_sent_to.contains_key(&id("alice")),
         "resolving must push our own key package back — that reverse exchange \
          is the only thing that heals a resolved-but-consumed package, and \
          nothing at resolution time can tell a spent record from a live one"
@@ -39810,7 +39938,7 @@ fn a_key_package_escapes_the_ratchet_but_its_reset_does_not() {
     // And the escape really does re-open the reciprocal send, which is the
     // only channel that can re-teach the peer.
     assert!(
-        !bob.key_package_sent_to.contains(&id("alice")),
+        !bob.key_package_sent_to.contains_key(&id("alice")),
         "the escape must clear the send record, or the peer is never re-advertised to"
     );
 }
