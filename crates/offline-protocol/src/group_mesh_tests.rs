@@ -9045,7 +9045,7 @@ fn test_key_package_sent_to_cleared_after_invite_consumption() {
     // Simulate that Alice has already sent a key package to Bob
     alice
         .key_package_sent_to
-        .insert(id("bob"), std::time::Instant::now());
+        .insert(id("bob"), (std::time::Instant::now(), 0));
 
     // Simulate Alice consuming Bob's key package for an invite.
     // After invite_to_group, the key_package_sent_to for the invitee
@@ -9069,7 +9069,7 @@ fn test_welcome_handler_clears_key_package_sent_to() {
     // In setup_alice_bob_group, bob manually joins, so let's verify
     // the behavior by checking that the field can be cleared.
     bob.key_package_sent_to
-        .insert(id("alice"), std::time::Instant::now());
+        .insert(id("alice"), (std::time::Instant::now(), 0));
 
     // Simulate the clear that happens in handle_group_mls_welcome
     bob.key_package_sent_to.remove(&id("alice"));

@@ -104,8 +104,13 @@ pub(crate) const REKEY_INTERVAL_SECS: i64 = 30;
 /// push that produced no session is re-armed. The floor is what keeps the
 /// re-arm from becoming a key-package storm: discovery fires on every inbound
 /// body, and a peer that never answers (an old SDK, encryption opted out) gets
-/// one advertisement per window rather than one per frame.
+/// one advertisement per window rather than one per frame. The window doubles
+/// with each repeat up to [`KEY_PACKAGE_RESEND_CAP_SECS`], so that peer is not
+/// sent a key package every 30 seconds for as long as it stays in range.
 pub(crate) const KEY_PACKAGE_RESEND_INTERVAL_SECS: u64 = 30;
+/// Ceiling on the doubling key-package resend window, matching
+/// [`WELCOME_UNREACHABLE_RETRY_CAP_SECS`].
+pub(crate) const KEY_PACKAGE_RESEND_CAP_SECS: u64 = 600;
 /// Number of welcome retry records processed per tick.
 pub(crate) const WELCOME_RETRY_BATCH_SIZE: usize = 20;
 /// Hard TTL for outbound welcome lifecycle records.
@@ -724,8 +729,8 @@ pub(crate) const MAX_PENDING_MESSAGE_BYTES_GLOBAL: usize = 16 * 1024 * 1024;
 /// per-recipient record still has to be readable for long enough to migrate it.
 pub(crate) const MAX_PROTOCOL_STATE_RECORD_BYTES: usize = 4 * 1024 * 1024;
 
-/// Maximum number of peers remembered in `key_package_sent_to` (the "already
-/// sent our key package to this peer" set).
+/// Maximum number of peers remembered in `key_package_sent_to` (the peers we
+/// have pushed our key package to, with when we last did).
 ///
 /// Wire-claimed ids grow this set in lockstep with a key-package flood, so it
 /// resets at capacity like [`MAX_PLAINTEXT_RECEIVE_WARNED_PEERS`]: the only cost

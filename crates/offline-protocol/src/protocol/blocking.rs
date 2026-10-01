@@ -431,7 +431,7 @@ mod tests {
         );
         proto
             .key_package_sent_to
-            .insert(id("bob"), std::time::Instant::now());
+            .insert(id("bob"), (std::time::Instant::now(), 0));
 
         // Queue a pending encrypted message for bob
         let pending_msg = Message::new(

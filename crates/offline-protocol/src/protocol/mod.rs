@@ -248,12 +248,13 @@ pub struct OfflineProtocol {
     /// Key packages received but not yet used (sender_id -> package).
     pub(crate) pending_key_packages: HashMap<String, ReceivedKeyPackage>,
 
-    /// Peers we have pushed our key package to, with when we last did.
+    /// Peers we have pushed our key package to, with when we last did and how
+    /// many times the push has been re-armed since.
     ///
     /// The instant is what lets a push that produced no session be re-armed
     /// (`Self::rearm_key_package_for_peer`) instead of standing in for a
-    /// delivery it never proved.
-    pub(crate) key_package_sent_to: HashMap<String, Instant>,
+    /// delivery it never proved; the count is that re-arm's backoff.
+    pub(crate) key_package_sent_to: HashMap<String, (Instant, u32)>,
 
     /// All discovered/connected peers, tracked independently of encryption.
     /// Used by service discovery to know who to broadcast queries to.

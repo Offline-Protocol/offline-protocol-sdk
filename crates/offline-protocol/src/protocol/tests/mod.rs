@@ -1819,7 +1819,7 @@ fn test_on_neighbor_lost_clears_tracking() {
     // Simulate that we've sent a key package to a peer (by inserting into tracking set)
     protocol
         .key_package_sent_to
-        .insert(id("peer123"), std::time::Instant::now());
+        .insert(id("peer123"), (std::time::Instant::now(), 0));
     assert!(protocol.key_package_sent_to.contains_key(&id("peer123")));
 
     // Neighbor lost should remove from tracking
@@ -16044,14 +16044,19 @@ fn pair_with_both_first_key_packages_lost() -> (
     (alice, alice_h, bob, bob_h, bob_rx)
 }
 
-/// Moves every key-package push `protocol` made back past the resend interval.
-fn age_key_package_pushes(protocol: &mut OfflineProtocol) {
+/// Moves every key-package push `protocol` made back by `secs`.
+fn age_key_package_pushes_by(protocol: &mut OfflineProtocol, secs: u64) {
     let aged = std::time::Instant::now()
-        .checked_sub(Duration::from_secs(KEY_PACKAGE_RESEND_INTERVAL_SECS + 1))
+        .checked_sub(Duration::from_secs(secs))
         .unwrap();
-    for sent_at in protocol.key_package_sent_to.values_mut() {
+    for (sent_at, _) in protocol.key_package_sent_to.values_mut() {
         *sent_at = aged;
     }
+}
+
+/// Moves every key-package push `protocol` made back past any resend wait.
+fn age_key_package_pushes(protocol: &mut OfflineProtocol) {
+    age_key_package_pushes_by(protocol, KEY_PACKAGE_RESEND_CAP_SECS + 1);
 }
 
 /// A rediscovery past the interval pushes the lost key package again, so the
@@ -16125,7 +16130,7 @@ fn a_key_package_is_not_pushed_again_inside_the_interval_or_once_a_session_exist
     age_key_package_pushes(&mut bob);
     bob.on_neighbor_discovered(&id("alice"));
     assert!(
-        bob.key_package_sent_to[&id("alice")].elapsed()
+        bob.key_package_sent_to[&id("alice")].0.elapsed()
             < Duration::from_secs(KEY_PACKAGE_RESEND_INTERVAL_SECS),
         "a session found in storage re-stamps the floor"
     );
@@ -16133,6 +16138,37 @@ fn a_key_package_is_not_pushed_again_inside_the_interval_or_once_a_session_exist
         !bob_h.sent_messages().iter().any(is_key_package),
         "a peer with an unconfirmed session is not pushed to either"
     );
+}
+
+/// A peer that never answers must not be sent a key package every interval
+/// for as long as it stays in range: each repeat doubles the wait.
+#[test]
+fn a_key_package_repeat_backs_off() {
+    let (_alice, _alice_h, mut bob, bob_h, _bob_rx) = pair_with_both_first_key_packages_lost();
+    let pushes = || {
+        bob_h
+            .sent_messages()
+            .iter()
+            .filter(|m| m.content.starts_with(internal_prefixes::KEY_PACKAGE))
+            .count()
+    };
+
+    age_key_package_pushes_by(&mut bob, KEY_PACKAGE_RESEND_INTERVAL_SECS + 1);
+    bob.on_neighbor_discovered(&id("alice"));
+    assert_eq!(pushes(), 1, "the first repeat waits one interval");
+
+    age_key_package_pushes_by(&mut bob, KEY_PACKAGE_RESEND_INTERVAL_SECS + 1);
+    bob.on_neighbor_discovered(&id("alice"));
+    assert_eq!(pushes(), 1, "the second waits two");
+
+    age_key_package_pushes_by(&mut bob, 2 * KEY_PACKAGE_RESEND_INTERVAL_SECS + 1);
+    bob.on_neighbor_discovered(&id("alice"));
+    assert_eq!(pushes(), 2);
+
+    bob.key_package_sent_to.get_mut(&id("alice")).unwrap().1 = u32::MAX;
+    age_key_package_pushes_by(&mut bob, KEY_PACKAGE_RESEND_CAP_SECS + 1);
+    bob.on_neighbor_discovered(&id("alice"));
+    assert_eq!(pushes(), 3, "the wait stops growing at the cap");
 }
 
 /// The deferred-ACK headline: an *evicted* pending entry (not merely a drained
@@ -17862,7 +17898,7 @@ fn test_on_neighbor_lost_clears_confirmed_session() {
     protocol.confirmed_sessions.insert("peer123".to_string());
     protocol
         .key_package_sent_to
-        .insert(id("peer123"), std::time::Instant::now());
+        .insert(id("peer123"), (std::time::Instant::now(), 0));
 
     assert!(protocol.confirmed_sessions.contains("peer123"));
 
@@ -22507,7 +22543,7 @@ fn test_known_peers_capacity_evicts_least_recently_seen() {
     *protocol.known_peers.get_mut("peer-7").unwrap() -= Duration::from_secs(60);
     protocol
         .key_package_sent_to
-        .insert("peer-7".to_string(), std::time::Instant::now());
+        .insert("peer-7".to_string(), (std::time::Instant::now(), 0));
 
     // A new peer discovered at capacity is tracked; the least-recently-seen
     // entry is evicted (issue #140: a local BLE neighbor must never be
@@ -22534,7 +22570,7 @@ fn test_known_peers_ttl_eviction() {
     protocol.on_neighbor_discovered("bob");
     protocol
         .key_package_sent_to
-        .insert("alice".to_string(), std::time::Instant::now());
+        .insert("alice".to_string(), (std::time::Instant::now(), 0));
 
     // Fresh entries survive a sweep at the current instant
     protocol.prune_stale_known_peers(std::time::Instant::now());

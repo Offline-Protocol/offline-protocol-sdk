@@ -61,10 +61,13 @@ sent to, and before this rule nothing ever sent again.
 
 Three bounds keep it cheap:
 
-- **The interval is a floor.** Discovery fires on every inbound body, and a
-  peer that never answers (an old SDK, encryption opted out) gets one push
-  per interval, not one per frame. The floor is stamped before the send, so
-  a send that fails waits it out too.
+- **The interval is a floor, and it backs off.** Discovery fires on every
+  inbound body, so a peer that never answers (an old SDK, encryption opted
+  out) would otherwise get a push per frame, or with a fixed floor one every
+  30 seconds for as long as it stays in range. Each repeat doubles the wait,
+  up to 10 minutes, the same ceiling as the Welcome retries; only forgetting
+  the peer (a session reset, the neighbour lost) starts it over. The floor is
+  stamped before the send, so a send that fails waits it out too.
 - **A session stops it.** A session that exists but is unconfirmed belongs to
   the Welcome lifecycle and the confirmation probes, which own that half.
 - **It is the same package.** The pool hands a peer its own live package
