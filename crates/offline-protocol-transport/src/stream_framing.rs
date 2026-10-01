@@ -2,8 +2,8 @@
 //!
 //! The chapter is `docs/spec/stream-framing.md`. A peer stream is a byte
 //! stream the platform established to exactly one other device (a Wi-Fi
-//! Direct group socket, a Multipeer session, a TCP connection over a LAN or a
-//! routed mesh), and the engine holds every such stream in the slot the FFI
+//! Direct group socket, a TCP connection over a LAN, AWDL or a routed
+//! mesh), and the engine holds every such stream in the slot the FFI
 //! names `wifi_direct`. A stream gets two things from its platform for free,
 //! bytes in order and a close; this module is the one Rust implementation of
 //! the two it does not: a frame boundary, and the peer's proved address.

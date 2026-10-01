@@ -1,8 +1,9 @@
 //! The peer-stream transport: the queue engine behind the `wifi_direct` slot.
 //!
 //! A peer stream is a byte stream the platform established to exactly one
-//! other device: a Wi-Fi Direct group socket on Android, a Multipeer session
-//! on iOS, a TCP connection over a LAN or a routed mesh on a host. To the
+//! other device: a Wi-Fi Direct group socket on Android, a TCP connection
+//! over a LAN or AWDL on iOS, a TCP connection over a LAN or a routed mesh on
+//! a host. To the
 //! engine they are one transport, and this is it. The name is historical and
 //! recorded as debt in `docs/spec/stream-framing.md`; renaming the slot is a
 //! separate breaking change.
