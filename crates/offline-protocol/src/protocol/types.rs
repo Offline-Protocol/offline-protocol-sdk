@@ -96,6 +96,31 @@ pub(crate) const CONFIRMATION_PROBE_INTERVAL_SECS: i64 = 5;
 /// it — so an attacker cannot defeat it by interleaving replays with legit
 /// traffic (see `schedule_session_rekey`).
 pub(crate) const REKEY_INTERVAL_SECS: i64 = 30;
+/// Minimum interval between two pushes of our key package to the same peer
+/// while no session with that peer exists.
+///
+/// The first push is fire-once over a carrier that may lose it without saying
+/// so (a superseded peer stream drops its late frames, `docs/spec/stream-framing.md`), so a
+/// push that produced no session is re-armed. The floor is what keeps the
+/// re-arm from becoming a key-package storm: discovery fires on every inbound
+/// body, and a peer that never answers (an old SDK, encryption opted out) gets
+/// one advertisement per window rather than one per frame. The window doubles
+/// with each repeat up to [`KEY_PACKAGE_RESEND_CAP_SECS`], so that peer is not
+/// sent a key package every 30 seconds for as long as it stays in range.
+pub(crate) const KEY_PACKAGE_RESEND_INTERVAL_SECS: u64 = 30;
+/// Ceiling on the doubling key-package resend window, matching
+/// [`WELCOME_UNREACHABLE_RETRY_CAP_SECS`].
+pub(crate) const KEY_PACKAGE_RESEND_CAP_SECS: u64 = 600;
+// The wait doubles at most five times (`<< min(5)`, which also keeps the
+// shift from wrapping the wait to zero); this keeps the cap reachable.
+const _: () = assert!(KEY_PACKAGE_RESEND_INTERVAL_SECS << 5 >= KEY_PACKAGE_RESEND_CAP_SECS);
+const _: () = assert!(KEY_PACKAGE_RESEND_CAP_SECS as i64 == WELCOME_UNREACHABLE_RETRY_CAP_SECS);
+
+/// Seconds to wait before repeating a key-package push that has already been
+/// repeated `repeats` times: the interval, doubled per repeat, capped.
+pub(crate) fn key_package_resend_wait_secs(repeats: u32) -> u64 {
+    (KEY_PACKAGE_RESEND_INTERVAL_SECS << repeats.min(5)).min(KEY_PACKAGE_RESEND_CAP_SECS)
+}
 /// Number of welcome retry records processed per tick.
 pub(crate) const WELCOME_RETRY_BATCH_SIZE: usize = 20;
 /// Hard TTL for outbound welcome lifecycle records.
@@ -714,8 +739,8 @@ pub(crate) const MAX_PENDING_MESSAGE_BYTES_GLOBAL: usize = 16 * 1024 * 1024;
 /// per-recipient record still has to be readable for long enough to migrate it.
 pub(crate) const MAX_PROTOCOL_STATE_RECORD_BYTES: usize = 4 * 1024 * 1024;
 
-/// Maximum number of peers remembered in `key_package_sent_to` (the "already
-/// sent our key package to this peer" set).
+/// Maximum number of peers remembered in `key_package_sent_to` (the peers we
+/// have pushed our key package to, with when we last did).
 ///
 /// Wire-claimed ids grow this set in lockstep with a key-package flood, so it
 /// resets at capacity like [`MAX_PLAINTEXT_RECEIVE_WARNED_PEERS`]: the only cost

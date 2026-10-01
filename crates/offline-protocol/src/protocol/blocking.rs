@@ -429,7 +429,9 @@ mod tests {
                 local_expires_at_ms: u64::MAX,
             },
         );
-        proto.key_package_sent_to.insert(id("bob"));
+        proto
+            .key_package_sent_to
+            .insert(id("bob"), (std::time::Instant::now(), 0));
 
         // Queue a pending encrypted message for bob
         let pending_msg = Message::new(
@@ -445,7 +447,7 @@ mod tests {
         proto.unblock_user(&id("bob")).unwrap();
 
         assert!(proto.pending_key_packages.get(&id("bob")).is_none());
-        assert!(!proto.key_package_sent_to.contains(&id("bob")));
+        assert!(!proto.key_package_sent_to.contains_key(&id("bob")));
         assert!(!proto.confirmed_sessions.contains(&id("bob")));
         assert!(proto
             .pending_queue
@@ -754,7 +756,7 @@ mod tests {
             "Blocked user should not be added to known_peers"
         );
         assert!(
-            !proto.key_package_sent_to.contains("mallory"),
+            !proto.key_package_sent_to.contains_key("mallory"),
             "Blocked user should not trigger key package exchange"
         );
 

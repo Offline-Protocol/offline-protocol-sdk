@@ -539,7 +539,7 @@ impl OfflineProtocol {
             // Send our key package back if auto_key_exchange is enabled
             if self.config.encryption.auto_key_exchange
                 && self.config.encryption.enabled
-                && !self.key_package_sent_to.contains(sender)
+                && !self.key_package_sent_to.contains_key(sender)
             {
                 let _ = self.send_key_package_to(sender, false);
             }

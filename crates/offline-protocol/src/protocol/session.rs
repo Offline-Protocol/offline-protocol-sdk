@@ -1,12 +1,13 @@
 //! Session confirmation, welcome lifecycle, and pending session reconciliation.
 
 use super::{
-    classify_transport_send_error, internal_prefixes, lock_shared_state, send_failure_token,
-    GatewayCarrier, OfflineProtocol, PresenceRescueThrottle, PruneAllowance, RestorableRecord,
-    SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord, CONFIRMATION_PROBE_INTERVAL_SECS,
-    CONFIRMATION_RETRY_INTERVAL_SECS, MAX_REKEY_TRACKED_PEERS, RECONCILIATION_THROTTLE_MS,
-    REKEY_INTERVAL_SECS, SEND_FAIL_REASON_CONFIRM_TIMEOUT, WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS,
-    WELCOME_LIFECYCLE_TTL_SECS, WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
+    classify_transport_send_error, internal_prefixes, key_package_resend_wait_secs,
+    lock_shared_state, send_failure_token, GatewayCarrier, OfflineProtocol, PresenceRescueThrottle,
+    PruneAllowance, RestorableRecord, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
+    CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS, MAX_REKEY_TRACKED_PEERS,
+    RECONCILIATION_THROTTLE_MS, REKEY_INTERVAL_SECS, SEND_FAIL_REASON_CONFIRM_TIMEOUT,
+    WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
+    WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
     WELCOME_PRESENCE_RESCUE_BASE_SECS, WELCOME_PRESENCE_RESCUE_MAX_SECS, WELCOME_RETRY_BATCH_SIZE,
     WELCOME_RETRY_JITTER_RATIO, WELCOME_UNREACHABLE_RETRY_CAP_SECS, WELCOME_WATCHLIST_MAX_AGE_SECS,
 };
@@ -565,6 +566,14 @@ impl OfflineProtocol {
         self.last_reconciliation_at = Some(now);
         self.retry_pending_session_confirmations();
         self.kick_pending_session_reconciliation(source_event);
+
+        // A message queued for a session is the standing reason to want one,
+        // so a lost key package is re-armed here too, not only on a discovery
+        // that a quiet pair may never produce.
+        let waiting: Vec<String> = self.pending_encrypted_messages.keys().cloned().collect();
+        for peer_id in waiting {
+            self.rearm_key_package_for_peer(&peer_id);
+        }
     }
 
     pub(super) fn kick_pending_session_reconciliation(&mut self, source_event: &str) {
@@ -1287,6 +1296,76 @@ impl OfflineProtocol {
                         "Failed to re-arm expired welcome on peer reachability"
                     );
                 }
+            }
+        }
+    }
+
+    /// Pushes our key package to `peer_id` again when an earlier push produced
+    /// no session.
+    ///
+    /// Invariant: a key package we pushed stands in for an exchange only until
+    /// the interval lapses; past it, no session with the peer means the push
+    /// is treated as lost. Without this the push is fire-once: a carrier can
+    /// drop that one frame without reporting it (a superseded peer stream
+    /// drops its late frames, `docs/spec/stream-framing.md`), the peer is already marked
+    /// as sent to, and when both sides' pushes are lost neither ever sends
+    /// again, so the pair never forms a session.
+    ///
+    /// The re-push is the same package (ADR 0012): the pool hands a peer its
+    /// own live package until a Welcome consumes it, so no key material is
+    /// minted. A session that exists but is unconfirmed is left to the Welcome
+    /// lifecycle and the confirmation probes, which own that half.
+    ///
+    /// Only a peer already pushed to qualifies; the first push belongs to
+    /// discovery. The stamp is taken before the send, so a send that fails
+    /// still waits out the interval instead of being retried on every tick.
+    /// A send that fails does not count as a repeat, though: the backoff is
+    /// for a peer that was asked and did not answer, and a peer whose frame
+    /// never left was not asked. Counting it would walk an unreachable peer
+    /// up to the cap while it is away, and nothing resets the count when it
+    /// comes back over a carrier with no neighbour-lost event.
+    ///
+    /// A blocked peer is never pushed to. Blocking is bidirectional, and the
+    /// tick reaches this for any peer with a queued message, which a block
+    /// leaves in place; without the check the tick would advertise our
+    /// presence and key package to the blocked peer every window.
+    pub(super) fn rearm_key_package_for_peer(&mut self, peer_id: &str) {
+        if !self.config.encryption.enabled
+            || !self.config.encryption.auto_key_exchange
+            || self.confirmed_sessions.contains(peer_id)
+            || self.is_user_blocked(peer_id)
+        {
+            return;
+        }
+        let Some((sent_at, repeats)) = self.key_package_sent_to.get_mut(peer_id) else {
+            return;
+        };
+        if sent_at.elapsed() < StdDuration::from_secs(key_package_resend_wait_secs(*repeats)) {
+            return;
+        }
+        // Stamped whatever the storage check below says: it is storage I/O,
+        // and discovery runs on every inbound body, so an unconfirmed session
+        // (or a failing read) must cost one check per wait, not one per
+        // frame. A check that finds a session, and a push that leaves, each
+        // double the wait, so a peer that never answers settles at one push
+        // per cap.
+        *sent_at = Instant::now();
+        let backed_off = match self.has_mls_session(peer_id) {
+            Ok(false) => {
+                debug!(peer_id = %peer_id, "Key package produced no session, pushing it again");
+                match self.send_key_package_to(peer_id, false) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        debug!(peer_id = %peer_id, error = %e, "Key package re-push deferred");
+                        false
+                    }
+                }
+            }
+            Ok(true) | Err(_) => true,
+        };
+        if backed_off {
+            if let Some((_, repeats)) = self.key_package_sent_to.get_mut(peer_id) {
+                *repeats = repeats.saturating_add(1);
             }
         }
     }

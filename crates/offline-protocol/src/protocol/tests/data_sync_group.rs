@@ -1136,7 +1136,10 @@ fn a_closed_gate_probes_the_member_holding_it_shut() {
         .kick_group_data_sync(&group, &bob.address, "rediscovered");
 
     assert!(
-        alice.protocol.key_package_sent_to.contains(&bob.address),
+        alice
+            .protocol
+            .key_package_sent_to
+            .contains_key(&bob.address),
         "a member of unknown capability has to be asked what it supports; \
          our key package is the question, and its automatic reply is the \
          answer"

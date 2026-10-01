@@ -1375,12 +1375,14 @@ impl OfflineProtocol {
     /// an old-SDK inviter): send them our key package so their
     /// `auto_key_exchange` reply teaches us theirs. Guarded by
     /// `key_package_sent_to`, so repeated gate-failing group sends don't
-    /// re-probe the same peer; a peer that never replies is either
+    /// re-probe the same peer (the only repeat is
+    /// `rearm_key_package_for_peer`, on its doubling backoff); a peer that
+    /// never replies is either
     /// unreachable, old-SDK, or opted out — all of which correctly leave
     /// the gate closed.
     pub(crate) fn backfill_group_rich_capabilities(&mut self, unknown_members: &[String]) {
         for member in unknown_members {
-            if self.key_package_sent_to.contains(member.as_str()) {
+            if self.key_package_sent_to.contains_key(member.as_str()) {
                 continue;
             }
             if let Err(e) = self.send_key_package_to(member, false) {
@@ -5671,12 +5673,23 @@ impl OfflineProtocol {
                 // flood (each reply routes through here) would grow it without
                 // bound. Reset at capacity like `plaintext_receive_warned` — the
                 // only cost of forgetting a peer is one idempotent re-send.
-                if !self.key_package_sent_to.contains(peer_id)
+                if !self.key_package_sent_to.contains_key(peer_id)
                     && self.key_package_sent_to.len() >= MAX_KEY_PACKAGE_SENT_TO
                 {
                     self.key_package_sent_to.clear();
                 }
-                self.key_package_sent_to.insert(peer_id.to_string());
+                // Re-stamped, and the repeat count (the re-arm's backoff) is
+                // kept: only a reset push, which opens a new exchange, or a
+                // removal (session reset, neighbour lost) starts it over.
+                let now = Instant::now();
+                let entry = self
+                    .key_package_sent_to
+                    .entry(peer_id.to_string())
+                    .or_insert((now, 0));
+                entry.0 = now;
+                if session_reset {
+                    entry.1 = 0;
+                }
                 debug!(peer_id = %peer_id, message_id = %message.id, "Sent key package");
                 Ok(())
             }
