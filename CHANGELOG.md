@@ -432,6 +432,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   secure provider in the UDL and the integration guide, not only on the
   protocol-state provider: a custom secure store that reports a transient
   fault as `CorruptedData` loses every sealed protocol-state record.
+- **Python `SecureStorage` warns on a host without a secret service.** Its
+  warning about a backend that cannot hold MLS keys checked only the class name,
+  and keyring's failing and null backends are both classes named `Keyring`, so a
+  headless Linux host or container (which gets `keyring.backends.fail.Keyring`)
+  was never warned. The check now also recognises those modules, and judges the
+  first backend inside keyring's `ChainerBackend` (the one writes go to) rather
+  than the chainer itself, which no check matched. The warning names the
+  backend in full (`keyring.backends.fail.Keyring`) and points a headless host
+  at the built-in file stores (`store_key`). Log output only; storage behaviour
+  is unchanged.
 - **Frames a bridge builds for the core carried a fixed application id.** The
   iOS, Android and Python bridges stamped `"offline-messenger"` on every relay
   answer, relay group frame and legacy plain-text DM they rebuilt for the

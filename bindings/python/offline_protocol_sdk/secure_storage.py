@@ -14,12 +14,16 @@ import logging
 import threading
 
 import keyring
+import keyring.backends.chainer
 
 from . import legacy_store_adoption
 from .offline_protocol import MlsStorageError, MlsStorageProvider
 from .storage_namespace import require_account_storage_namespace
 
 logger = logging.getLogger(__name__)
+
+#: keyring backends that cannot hold a secret: every call fails, or nothing is kept.
+_INSECURE_KEYRING_MODULES = frozenset({"keyring.backends.fail", "keyring.backends.null"})
 
 # Base service name used for keyring entries
 _DEFAULT_SERVICE = "offline-protocol-mls-v2"
@@ -96,16 +100,43 @@ class SecureStorage(MlsStorageProvider):
                 "ProtocolManager build the provider."
             )
 
-        # Warn if keyring resolved to a plaintext or null backend — MLS key
-        # material would be stored unprotected.
+        # Warn if keyring resolved to a failing, null or plaintext backend: MLS
+        # key material would not be stored, or not stored securely. keyring's
+        # failing and null backends are both classes named plain ``Keyring``
+        # (in ``keyring.backends.fail`` and ``keyring.backends.null``), so the
+        # module is checked as well as the class name; the failing one is what a
+        # host without a secret service gets. When two or more backends are
+        # viable, keyring hands back a ``ChainerBackend`` instead, and writes go
+        # to the first backend it chains, so that is the backend judged. (A host
+        # whose only viable backend is ``keyrings.alt``'s plaintext file gets
+        # that backend directly, not a chain; the unwrap is for a chain that
+        # happens to rank an insecure backend first.)
         try:
             backend = keyring.get_keyring()
-            backend_name = type(backend).__name__
-            if "Fail" in backend_name or "Null" in backend_name or "PlaintextKeyring" in backend_name:
+            # A chain with nothing in it stores nothing, like the null backend.
+            empty_chain = False
+            if isinstance(backend, keyring.backends.chainer.ChainerBackend):
+                chained = backend.backends
+                empty_chain = not chained
+                if chained:
+                    backend = chained[0]
+            backend_cls = type(backend)
+            backend_name = f"{backend_cls.__module__}.{backend_cls.__name__}"
+            if (
+                empty_chain
+                or backend_cls.__module__ in _INSECURE_KEYRING_MODULES
+                # keyring's own failing and null backends are caught by module
+                # above; the name markers catch third-party backends.
+                or "Fail" in backend_cls.__name__
+                or "Null" in backend_cls.__name__
+                or "PlaintextKeyring" in backend_cls.__name__
+            ):
                 logger.warning(
-                    "keyring backend is '%s' — MLS keys will NOT be stored "
+                    "keyring backend is '%s': MLS keys will NOT be stored "
                     "securely. Install a platform secret service (e.g. "
-                    "gnome-keyring, kwallet) for production use.",
+                    "gnome-keyring, kwallet), or on a headless host pass "
+                    "store_key or store_key_env to ProtocolManager to use the "
+                    "built-in file stores.",
                     backend_name,
                 )
         except Exception:
