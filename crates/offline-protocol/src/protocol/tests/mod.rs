@@ -16203,6 +16203,33 @@ fn a_blocked_peer_is_not_pushed_a_key_package_from_the_tick() {
     );
 }
 
+/// The backoff is for a peer that was asked and did not answer. A re-push
+/// that never left must still wait out the window, but must not climb the
+/// ladder, or an unreachable peer reaches the cap while it is away.
+#[test]
+fn a_key_package_re_push_that_fails_to_send_does_not_back_off() {
+    let (_alice, _alice_h, mut bob, bob_h, _bob_rx) = pair_with_both_first_key_packages_lost();
+
+    age_key_package_pushes(&mut bob);
+    bob_h.set_fail_next_sends(usize::MAX);
+    bob.on_neighbor_discovered(&id("alice"));
+    let (sent_at, repeats) = bob.key_package_sent_to[&id("alice")];
+    assert_eq!(repeats, 0, "a push that never left is not a repeat");
+    assert!(
+        sent_at.elapsed() < Duration::from_secs(KEY_PACKAGE_RESEND_INTERVAL_SECS),
+        "but it still waits out the window rather than retrying per frame"
+    );
+
+    bob_h.set_fail_next_sends(0);
+    age_key_package_pushes_by(&mut bob, KEY_PACKAGE_RESEND_INTERVAL_SECS + 1);
+    bob.on_neighbor_discovered(&id("alice"));
+    assert_eq!(
+        bob.key_package_sent_to[&id("alice")].1,
+        1,
+        "a push that left counts"
+    );
+}
+
 /// The deferred-ACK headline: an *evicted* pending entry (not merely a drained
 /// one) still recovers on the sender's next resend, precisely because the
 /// eviction never produced an ACK. With a 1-slot per-peer queue and `DropOldest`,

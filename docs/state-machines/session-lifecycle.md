@@ -67,8 +67,10 @@ Four bounds keep it cheap and correct:
   30 seconds for as long as it stays in range. Each repeat doubles the wait,
   up to 10 minutes, the same ceiling as the Welcome retries; only a reset
   push or forgetting the peer (a session reset, the neighbour lost) starts
-  it over. The floor is
-  stamped before the send, so a send that fails waits it out too.
+  it over. The floor is stamped before the send, so a send that fails waits
+  it out too, but a failed send does not double it: the backoff is for a
+  peer that was asked and did not answer, and counting a frame that never
+  left would walk an unreachable peer to the cap while it is away.
 - **A blocked peer is never pushed to.** A block leaves the queued messages
   that make the tick re-arm a peer, and blocking is bidirectional, so the
   re-arm checks it itself rather than relying on each trigger's caller.

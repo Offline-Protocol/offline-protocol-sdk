@@ -1319,6 +1319,11 @@ impl OfflineProtocol {
     /// Only a peer already pushed to qualifies; the first push belongs to
     /// discovery. The stamp is taken before the send, so a send that fails
     /// still waits out the interval instead of being retried on every tick.
+    /// A send that fails does not count as a repeat, though: the backoff is
+    /// for a peer that was asked and did not answer, and a peer whose frame
+    /// never left was not asked. Counting it would walk an unreachable peer
+    /// up to the cap while it is away, and nothing resets the count when it
+    /// comes back over a carrier with no neighbour-lost event.
     ///
     /// A blocked peer is never pushed to. Blocking is bidirectional, and the
     /// tick reaches this for any peer with a queued message, which a block
@@ -1341,17 +1346,27 @@ impl OfflineProtocol {
         // Stamped whatever the storage check below says: it is storage I/O,
         // and discovery runs on every inbound body, so an unconfirmed session
         // (or a failing read) must cost one check per wait, not one per
-        // frame. Each check doubles the wait, so a peer that never answers
-        // settles at one push per cap.
+        // frame. A check that finds a session, and a push that leaves, each
+        // double the wait, so a peer that never answers settles at one push
+        // per cap.
         *sent_at = Instant::now();
-        *repeats = repeats.saturating_add(1);
-        match self.has_mls_session(peer_id) {
-            Ok(false) => {}
-            Ok(true) | Err(_) => return,
-        }
-        debug!(peer_id = %peer_id, "Key package produced no session, pushing it again");
-        if let Err(e) = self.send_key_package_to(peer_id, false) {
-            debug!(peer_id = %peer_id, error = %e, "Key package re-push deferred");
+        let backed_off = match self.has_mls_session(peer_id) {
+            Ok(false) => {
+                debug!(peer_id = %peer_id, "Key package produced no session, pushing it again");
+                match self.send_key_package_to(peer_id, false) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        debug!(peer_id = %peer_id, error = %e, "Key package re-push deferred");
+                        false
+                    }
+                }
+            }
+            Ok(true) | Err(_) => true,
+        };
+        if backed_off {
+            if let Some((_, repeats)) = self.key_package_sent_to.get_mut(peer_id) {
+                *repeats = repeats.saturating_add(1);
+            }
         }
     }
 
