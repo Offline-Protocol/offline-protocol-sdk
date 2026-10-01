@@ -263,7 +263,8 @@ carrier and a manual clock, `PeerStreamReaderTests` the reader with every
 chunking, `PeerStreamDialPolicyTests` when to dial and redial (the ladder
 climbs only on a redial actually scheduled, a dial that finds no free slot
 waits on it, and a stale record never takes a live one's address), and `PeerStreamFramingTests`
-replays the chapter's vectors. The manager's own use of Network framework
+replays the chapter's vectors and pins the advert's TXT bytes and instance
+name. The manager's own use of Network framework
 (advertise, browse, connect) is not covered in CI (C9).
 
 ## S9. Every object is built for the pod's deployment target

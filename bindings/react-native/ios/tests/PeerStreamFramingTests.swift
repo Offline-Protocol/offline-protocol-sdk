@@ -358,4 +358,19 @@ final class PeerStreamFramingTests: XCTestCase {
         XCTAssertEqual(announce(links, "s1", a), .init(firstForAddress: false, superseded: nil))
         XCTAssertEqual(links.handle(for: a), "s1")
     }
+
+    /// The advert is the only way a peer finds this one, so a wrong length
+    /// byte or key leaves the iPhone invisible to every host, silently.
+    func testTheAdvertCarriesTxtversFirstThenTheAddress() {
+        let address = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
+        var expected = Data([9]) + Data("txtvers=1".utf8)
+        expected += Data([UInt8(5 + address.utf8.count)]) + Data("addr=\(address)".utf8)
+        XCTAssertEqual(PeerStreamFraming.txtRecord(address: address), expected)
+        XCTAssertEqual(PeerStreamFraming.txtRecord(address: nil), Data([9]) + Data("txtvers=1".utf8))
+        XCTAssertEqual(PeerStreamFraming.txtRecord(address: String(repeating: "x", count: 251)),
+                       Data([9]) + Data("txtvers=1".utf8), "an entry its length byte cannot say is left out")
+        // Python's `service_instance_name` for the same address.
+        XCTAssertEqual(PeerStreamFraming.instanceName(address: address), "op-b701bfc1c92768b5")
+        XCTAssertTrue(PeerStreamFraming.instanceName(address: nil).hasPrefix("op-"))
+    }
 }

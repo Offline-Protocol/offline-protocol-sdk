@@ -17119,6 +17119,13 @@ mod tests {
             rn_source_code_only("ios/WifiDirectManager.swift"),
             rn_source_code_only("ios/PeerStreamSession.swift"),
         );
+        // The chapter's TXT rule: `txtvers=1` first. The encoder sits beside
+        // the framing, where the SwiftPM harness runs it.
+        assert!(
+            rn_source_code_only("ios/PeerStreamFraming.swift")
+                .contains("var entries = [\"txtvers=1\"]"),
+            "ios/PeerStreamFraming.swift: the TXT record must put `txtvers=1` first"
+        );
         let kotlin = format!(
             "{} {}",
             rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt"),
@@ -17175,8 +17182,7 @@ mod tests {
                     "switch PeerStreamFraming.unframe(message, \
                      preamble: link.preamble.awaitingPreamble)",
                     "static let SERVICE_TYPE = \"_offlineprotocol._tcp\"",
-                    // The chapter's TXT rule: `txtvers=1` first.
-                    "var entries = [\"txtvers=1\"]",
+                    "txtRecord: PeerStreamFraming.txtRecord(address: address)",
                 ][..],
             ),
             (

@@ -8,7 +8,6 @@
 // the radio's: iOS has no Wi-Fi Direct API (ADR 0027).
 //
 
-import CryptoKit
 import Foundation
 import Network
 
@@ -227,23 +226,6 @@ public class WifiDirectManager: NSObject, TransportManager {
         return parameters
     }
 
-    /// The DNS-SD TXT record, built by hand because the chapter requires
-    /// `txtvers=1` to be the first entry and `NWTXTRecord` does not promise an
-    /// order. `addr` is absent until this device has an identity.
-    private static func txtRecord(address: String?) -> Data {
-        var entries = ["txtvers=1"]
-        if let address = address, !address.isEmpty {
-            entries.append("addr=\(address)")
-        }
-        var out = Data()
-        for entry in entries {
-            let bytes = Data(entry.utf8)
-            out.append(UInt8(bytes.count))
-            out.append(bytes)
-        }
-        return out
-    }
-
     // MARK: - TransportManager Implementation
 
     public func isAvailable() -> Bool {
@@ -443,10 +425,10 @@ public class WifiDirectManager: NSObject, TransportManager {
         let listener = try NWListener(using: Self.makeParameters())
         let address = protocolInstance.localAddress()
         listener.service = NWListener.Service(
-            name: Self.instanceName(address: address),
+            name: PeerStreamFraming.instanceName(address: address),
             type: Self.SERVICE_TYPE,
             domain: nil,
-            txtRecord: Self.txtRecord(address: address)
+            txtRecord: PeerStreamFraming.txtRecord(address: address)
         )
         listener.stateUpdateHandler = { [weak self, weak listener] newState in
             guard let self = self, let listener = listener, listener === self.listener else { return }
@@ -472,17 +454,6 @@ public class WifiDirectManager: NSObject, TransportManager {
     private static func host(of connection: NWConnection) -> String? {
         guard case .hostPort(let host, _) = connection.endpoint else { return nil }
         return "\(host)"
-    }
-
-    /// A digest of the address, as the Python manager names its own. A
-    /// restarted listener (every return from the background) then replaces
-    /// its record in each peer's cache instead of publishing a second one
-    /// beside the stale one. Random only while there is no identity, when the
-    /// record carries no address and no browser dials it.
-    static func instanceName(address: String?) -> String {
-        guard let address = address else { return "op-\(UUID().uuidString.prefix(8).lowercased())" }
-        let digest = SHA256.hash(data: Data(address.utf8))
-        return "op-" + digest.prefix(8).map { String(format: "%02x", $0) }.joined()
     }
 
     private func listenerChanged(_ newState: NWListener.State) {

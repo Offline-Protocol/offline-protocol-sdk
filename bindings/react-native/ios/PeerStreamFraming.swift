@@ -4,14 +4,16 @@
 //
 // The parts of docs/spec/stream-framing.md a platform manager owns: the
 // length prefix, its bounds, the position rule that makes the first body on a
-// stream the peer's identity assertion, and one announced stream per address.
+// stream the peer's identity assertion, one announced stream per address, and
+// the DNS-SD advert a peer finds it by.
 //
-// Foundation only, so the SwiftPM harness tests it without a socket
+// Foundation and CryptoKit only, so the SwiftPM harness tests it without a socket
 // (PeerStreamFramingTests replays the chapter's conformance vectors).
 // WifiDirectManager owns the connections and calls into this. Mirrors
 // android's PeerStreamFraming.kt, keep in sync.
 //
 
+import CryptoKit
 import Foundation
 
 /// Why a frame or a preamble was refused. The stream closes in every case.
@@ -77,6 +79,38 @@ enum PeerStreamFraming {
         }
         // Rebased, so the caller can index from zero.
         return .success(Data(message.dropFirst(prefixBytes)))
+    }
+
+    /// The DNS-SD TXT record, built by hand because the chapter requires
+    /// `txtvers=1` to be the first entry and `NWTXTRecord` does not promise an
+    /// order. `addr` is absent until this device has an identity. An entry
+    /// longer than its one length byte can say is left out rather than
+    /// trapping the host app; an address is far shorter.
+    static func txtRecord(address: String?) -> Data {
+        var entries = ["txtvers=1"]
+        if let address = address, !address.isEmpty {
+            entries.append("addr=\(address)")
+        }
+        var out = Data()
+        for entry in entries {
+            let bytes = Data(entry.utf8)
+            guard let length = UInt8(exactly: bytes.count) else { continue }
+            out.append(length)
+            out.append(bytes)
+        }
+        return out
+    }
+
+    /// The DNS-SD instance name: a digest of the address, as the Python
+    /// manager names its own. A restarted listener (every return from the
+    /// background) then replaces its record in each peer's cache instead of
+    /// publishing a second one beside the stale one. Random only while there
+    /// is no identity, when the record carries no address and no browser
+    /// dials it.
+    static func instanceName(address: String?) -> String {
+        guard let address = address else { return "op-\(UUID().uuidString.prefix(8).lowercased())" }
+        let digest = SHA256.hash(data: Data(address.utf8))
+        return "op-" + digest.prefix(8).map { String(format: "%02x", $0) }.joined()
     }
 }
 
