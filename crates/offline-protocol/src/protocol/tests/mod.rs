@@ -16044,7 +16044,9 @@ fn pair_with_both_first_key_packages_lost() -> (
     (alice, alice_h, bob, bob_h, bob_rx)
 }
 
-/// Moves every key-package push `protocol` made back by `secs`.
+/// Moves every key-package push `protocol` made back by `secs`. Kept to a
+/// few minutes at most: `Instant` counts from boot, so a larger offset has no
+/// representation on a freshly booted CI runner.
 fn age_key_package_pushes_by(protocol: &mut OfflineProtocol, secs: u64) {
     let aged = std::time::Instant::now()
         .checked_sub(Duration::from_secs(secs))
@@ -16054,9 +16056,13 @@ fn age_key_package_pushes_by(protocol: &mut OfflineProtocol, secs: u64) {
     }
 }
 
-/// Moves every key-package push `protocol` made back past any resend wait.
+/// Moves every key-package push `protocol` made back past its next resend
+/// wait, with the backoff started over so that wait is the base interval.
 fn age_key_package_pushes(protocol: &mut OfflineProtocol) {
-    age_key_package_pushes_by(protocol, KEY_PACKAGE_RESEND_CAP_SECS + 1);
+    for (_, repeats) in protocol.key_package_sent_to.values_mut() {
+        *repeats = 0;
+    }
+    age_key_package_pushes_by(protocol, KEY_PACKAGE_RESEND_INTERVAL_SECS + 1);
 }
 
 /// A rediscovery past the interval pushes the lost key package again, so the
@@ -16165,10 +16171,15 @@ fn a_key_package_repeat_backs_off() {
     bob.on_neighbor_discovered(&id("alice"));
     assert_eq!(pushes(), 2);
 
-    bob.key_package_sent_to.get_mut(&id("alice")).unwrap().1 = u32::MAX;
-    age_key_package_pushes_by(&mut bob, KEY_PACKAGE_RESEND_CAP_SECS + 1);
-    bob.on_neighbor_discovered(&id("alice"));
-    assert_eq!(pushes(), 3, "the wait stops growing at the cap");
+    // The cap is checked on the wait itself: aging a stamp by ten minutes
+    // has no `Instant` on a freshly booted host.
+    assert_eq!(key_package_resend_wait_secs(4), 480);
+    assert_eq!(key_package_resend_wait_secs(5), KEY_PACKAGE_RESEND_CAP_SECS);
+    assert_eq!(
+        key_package_resend_wait_secs(u32::MAX),
+        KEY_PACKAGE_RESEND_CAP_SECS,
+        "the wait stops growing at the cap"
+    );
 }
 
 /// The deferred-ACK headline: an *evicted* pending entry (not merely a drained

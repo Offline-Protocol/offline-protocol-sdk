@@ -5678,14 +5678,18 @@ impl OfflineProtocol {
                 {
                     self.key_package_sent_to.clear();
                 }
-                // Re-stamped, never reset: the repeat count is the re-arm's
-                // backoff and only a removal (session reset, neighbour lost)
-                // starts it over.
+                // Re-stamped, and the repeat count (the re-arm's backoff) is
+                // kept: only a reset push, which opens a new exchange, or a
+                // removal (session reset, neighbour lost) starts it over.
                 let now = Instant::now();
-                self.key_package_sent_to
+                let entry = self
+                    .key_package_sent_to
                     .entry(peer_id.to_string())
-                    .or_insert((now, 0))
-                    .0 = now;
+                    .or_insert((now, 0));
+                entry.0 = now;
+                if session_reset {
+                    entry.1 = 0;
+                }
                 debug!(peer_id = %peer_id, message_id = %message.id, "Sent key package");
                 Ok(())
             }

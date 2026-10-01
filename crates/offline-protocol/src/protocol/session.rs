@@ -1,13 +1,13 @@
 //! Session confirmation, welcome lifecycle, and pending session reconciliation.
 
 use super::{
-    classify_transport_send_error, internal_prefixes, lock_shared_state, send_failure_token,
-    GatewayCarrier, OfflineProtocol, PresenceRescueThrottle, PruneAllowance, RestorableRecord,
-    SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord, CONFIRMATION_PROBE_INTERVAL_SECS,
-    CONFIRMATION_RETRY_INTERVAL_SECS, KEY_PACKAGE_RESEND_CAP_SECS,
-    KEY_PACKAGE_RESEND_INTERVAL_SECS, MAX_REKEY_TRACKED_PEERS, RECONCILIATION_THROTTLE_MS,
-    REKEY_INTERVAL_SECS, SEND_FAIL_REASON_CONFIRM_TIMEOUT, WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS,
-    WELCOME_LIFECYCLE_TTL_SECS, WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
+    classify_transport_send_error, internal_prefixes, key_package_resend_wait_secs,
+    lock_shared_state, send_failure_token, GatewayCarrier, OfflineProtocol, PresenceRescueThrottle,
+    PruneAllowance, RestorableRecord, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
+    CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS, MAX_REKEY_TRACKED_PEERS,
+    RECONCILIATION_THROTTLE_MS, REKEY_INTERVAL_SECS, SEND_FAIL_REASON_CONFIRM_TIMEOUT,
+    WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
+    WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
     WELCOME_PRESENCE_RESCUE_BASE_SECS, WELCOME_PRESENCE_RESCUE_MAX_SECS, WELCOME_RETRY_BATCH_SIZE,
     WELCOME_RETRY_JITTER_RATIO, WELCOME_UNREACHABLE_RETRY_CAP_SECS, WELCOME_WATCHLIST_MAX_AGE_SECS,
 };
@@ -1329,9 +1329,7 @@ impl OfflineProtocol {
         let Some((sent_at, repeats)) = self.key_package_sent_to.get_mut(peer_id) else {
             return;
         };
-        let wait = (KEY_PACKAGE_RESEND_INTERVAL_SECS << (*repeats).min(5))
-            .min(KEY_PACKAGE_RESEND_CAP_SECS);
-        if sent_at.elapsed() < StdDuration::from_secs(wait) {
+        if sent_at.elapsed() < StdDuration::from_secs(key_package_resend_wait_secs(*repeats)) {
             return;
         }
         // Stamped whatever the storage check below says: it is storage I/O,

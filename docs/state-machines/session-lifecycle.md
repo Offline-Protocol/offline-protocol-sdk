@@ -65,8 +65,9 @@ Three bounds keep it cheap:
   inbound body, so a peer that never answers (an old SDK, encryption opted
   out) would otherwise get a push per frame, or with a fixed floor one every
   30 seconds for as long as it stays in range. Each repeat doubles the wait,
-  up to 10 minutes, the same ceiling as the Welcome retries; only forgetting
-  the peer (a session reset, the neighbour lost) starts it over. The floor is
+  up to 10 minutes, the same ceiling as the Welcome retries; only a reset
+  push or forgetting the peer (a session reset, the neighbour lost) starts
+  it over. The floor is
   stamped before the send, so a send that fails waits it out too.
 - **A session stops it.** A session that exists but is unconfirmed belongs to
   the Welcome lifecycle and the confirmation probes, which own that half.
