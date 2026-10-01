@@ -16230,6 +16230,28 @@ fn a_key_package_re_push_that_fails_to_send_does_not_back_off() {
     );
 }
 
+/// A reset push opens a new exchange, so it starts the backoff over; any
+/// other push keeps the count it found.
+#[test]
+fn a_reset_push_starts_the_key_package_backoff_over() {
+    let (_alice, _alice_h, mut bob, _bob_h, _bob_rx) = pair_with_both_first_key_packages_lost();
+    bob.key_package_sent_to.get_mut(&id("alice")).unwrap().1 = 3;
+
+    bob.send_key_package_to(&id("alice"), false).unwrap();
+    assert_eq!(
+        bob.key_package_sent_to[&id("alice")].1,
+        3,
+        "a plain push keeps the count"
+    );
+
+    bob.send_key_package_to(&id("alice"), true).unwrap();
+    assert_eq!(
+        bob.key_package_sent_to[&id("alice")].1,
+        0,
+        "a reset push starts it over"
+    );
+}
+
 /// The deferred-ACK headline: an *evicted* pending entry (not merely a drained
 /// one) still recovers on the sender's next resend, precisely because the
 /// eviction never produced an ACK. With a 1-slot per-peer queue and `DropOldest`,
