@@ -328,6 +328,34 @@ struct PeerStreamDialPolicy {
         redialDelay = [:]
     }
 
+    /// The record each advertised address is dialed at, from every peer
+    /// record the browser holds now (`records`, our own already left out).
+    ///
+    /// Rebuilt whole on each change, never patched per record, because one
+    /// address can be advertised by two records at once: a peer whose record
+    /// outlived it in our cache, beside the one it published on return.
+    /// Removing a record by its address took the live record's address with
+    /// it, and with no advert the address was never dialed again. Of two
+    /// records for one address, one in `fresh` (added or changed by this
+    /// change) wins, being the newest; then the one in `current`, which a dial
+    /// may already be using.
+    static func adverts<Endpoint: Hashable>(
+        _ records: [(address: String, endpoint: Endpoint)],
+        fresh: Set<Endpoint>,
+        current: [String: Endpoint]
+    ) -> [String: Endpoint] {
+        func rank(_ address: String, _ endpoint: Endpoint) -> Int {
+            fresh.contains(endpoint) ? 2 : current[address] == endpoint ? 1 : 0
+        }
+        var out: [String: Endpoint] = [:]
+        for record in records {
+            if let kept = out[record.address],
+               rank(record.address, kept) >= rank(record.address, record.endpoint) { continue }
+            out[record.address] = record.endpoint
+        }
+        return out
+    }
+
     private mutating func schedule(_ address: String, held: Bool, after delay: TimeInterval) -> TimeInterval? {
         guard !held, !dialing.contains(address) else { return nil }
         dialing.insert(address)

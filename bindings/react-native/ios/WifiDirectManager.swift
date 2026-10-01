@@ -8,6 +8,7 @@
 // the radio's: iOS has no Wi-Fi Direct API (ADR 0027).
 //
 
+import CryptoKit
 import Foundation
 import Network
 
@@ -73,6 +74,10 @@ public class WifiDirectManager: NSObject, TransportManager {
     private static let MAX_STREAMS = 16
     /// A listener or browser that failed is rebuilt after this long.
     private static let REBUILD_DELAY: TimeInterval = 5.0
+    /// How long a dialed stream may wait for a path before it is ended and
+    /// left to the redial ladder. The connect timeout, so AWDL gets as long to
+    /// come up as a connect attempt does.
+    private static let WAITING_GRACE: TimeInterval = 10.0
     /// Android's `Limits`: queued bytes toward one peer beyond which a body
     /// is dropped (the core retries it), and only while that peer's oldest
     /// write has been outstanding for `WRITE_STALL_MS`. The core hands a burst
@@ -435,11 +440,12 @@ public class WifiDirectManager: NSObject, TransportManager {
 
     private func startListening() throws {
         let listener = try NWListener(using: Self.makeParameters())
+        let address = protocolInstance.localAddress()
         listener.service = NWListener.Service(
-            name: "op-\(UUID().uuidString.prefix(8).lowercased())",
+            name: Self.instanceName(address: address),
             type: Self.SERVICE_TYPE,
             domain: nil,
-            txtRecord: Self.txtRecord(address: protocolInstance.localAddress())
+            txtRecord: Self.txtRecord(address: address)
         )
         listener.stateUpdateHandler = { [weak self, weak listener] newState in
             guard let self = self, let listener = listener, listener === self.listener else { return }
@@ -455,6 +461,17 @@ public class WifiDirectManager: NSObject, TransportManager {
         }
         self.listener = listener
         listener.start(queue: linkQueue)
+    }
+
+    /// A digest of the address, as the Python manager names its own. A
+    /// restarted listener (every return from the background) then replaces
+    /// its record in each peer's cache instead of publishing a second one
+    /// beside the stale one. Random only while there is no identity, when the
+    /// record carries no address and no browser dials it.
+    static func instanceName(address: String?) -> String {
+        guard let address = address else { return "op-\(UUID().uuidString.prefix(8).lowercased())" }
+        let digest = SHA256.hash(data: Data(address.utf8))
+        return "op-" + digest.prefix(8).map { String(format: "%02x", $0) }.joined()
     }
 
     private func listenerChanged(_ newState: NWListener.State) {
@@ -492,9 +509,9 @@ public class WifiDirectManager: NSObject, TransportManager {
             guard let self = self, let browser = browser, browser === self.browser else { return }
             self.browserChanged(newState)
         }
-        browser.browseResultsChangedHandler = { [weak self, weak browser] _, changes in
+        browser.browseResultsChangedHandler = { [weak self, weak browser] results, changes in
             guard let self = self, let browser = browser, browser === self.browser else { return }
-            self.advertsChanged(changes)
+            self.advertsChanged(results, changes)
         }
         self.browser = browser
         browser.start(queue: linkQueue)
@@ -533,30 +550,31 @@ public class WifiDirectManager: NSObject, TransportManager {
         }
     }
 
-    /// Records each advertised address and dials it. An advert with no `addr`
+    /// Records each advertised address from every record the browser holds,
+    /// and dials the ones a change added or changed. An advert with no `addr`
     /// is a device with no identity yet, which has no preamble to send, and
     /// ours is skipped by its address.
-    private func advertsChanged(_ changes: Set<NWBrowser.Result.Change>) {
+    private func advertsChanged(_ results: Set<NWBrowser.Result>, _ changes: Set<NWBrowser.Result.Change>) {
+        guard let local = protocolInstance.localAddress() else { return }
+        var records: [(address: String, endpoint: NWEndpoint)] = []
+        for result in results {
+            guard let address = Self.advertisedAddress(result), address != local else { continue }
+            records.append((address, result.endpoint))
+        }
+        var fresh = Set<NWEndpoint>()
         for change in changes {
-            switch change {
-            case .added(let result), .changed(_, let result, _):
-                guard let address = Self.advertisedAddress(result),
-                      let local = protocolInstance.localAddress(), address != local else { continue }
-                adverts[address] = result.endpoint
-                // The lower address's stream is the one both ends keep, so
-                // the lower one dials at once and the higher gives it time.
-                let weAreLower = PeerStreamLinks<Stream>.newStreamWins(
-                    outbound: true, localAddress: local, peer: address)
-                if let delay = dialPolicy.discovered(
-                    address, weAreLower: weAreLower, held: peers.handle(for: address) != nil) {
-                    scheduleDial(address, after: delay)
-                }
-            case .removed(let result):
-                if let address = Self.advertisedAddress(result) {
-                    adverts.removeValue(forKey: address)
-                }
-            default:
-                break
+            if case .added(let result) = change { fresh.insert(result.endpoint) }
+            if case .changed(_, let result, _) = change { fresh.insert(result.endpoint) }
+        }
+        adverts = PeerStreamDialPolicy.adverts(records, fresh: fresh, current: adverts)
+        for (address, endpoint) in adverts where fresh.contains(endpoint) {
+            // The lower address's stream is the one both ends keep, so the
+            // lower one dials at once and the higher gives it time.
+            let weAreLower = PeerStreamLinks<Stream>.newStreamWins(
+                outbound: true, localAddress: local, peer: address)
+            if let delay = dialPolicy.discovered(
+                address, weAreLower: weAreLower, held: peers.handle(for: address) != nil) {
+                scheduleDial(address, after: delay)
             }
         }
     }
@@ -611,9 +629,14 @@ public class WifiDirectManager: NSObject, TransportManager {
                 self.peers.connected(stream)
                 self.receive(on: stream)
             case .waiting:
-                // The peer is not reachable now. Ended rather than left
-                // waiting, so the redial ladder decides when to try again.
-                stream.connection.cancel()
+                // No path to the peer yet, which over AWDL can be the link
+                // still coming up. Ended if it is still waiting after the
+                // grace, so the redial ladder decides when to try again
+                // rather than a connection that waits forever.
+                self.linkQueue.asyncAfter(deadline: .now() + Self.WAITING_GRACE) { [weak stream] in
+                    guard let stream = stream, case .waiting = stream.connection.state else { return }
+                    stream.connection.cancel()
+                }
             case .failed, .cancelled:
                 self.end(stream)
             default:

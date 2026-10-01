@@ -17309,9 +17309,19 @@ mod tests {
         // Our own advert is skipped by the address it carries.
         assert!(
             ios_manager.contains(
-                "let local = protocolInstance.localAddress(), address != local else { continue }"
+                "guard let address = Self.advertisedAddress(result), address != local else { continue }"
             ),
             "ios/WifiDirectManager.swift: the browser must skip our own address"
+        );
+        // The adverts are rebuilt from every record the browser holds, never
+        // removed by address: a peer back from the background is advertised by
+        // its stale record and its new one at once, and removing the stale one
+        // by address dropped the live one's too, so the peer was never redialed.
+        assert!(
+            ios_manager.contains(
+                "adverts = PeerStreamDialPolicy.adverts(records, fresh: fresh, current: adverts)"
+            ) && !ios_manager.contains("adverts.removeValue(forKey:"),
+            "ios/WifiDirectManager.swift: the browser must rebuild its adverts from the full result set"
         );
 
         // A group client redials the owner the group has NOW. On a group

@@ -108,6 +108,10 @@ seconds idle, 5 between probes, 3 probes.
   carriers.
 - A local-network denial is reported as a diagnostic. Multipeer failed
   silently there.
+- When this was accepted, the manager had been run on one iPhone against a
+  Python host on a shared network, in both address orders. Two iPhones over
+  AWDL with no access point, the case Multipeer covered, had not been run on
+  devices. It is owed before a release claims it.
 
 ## What would undo this
 

@@ -4,7 +4,8 @@
 // Pins when the iOS peer-stream manager dials an advertised address and when
 // it dials again (ADR 0027): the lower address at once, the higher after a
 // grace delay, a redial ladder that climbs only on a redial actually
-// scheduled, and no dial toward an address a stream already holds. The
+// scheduled, no dial toward an address a stream already holds, and an
+// address that stays advertised while any record for it is live. The
 // manager owns the timers and connections, which need a device; this is the
 // decision it makes with them.
 //
@@ -88,5 +89,30 @@ final class PeerStreamDialPolicyTests: XCTestCase {
         policy.reset()
         XCTAssertEqual(policy.discovered(peer, weAreLower: true, held: false), 0)
         XCTAssertEqual(policy.ended(peer, advertised: true, held: false), 1)
+    }
+
+    /// A peer back from the background before its old record expired is
+    /// advertised by two records; the old one going must leave the address.
+    func testRemovingAStaleRecordKeepsTheLiveOnesAddress() {
+        var adverts = PeerStreamDialPolicy.adverts(
+            [(address: peer, endpoint: "old")], fresh: ["old"], current: [:])
+        adverts = PeerStreamDialPolicy.adverts(
+            [(address: peer, endpoint: "old"), (address: peer, endpoint: "new")],
+            fresh: ["new"], current: adverts)
+        XCTAssertEqual(adverts[peer], "new", "the record a change added is the newest")
+        adverts = PeerStreamDialPolicy.adverts(
+            [(address: peer, endpoint: "new")], fresh: [], current: adverts)
+        XCTAssertEqual(adverts[peer], "new")
+        XCTAssertNil(PeerStreamDialPolicy.adverts(
+            [(address: String, endpoint: String)](), fresh: [], current: adverts)[peer],
+            "the last record going takes the address")
+    }
+
+    func testTheRecordInUseStaysOverAnOlderOne() {
+        let records = [(address: peer, endpoint: "a"), (address: peer, endpoint: "b")]
+        for current in ["a", "b"] {
+            XCTAssertEqual(PeerStreamDialPolicy.adverts(
+                records, fresh: [], current: [peer: current])[peer], current)
+        }
     }
 }

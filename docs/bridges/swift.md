@@ -238,6 +238,15 @@ connection, never an id a later stream could share: the Multipeer manager
 this replaced keyed its peers by an id that survived a restart, and a
 reconnect met state that said its preamble was already sent.
 
+The browser rebuilds its adverts from every record it holds after each
+change, never removing one by its address. A peer back from the background
+can be advertised by the record it just published and by its old one still in
+our cache, and removing the old one by address took the live one's address
+with it, so the peer was never dialed again. The instance name is a digest of
+the address, as on Python, so a restarted listener replaces its record
+instead of adding a second. A dial with no path yet (`.waiting`) gets ten
+seconds, the connect timeout, before the redial ladder takes it over.
+
 Writes follow Android's bounds: a body is dropped (the core retries it) when
 more than 4 MiB is queued toward a peer whose oldest write has been
 outstanding for two seconds, and a write outstanding for thirty seconds ends
@@ -248,7 +257,8 @@ as a diagnostic naming `NSBonjourServices`.
 `PeerStreamSessionTests` drives the session with string handles, a fake
 carrier and a manual clock, `PeerStreamReaderTests` the reader with every
 chunking, `PeerStreamDialPolicyTests` when to dial and redial (the ladder
-climbs only on a redial actually scheduled), and `PeerStreamFramingTests`
+climbs only on a redial actually scheduled, and a stale record never takes
+a live one's address), and `PeerStreamFramingTests`
 replays the chapter's vectors. The manager's own use of Network framework
 (advertise, browse, connect) is not covered in CI (C9).
 
