@@ -17299,6 +17299,13 @@ mod tests {
                 .contains("static func == (lhs: Stream, rhs: Stream) -> Bool { lhs === rhs }"),
             "ios/WifiDirectManager.swift: a Stream must compare by identity"
         );
+        // A service-instance record (`sid`) is never a peer hint: the stream
+        // chapter's MUST, which the Python browser already keeps. Taking one
+        // as a peer opens a second stream to the same host per service.
+        assert!(
+            ios_manager.contains("if txt.dictionary.keys.contains(\"sid\") { return nil }"),
+            "ios/WifiDirectManager.swift: the browser must ignore records carrying `sid`"
+        );
         // Our own advert is skipped by the address it carries.
         assert!(
             ios_manager.contains(

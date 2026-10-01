@@ -212,7 +212,9 @@ found through DNS-SD `_offlineprotocol._tcp` on the network or over AWDL
 connected peer is announced to the core only under the address
 `verifyIdentityAssertion` derived from its first frame, and only then: never
 on connect, and never from the `addr` in its TXT record, which is only a
-claim the preamble must match.
+claim the preamble must match. A record carrying `sid` is a service
+instance under the [DNS-SD mapping](../spec/dns-sd-mapping.md), not a peer,
+and the browser ignores it as the stream chapter requires.
 
 The rules live in two Foundation-only pieces. `PeerStreamReader` cuts the
 stream into whole frames and refuses a prefix out of bounds before it

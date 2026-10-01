@@ -561,9 +561,16 @@ public class WifiDirectManager: NSObject, TransportManager {
         }
     }
 
+    /// The peer address a record advertises, or nil for a record that is not
+    /// a peer hint. A record carrying `sid` is a service instance under the
+    /// DNS-SD mapping chapter: it names the same host and address as the peer
+    /// record, so taking it as a peer would open a second stream to one host
+    /// per service published there. The stream chapter says a peer browser
+    /// MUST ignore it, as the Python manager does.
     private static func advertisedAddress(_ result: NWBrowser.Result) -> String? {
-        guard case .bonjour(let txt) = result.metadata,
-              let address = txt["addr"], !address.isEmpty else { return nil }
+        guard case .bonjour(let txt) = result.metadata else { return nil }
+        if txt.dictionary.keys.contains("sid") { return nil }
+        guard let address = txt["addr"], !address.isEmpty else { return nil }
         return address
     }
 
