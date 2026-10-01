@@ -269,12 +269,36 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   is `OfflineProtocolSDK`, assembled by `scripts/assemble-swift-package.sh`.
   The Android library is `com.offlineprotocol:offline-protocol-android`,
   built by the Gradle build in `bindings/kotlin`. CI builds and tests both
-  on every pull request, and builds an application against each. Neither is
-  published yet. What is public in them is what the React Native module
-  happened to need public, not a chosen API, and on iOS that leaves out the
-  storage providers, so an application cannot construct the built-in stores
-  there. Both carry the license, the commercial license, the third-party
-  notices and the export notice.
+  on every pull request, and builds an application against each. A release
+  publishes them (below). What is public in them is what the React Native
+  module happened to need public, not a chosen API, and on iOS that leaves out
+  the storage providers, so an application cannot construct the built-in
+  stores there. Both carry the license, the commercial license, the
+  third-party notices and the export notice.
+- **A release publishes the Swift package, the Android library and the
+  Python wheels.** Each is built from the release's own libraries and tested
+  before anything publishes: the Swift package on a simulator with an
+  application built against it, the Android library with all four ABIs and a
+  minified application, and each wheel installed by pip and run through the
+  whole Python suite on macOS, Linux (x86_64 and aarch64) and Windows. A
+  failure stops npm and crates.io as well. The wheels and the Swift package's
+  XCFramework (`offline-protocol-X.Y.Z-swiftpm-xcframework.zip`) are attached
+  to the GitHub release, and so is the assembled Swift package
+  (`offline-protocol-X.Y.Z-swift-package.tar.gz`), whose manifest names that
+  archive by url and checksum. Then, each behind a repository variable, the
+  library is signed and uploaded to Maven Central as
+  `com.offlineprotocol:offline-protocol-android`, and the wheels go to PyPI by
+  trusted publishing; a dry run with Maven Central on uploads a deployment
+  the Portal validates and then drops. The Swift package is pulled rather
+  than pushed: `Offline-Protocol/offline-protocol-swift` has a workflow that
+  downloads the package and the archive, verifies their attestations, and
+  commits and tags the package `X.Y.Z` with its own token, so no credential
+  for it exists in this repository. The wheels used to be built
+  as `py3-none-any`, four files with one name and a different library inside;
+  each is now tagged for its platform, the Linux ones `manylinux_2_N` for the
+  newest glibc symbol their library needs, and numbered from the tag in
+  Python's spelling, so `v0.28.0-rc.1` builds `0.28.0rc1` rather than taking
+  `0.28.0`. See [Cutting a Release](CONTRIBUTING.md#the-native-packages-and-pypi).
 - **Three iOS suites run for the first time.** The mesh controller, the BLE
   discovery bootstrap policy and the error mapping suites are excluded from
   the SwiftPM test harness, and nothing else ran them. They run in the Swift

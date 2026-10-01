@@ -13,8 +13,8 @@ artifact set described in [C1](README.md#c1-regenerate-every-binding-together)
 and is never regenerated alone.
 
 **The release workflow regenerates the Kotlin and downloads it over the committed
-file in the publish job.** The generated artifact, not the committed one, is what
-ships. Any generation step in CI must therefore go through the same script, or
+file in the publish job and in the job that builds the Android library.** The
+generated artifact, not the committed one, is what ships. Any generation step in CI must therefore go through the same script, or
 the released Kotlin and the released Swift were built by different bindgens.
 
 ## K1. Platform callbacks arrive on binder threads

@@ -64,9 +64,12 @@ that does not exist yet.
 6. **Code that exists only for a native application lives in
    `bindings/swift` and `bindings/kotlin`.**
 7. **The Swift package ships through a distribution repository that is
-   generated output.** The release workflow is to write the assembled tree
-   there and tag it, after the archive it names is published. Nobody edits
-   that repository.
+   generated output.** The release attaches the assembled tree to the GitHub
+   release beside the archive it names, and the distribution repository's
+   own workflow pulls the two, verifies the release's attestations, and
+   commits and tags the tree, after the archive is published. Nothing pushes
+   into that repository from outside, so no credential for it exists, and
+   nobody edits it: every release replaces its tree, except the workflow.
 8. **Neither package carries a version of its own.** Both take it from the
    tag, so there is nothing for the version gate to compare.
 
@@ -85,15 +88,19 @@ that does not exist yet.
   library compiled by a newer Kotlin than its consumers use cannot be used
   by them at all, and one compiled by a newer Kotlin than its tests is not
   the code that was tested. It rules out publishing plugins that need a
-  newer Gradle. The library is published by Gradle's own.
+  newer Gradle. The library is written out by Gradle's own `maven-publish`.
 - A release has two more channels that cannot take a version back. A Swift
   tag must never move, because Swift Package Manager records the revision
   behind each version and refuses one that changed, and a version on a Maven
   repository is permanent. A bad release is answered by the next one.
-- **Nothing publishes either package yet.** The release workflow builds
-  neither. Wiring it needs the distribution repository, a deploy key, a
-  signing key and a Maven channel, none of which exists, and it is a change
-  of its own. Until then decisions 7 and 8 describe what a release is to do.
+- **The release builds, tests and publishes both.** It builds each from the
+  release's own libraries and tests it before anything publishes. The Swift
+  package goes on the GitHub release for `Offline-Protocol/offline-protocol-swift`
+  to pull (decision 7). The Android library is uploaded to Maven Central
+  behind a repository variable, signed in the publishing job with gpg and
+  not by Gradle, so the signing key never shares a process with a build's
+  plugins and dependencies. `CONTRIBUTING.md` has the switches, the secrets
+  and the command that publishes the Swift package.
 - A release AAR carries the four legal files the Swift package carries
   (`LICENSE`, `LICENSE-COMMERCIAL.md`, `THIRD-PARTY-NOTICES.md`,
   `EXPORT.md`). Both packages hold the Rust library, and the notices are

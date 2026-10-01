@@ -6,10 +6,10 @@
 # The sources are not moved and not copied into the repository. They have one
 # home, bindings/react-native/ios, where the pod compiles them and where the
 # Rust guards read them by path. This script copies them into an output
-# directory beside a rendered manifest, and that directory is what is meant
-# to ship: a release is to push it to the distribution repository and tag it.
-# No release does yet. Today CI builds and tests the same tree on every pull
-# request. See ADR 0025.
+# directory beside a rendered manifest, and that directory is what ships: a
+# release attaches it, and the distribution repository pulls it and tags it
+# (scripts/publish-swift-package.sh). CI builds and tests the same tree on
+# every pull request. See ADR 0025.
 #
 # The output directory appears whole or not at all. A refusal part way
 # through leaves nothing behind for a later step to mistake for a package.

@@ -557,6 +557,85 @@ jobs:
           pip install -e 'bindings/python[dev]'
           pytest bindings/python/tests/ -v
 
+  # The Python suite on the two platforms the job above never reaches, from
+  # a wheel built the way the release builds one. release.yml installs each
+  # wheel on its platform and runs the suite before publishing; without this
+  # its first execution on macOS and Windows would be inside a release. The
+  # Linux leg is the job above. A debug library: under test are the suite on
+  # this platform and the wheel's plumbing, not the optimised build.
+  python-wheel-platforms:
+    name: Python Wheel (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            runner: macos-14
+            target: aarch64-apple-darwin
+            library: liboffline_protocol_uniffi.dylib
+          - platform: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            library: offline_protocol_uniffi.dll
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-python-wheel-${{ matrix.platform }}
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # Keep in sync with the `uniffi` pin in crates/offline-protocol-uniffi/Cargo.toml.
+      - name: Cache uniffi-bindgen
+        id: cache-uniffi
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/uniffi-bindgen*
+          key: uniffi-bindgen-${{ runner.os }}-0.30.0
+
+      - name: Install uniffi-bindgen
+        if: steps.cache-uniffi.outputs.cache-hit != 'true'
+        run: cargo install uniffi --version 0.30.0 --features cli --locked
+
+      - name: Build the desktop library and the bindings
+        shell: bash
+        run: bash bindings/python/scripts/build-desktop.sh --target ${{ matrix.target }} --debug
+
+      # Safe: matrix values are author-controlled literals, not external input.
+      - name: Build the wheel
+        shell: bash
+        run: |
+          python -m pip install build wheel
+          bash bindings/python/scripts/build-wheel.sh ${{ matrix.platform }} \
+            "target/${{ matrix.target }}/debug/${{ matrix.library }}" 0.0.0-dev
+
+      - name: Install the wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          WHEELS=(bindings/python/dist/*.whl)
+          [ "${#WHEELS[@]}" = 1 ] || { echo "::error::expected one wheel, found ${#WHEELS[*]}"; exit 1; }
+          python -m pip install "${WHEELS[0]}[dev]"
+
+      # From inside tests/, as the release does: the source package has the
+      # library too here, so a test that reached it would pass against the
+      # wrong copy.
+      - name: Run the suite against the installed wheel
+        shell: bash
+        working-directory: bindings/python/tests
+        run: |
+          set -euo pipefail
+          python -I -c "import offline_protocol_sdk as m; print('testing', m.__file__)"
+          pytest -p no:cacheprovider .
+
   # release.yml runs only on a `v*` tag, so every line of it used to reach
   # production untested — the packaging step's first real execution would be
   # during a release, with a half-built asset set as the failure mode. The
@@ -577,12 +656,31 @@ jobs:
           shellcheck --severity=warning \
             scripts/package-release-assets.sh \
             scripts/tests/test-package-release-assets.sh \
+            scripts/pep440-version.sh \
+            scripts/tests/test-pep440-version.sh \
+            bindings/python/scripts/build-wheel.sh \
+            scripts/tests/test-build-wheel.sh \
             bindings/react-native/scripts/shared/xcframework.sh \
             bindings/react-native/scripts/build-uniffi-ios.sh \
             scripts/tests/test-ios-min-os.sh
 
       - name: Package release assets against a fixture tree
         run: bash scripts/tests/test-package-release-assets.sh
+
+      # The wheel's number and its platform tag are the two claims a release
+      # makes about a wheel that nothing after it re-checks: pip on a newer
+      # runner accepts a tag that is too old.
+      - name: Test the Python version conversion
+        run: bash scripts/tests/test-pep440-version.sh
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Build wheels from libraries with a known glibc floor
+        run: |
+          python -m pip install build wheel
+          bash scripts/tests/test-build-wheel.sh
 
       # The gate reads a real archive with otool, so it runs where the iOS
       # library is built: in a release, on all three archives, and in the
@@ -829,7 +927,14 @@ jobs:
             scripts/package-swiftpm-xcframework.sh \
             scripts/ios-deployment-target.sh \
             scripts/pick-ios-simulator.sh \
-            scripts/tests/test-assemble-swift-package.sh
+            scripts/test-swift-package.sh \
+            scripts/tests/test-assemble-swift-package.sh \
+            scripts/publish-swift-package.sh \
+            scripts/swiftpm-archive-url.sh \
+            scripts/tests/test-publish-swift-package.sh \
+            scripts/maven-central-bundle.sh \
+            scripts/maven-central-upload.sh \
+            scripts/tests/test-maven-central.sh
 
       # Exactly what the script writes, and what it refuses. The job below
       # runs its success path only. Once a release pushes its output to a
@@ -839,6 +944,17 @@ jobs:
 
       - name: Test the AAR check
         run: python3 -B -m unittest scripts/tests/test_check_android_aar.py
+
+      # What the release does with the package and the library once they are
+      # built, against a local bare repository and a stand-in Portal. Both
+      # channels are permanent: a moved tag or a version on Maven Central
+      # cannot be taken back, so the refusals are pinned here, not found in a
+      # release.
+      - name: Publish the Swift package to a local repository
+        run: bash scripts/tests/test-publish-swift-package.sh
+
+      - name: Sign, bundle and upload the Android library to a stand-in Portal
+        run: bash scripts/tests/test-maven-central.sh
 
   swift-package:
     name: Swift Package
@@ -934,58 +1050,11 @@ jobs:
           print("the release manifest parses:", binary[0]["url"], platforms)
           PYTHON
 
-      - name: Test the package on a simulator
-        working-directory: build/offline-protocol-swift
-        run: |
-          set -euo pipefail
-          SIMULATOR="$(bash ../../scripts/pick-ios-simulator.sh)"
-          STATUS=0
-          xcodebuild test -scheme OfflineProtocolSDK \
-            -destination "platform=iOS Simulator,id=$SIMULATOR" \
-            -derivedDataPath ../package-build \
-            > ../package-test.log 2>&1 || STATUS=$?
-          # The log is thousands of lines. What failed, and the totals.
-          grep -E "error:|Test Case .* failed|Executed [0-9]+ tests?|\*\* TEST" \
-            ../package-test.log | tail -60 || true
-          if [ "$STATUS" != 0 ]; then
-            echo "::error::xcodebuild test exited $STATUS"
-            exit "$STATUS"
-          fi
-          # A run that built and executed nothing also exits 0. Every suite
-          # file holds one suite, named after the file.
-          MISSING=0
-          while IFS= read -r suite; do
-            name="$(basename "$suite" .swift)"
-            grep -q "Test Suite '$name' passed" ../package-test.log || {
-              echo "::error::$name did not run"
-              MISSING=$((MISSING + 1))
-            }
-          done < <(find Tests -name '*.swift' | sort)
-          [ "$MISSING" = 0 ]
-
-      # The package from an application's side: the product by the name the
-      # README gives, a plain import, and a call into the library from a
-      # module that is not the package.
-      - name: Test an application against the package
-        working-directory: bindings/swift/consumer-check
-        run: |
-          set -euo pipefail
-          SIMULATOR="$(bash ../../../scripts/pick-ios-simulator.sh)"
-          STATUS=0
-          xcodebuild test -scheme ConsumerCheck-Package \
-            -destination "platform=iOS Simulator,id=$SIMULATOR" \
-            -derivedDataPath ../../../build/consumer-build \
-            > ../../../build/consumer-test.log 2>&1 || STATUS=$?
-          grep -E "error:|Test Case .* failed|Executed [0-9]+ tests?|\*\* TEST" \
-            ../../../build/consumer-test.log | tail -30 || true
-          if [ "$STATUS" != 0 ]; then
-            echo "::error::xcodebuild test exited $STATUS"
-            exit "$STATUS"
-          fi
-          grep -q "Test Suite 'UseTests' passed" ../../../build/consumer-test.log || {
-            echo "::error::UseTests did not run"
-            exit 1
-          }
+      # Its own suites, then an application that depends on it by the
+      # product name the README gives. The release runs the same script on
+      # the package it publishes.
+      - name: Test the package and an application against it on a simulator
+        run: bash scripts/test-swift-package.sh
 
       - name: Keep the test logs
         if: always()
@@ -1037,23 +1106,7 @@ jobs:
       # Gradle succeeds on a test task that found no test. The sources are
       # read from another directory, so that is one wrong path away.
       - name: Check that the suite ran
-        run: |
-          python3 - bindings/kotlin/offline-protocol-android/build/test-results/testDebugUnitTest <<'PYTHON'
-          import glob, os, re, sys
-          results = glob.glob(os.path.join(sys.argv[1], "*.xml"))
-          tests = failures = 0
-          for path in results:
-              head = open(path, encoding="utf-8").read(4000)
-              found = re.search(r'tests="(\d+)" skipped="\d+" failures="(\d+)" errors="(\d+)"', head)
-              assert found, f"cannot read the totals of {path}"
-              tests += int(found.group(1))
-              failures += int(found.group(2)) + int(found.group(3))
-          named = "TEST-com.offlineprotocol.RelayControlOpTranslatorTest.xml"
-          assert any(os.path.basename(p) == named for p in results), f"{named} is not among the results"
-          assert tests >= 400, f"only {tests} tests ran"
-          assert failures == 0, f"{failures} failed"
-          print(f"{tests} tests in {len(results)} suites")
-          PYTHON
+        run: python3 -B scripts/check_android_test_results.py bindings/kotlin/offline-protocol-android/build/test-results/testDebugUnitTest
 
       - name: Check what is inside the AAR and the sources jar
         run: |

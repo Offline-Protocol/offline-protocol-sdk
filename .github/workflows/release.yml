@@ -143,6 +143,31 @@ jobs:
             bindings/react-native/ios/Generated/
           retention-days: 1
 
+      # The Swift package links an XCFramework of its own, built from these
+      # same two archives (the device slice and the fat simulator slice), which
+      # carries the FFI header that the pod's leaves to the podspec. Built here
+      # because it needs xcodebuild and the archives that were just gated.
+      #
+      # Zipped here, once. The package's manifest names this archive by
+      # checksum, so every job after this one works from these bytes: the test
+      # job unpacks them, the release job assembles the package against their
+      # checksum and publishes them verbatim.
+      - name: Build the Swift package's XCFramework
+        run: |
+          set -euo pipefail
+          POD=bindings/react-native/ios/libs/offline_protocol_uniffi.xcframework
+          bash scripts/package-swiftpm-xcframework.sh swiftpm \
+            "$POD/ios-arm64/liboffline_protocol_uniffi.a" \
+            "$POD/ios-arm64_x86_64-simulator/liboffline_protocol_uniffi.a"
+          (cd swiftpm && zip -qry offline_protocolFFI.xcframework.zip offline_protocolFFI.xcframework)
+
+      - name: Upload the Swift package's XCFramework
+        uses: actions/upload-artifact@v7
+        with:
+          name: swiftpm-xcframework
+          path: swiftpm/offline_protocolFFI.xcframework.zip
+          retention-days: 1
+
   # Build each Android ABI in parallel instead of sequentially
   build-android:
     name: Build Android (${{ matrix.abi }})
@@ -521,9 +546,12 @@ jobs:
           pip install bleak websockets keyring zeroconf ifaddr
           pip-audit --strict
 
+  # One wheel per desktop library, tagged for the platform it was built for
+  # and numbered as this release in Python's spelling. The logic, and why the
+  # tags are read rather than written down, is in the script.
   python-package:
     name: Package Python (${{ matrix.platform }})
-    needs: [build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings]
+    needs: [version-gate, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -531,20 +559,16 @@ jobs:
         include:
           - platform: macos-arm64
             artifact: desktop-macos-arm64
-            lib_subdir: macos-arm64
-            plat_name: macosx_14_0_arm64
+            library: liboffline_protocol_uniffi.dylib
           - platform: linux-x86_64
             artifact: desktop-linux-x86_64
-            lib_subdir: linux-x86_64
-            plat_name: manylinux_2_17_x86_64
+            library: liboffline_protocol_uniffi.so
           - platform: linux-aarch64
             artifact: desktop-linux-aarch64
-            lib_subdir: linux-aarch64
-            plat_name: manylinux_2_17_aarch64
+            library: liboffline_protocol_uniffi.so
           - platform: windows-x86_64
             artifact: desktop-windows-x86_64
-            lib_subdir: windows-x86_64
-            plat_name: win_amd64
+            library: offline_protocol_uniffi.dll
     steps:
       - uses: actions/checkout@v7
 
@@ -564,29 +588,227 @@ jobs:
           name: ${{ matrix.artifact }}
           path: native-libs/
 
-      - name: Build wheel
+      # Safe: matrix values are author-controlled literals, not external input.
+      - name: Build the platform wheel
+        env:
+          VERSION: ${{ needs.version-gate.outputs.VERSION }}
         run: |
-          cp native-libs/${{ matrix.lib_subdir }}/* bindings/python/offline_protocol_sdk/
-          # Create symlink matching the name generated Python expects (libuniffi.*)
-          cd bindings/python/offline_protocol_sdk
-          for lib in *.dylib; do [ -f "$lib" ] && ln -sf "$lib" libuniffi.dylib; done
-          for lib in *.so; do [ -f "$lib" ] && ln -sf "$lib" libuniffi.so; done
-          for lib in *.dll; do [ -f "$lib" ] && ln -sf "$lib" uniffi.dll; done
-          cd ..
-          pip install build wheel
-          python -m build --wheel
-          # Re-tag the wheel with the correct platform
-          pip install wheel
-          python -c "
-          import glob, pathlib, wheel.wheelfile
-          for whl in glob.glob('dist/*.whl'):
-              print(f'Built: {whl}')
-          "
+          set -euo pipefail
+          python -m pip install build wheel
+          bash bindings/python/scripts/build-wheel.sh ${{ matrix.platform }} \
+            "native-libs/${{ matrix.platform }}/${{ matrix.library }}" "$VERSION"
 
       - uses: actions/upload-artifact@v7
         with:
           name: python-wheel-${{ matrix.platform }}
           path: bindings/python/dist/*.whl
+          retention-days: 5
+
+  # Each wheel installed by pip on the platform it is tagged for, and the whole
+  # suite run against the installed copy. pip refuses a wheel whose tag the
+  # machine does not satisfy, so this is also the check on the tag, and the
+  # native library loads only on the system it was built for.
+  #
+  # From inside tests/, so neither pytest nor the suites that start a fresh
+  # interpreter put the source package on the path: it has no native library
+  # in this checkout, so a test that reached it would fail rather than pass
+  # against the wrong copy.
+  test-python-wheels:
+    name: Test Python Wheel (${{ matrix.platform }})
+    needs: [python-package]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            runner: macos-14
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+          - platform: windows-x86_64
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Download the wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: python-wheel-${{ matrix.platform }}
+          path: wheel/
+
+      - name: Install the wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          WHEELS=(wheel/*.whl)
+          [ "${#WHEELS[@]}" = 1 ] || { echo "::error::expected one wheel, found ${#WHEELS[*]}"; exit 1; }
+          python -m pip install "${WHEELS[0]}[dev]"
+
+      - name: Run the suite against the installed wheel
+        shell: bash
+        working-directory: bindings/python/tests
+        run: |
+          set -euo pipefail
+          python -I -c "import offline_protocol_sdk as m; print('testing', m.__file__)"
+          pytest -p no:cacheprovider .
+
+  # The Android library a release publishes, built from the release's own
+  # native libraries and bindings, with the checks CI runs on a pull request
+  # plus the one it cannot: all four ABIs present. Credential-free: it writes
+  # an unsigned Maven repository, and the publish job signs what this tested.
+  android-library:
+    name: Build Android Library
+    needs: [version-gate, build-android, android-bindings]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download Android Libraries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: android-jniLibs-*
+          path: bindings/react-native/android/src/main/jniLibs
+          merge-multiple: true
+
+      - name: Download Android Bindings
+        uses: actions/download-artifact@v8
+        with:
+          name: android-uniffi-bindings
+          path: bindings/react-native/android/src/main/java
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
+        with:
+          packages: platform-tools
+
+      # The Gradle the React Native harness runs on (ADR 0025).
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          gradle-version: "8.9"
+
+      - name: Test the library and write it out as a Maven repository
+        working-directory: bindings/kotlin
+        env:
+          VERSION: ${{ needs.version-gate.outputs.VERSION }}
+        run: >
+          gradle --no-daemon --stacktrace -PVERSION_NAME="$VERSION"
+          :offline-protocol-android:testDebugUnitTest
+          :offline-protocol-android:lintDebug
+          :offline-protocol-android:publishAllPublicationsToStagingRepository
+
+      - name: Check that the suite ran
+        run: python3 -B scripts/check_android_test_results.py bindings/kotlin/offline-protocol-android/build/test-results/testDebugUnitTest
+
+      - name: Check what is inside the AAR and the sources jar
+        env:
+          VERSION: ${{ needs.version-gate.outputs.VERSION }}
+        run: |
+          PUBLISHED="bindings/kotlin/offline-protocol-android/build/maven/com/offlineprotocol/offline-protocol-android/$VERSION"
+          python3 -B scripts/check_android_aar.py \
+            "$PUBLISHED/offline-protocol-android-$VERSION.aar" \
+            --sources-jar "$PUBLISHED/offline-protocol-android-$VERSION-sources.jar" \
+            --require-natives
+
+      - name: Build a minified application against the library
+        working-directory: bindings/kotlin/consumer-check
+        env:
+          VERSION: ${{ needs.version-gate.outputs.VERSION }}
+        run: gradle --no-daemon --stacktrace -PVERSION_NAME="$VERSION" :app:assembleRelease
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-library-maven
+          path: bindings/kotlin/offline-protocol-android/build/maven/
+          retention-days: 1
+
+  # The Swift package a release publishes, built from the release's own
+  # libraries and tested on a simulator: its suites, the bridge's, and an
+  # application that depends on it. Assembled here with the XCFramework in
+  # place; the release job assembles the same sources against the archive's
+  # url and checksum, and that manifest is parsed here too, by the toolchain
+  # a consumer resolves it with.
+  swift-package:
+    name: Test Swift Package
+    needs: [version-gate, build-ios]
+    runs-on: macos-latest
+    # A simulator that does not boot holds a runner for six hours.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download iOS Artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: ios-libs
+          path: bindings/react-native/ios
+
+      - name: Download the Swift package's XCFramework
+        uses: actions/download-artifact@v8
+        with:
+          name: swiftpm-xcframework
+          path: build/swiftpm
+
+      - name: Unpack the archive a consumer will download
+        run: unzip -q build/swiftpm/offline_protocolFFI.xcframework.zip -d build/swiftpm
+
+      - name: Assemble the package
+        env:
+          VERSION: ${{ needs.version-gate.outputs.VERSION }}
+        run: >
+          bash scripts/assemble-swift-package.sh
+          --output build/offline-protocol-swift --version "$VERSION" --bridge-tests
+          --xcframework-path build/swiftpm/offline_protocolFFI.xcframework
+
+      - name: Test the package and an application against it on a simulator
+        run: bash scripts/test-swift-package.sh
+
+      # The manifest the release publishes, read back by Swift Package
+      # Manager: the binary target's url and checksum, the platform, the
+      # product. The url is where this release will put the archive and the
+      # checksum is of the archive's bytes, so this is the manifest a consumer
+      # resolves, parsed before anything is published.
+      - name: Parse the manifest a consumer will resolve
+        env:
+          VERSION: ${{ needs.version-gate.outputs.VERSION }}
+        run: |
+          set -euo pipefail
+          URL="$(bash scripts/swiftpm-archive-url.sh "$VERSION")"
+          CHECKSUM="$(swift package compute-checksum build/swiftpm/offline_protocolFFI.xcframework.zip)"
+          bash scripts/assemble-swift-package.sh --output build/release-manifest \
+            --version "$VERSION" --xcframework-url "$URL" --xcframework-checksum "$CHECKSUM"
+          swift package --package-path build/release-manifest dump-package > build/release-manifest.json
+          python3 - build/release-manifest.json "$URL" "$CHECKSUM" "$(bash scripts/ios-deployment-target.sh)" <<'PYTHON'
+          import json, sys
+          manifest = json.load(open(sys.argv[1]))
+          binary = [t for t in manifest["targets"] if t["type"] == "binary"]
+          assert len(binary) == 1, binary
+          assert binary[0]["url"] == sys.argv[2], binary[0]
+          assert binary[0]["checksum"] == sys.argv[3], binary[0]
+          platforms = {p["platformName"]: p["version"] for p in manifest["platforms"]}
+          assert platforms == {"ios": sys.argv[4]}, platforms
+          assert [p["name"] for p in manifest["products"]] == ["OfflineProtocolSDK"], manifest["products"]
+          print("the manifest resolves:", binary[0]["url"], binary[0]["checksum"], platforms)
+          PYTHON
+
+      - name: Keep the test logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-package-test-logs
+          path: |
+            build/package-test.log
+            build/consumer-test.log
+          if-no-files-found: ignore
           retention-days: 5
 
   # ---------------------------------------------------------------------------
@@ -625,6 +847,17 @@ jobs:
   version-gate:
     name: Verify Release Versions
     runs-on: ubuntu-latest
+    # The one place a release's number is worked out. Every job that names the
+    # version takes it from here, so the npm package, the Swift tag, the Maven
+    # coordinate and the wheel cannot be numbered by two different rules.
+    outputs:
+      VERSION: ${{ steps.version.outputs.VERSION }}
+      NPM_TAG: ${{ steps.version.outputs.NPM_TAG }}
+      PY_VERSION: ${{ steps.version.outputs.PY_VERSION }}
+      # True only for a tag run that is not a dry run: the condition every
+      # channel that cannot take a version back publishes under. A dispatch
+      # from a branch never qualifies, whatever its inputs say.
+      REAL_RELEASE: ${{ steps.version.outputs.REAL_RELEASE }}
     steps:
       # Credential-free and artifact-free, so `actions/*` stays on a major tag
       # per the pinning note at the top of this file. A compromise here could
@@ -658,6 +891,60 @@ jobs:
       # number — it followed the Cargo version before crates.io publishing
       # existed, and leaving it unchecked is how it quietly becomes a third
       # scheme.
+      - name: Resolve the release version
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          elif [[ -n "$INPUT_VERSION" ]]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="0.0.0-dev"
+          fi
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid semantic version: $VERSION"
+            exit 1
+          fi
+
+          printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+
+          # A prerelease must not become what a plain `npm install` resolves to.
+          # npm dist-tags every publish `latest` unless told otherwise, so
+          # without this an `-rc` tag would quietly become the default version
+          # for every consumer. That matters more now than it used to: the
+          # crates job treats prerelease tags as free rehearsal — every gate and
+          # the full packaging verification run, only the immutable upload is
+          # skipped — which makes cutting one a reasonable thing to do rather
+          # than a rarity.
+          #
+          # Derived from the resolved, semver-validated version rather than the
+          # ref, so a branch dispatch off a hyphenated branch name cannot trip
+          # it.
+          if [[ "$VERSION" == *-* ]]; then
+            NPM_TAG=next
+          else
+            NPM_TAG=latest
+          fi
+          printf 'NPM_TAG=%s\n' "$NPM_TAG" >> "$GITHUB_OUTPUT"
+          echo "Version $VERSION publishes under the '$NPM_TAG' npm dist-tag."
+
+          # The wheels' number. A suffix Python has no agreed spelling for
+          # fails here, before anything builds.
+          PY_VERSION="$(bash scripts/pep440-version.sh "$VERSION")"
+          printf 'PY_VERSION=%s\n' "$PY_VERSION" >> "$GITHUB_OUTPUT"
+          echo "The Python package is $PY_VERSION."
+
+          if [[ "$GITHUB_REF" == refs/tags/v* && "$DRY_RUN" != true ]]; then
+            REAL_RELEASE=true
+          else
+            REAL_RELEASE=false
+          fi
+          printf 'REAL_RELEASE=%s\n' "$REAL_RELEASE" >> "$GITHUB_OUTPUT"
+
       - name: Verify the release versions match the tag
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -699,7 +986,12 @@ jobs:
     # purpose: a version mismatch has to stop npm too. Left to fail the crates
     # job alone, it splits the release across registries with no way back — see
     # the long note on that job.
-    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python]
+    #
+    # The Swift package, the Android library and the wheels are in it too, and
+    # their tests: the GitHub release carries the wheels, the Swift package and
+    # the archive it names, and Maven Central and PyPI publish only after this
+    # job, so one that fails its tests stops everything before npm.
+    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, swift-package]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -761,6 +1053,19 @@ jobs:
         with:
           name: python-bindings
           path: bindings/python/offline_protocol_sdk
+
+      - name: Download the Swift package's XCFramework
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: swiftpm-xcframework
+          path: swiftpm
+
+      - name: Download the Python wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: python-wheel-*
+          path: python-wheels
+          merge-multiple: true
 
       - name: Verify artifacts
         run: |
@@ -865,42 +1170,11 @@ jobs:
       - name: Get version from tag
         id: version
         env:
-          INPUT_VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.version-gate.outputs.VERSION }}
+          NPM_TAG: ${{ needs.version-gate.outputs.NPM_TAG }}
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/v}"
-          elif [[ -n "$INPUT_VERSION" ]]; then
-            VERSION="$INPUT_VERSION"
-          else
-            VERSION="0.0.0-dev"
-          fi
-
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::Invalid semantic version: $VERSION"
-            exit 1
-          fi
-
           printf 'VERSION=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
-
-          # A prerelease must not become what a plain `npm install` resolves to.
-          # npm dist-tags every publish `latest` unless told otherwise, so
-          # without this an `-rc` tag would quietly become the default version
-          # for every consumer. That matters more now than it used to: the
-          # crates job treats prerelease tags as free rehearsal — every gate and
-          # the full packaging verification run, only the immutable upload is
-          # skipped — which makes cutting one a reasonable thing to do rather
-          # than a rarity.
-          #
-          # Derived from the resolved, semver-validated version rather than the
-          # ref, so a branch dispatch off a hyphenated branch name cannot trip
-          # it.
-          if [[ "$VERSION" == *-* ]]; then
-            NPM_TAG=next
-          else
-            NPM_TAG=latest
-          fi
           printf 'NPM_TAG=%s\n' "$NPM_TAG" >> "$GITHUB_OUTPUT"
-          echo "Version $VERSION publishes under the '$NPM_TAG' npm dist-tag."
 
       - name: Update package.json version
         working-directory: bindings/react-native
@@ -928,6 +1202,20 @@ jobs:
       # against a fixture tree, including the failure paths); this workflow only
       # ever runs on a `v*` tag, so inline logic would first execute during a
       # real release.
+      # The package the distribution repository will pull: the bridge sources
+      # and a manifest that names the XCFramework archive by the url this
+      # release publishes it under and by its checksum. Assembled on the
+      # archive's bytes, before anything is published, and the packaging step
+      # holds the two to each other.
+      - name: Assemble the Swift package against the archive
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          set -euo pipefail
+          bash scripts/assemble-swift-package.sh --output swift-package --version "$VERSION" \
+            --xcframework-url "$(bash scripts/swiftpm-archive-url.sh "$VERSION")" \
+            --xcframework-checksum "$(sha256sum swiftpm/offline_protocolFFI.xcframework.zip | cut -d' ' -f1)"
+
       - name: Package binary release assets
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
@@ -1193,7 +1481,7 @@ jobs:
     # artifacts; the shared `needs` list exists purely for that all-or-nothing
     # property, and sharing it with `release` is what keeps a version mismatch
     # from failing one registry while the other publishes regardless.
-    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python]
+    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, swift-package]
     runs-on: ubuntu-latest
     env:
       # The single gate on every step that uploads. Four conditions, each
@@ -1376,3 +1664,132 @@ jobs:
           fi
 
           cargo workspaces publish --publish-as-is --no-verify --yes
+
+  # ---------------------------------------------------------------------------
+  # Maven Central and PyPI
+  #
+  # Two more channels, and neither takes a version back: a version on Maven
+  # Central or PyPI is permanent. So each publishes only after the `release`
+  # job has created the GitHub release and published npm, only from a `v*`
+  # tag that is not a dry run (`REAL_RELEASE`), and only when its repository
+  # variable switches it on. A dry run with Maven Central on rehearses it
+  # against the real Portal: the token, the signing key and every POM
+  # requirement are exercised, and nothing is released.
+  #
+  #   MAVEN_CENTRAL_PUBLISH  secrets: MAVEN_CENTRAL_USERNAME, MAVEN_CENTRAL_PASSWORD,
+  #                                   MAVEN_SIGNING_KEY, MAVEN_SIGNING_KEY_PASSWORD
+  #   PYPI_PUBLISH           no secret: trusted publishing, environment `pypi`
+  #
+  # A channel switched on with its secret missing fails loudly rather than
+  # skipping: a silent skip is a release that looks shipped and is not.
+  # Each job holds a credential, so every action in it is pinned to a SHA.
+  #
+  # The Swift package is the third channel and has no job here, because
+  # nothing in this repository holds a credential for the distribution
+  # repository. Offline-Protocol/offline-protocol-swift pulls the package and
+  # the archive this release attached, verifies their attestations, and tags
+  # itself with its own token: its .github/workflows/publish.yml, run by hand
+  # after a release or by its schedule. The logic is
+  # scripts/publish-swift-package.sh here, taken from the release's tag.
+  # ---------------------------------------------------------------------------
+
+  # com.offlineprotocol:offline-protocol-android, signed here with gpg from the
+  # Maven repository the `android-library` job built and tested. The key never
+  # enters a Gradle build.
+  publish-maven:
+    name: Publish to Maven Central
+    needs: [version-gate, android-library, release]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version-gate.outputs.VERSION }}
+      REAL_RELEASE: ${{ needs.version-gate.outputs.REAL_RELEASE }}
+    steps:
+      - name: Channel off
+        if: vars.MAVEN_CENTRAL_PUBLISH != 'true'
+        run: echo "::notice title=Android library not published::MAVEN_CENTRAL_PUBLISH is not 'true', so the library was built and tested and not uploaded."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: vars.MAVEN_CENTRAL_PUBLISH == 'true'
+
+      - name: Download the library
+        if: vars.MAVEN_CENTRAL_PUBLISH == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: android-library-maven
+          path: maven
+
+      - name: Sign and bundle
+        if: vars.MAVEN_CENTRAL_PUBLISH == 'true'
+        env:
+          SIGNING_KEY: ${{ secrets.MAVEN_SIGNING_KEY }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.MAVEN_SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [ -n "$SIGNING_KEY" ] || {
+            echo "::error title=Missing signing key::MAVEN_CENTRAL_PUBLISH is on, and the MAVEN_SIGNING_KEY secret is empty."
+            exit 1
+          }
+          bash scripts/maven-central-bundle.sh maven "$RUNNER_TEMP/central-bundle.zip" "$VERSION"
+
+      # A dry run uploads too, as a deployment Central validates and this then
+      # drops, so a wrong token, an unverified namespace or a key missing from
+      # the keyservers fails before a tag is cut.
+      - name: Upload to Maven Central
+        if: vars.MAVEN_CENTRAL_PUBLISH == 'true'
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [ -n "$MAVEN_CENTRAL_USERNAME" ] && [ -n "$MAVEN_CENTRAL_PASSWORD" ] || {
+            echo "::error title=Missing Portal token::MAVEN_CENTRAL_PUBLISH is on, and MAVEN_CENTRAL_USERNAME or MAVEN_CENTRAL_PASSWORD is empty."
+            exit 1
+          }
+          MODE=rehearse
+          [ "$REAL_RELEASE" = true ] && MODE=publish
+          bash scripts/maven-central-upload.sh "$RUNNER_TEMP/central-bundle.zip" "$MODE" "$VERSION"
+
+  # offline-protocol-sdk on PyPI, by trusted publishing: PyPI trusts this
+  # workflow file and the `pypi` environment, so there is no token to store
+  # or leak. The wheels are the ones `test-python-wheels` installed and tested.
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [version-gate, test-python-wheels, release]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      # The trusted-publishing credential, as for npm.
+      id-token: write
+    env:
+      REAL_RELEASE: ${{ needs.version-gate.outputs.REAL_RELEASE }}
+    steps:
+      - name: Download the wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: python-wheel-*
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      # PyPI refuses metadata it cannot render, after the upload has begun.
+      - name: Check the wheels' metadata
+        run: |
+          python -m pip install twine
+          python -m twine check --strict dist/*.whl
+
+      - name: Channel off
+        if: vars.PYPI_PUBLISH != 'true' || env.REAL_RELEASE != 'true'
+        run: echo "::notice title=Python package not published::Published only from a release tag with PYPI_PUBLISH set to 'true'. PyPI has no rehearsal; the trusted publisher is first exercised by a release candidate."
+
+      # skip-existing: a re-run of a release whose wheels are already on PyPI
+      # succeeds instead of failing on the duplicate.
+      - name: Publish to PyPI
+        if: vars.PYPI_PUBLISH == 'true' && env.REAL_RELEASE == 'true'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/
+          skip-existing: true

@@ -61,6 +61,23 @@ The directory is named for the distribution repository, `offline-protocol-swift`
 because Swift Package Manager names a package after where it came from, and
 the consumer check refers to it by that name.
 
+## How a release publishes it
+
+A release builds the package's XCFramework from the release's own archives,
+assembles the package around it and runs every suite and the consumer check
+on a simulator (`scripts/test-swift-package.sh`, the script the pull request
+job runs). Two assets go on the GitHub release: the XCFramework as
+`offline-protocol-X.Y.Z-swiftpm-xcframework.zip`, and the package assembled
+against that archive's url and checksum as
+`offline-protocol-X.Y.Z-swift-package.tar.gz`. Nothing here pushes to the
+distribution repository: `Offline-Protocol/offline-protocol-swift` has a
+workflow that downloads the two, verifies their attestations, and runs
+`scripts/publish-swift-package.sh` from the release's tag to commit the
+package and tag it `X.Y.Z`. The tag never moves: a re-run of the same
+release is accepted only when the tag already holds exactly that content.
+Never edit the distribution repository by hand; see
+[Cutting a Release](../../CONTRIBUTING.md#the-native-packages-and-pypi).
+
 ## Adding a source
 
 A new file at the top level of `bindings/react-native/ios`, or under `ble/`

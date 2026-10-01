@@ -248,8 +248,14 @@ cargo bench --package offline-protocol-bench --bench '*' --locked -- \
 
 One number identifies a release across every channel: the `vX.Y.Z` git tag, the
 `@offline-protocol/mesh-sdk` npm package, the `offline-protocol*` crates on
-crates.io, and the GitHub release assets. Pushing the tag is what publishes, so
+crates.io, the GitHub release assets (the Python wheels among them), the Swift
+package's `X.Y.Z` tag in `Offline-Protocol/offline-protocol-swift`,
+`com.offlineprotocol:offline-protocol-android` on Maven Central, and
+`offline-protocol-sdk` on PyPI. Pushing the tag is what publishes, so
 everything below happens on a `chore/release-X.Y.Z` branch that merges first.
+The last three are switched on one by one, and the Swift package is pulled
+rather than pushed; see
+[the native packages and PyPI](#the-native-packages-and-pypi).
 
 Version files to bump together:
 
@@ -339,6 +345,83 @@ Four failure modes worth naming:
   the recovery above no longer exists: a tag that has already published crates
   cannot be moved, so a publish that fails here costs a patch version. The
   `dry_run` dispatch is what makes that cheap to check beforehand.
+
+### The native packages and PyPI
+
+The Swift package, the Android library and the wheels are built from the
+release's own libraries and tested before anything publishes: the Swift package
+on a simulator with an application built against it, the Android library with
+all four ABIs and a minified application, and each wheel installed by pip and
+run through the whole suite on the system it is tagged for. All of that runs on
+every release and every dry run, and a failure stops npm and crates.io too.
+
+Maven Central and PyPI then publish after the `release` job, only from a
+`v*` tag that is not a dry run, and only when the channel's repository
+variable is `true`. A channel switched on with its secret missing fails the
+run rather than skipping, because a skipped channel is a release that looks
+shipped.
+
+| Channel | Switch (variable) | Credentials (secrets) | A dry run with it on |
+| --- | --- | --- | --- |
+| Maven Central | `MAVEN_CENTRAL_PUBLISH` | `MAVEN_CENTRAL_USERNAME` and `MAVEN_CENTRAL_PASSWORD` (a Central Portal user token), `MAVEN_SIGNING_KEY` (armored private key) and `MAVEN_SIGNING_KEY_PASSWORD` | uploads a deployment Central validates, then drops it |
+| PyPI | `PYPI_PUBLISH` | none: trusted publishing from `release.yml` in the `pypi` environment | checks the wheels' metadata only: PyPI has no rehearsal |
+
+**The Swift package is pulled, not pushed.** Nothing in this repository can
+write to `Offline-Protocol/offline-protocol-swift`, and no credential for it
+exists anywhere. The release attaches the assembled package
+(`offline-protocol-X.Y.Z-swift-package.tar.gz`) and the XCFramework archive
+its manifest names, both attested. The distribution repository's own
+workflow downloads the two, verifies the attestations against this
+repository's `release.yml`, and commits and tags the package with the token
+every workflow holds for its own repository. After a release is green, run
+it:
+
+```bash
+gh workflow run publish.yml -R Offline-Protocol/offline-protocol-swift -f version=X.Y.Z
+```
+
+Its schedule also publishes the newest release every six hours if nobody
+did, and skips a release that has no package (every release before 0.28.0).
+The logic is `scripts/publish-swift-package.sh` here, checked out from the
+release's tag by that workflow, so it is tested in this repository and copied
+nowhere. A dry run of this workflow assembles the package and parses its
+manifest with Swift Package Manager; `dry_run` on the distribution
+repository's workflow rehearses the pull without pushing.
+
+One-time setup, outside this repository (none for the Swift package):
+
+- **Maven Central**: a Central Portal account, the `com.offlineprotocol`
+  namespace verified (a DNS TXT record on `offlineprotocol.com`), a user token,
+  and the signing key's public half on `keys.openpgp.org`. Central checks every
+  signature against the keyservers, so a key that is not there fails the
+  rehearsal, which is where it should fail.
+- **PyPI**: a trusted publisher for `offline-protocol-sdk` naming this
+  repository, the workflow `release.yml` and the environment `pypi`. As with
+  npm, renaming the file revokes it.
+
+Three things here cannot be undone, and each script refuses rather than
+guesses:
+
+- **A Swift package tag never moves.** Swift Package Manager records the
+  revision behind every version it resolves, so a moved tag breaks every
+  consumer that resolved it. `publish-swift-package.sh` accepts a version that
+  is already tagged only when the tag holds exactly what it would publish (a
+  re-run) and refuses one that differs. A bad Swift release is answered by the
+  next version. Never edit the distribution repository by hand: the next
+  release replaces its whole tree.
+- **A version on Maven Central or PyPI is permanent**, including a release
+  candidate. An rc publishes as `X.Y.Z-rc.N` on Central and `X.Y.ZrcN` on
+  PyPI (the wheel is numbered from the tag, in Python's spelling), so it never
+  takes the number the final release needs. A re-run skips a version that is
+  already on PyPI, and one already on Maven Central once `repo1.maven.org`
+  serves it, which is minutes after the Portal publishes; a re-run inside
+  that window uploads a duplicate the Portal refuses, which turns the job
+  red and changes nothing.
+- **The wheels' platform tags are read from the libraries.** A Linux wheel is
+  tagged `manylinux_2_N` for the newest glibc symbol its library asks for,
+  which is the glibc of the image that built it. Building on a newer image
+  raises the floor for every Linux user; that is a change to say in the
+  changelog.
 
 ## Architecture Decisions
 
