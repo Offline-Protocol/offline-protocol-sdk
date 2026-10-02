@@ -2790,44 +2790,133 @@ mod tests {
     /// calls `delete(` on the storage is a record delete of ours, and only the
     /// loader (consumed or unparseable records) and the purge (after the
     /// provider key) may do that.
+    ///
+    /// Read line by line, never by matching `\n`: `*.rs` is not pinned to LF,
+    /// so a Windows checkout hands `include_str!` CRLF text, and a `\n` pattern
+    /// finds nothing there (the first version of this guard failed only on the
+    /// Windows runner for that reason).
     #[test]
     fn only_the_known_sites_delete_a_key_package_record_alone() {
-        let source = include_str!("manager.rs");
-        let production = &source[..source
-            .find("#[cfg(test)]\nmod tests")
-            .expect("manager.rs has a test module")];
         let allowed = ["load_stored_key_package", "purge_key_package_material"];
+        let (checked, offenders) = record_only_key_package_deletes(include_str!("manager.rs"));
 
-        let mut offenders = Vec::new();
-        let mut checked = 0usize;
-        for body in production
-            .split("\n    fn ")
-            .chain(production.split("\n    pub fn "))
-        {
-            let name = body.split(['(', '<']).next().unwrap_or("");
-            // Only the text up to the next function is this function's body.
-            let body = body.split("\n    pub fn ").next().unwrap_or(body);
-            let body = body.split("\n    fn ").next().unwrap_or(body);
-            if !body.contains("StorageKeyType::KeyPackage.as_str()") {
-                continue;
-            }
-            checked += 1;
-            if body.contains(".delete(")
-                && !body.contains("delete_key_package(")
-                && !allowed.contains(&name)
-            {
-                offenders.push(name.to_string());
-            }
-        }
         assert!(
             checked >= 8,
             "found only {checked} key package functions; the scan is broken, not the code"
         );
+        let offenders: Vec<_> = offenders
+            .into_iter()
+            .filter(|name| !allowed.contains(&name.as_str()))
+            .collect();
         assert!(
             offenders.is_empty(),
             "record-only delete of a key package in {offenders:?}. Destroy the init \
              key too (purge_key_package_material), or keep the record"
         );
+    }
+
+    /// The scanner behind the guard above, run on text it must flag: a CRLF
+    /// source, and offenders declared `pub(crate)`, `async` and at column 0,
+    /// each placed right after an allowed function so a header the tokenizer
+    /// missed would fold the offender into the allowed body.
+    #[test]
+    fn the_record_delete_scanner_sees_every_function_header_and_crlf() {
+        let source = [
+            "impl MlsManager {",
+            "    fn purge_key_package_material(&self) {",
+            "        let t = StorageKeyType::KeyPackage.as_str();",
+            "        self.storage.delete(t, id)?;",
+            "    }",
+            "    pub(crate) fn hidden_crate(&self) {",
+            "        self.storage.delete(StorageKeyType::KeyPackage.as_str(), id)?;",
+            "    }",
+            "    fn load_stored_key_package(&self) {}",
+            "    pub async fn hidden_async(&self) {",
+            "        self.storage.delete(StorageKeyType::KeyPackage.as_str(), id)?;",
+            "    }",
+            "}",
+            "fn hidden_free() {",
+            "    storage.delete(StorageKeyType::KeyPackage.as_str(), id)?;",
+            "}",
+            "#[cfg(test)]",
+            "mod tests {",
+            "    fn in_tests() {",
+            "        storage.delete(StorageKeyType::KeyPackage.as_str(), id)?;",
+            "    }",
+            "}",
+        ]
+        .join("\r\n");
+
+        let (checked, offenders) = record_only_key_package_deletes(&source);
+
+        assert_eq!(checked, 4, "the test module is out of scope");
+        assert_eq!(
+            offenders,
+            [
+                "purge_key_package_material",
+                "hidden_crate",
+                "hidden_async",
+                "hidden_free"
+            ]
+        );
+    }
+
+    /// Scans the production half of `source` (everything before the
+    /// `#[cfg(test)]` test module) one function at a time. Returns how many
+    /// functions name the key package storage type, and the names of those
+    /// that also call `.delete(`.
+    fn record_only_key_package_deletes(source: &str) -> (usize, Vec<String>) {
+        let lines: Vec<&str> = source.lines().collect();
+        let test_module = lines
+            .windows(2)
+            .position(|pair| pair[0].trim() == "#[cfg(test)]" && pair[1].starts_with("mod tests"))
+            .expect("the source has a test module");
+
+        let mut functions: Vec<(String, String)> = Vec::new();
+        for line in &lines[..test_module] {
+            if let Some(name) = function_header_name(line) {
+                functions.push((name.to_string(), String::new()));
+            } else if let Some((_, body)) = functions.last_mut() {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+
+        let mut checked = 0;
+        let mut offenders = Vec::new();
+        for (name, body) in functions {
+            if !body.contains("StorageKeyType::KeyPackage.as_str()") {
+                continue;
+            }
+            checked += 1;
+            if body.contains(".delete(") {
+                offenders.push(name);
+            }
+        }
+        (checked, offenders)
+    }
+
+    /// The name a function header at column 0 or 4 declares, whatever its
+    /// visibility (`pub`, `pub(crate)`, `pub(super)`) and qualifiers.
+    fn function_header_name(line: &str) -> Option<&str> {
+        let trimmed = line.trim_start();
+        if !matches!(line.len() - trimmed.len(), 0 | 4) {
+            return None;
+        }
+        let mut rest = trimmed;
+        loop {
+            if let Some(after) = rest.strip_prefix("pub(") {
+                rest = after.split_once(')')?.1.trim_start();
+            } else if let Some(after) = ["pub ", "async ", "const ", "unsafe "]
+                .iter()
+                .find_map(|qualifier| rest.strip_prefix(qualifier))
+            {
+                rest = after.trim_start();
+            } else {
+                break;
+            }
+        }
+        rest.strip_prefix("fn ")?.split(['(', '<']).next()
     }
 
     /// An unclaimed package — minted by the peer-less entry point, or by a
