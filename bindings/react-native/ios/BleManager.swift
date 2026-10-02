@@ -708,7 +708,10 @@ public class BleManager: NSObject, TransportManager {
     }
     
     private func stopUnsafe() {
-        guard state == .running || state == .starting else {
+        // `.unavailable` too: the managers are still alive with Bluetooth off,
+        // and returning early here would let the next power-on move a stopped
+        // transport back to `.running` and report BLE available to the core.
+        guard state == .running || state == .starting || state == .unavailable else {
             return
         }
         
