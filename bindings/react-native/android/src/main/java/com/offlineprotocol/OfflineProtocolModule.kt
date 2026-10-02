@@ -2368,6 +2368,18 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             // destroyed handle throws; publishing the null first means the
             // widest that race can be is one already-in-flight call, which
             // [notifyAppStateQuietly] absorbs.
+            // The data store holds a strong reference to the engine, so it is
+            // released first and explicitly: left set, every data call after
+            // destroy() reached the stopped engine instead of rejecting with
+            // "DataStore not initialized", and its reference kept the engine
+            // alive until the collector got to it.
+            val store = dataStore
+            dataStore = null
+            try {
+                store?.destroy()
+            } catch (e: Exception) {
+                android.util.Log.w(NAME, "Releasing the data store handle failed", e)
+            }
             val handle = protocol
             protocol = null
             try {

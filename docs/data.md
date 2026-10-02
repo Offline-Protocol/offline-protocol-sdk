@@ -294,12 +294,24 @@ It does two things, and they are worth telling apart.
   whoever sends it. That half depends on nothing, so a narrowed space stays
   narrow even against a peer that ignores the request.
 
-**Set it before `start()`.** It is not persisted, on purpose: it is your
-application's policy for this launch rather than a fact about the store, and
-a durable copy would be a second thing to reconcile against an app that has
-changed its mind. Declaring it costs nothing there: the exchange `start()`
-makes already carries it, and declaring the same patterns twice sends
-nothing.
+**Set it before `start()`.** The engine's start-up exchange offers every
+space with the interest in force at that moment, and narrowing afterwards
+does not delete what that wider exchange already pulled in. On React Native
+the store does not exist until `start()` opens it, so the SDK holds a call
+made earlier, resolves it at once, and applies it after storage opens and
+before the engine starts. A pattern it refuses then rejects `start()` with an
+error naming the space, and the engine is not started. On the Swift package,
+the Android library and Python, call it after `initializeMls` and before
+`start()`, the order the engine documents; Python's `ProtocolManager`
+initializes MLS inside its own `start()`, so a store opened through it runs
+its first exchange under the default interest.
+
+It is not persisted, on purpose: it is your application's policy for this
+launch rather than a fact about the store, and a durable copy would be a
+second thing to reconcile against an app that has changed its mind. Declare
+it at every launch, and again after `destroy()`, which discards a held one.
+Declaring it costs nothing: the exchange `start()` makes already carries it,
+and declaring the same patterns twice sends nothing.
 
 **`wipeAll()` clears it too**, along with the documents it was scoping,
 because nothing may distinguish a wiped space from one this device has never

@@ -99,7 +99,7 @@ subscription, not on what it means. See
 
 ## K7. Pinned constant lists
 
-`RelayAnswerPrefixes.kt` holds one of the three copies of the relay-answer
+`RelayAnswerPrefixes.kt` holds one of the four copies of the relay-answer
 exemption list, pinned in `RelayAnswerPrefixesTest.kt`.
 
 See [C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language).

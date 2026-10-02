@@ -345,11 +345,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
-- **BLE survives a Bluetooth power-cycle on iOS and Android.** Turning an
-  iPhone's Bluetooth off and on, or a Bluetooth stack reset, left the pair
-  unable to talk. On iOS, power-off removes the GATT service, but the bridge
-  still marked it as published, so power-on advertised a service UUID with
-  nothing behind it and peers connected and dropped. Power-on also never
+- **BLE survives an iPhone's Bluetooth being turned off and on, on both ends
+  of the link.** Turning an iPhone's Bluetooth off and on, or a Bluetooth
+  stack reset, left the pair unable to talk. On iOS, power-off removes the
+  GATT service, but the bridge still marked it as published, so power-on
+  advertised a service UUID with nothing behind it and peers connected and
+  dropped. The service is now published again on power-on, after clearing
+  whatever the stack kept, so it never appears twice. Power-on also never
   reported BLE as available again, so the core stopped sending over BLE
   while inbound still arrived. Power-off and reset now drop every per-link
   record, because CoreBluetooth invalidates the links without a disconnect
@@ -357,14 +359,70 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   count: a device that was at its connection limit came back with no free
   slots and refused its returning peers. Each dropped peer is also reported
   lost, so one that does not come back produces `neighbor_lost` instead of
-  staying a neighbor in the core. Power-on brings the transport
-  back to running, and `stop()` while Bluetooth is off now stops it instead
-  of returning early and letting the next power-on restart a stopped
-  transport. On Android, an iPhone that came back from a new random address
-  was verified there, but the old address kept being redialled. When the
-  redialling gave up, it reported the live peer as lost and deleted the
-  mapping that pointed at the new link. An address is now dropped on its
-  own once the peer is live at another one.
+  staying a neighbor in the core. Power-on brings the transport back to
+  running, and `stop()` while Bluetooth is off now stops it instead of
+  returning early and letting the next power-on restart a stopped transport.
+  On the Android end, an iPhone that came back from a new random address was
+  verified there, but the old address kept being redialled. When the
+  redialling gave up, or the old address's GATT server link dropped
+  uncleanly, it reported the live peer as lost and deleted the mapping that
+  pointed at the new link. Once the peer is live at another address, the old
+  address is now dropped on its own, with only its address-keyed state. This
+  does not add handling for an Android phone's own Bluetooth being turned
+  off and on.
+
+- **React Native holds an interest declared before `start()` and applies it
+  before the engine starts.** (#472) The engine's start-up exchange offers
+  every held space with the interest in force at that moment, and a narrowing
+  never deletes what a wider exchange pulled in, so interest has to be
+  declared after storage opens and before the engine starts. React Native's
+  `start()` does both steps, and the JSDoc said to call `setInterest` before
+  it, where both native modules rejected it with `DataStore not initialized`.
+  An app that moved the call after `start()` had its first exchange ask for
+  everything. `DataStore.setInterest` now holds a call made before `start()`
+  and resolves it, and `start()` applies what is held after MLS
+  initialization and before the native start. A pattern refused then rejects
+  `start()` with an error naming the space and carrying the native code, and
+  the engine is not started, because starting would replicate the space
+  whole; when the data layer is off the held call is dropped with a warning
+  and `start()` proceeds. `destroy()` discards what is held. The behaviour
+  change for a deployed app: an invalid pattern declared before `start()`
+  used to reject that call and now rejects `start()`; a call after `start()`
+  is unchanged. Both native `destroy()` paths now also release the data
+  store, which holds a strong reference to the engine: left set, every data
+  call after `destroy()` reached the stopped engine instead of rejecting, and
+  on Android the engine stayed alive until the collector reached it. Python's
+  `ProtocolManager` initializes MLS inside its own `start()` too; its first
+  exchange still runs under the default interest, now stated in
+  `docs/bridges/python.md`.
+
+- **`DiagnosticEvent.level` declares `debug`, which both native platforms
+  emit, and Android no longer emits `warn`.** (#471) The iOS and Android
+  managers emit diagnostics at `debug` at about seventy sites, while the
+  TypeScript union said `'info' | 'warning' | 'error'`. Android's GATT server
+  also emitted four diagnostics as `warn`, a spelling nothing declared; they
+  are `warning` now. The union is `'debug' | 'info' | 'warning' | 'error'`, and
+  `react_native_diagnostic_levels_match_every_bridge` reads every level
+  literal the bridges hand to a diagnostic sink and fails when a level is
+  emitted but not declared, or declared but never emitted. This widens a
+  public type to match what already arrives at runtime. It is not
+  automatically source-compatible: a consumer with an exhaustive `switch` or
+  a `Record` keyed by the level needs a `debug` entry to typecheck, and a
+  filter that compared against `'warn'` for the four GATT server diagnostics
+  should compare against `'warning'`.
+
+- **Python holds a pinned copy of the relay-answer prefixes, and decides
+  attribution in one place.** (#368) The relay's group answers reach the core
+  only when they carry no transport peer identity, so an answer injected with
+  a `sender_id` is refused as unsigned while the inject reports success. The
+  Swift and Kotlin bridges each hold the list and force those answers
+  unattributed centrally; Python held no copy, and every call site had to get
+  it right on its own. 0.27.0 already corrected the prefix names and the
+  attribution at each site (#453). Now `relay_answer_prefixes.py` holds the
+  list, `_inject_group_frame` drops the actor for any answer whatever the
+  caller passed, and `test_relay_answer_prefixes.py` pins the six literals,
+  so the next registry change fails the Python suite rather than a relay
+  feature in the field. No behaviour change for a correct caller.
 
 - **A key package the application marks synced keeps its record, so its
   private key is still destroyed when it expires.**

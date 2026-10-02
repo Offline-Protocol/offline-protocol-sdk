@@ -6,7 +6,8 @@ package com.offlineprotocol
  *
  * Mirrors `RELAY_ANSWER_PREFIXES` in
  * `crates/offline-protocol/src/protocol/prefixes.rs`, and iOS's
- * RelayAnswerPrefixes.swift — keep all three in sync. The lists must agree: the
+ * RelayAnswerPrefixes.swift and Python's relay_answer_prefixes.py. Keep all
+ * four in sync. The lists must agree: the
  * core exempts exactly these from its unconditional control-frame signature
  * gate, because no peer sent them so no key exists to sign them.
  *

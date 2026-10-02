@@ -73,8 +73,9 @@ the group delivery report already works. See
 
 ## Maintenance hazard
 
-The relay-answer list exists in three places no single compiler sees together:
-the core and each native bridge. A prefix present in one copy and absent from
+The relay-answer list exists in four places no single compiler sees together:
+the core, the Swift and Kotlin bridges, and the Python binding (which had no
+copy until #368). A prefix present in one copy and absent from
 another fails **silently**: the bridge injects the answer unattributed, the gate
 declines to exempt it, and the frame is dropped as unsigned with no peer at
 fault.

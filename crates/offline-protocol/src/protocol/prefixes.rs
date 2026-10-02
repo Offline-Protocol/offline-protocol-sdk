@@ -211,13 +211,14 @@ pub(crate) const DATA_PLANE_PREFIXES: &[&str] =
 /// `internet_group_report_received` already handles the group delivery report;
 /// that is deliberately out of scope here and left as the follow-up.
 ///
-/// **Maintenance note:** this list is mirrored, by hand, in three places that
+/// **Maintenance note:** this list is mirrored, by hand, in four places that
 /// no single compiler ever sees together — here, `RelayAnswerPrefixes.swift`,
-/// and `RelayAnswerPrefixes.kt`. Each bridge pins its own copy against the same
-/// literals ([`relay_answer_prefixes_are_pinned`] does it for this one), because
+/// `RelayAnswerPrefixes.kt` and the Python `relay_answer_prefixes.py`. Each
+/// bridge pins its own copy against the same literals
+/// ([`relay_answer_prefixes_are_pinned`] does it for this one), because
 /// a prefix present in one list and absent from another fails **silently**: the
 /// bridge injects the answer unattributed, this list declines to exempt it, and
-/// the frame is dropped as unsigned with no peer at fault. Edit all three.
+/// the frame is dropped as unsigned with no peer at fault. Edit all four.
 pub(crate) const RELAY_ANSWER_PREFIXES: &[&str] = &[
     internal_prefixes::GROUP_CREATED,
     internal_prefixes::GROUP_MEMBER_ADDED,
@@ -234,11 +235,11 @@ mod tests {
     /// The membership of [`RELAY_ANSWER_PREFIXES`], pinned to literals.
     ///
     /// Written out rather than derived, for the same reason the bridges write
-    /// theirs out: this list is one of three hand-maintained copies, and a test
+    /// theirs out: this list is one of four hand-maintained copies, and a test
     /// that recomputed it from the constant would agree with any edit — which
     /// is precisely the failure mode. The literals here are the contract the
-    /// two bridge lists are also pinned against, so a divergence in any one of
-    /// the three now fails a test in its own language.
+    /// three bridge lists are also pinned against, so a divergence in any one
+    /// of the four now fails a test in its own language.
     ///
     /// Dropping an entry is the dangerous direction and the reason this test
     /// exists: the bridge would keep injecting that answer unattributed, the
@@ -258,9 +259,9 @@ mod tests {
                 "__USER_GROUPS__",
                 "__GROUP_ERROR__",
             ],
-            "the relay-answer exemption list changed — update RelayAnswerPrefixes.swift \
-             and RelayAnswerPrefixes.kt to match, or the bridges and the gate will \
-             disagree silently"
+            "the relay-answer exemption list changed: update RelayAnswerPrefixes.swift, \
+             RelayAnswerPrefixes.kt and relay_answer_prefixes.py to match, or the \
+             bridges and the gate will disagree silently"
         );
     }
 

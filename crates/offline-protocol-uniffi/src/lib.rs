@@ -17722,6 +17722,231 @@ mod tests {
         }
     }
 
+    /// The diagnostic levels TypeScript declares are exactly the ones the
+    /// bridges emit.
+    ///
+    /// Every bridge passes the level as a plain string, so only the
+    /// TypeScript union types it, and nothing compiles the two together.
+    /// `debug` was emitted on both platforms for several releases while the
+    /// union said `'info' | 'warning' | 'error'` (#471), and Android's GATT
+    /// server emitted a fifth spelling, `warn`, that no declaration had. A
+    /// consumer's exhaustive switch reads either one as impossible.
+    ///
+    /// Both directions: an emitted level the union lacks, and a declared level
+    /// nothing emits. Every sink that takes a level literal is read: the
+    /// managers' `emitDiagnostic`, the Android BLE `diagnosticEmitter`, and
+    /// the peer-stream host callbacks. Python's managers are read too, since
+    /// they share the vocabulary even though their level never reaches
+    /// TypeScript. The floors on files and literals keep a scan that stopped
+    /// matching from passing on nothing.
+    #[test]
+    fn react_native_diagnostic_levels_match_every_bridge() {
+        use std::collections::BTreeSet;
+
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        let types_ts = std::fs::read_to_string(repo.join("bindings/react-native/src/types.ts"))
+            .expect("read types.ts");
+        let interface = types_ts
+            .split_once("export interface DiagnosticEvent extends BaseEvent {")
+            .expect("types.ts must declare DiagnosticEvent")
+            .1
+            .split_once("\n}")
+            .expect("unterminated DiagnosticEvent")
+            .0;
+        let level_line = interface
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with("level:"))
+            .expect("DiagnosticEvent must declare `level`");
+        let declared: BTreeSet<String> = level_line
+            .trim_start_matches("level:")
+            .trim_end_matches(';')
+            .split('|')
+            .map(|member| member.trim().trim_matches('\'').to_string())
+            .collect();
+
+        // Comment lines dropped, then flattened, so a call the formatter
+        // wrapped after its parenthesis still reads as one call.
+        fn flatten(source: &str, python: bool) -> String {
+            source
+                .lines()
+                .map(str::trim)
+                .filter(|l| {
+                    if python {
+                        !l.starts_with('#')
+                    } else {
+                        !l.starts_with("//") && !l.starts_with('*') && !l.starts_with("/*")
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+
+        fn walk(dir: &std::path::Path, ext: &str, out: &mut Vec<std::path::PathBuf>) {
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("dir entry").path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if path.is_dir() {
+                    // Build output, test doubles, generated bindings and the
+                    // local API (which emits no diagnostics) are not emitters.
+                    if ![".build", "tests", "Generated", "__pycache__", "local_api"].contains(&name)
+                    {
+                        walk(&path, ext, out);
+                    }
+                } else if name.ends_with(ext) && name != "offline_protocol.py" {
+                    out.push(path);
+                }
+            }
+        }
+
+        const SINKS: [&str; 5] = [
+            "emitDiagnostic(",
+            "diagnosticEmitter(",
+            "diagnostic(",
+            "peerStreamDiagnostic(",
+            "_emit_diagnostic(",
+        ];
+
+        let mut emitted: BTreeSet<String> = BTreeSet::new();
+        let mut sites: Vec<(String, String)> = Vec::new();
+        let mut files_with_sites = 0usize;
+        for (root, ext, python) in [
+            ("bindings/react-native/ios", ".swift", false),
+            ("bindings/react-native/android/src/main/java", ".kt", false),
+            ("bindings/python/offline_protocol_sdk", ".py", true),
+        ] {
+            let mut files = Vec::new();
+            walk(&repo.join(root), ext, &mut files);
+            for file in files {
+                let code = flatten(
+                    &std::fs::read_to_string(&file).expect("read source"),
+                    python,
+                );
+                let before = sites.len();
+                for sink in SINKS {
+                    for (at, _) in code.match_indices(sink) {
+                        // `diagnostic(` also matches inside the longer sink
+                        // names; only a call whose name starts at a word
+                        // boundary counts, so each site is read once.
+                        let preceding = code[..at].chars().next_back();
+                        if preceding.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+                            continue;
+                        }
+                        let rest = code[at + sink.len()..].trim_start();
+                        // Swift's `level:` label and Kotlin's `level =` named
+                        // argument both precede the literal.
+                        let rest = rest
+                            .strip_prefix("level:")
+                            .or_else(|| rest.strip_prefix("level ="))
+                            .map_or(rest, str::trim_start);
+                        let Some(literal) = rest.strip_prefix('"') else {
+                            continue; // a forwarded variable, not a level
+                        };
+                        let level: String = literal.chars().take_while(|c| *c != '"').collect();
+                        emitted.insert(level.clone());
+                        sites.push((file.display().to_string(), level));
+                    }
+                }
+                if sites.len() > before {
+                    files_with_sites += 1;
+                }
+            }
+        }
+
+        assert!(
+            files_with_sites >= 15 && sites.len() >= 500,
+            "the diagnostic scan found {} level literals in {files_with_sites} files, so it is \
+             no longer reading the emitters and would pass against anything",
+            sites.len()
+        );
+
+        let undeclared: Vec<&(String, String)> = sites
+            .iter()
+            .filter(|(_, level)| !declared.contains(level))
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "these diagnostics emit a level DiagnosticEvent.level in types.ts does not declare \
+             ({declared:?}); declare it there and in the README, or use a declared one: \
+             {undeclared:?}"
+        );
+        let unused: Vec<&String> = declared.difference(&emitted).collect();
+        assert!(
+            unused.is_empty(),
+            "DiagnosticEvent.level declares {unused:?}, which no bridge emits"
+        );
+    }
+
+    /// React Native applies an interest declared before `start()` after
+    /// storage opens and before the engine starts.
+    ///
+    /// The engine's start-up exchange offers every held space with the
+    /// interest in force at that instant, and narrowing later never deletes
+    /// what the wider offer pulled in. React Native folds MLS initialization
+    /// and the engine start into one `start()`, so the SDK holds a declaration
+    /// made earlier and applies it in between (#472). Moved after the native
+    /// start, everything still compiles and resolves, and the first exchange
+    /// asks for every document. `js-ci-harness/data-interest-order.test.js`
+    /// is the behavioural pin; this one reads the order as text so a reorder
+    /// fails the Rust suite too.
+    #[test]
+    fn react_native_start_applies_held_interest_before_the_engine_starts() {
+        let index = rn_source_code_only("src/index.ts");
+        let start = index
+            .split_once("async start(): Promise<void> {")
+            .expect("index.ts must define start()")
+            .1
+            .split_once("async stop(): Promise<void> {")
+            .expect("stop() must follow start() in index.ts")
+            .0;
+        let at = |needle: &str| {
+            start
+                .find(needle)
+                .unwrap_or_else(|| panic!("start() in index.ts must call `{needle}`"))
+        };
+        let mls = at("OfflineProtocolNativeModule.initializeMlsWithSecureStorage()");
+        let apply = at("await applyPendingInterest();");
+        let ready = at("dataStoreReady = true;");
+        let engine = at("await OfflineProtocolNativeModule.start();");
+        assert!(
+            mls < apply && apply < ready && ready < engine,
+            "start() must initialize MLS, apply the held interest, mark the store ready, and \
+             only then start the engine: the engine's start-up exchange offers each space with \
+             the interest in force when it starts"
+        );
+
+        let set_interest = index
+            .split_once("async setInterest(spaceId: string, patterns: string[]): Promise<void> {")
+            .expect("DataStore must define setInterest")
+            .1
+            .split_once("async listDocs(")
+            .expect("listDocs must follow setInterest")
+            .0;
+        assert!(
+            set_interest.contains("if (!dataStoreReady) {")
+                && set_interest.contains("pendingInterest.set(spaceId, [...patterns]);"),
+            "setInterest must hold a declaration made before the store is ready; sent to \
+             native then, it is refused (no store before create, no storage before MLS)"
+        );
+
+        let destroy = index
+            .split_once("async destroy(): Promise<void> {")
+            .expect("index.ts must define destroy()")
+            .1;
+        assert!(
+            destroy.contains("dataStoreReady = false;")
+                && destroy.contains("pendingInterest.clear();"),
+            "destroy() must discard held interest and hold the next declaration again; a \
+             surviving flag sends it to a store that no longer exists"
+        );
+    }
+
     /// Frames a bridge synthesizes for the core carry the configured app id.
     ///
     /// Every relay answer, relay group frame and legacy plain-text DM is

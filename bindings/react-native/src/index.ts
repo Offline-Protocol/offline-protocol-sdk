@@ -310,6 +310,109 @@ function toMlsKeyPackage(raw: any): MlsKeyPackage {
  * await protocol.stop();
  * ```
  */
+/**
+ * Interest declared before the native data store could take it, by space.
+ *
+ * The engine's order is: open storage, declare interest, start. Its start-up
+ * exchange offers every held space with the interest in force at that
+ * instant, and a narrowing never deletes what a wider offer already pulled
+ * in. React Native folds the first and last steps into the one
+ * {@link OfflineProtocol.start} call, so there is no moment outside it at
+ * which the native store can accept a declaration: before `create` the
+ * native module has no store, and before MLS initialization the store has no
+ * storage. A declaration made then is held here, and `start()` applies it
+ * after storage opens and before the engine starts (#472).
+ *
+ * Module-level, like the native module it stands in front of: there is one
+ * native store per process, and `DataStore` instances are stateless.
+ */
+const pendingInterest: Map<string, string[]> = new Map();
+
+/**
+ * Whether the native store has taken the held interest, so a declaration can
+ * go straight to it. Set by `start()` once the held interest is applied, and
+ * cleared by `destroy()`, after which a declaration is held again.
+ */
+let dataStoreReady = false;
+
+/**
+ * The two data-layer answers that mean the layer stores and replicates
+ * nothing at all. A held interest that meets one of them cannot be violated
+ * by starting, so `start()` warns rather than refusing.
+ */
+const DATA_LAYER_OFF_CODES: ReadonlySet<string> = new Set([
+  "DataDisabled",
+  "DataStorageUnavailable",
+]);
+
+/**
+ * Hands every held interest to the native store, in declaration order.
+ *
+ * Re-reads the map on every step, so a declaration made while one is in
+ * flight is applied too, and an entry is removed only if it was not replaced
+ * meanwhile. A refusal leaves the refused entry held: retrying `start()`
+ * without correcting it fails the same way, which is the point, since
+ * starting would offer the space whole.
+ */
+async function applyPendingInterest(): Promise<void> {
+  // Resolves the code that says the data layer is off, or null. The engine
+  // validates the space name before it checks whether the layer is on, so a
+  // malformed name on a layer that is off is refused as an invalid argument;
+  // a cheap read answers the real question, so that refusal cannot hold the
+  // engine back when nothing would be replicated anyway.
+  const dataLayerOffCode = async (error: unknown): Promise<string | null> => {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (typeof code === "string" && DATA_LAYER_OFF_CODES.has(code)) {
+      return code;
+    }
+    try {
+      await OfflineProtocolNativeModule.dataListSpaces();
+      return null;
+    } catch (probe) {
+      const probeCode = (probe as { code?: unknown } | null)?.code;
+      return typeof probeCode === "string" && DATA_LAYER_OFF_CODES.has(probeCode)
+        ? probeCode
+        : null;
+    }
+  };
+
+  for (;;) {
+    const next = pendingInterest.entries().next();
+    if (next.done) {
+      return;
+    }
+    const [spaceId, patterns] = next.value;
+    try {
+      await OfflineProtocolNativeModule.dataSetInterest(spaceId, patterns);
+    } catch (error) {
+      const offCode = await dataLayerOffCode(error);
+      if (offCode !== null) {
+        console.warn(
+          `[OfflineProtocol] The data layer is unavailable (${offCode}), so the interest ` +
+            "declared before start() was dropped; nothing is replicated while it is off.",
+          error
+        );
+        pendingInterest.clear();
+        return;
+      }
+      const code = (error as { code?: unknown } | null)?.code;
+      const message = error instanceof Error ? error.message : String(error);
+      const refusal = new Error(
+        `setInterest for space "${spaceId}" was refused, so the protocol was not ` +
+          `started: starting would replicate the whole space. ${message}`
+      ) as Error & { code?: string; cause?: unknown };
+      if (typeof code === "string") {
+        refusal.code = code;
+      }
+      refusal.cause = error;
+      throw refusal;
+    }
+    if (pendingInterest.get(spaceId) === patterns) {
+      pendingInterest.delete(spaceId);
+    }
+  }
+}
+
 export class OfflineProtocol {
   private eventEmitter: NativeEventEmitter;
   private eventSubscription: EmitterSubscription | null = null;
@@ -1125,6 +1228,13 @@ export class OfflineProtocol {
         );
       }
     }
+
+    // After storage opened and before the engine starts: the engine's
+    // start-up exchange builds its offers from the interest in force now, so
+    // a declaration made before start() has to land here or the first
+    // exchange asks for every document. See `pendingInterest`.
+    await applyPendingInterest();
+    dataStoreReady = true;
 
     await OfflineProtocolNativeModule.start();
 
@@ -3557,6 +3667,15 @@ export class OfflineProtocol {
 
     // Destroy native protocol instance
     if (this.isCreated) {
+      // The store goes with the instance, and interest is policy for one
+      // launch of one account: a declaration from before this point must not
+      // reach whatever is created next. Reset before the native call, so a
+      // declaration racing it is held rather than sent to a store being torn
+      // down. Only here, inside the branch: the state is module-wide, and an
+      // instance that never created an engine must not mark another
+      // instance's running store as not ready.
+      dataStoreReady = false;
+      pendingInterest.clear();
       await OfflineProtocolNativeModule.destroy();
       this.isCreated = false;
     }
@@ -3978,7 +4097,8 @@ export type DataValue =
  * Requires `initializeMlsWithSecureStorage()` to have run — documents are
  * sealed at rest with the same per-install key as every other protocol
  * record, and that key is minted there — and `data.enabled` set in the
- * config. Every method answers `DataDisabled` until it is.
+ * config. Every method answers `DataDisabled` until it is, except
+ * {@link setInterest}, which is held until `start()` can apply it.
  *
  * Edits change the open document in memory only. Nothing is stored or
  * replicated to peers until {@link flush} or {@link flushAll} runs (the SDK
@@ -4079,11 +4199,35 @@ export class DataStore {
    * which is what makes a narrowing mean something against a peer on an
    * older build.
    *
-   * Not persisted: declare it at launch, before `start()`. Narrowing does
-   * not delete what is already held; widening asks the peers for what it
-   * adds.
+   * Declare it before {@link OfflineProtocol.start}. The native store does
+   * not exist until `start()` opens it, so a call made earlier is held and
+   * resolves at once, and `start()` applies it after storage opens and
+   * before the engine starts. That ordering matters: the engine's start-up
+   * exchange offers every held space with the interest in force at that
+   * moment, and narrowing afterwards does not delete what the wider
+   * exchange pulled in. A later call for the same space replaces a held one.
+   *
+   * Validation of a held declaration therefore happens in `start()`: a
+   * refused pattern rejects `start()` with an error naming the space, and
+   * the engine is not started, because starting would replicate the space
+   * whole. Correct it with another `setInterest` and call `start()` again.
+   * When the data layer is off (`DataDisabled`, `DataStorageUnavailable`) a
+   * held declaration is dropped with a warning instead, since nothing is
+   * replicated.
+   *
+   * After `start()` resolves, a call applies immediately, and widening asks
+   * the peers for what it adds. Narrowing never deletes what is already held.
+   *
+   * Not persisted: declare it at every launch, and again after
+   * {@link OfflineProtocol.destroy}, which discards anything held.
    */
   async setInterest(spaceId: string, patterns: string[]): Promise<void> {
+    if (!dataStoreReady) {
+      // A copy, so a caller mutating its array later cannot change what is
+      // applied, and so `applyPendingInterest` can tell a replacement apart.
+      pendingInterest.set(spaceId, [...patterns]);
+      return;
+    }
     await OfflineProtocolNativeModule.dataSetInterest(spaceId, patterns);
   }
 
