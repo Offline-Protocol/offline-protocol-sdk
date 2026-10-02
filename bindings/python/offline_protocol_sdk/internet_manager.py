@@ -20,6 +20,7 @@ import websockets
 from websockets.asyncio.client import ClientConnection
 
 from . import address_declaration
+from .relay_answer_prefixes import attributable_actor
 from .transport_manager import TransportError, TransportManager, TransportState
 
 logger = logging.getLogger(__name__)
@@ -1098,7 +1099,8 @@ class InternetManager(TransportManager):
         is data plane (MLS authenticates it afterwards) and the attribution is
         the reachability signal for the relayed sender.
 
-        The others are relay answers (the core's ``RELAY_ANSWER_PREFIXES``) and
+        The others are relay answers (``relay_answer_prefixes``, mirroring the
+        core's ``RELAY_ANSWER_PREFIXES``) and
         must reach the core unattributed: no peer sent them, so nothing can
         sign them, and the core's exemption from the control-frame signature
         gate only recognizes a frame with no transport peer identity. An
@@ -1157,8 +1159,11 @@ class InternetManager(TransportManager):
 
         ``actor`` is both the FFI ``sender_id`` and the frame's ``sender``;
         ``None`` selects unattributed ingest, with the "relay" placeholder as
-        the frame sender because the core rejects an empty one.
+        the frame sender because the core rejects an empty one. A relay
+        answer is forced unattributed here, whatever the caller passed: see
+        ``relay_answer_prefixes``, which holds the pinned list.
         """
+        actor = attributable_actor(prefix, actor)
         content = prefix + json.dumps(payload)
         data_bytes = json.dumps(
             self._build_internal_message(actor or "relay", content)

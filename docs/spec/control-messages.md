@@ -412,8 +412,9 @@ assert disjointness in a test.
 
 ### Hand-mirrored lists
 
-The relay-answer exemption list exists in three places that no single compiler
-sees together: the protocol core and each native bridge. A prefix present in one
+The relay-answer exemption list exists in four places that no single compiler
+sees together: the protocol core, the Swift and Kotlin bridges, and the Python
+binding. A prefix present in one
 copy and absent from another fails **silently**: the bridge injects the answer
 unattributed, the gate declines to exempt it, and the frame is dropped as
 unsigned with no peer at fault.

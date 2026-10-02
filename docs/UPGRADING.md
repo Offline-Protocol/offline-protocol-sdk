@@ -2249,7 +2249,11 @@ is a document name, optionally ending in `*` to match a prefix; `["*"]` is
 everything and is the default, `[]` is nothing, and a space takes at most 32.
 
 **Set it before `start()`.** It is not persisted, on purpose: it is your
-policy for this launch, not a fact about the store. `wipeAll()` clears it
+policy for this launch, not a fact about the store. On React Native the
+store only opens inside `start()`, and from 0.28.0 the SDK holds a call made
+before it and applies it there, before the engine starts; on 0.27.0 the same
+call rejected with `DataStore not initialized`, so an app that worked around
+that by calling it after `start()` can move the call back. `wipeAll()` clears it
 along with the documents it scoped, so re-declare it if you wipe while the
 engine is running.
 

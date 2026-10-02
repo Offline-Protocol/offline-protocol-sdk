@@ -1085,7 +1085,7 @@ interface FileReceivedEvent {
 ```typescript
 interface DiagnosticEvent {
   type: 'diagnostic';
-  level: 'info' | 'warning' | 'error';
+  level: 'debug' | 'info' | 'warning' | 'error';
   message: string;
   context?: Record<string, unknown>;
 }
