@@ -749,6 +749,22 @@ public class BleManager: NSObject, TransportManager {
         emitDiagnostic("info", "BLE transport stopped")
     }
     
+    /// Bluetooth powered off or reset: report every identified peer lost, then
+    /// drop the link state. No disconnect callback arrives for these links, and
+    /// `bleStatusChanged(false)` clears only the Rust transport's peer map, so
+    /// without this a peer that does not come back stays a neighbor in the core
+    /// and never produces `neighbor_lost`. Peers that do come back are announced
+    /// again on the verified path. Not folded into `clearLinkState()`: `stop()`
+    /// reaches that from `deinit`, where `notifyBlePeerLost`'s `[weak self]`
+    /// capture is a hard abort. The second manager's callback finds the
+    /// registry already empty, so each peer is reported once.
+    private func dropLinksAfterRadioLoss() {
+        for deviceId in Set(connections.allPeripheralDeviceIds()) {
+            notifyBlePeerLost(deviceId: deviceId)
+        }
+        clearLinkState()
+    }
+
     /// Drops every piece of per-link state: connections, fragments, GATT
     /// subscribers, bootstrap and service-instance bookkeeping. Used by
     /// `stop()` and when the radio powers off, because CoreBluetooth then
@@ -2932,7 +2948,7 @@ extension BleManager: CBCentralManagerDelegate {
             print("[BleManager] ⚠️ Bluetooth is \(stateString)")
             centralReady = false
             stopScanning(reason: "central_powered_off")
-            clearLinkState()
+            dropLinksAfterRadioLoss()
             updateState(.unavailable)
             notifyBleStatus(false)
             emitDiagnostic("warning", "Bluetooth is powered off or resetting", context: ["state": stateString])
@@ -4126,7 +4142,7 @@ extension BleManager: CBPeripheralManagerDelegate {
             // sees the stale flag and skips re-adding), so peers connect and drop.
             isGattServiceReady = false
             pendingAdvertiseAfterServiceReady = false
-            clearLinkState()
+            dropLinksAfterRadioLoss()
             updateState(.unavailable)
             notifyBleStatus(false)
             emitDiagnostic("warning", "Bluetooth peripheral is powered off or resetting", context: ["state": stateString])

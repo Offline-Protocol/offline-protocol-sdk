@@ -355,7 +355,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   record, because CoreBluetooth invalidates the links without a disconnect
   callback for each one. That includes the mesh controller's connection
   count: a device that was at its connection limit came back with no free
-  slots and refused its returning peers. Power-on brings the transport
+  slots and refused its returning peers. Each dropped peer is also reported
+  lost, so one that does not come back produces `neighbor_lost` instead of
+  staying a neighbor in the core. Power-on brings the transport
   back to running, and `stop()` while Bluetooth is off now stops it instead
   of returning early and letting the next power-on restart a stopped
   transport. On Android, an iPhone that came back from a new random address
