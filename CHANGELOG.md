@@ -363,6 +363,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   ([ADR 0012](docs/adr/0012-one-key-package-per-peer.md#a-package-the-application-publishes-keeps-its-record),
   [#367](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/367)).
 
+- **React Native key packages carry their timestamps and synced flag.** The
+  wrappers read `createdAt` and `isSynced` from a native record that has only
+  ever sent `createdAtMs`, `expiresAtMs` and `synced`, so both were always
+  `undefined` in JavaScript. All three key package methods now go through one
+  mapper, and `MlsKeyPackage` gains `expiresAt`, the moment a key server
+  should drop its copy.
+
 - **`import offline_protocol_sdk` works on Windows.** `pyproject.toml` has
   never installed `bless` on Windows, where it has no backend, and the
   package imported it on the way in, so the import failed on every Windows
