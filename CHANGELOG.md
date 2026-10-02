@@ -365,7 +365,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   redialling gave up, it reported the live peer as lost and deleted the
   mapping that pointed at the new link. An address is now dropped on its
   own once the peer is live at another one.
-  
+
 - **A key package the application marks synced keeps its record, so its
   private key is still destroyed when it expires.**
   `mls_mark_key_package_synced` deleted the record and left the init key in
