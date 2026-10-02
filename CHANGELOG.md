@@ -357,7 +357,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `mls_get_pending_key_packages` now lists only packages the application may
   publish: it used to include packages the engine had pushed to a peer or held
   in its own Nostr slots, which the documented upload loop would then have
-  marked, stranding each old key as the engine minted a successor. Marking an
+  marked, stranding each old key as the engine minted a successor. The SDK adds
+  none of its own packages to the list, so an application that publishes
+  packages mints them with `mls_generate_key_package` first. Marking an
   unknown or already used id does nothing, and marking takes the MLS manager's
   write lock, so a concurrent push can no longer erase it. A source guard refuses any new
   record-only delete of a key package

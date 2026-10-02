@@ -904,9 +904,11 @@ DELETE /keys/{userId}/{pkgId} # Delete used key package
 
 ### Syncing Key Packages
 
-The pending list holds only packages this app may publish. Packages the SDK
-has already pushed to a peer, or published in its own slots, never appear in
-it. Marking a package synced keeps it on the device, so a Welcome built from
+The pending list holds only packages this app may publish, which means
+packages it minted itself with `mlsGenerateKeyPackage` and has not marked yet.
+The SDK mints its own packages for peers it pushes to and for its own slots,
+and those never appear in the list, so on a fresh install it is empty until
+the app generates what it intends to upload. Marking a package synced keeps it on the device, so a Welcome built from
 the uploaded copy still opens, and stops the SDK handing it to anybody else.
 It expires with the lifetime it was minted with (30 days), and its private key
 is destroyed a week after that, used or not. Your server should drop its copy
@@ -914,6 +916,12 @@ by `expiresAtMs`: past it the package's own validity window has closed, and a
 week later this device can no longer open a Welcome built from it.
 
 ```swift
+// Mint the packages this app intends to publish. The SDK never adds any of
+// its own to the pending list.
+for _ in 0..<packagesToKeepOnServer {
+    _ = try mesh.mlsGenerateKeyPackage()
+}
+
 // Get the key packages this app may publish
 let pending = mesh.mlsGetPendingKeyPackages()
 

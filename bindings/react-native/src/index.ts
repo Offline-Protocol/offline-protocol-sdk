@@ -2885,7 +2885,9 @@ export class OfflineProtocol {
    *
    * Only packages nobody has spoken for are listed: never one the SDK has
    * already handed to a peer or one standing in its own publication slots,
-   * and never one already marked synced.
+   * and never one already marked synced. The SDK adds none of its own, so
+   * the list is empty until the app mints packages with
+   * `mlsGenerateKeyPackage`.
    *
    * @returns Array of key packages free to publish
    */
