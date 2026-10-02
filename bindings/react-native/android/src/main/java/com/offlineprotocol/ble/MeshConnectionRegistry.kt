@@ -51,8 +51,18 @@ class MeshConnectionRegistry {
     fun removeIdentifiersForAddress(address: String) {
         val deviceId = addressToDevice.remove(address)
         if (deviceId != null) {
-            deviceToAddress.remove(deviceId)
+            // Only if it still points here: a peer that came back from a new
+            // address (iOS rotates its random address across a Bluetooth
+            // power-cycle) has already re-pointed it to the live link.
+            deviceToAddress.remove(deviceId, address)
         }
+    }
+
+    /** True when [deviceId] is reachable over a live link at an address other than [excluding]. */
+    fun hasOtherLiveLink(deviceId: String, excluding: String): Boolean {
+        val address = deviceToAddress[deviceId] ?: return false
+        return address != excluding &&
+            (gattClients.containsKey(address) || serverConnections.contains(address))
     }
 
     fun removeIdentifiersForDevice(deviceId: String) {

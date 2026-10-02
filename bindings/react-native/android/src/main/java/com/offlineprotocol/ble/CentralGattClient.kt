@@ -932,6 +932,16 @@ internal class CentralGattClient(
             host.clearRssi(address)
         }
 
+        // The peer already reconnected from another address: this one is
+        // stale, so drop it instead of redialling it and later reporting the
+        // (live) peer as lost.
+        val stalePeerId = host.connections.deviceIdForAddress(address)
+        if (stalePeerId != null && host.connections.hasOtherLiveLink(stalePeerId, address)) {
+            connectionRetryCount.remove(address)
+            bleHandler.post { finalizeGivenUpPeer(address, stalePeerId) }
+            return
+        }
+
         if (wasConnected && host.isRunning()) {
             // Increment retry count and calculate backoff
             val retryCount = (connectionRetryCount[address] ?: 0) + 1
@@ -1016,6 +1026,16 @@ internal class CentralGattClient(
         // through close first.
         cancelMtuWatchdog(address)
         clearServiceInstanceSelection(address)
+        if (host.connections.hasOtherLiveLink(peerId, address)) {
+            // Only this address is gone, not the peer: skip the peer-level
+            // teardown (peer lost, role, outbound queue) the live link needs.
+            host.connections.removeIdentifiersForAddress(address)
+            diagnosticEmitter("info", "Dropped stale address for a peer with a live link", mapOf(
+                "address" to address,
+                "peerId" to peerId,
+            ))
+            return
+        }
         try {
             host.protocol.blePeerLost(peerId)
         } catch (e: Exception) {
