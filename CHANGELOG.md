@@ -345,6 +345,32 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **BLE survives an iPhone's Bluetooth being turned off and on, on both ends
+  of the link.** Turning an iPhone's Bluetooth off and on, or a Bluetooth
+  stack reset, left the pair unable to talk. On iOS, power-off removes the
+  GATT service, but the bridge still marked it as published, so power-on
+  advertised a service UUID with nothing behind it and peers connected and
+  dropped. The service is now published again on power-on, after clearing
+  whatever the stack kept, so it never appears twice. Power-on also never
+  reported BLE as available again, so the core stopped sending over BLE
+  while inbound still arrived. Power-off and reset now drop every per-link
+  record, because CoreBluetooth invalidates the links without a disconnect
+  callback for each one. That includes the mesh controller's connection
+  count: a device that was at its connection limit came back with no free
+  slots and refused its returning peers. Each dropped peer is also reported
+  lost, so one that does not come back produces `neighbor_lost` instead of
+  staying a neighbor in the core. Power-on brings the transport back to
+  running, and `stop()` while Bluetooth is off now stops it instead of
+  returning early and letting the next power-on restart a stopped transport.
+  On the Android end, an iPhone that came back from a new random address was
+  verified there, but the old address kept being redialled. When the
+  redialling gave up, or the old address's GATT server link dropped
+  uncleanly, it reported the live peer as lost and deleted the mapping that
+  pointed at the new link. Once the peer is live at another address, the old
+  address is now dropped on its own, with only its address-keyed state. This
+  does not add handling for an Android phone's own Bluetooth being turned
+  off and on.
+
 - **React Native holds an interest declared before `start()` and applies it
   before the engine starts.** (#472) The engine's start-up exchange offers
   every held space with the interest in force at that moment, and a narrowing

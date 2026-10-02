@@ -140,6 +140,14 @@ internal class CentralGattClient(
          *  per-peer MTU entry). */
         fun onPeerGivenUp(address: String, peerId: String)
 
+        /** Notify the facade that [address] was dropped while its peer stays
+         *  live at another address (an iPhone rotates its random address
+         *  across a Bluetooth power-cycle). Called from [finalizeGivenUpPeer]
+         *  on the BLE thread instead of [onPeerGivenUp]: the facade drops only
+         *  what it keys by [address]. Anything keyed by the peer's device id
+         *  belongs to the live link and must survive. */
+        fun onStaleAddressDropped(address: String)
+
         /** Entry point used by the retry-on-disconnect path to re-attempt
          *  connecting to a known address. Facade enforces the per-device
          *  RSSI / capacity / cooldown gating inside connectToDevice. */
@@ -932,6 +940,16 @@ internal class CentralGattClient(
             host.clearRssi(address)
         }
 
+        // The peer already reconnected from another address: this one is
+        // stale, so drop it instead of redialling it and later reporting the
+        // (live) peer as lost.
+        val stalePeerId = host.connections.deviceIdForAddress(address)
+        if (stalePeerId != null && host.connections.hasOtherLiveLink(stalePeerId, address)) {
+            connectionRetryCount.remove(address)
+            bleHandler.post { finalizeGivenUpPeer(address, stalePeerId) }
+            return
+        }
+
         if (wasConnected && host.isRunning()) {
             // Increment retry count and calculate backoff
             val retryCount = (connectionRetryCount[address] ?: 0) + 1
@@ -1016,6 +1034,21 @@ internal class CentralGattClient(
         // through close first.
         cancelMtuWatchdog(address)
         clearServiceInstanceSelection(address)
+        if (host.connections.hasOtherLiveLink(peerId, address)) {
+            // Only this address is gone, not the peer: skip the peer-level
+            // teardown (peer lost, role, outbound queue) the live link needs,
+            // and drop only what is keyed by the dead address. The outbound
+            // queue is keyed by peer id, so it stays for the live link.
+            host.connections.removeIdentifiersForAddress(address)
+            host.pendingInbound.removeAll(address)
+            deviceIdResolutionAttempts.remove(address)
+            host.onStaleAddressDropped(address)
+            diagnosticEmitter("info", "Dropped stale address for a peer with a live link", mapOf(
+                "address" to address,
+                "peerId" to peerId,
+            ))
+            return
+        }
         try {
             host.protocol.blePeerLost(peerId)
         } catch (e: Exception) {

@@ -554,6 +554,15 @@ class BleTransportFacade(
                     if (shuttingDown) return
                     dropStagedPeerMtu(address, peerId)
                 }
+
+                override fun onStaleAddressDropped(address: String) {
+                    // The address-keyed staged slots only. A null device id
+                    // keeps the per-device slots, which the peer's live link
+                    // at its new address owns, and the Rust-side MTU stays
+                    // because no blePeerLost was sent.
+                    if (shuttingDown) return
+                    dropStagedPeerMtu(address, null)
+                }
             },
             diagnosticEmitter = { level, message, ctx -> emitDiagnostic(level, message, ctx) },
         )
@@ -4148,6 +4157,22 @@ class BleTransportFacade(
         if (!isCleanDisconnect) {
             lastSeenRssi.remove(address)
             connections.deviceIdForAddress(address)?.let { peerId ->
+                if (connections.hasOtherLiveLink(peerId, address)) {
+                    // The peer is live at another address (an iPhone rotates
+                    // its random address across a Bluetooth power-cycle), so
+                    // only this address is gone. Reporting the peer lost here
+                    // would be a false neighbor_lost and would drop the live
+                    // link's role and MTU, as on the central path. Drop only
+                    // what is keyed by this address.
+                    dropStagedPeerMtu(address, null)
+                    connections.removeIdentifiersForAddress(address)
+                    centralClient.clearResolutionAttempt(address)
+                    emitDiagnostic("info", "Dropped stale server address for a peer with a live link", mapOf(
+                        "address" to address,
+                        "peerId" to peerId,
+                    ))
+                    return
+                }
                 try {
                     protocol.blePeerLost(peerId)
                 } catch (e: Exception) {

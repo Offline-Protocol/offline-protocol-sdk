@@ -708,7 +708,10 @@ public class BleManager: NSObject, TransportManager {
     }
     
     private func stopUnsafe() {
-        guard state == .running || state == .starting else {
+        // `.unavailable` too: the managers are still alive with Bluetooth off,
+        // and returning early here would let the next power-on move a stopped
+        // transport back to `.running` and report BLE available to the core.
+        guard state == .running || state == .starting || state == .unavailable else {
             return
         }
         
@@ -724,7 +727,61 @@ public class BleManager: NSObject, TransportManager {
         for peripheral in connections.allPeripherals() {
             centralManager?.cancelPeripheralConnection(peripheral)
         }
+        clearLinkState()
+        pendingAdvertiseRestart?.cancel()
+        pendingAdvertiseRestart = nil
+        lastAdvertiseRestartAt = nil
+        transportStartAt = nil
+        lastProactiveScanRefresh = nil
+        lastForcedBleRefresh = nil
+        aggressiveDiscoveryStarted = nil
+
+        // Clean up managers
+        centralManager = nil
+        peripheralManager = nil
+        
+        centralReady = false
+        peripheralReady = false
+        isGattServiceReady = false
+        pendingAdvertiseAfterServiceReady = false
+        
+        updateState(.stopped)
+        emitDiagnostic("info", "BLE transport stopped")
+    }
+    
+    /// Bluetooth powered off or reset: report every identified peer lost, then
+    /// drop the link state. No disconnect callback arrives for these links, and
+    /// `bleStatusChanged(false)` clears only the Rust transport's peer map, so
+    /// without this a peer that does not come back stays a neighbor in the core
+    /// and never produces `neighbor_lost`. Peers that do come back are announced
+    /// again on the verified path. Not folded into `clearLinkState()`: `stop()`
+    /// reaches that from `deinit`, where `notifyBlePeerLost`'s `[weak self]`
+    /// capture is a hard abort. The second manager's callback finds the
+    /// registry already empty, so each peer is reported once.
+    private func dropLinksAfterRadioLoss() {
+        for deviceId in Set(connections.allPeripheralDeviceIds()) {
+            notifyBlePeerLost(deviceId: deviceId)
+        }
+        clearLinkState()
+    }
+
+    /// Drops every piece of per-link state: connections, fragments, GATT
+    /// subscribers, bootstrap and service-instance bookkeeping. Used by
+    /// `stop()` and when the radio powers off, because CoreBluetooth then
+    /// invalidates every connection and published service without delivering
+    /// disconnect callbacks; stale entries would keep routing sends into dead
+    /// links after Bluetooth comes back.
+    private func clearLinkState() {
         connections.reset()
+        // The handshake state too. `didDisconnectPeripheral` normally clears
+        // it per link; without that callback a peer returning under the same
+        // identifier hits the `announcedPeripherals` guard, skips the identity
+        // reads and is never announced again.
+        advertisedDeviceIds.removeAll()
+        verifiedPeerAddresses.removeAll()
+        announcedPeripherals.removeAll()
+        // The mesh counts the same links; without this it stays full.
+        meshController.registerAllDisconnected()
         discoveredPeripherals.removeAll()
         peripheralRSSI.removeAll()
         inboundFragments.clear()
@@ -753,13 +810,6 @@ public class BleManager: NSObject, TransportManager {
         unknownBootstrapAttempts.removeAll()
         verifiedNonMeshDevices.removeAll()
         recentAdvertisementHashes.removeAll()
-        pendingAdvertiseRestart?.cancel()
-        pendingAdvertiseRestart = nil
-        lastAdvertiseRestartAt = nil
-        transportStartAt = nil
-        lastProactiveScanRefresh = nil
-        lastForcedBleRefresh = nil
-        aggressiveDiscoveryStarted = nil
         notifyLock.lock()
         subscribedCentralsById.removeAll()
         notifyLock.unlock()
@@ -772,18 +822,6 @@ public class BleManager: NSObject, TransportManager {
         serviceInstanceLock.lock()
         serviceInstanceBindings.removeAll()
         serviceInstanceLock.unlock()
-
-        // Clean up managers
-        centralManager = nil
-        peripheralManager = nil
-        
-        centralReady = false
-        peripheralReady = false
-        isGattServiceReady = false
-        pendingAdvertiseAfterServiceReady = false
-        
-        updateState(.stopped)
-        emitDiagnostic("info", "BLE transport stopped")
     }
     
     public func pause() {
@@ -1456,6 +1494,15 @@ public class BleManager: NSObject, TransportManager {
         let service = CBMutableService(type: SERVICE_UUID, primary: true)
         service.characteristics = [messageCharacteristic!, deviceIdCharacteristic!, identityCharacteristic!, appTagCharacteristic!]
         
+        // Clear this app's published services first, so this add is the only
+        // instance. CoreBluetooth documents the local GATT database as cleared
+        // only below `.poweredOff`, so after a plain power-off a build may keep
+        // the old service, and a relaunch restores it with every characteristic
+        // reference here nil. Adding on top of either publishes the service
+        // twice, and a central then sees two instances behind one link. Only
+        // this app's services are removed: other SDK apps on the phone
+        // publish their own.
+        peripheral.removeAllServices()
         // Add service to peripheral manager (asynchronous - callback in peripheralManager(_:didAdd:error:))
         peripheral.add(service)
         print("[BleManager] GATT server setup initiated, waiting for service registration callback...")
@@ -2898,7 +2945,10 @@ extension BleManager: CBCentralManagerDelegate {
             drainAndSendFragments()
             
             // If both central and peripheral are ready, mark as running
-            if peripheralReady && state == .starting {
+            // `.unavailable` too: after Bluetooth is powered off and back on, the
+            // core must hear bleStatusChanged(true) again or it never routes
+            // outbound traffic to BLE (inbound still arrives via the delegates).
+            if peripheralReady && (state == .starting || state == .unavailable) {
                 updateState(.running)
                 print("[BleManager] ✅ BLE Manager ready - dispatching bleStatusChanged(true)")
                 // "dispatched", not "called": the FFI now runs on the protocol
@@ -2908,13 +2958,16 @@ extension BleManager: CBCentralManagerDelegate {
                 emitDiagnostic("info", "Dispatched protocol.bleStatusChanged(true)")
             }
             
-        case .poweredOff:
-            print("[BleManager] ⚠️ Bluetooth is powered off")
+        // `.resetting` too: any state below poweredOff invalidates every
+        // CBPeripheral, and a reset can return straight to poweredOn.
+        case .poweredOff, .resetting:
+            print("[BleManager] ⚠️ Bluetooth is \(stateString)")
             centralReady = false
             stopScanning(reason: "central_powered_off")
+            dropLinksAfterRadioLoss()
             updateState(.unavailable)
             notifyBleStatus(false)
-            emitDiagnostic("warning", "Bluetooth is powered off", context: ["state": stateString])
+            emitDiagnostic("warning", "Bluetooth is powered off or resetting", context: ["state": stateString])
             
         case .unauthorized:
             print("[BleManager] ⚠️ Bluetooth is unauthorized")
@@ -2931,10 +2984,6 @@ extension BleManager: CBCentralManagerDelegate {
             updateState(.unavailable)
             notifyBleStatus(false)
             emitDiagnostic("error", "Bluetooth is not supported", context: ["state": stateString])
-            
-        case .resetting:
-            print("[BleManager] 🔄 Bluetooth is resetting...")
-            emitDiagnostic("info", "Bluetooth is resetting", context: ["state": stateString])
             
         case .unknown:
             print("[BleManager] ❓ Bluetooth state is unknown")
@@ -4087,7 +4136,10 @@ extension BleManager: CBPeripheralManagerDelegate {
             emitDiagnostic("info", "Peripheral manager powered on and ready")
             
             // If both central and peripheral are ready, mark as running
-            if centralReady && state == .starting {
+            // `.unavailable` too: after Bluetooth is powered off and back on, the
+            // core must hear bleStatusChanged(true) again or it never routes
+            // outbound traffic to BLE (inbound still arrives via the delegates).
+            if centralReady && (state == .starting || state == .unavailable) {
                 updateState(.running)
                 print("[BleManager] ✅ BLE Manager ready (peripheral) - dispatching bleStatusChanged(true)")
                 // See the central-side note: dispatched, not completed.
@@ -4095,13 +4147,21 @@ extension BleManager: CBPeripheralManagerDelegate {
                 emitDiagnostic("info", "Dispatched protocol.bleStatusChanged(true) from peripheral")
             }
             
-        case .poweredOff:
-            print("[BleManager] ⚠️ Bluetooth peripheral is powered off")
+        // `.resetting` too: any state below poweredOff clears the local GATT
+        // database, and a reset can return straight to poweredOn.
+        case .poweredOff, .resetting:
+            print("[BleManager] ⚠️ Bluetooth peripheral is \(stateString)")
             peripheralReady = false
             stopAdvertising()
+            // Powering off unpublishes our GATT service. Without this, power-on
+            // advertises the UUID with no service behind it (setupGattServer
+            // sees the stale flag and skips re-adding), so peers connect and drop.
+            isGattServiceReady = false
+            pendingAdvertiseAfterServiceReady = false
+            dropLinksAfterRadioLoss()
             updateState(.unavailable)
             notifyBleStatus(false)
-            emitDiagnostic("warning", "Bluetooth peripheral is powered off", context: ["state": stateString])
+            emitDiagnostic("warning", "Bluetooth peripheral is powered off or resetting", context: ["state": stateString])
             
         case .unauthorized:
             print("[BleManager] ⚠️ Bluetooth peripheral is unauthorized")
@@ -4118,10 +4178,6 @@ extension BleManager: CBPeripheralManagerDelegate {
             updateState(.unavailable)
             notifyBleStatus(false)
             emitDiagnostic("error", "Bluetooth peripheral is not supported", context: ["state": stateString])
-            
-        case .resetting:
-            print("[BleManager] 🔄 Bluetooth peripheral is resetting...")
-            emitDiagnostic("info", "Bluetooth peripheral is resetting", context: ["state": stateString])
             
         case .unknown:
             print("[BleManager] ❓ Bluetooth peripheral state is unknown")

@@ -376,6 +376,7 @@ class CentralGattClientInstanceSelectionTest {
         override fun onPeerMtuNegotiated(address: String, maxPayload: Int) {}
         override fun onDeviceIdResolved(address: String, deviceId: String) {}
         override fun onPeerGivenUp(address: String, peerId: String) {}
+        override fun onStaleAddressDropped(address: String) {}
         override fun connectToDevice(device: BluetoothDevice) {}
     }
 }

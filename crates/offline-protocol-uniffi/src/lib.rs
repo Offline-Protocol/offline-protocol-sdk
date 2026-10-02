@@ -13677,6 +13677,153 @@ mod tests {
         }
     }
 
+    /// Dropping every link at once (Bluetooth off, a stack reset, `stop()`)
+    /// clears the handshake state with it.
+    ///
+    /// `didDisconnectPeripheral` clears `announcedPeripherals` per link, and
+    /// the identity reads are skipped for any peripheral still in it. Power-off
+    /// delivers no disconnect callbacks, so without the clear in
+    /// `clearLinkState` a peer that comes back under the same identifier (its
+    /// address did not rotate) is reported lost and then never announced
+    /// again: no device id, no MTU, no route. No Swift test can reach
+    /// `BleManager`, and a device only shows it with a peer that did not
+    /// power-cycle.
+    #[test]
+    fn react_native_ios_link_loss_clears_handshake_state() {
+        let swift = rn_source_code_only("ios/BleManager.swift");
+        let start = swift
+            .find("private func clearLinkState() {")
+            .expect("BleManager.swift must drop per-link state in clearLinkState");
+        let end = start
+            + swift[start..]
+                .find("public func pause() {")
+                .expect("pause() must follow clearLinkState so the slice is its body");
+        let body = &swift[start..end];
+        for clear in [
+            "advertisedDeviceIds.removeAll()",
+            "verifiedPeerAddresses.removeAll()",
+            "announcedPeripherals.removeAll()",
+        ] {
+            assert!(
+                body.contains(clear),
+                "clearLinkState must call {clear}: a peer returning after a Bluetooth \
+                 power-cycle under the same identifier is otherwise never announced again"
+            );
+        }
+    }
+
+    /// A Bluetooth power-off or stack reset drops every link and the published
+    /// service, and power-on brings the transport back. Each piece is a
+    /// one-token edit that compiles, `BleManager` has no unit coverage, and
+    /// the power-cycle path has no automated device run, so this is what
+    /// holds them:
+    ///
+    /// - both managers treat `.resetting` as `.poweredOff`, and both arms drop
+    ///   the links (no per-link disconnect callback arrives, so without it the
+    ///   mesh stays full and a peer that never returns stays a neighbor);
+    /// - the peripheral arm forgets the published service, or power-on
+    ///   advertises a UUID with nothing behind it;
+    /// - `setupGattServer` clears this app's services before adding, so the
+    ///   service is never published twice;
+    /// - both power-on arms recover from `.unavailable`, or the core never
+    ///   hears BLE is back and outbound stays off;
+    /// - `stop()` stops from `.unavailable`, or the next power-on revives a
+    ///   stopped transport.
+    #[test]
+    fn react_native_ios_bluetooth_power_cycle_drops_and_restores_the_transport() {
+        let swift = rn_source_code_only("ios/BleManager.swift");
+        let arm = |delegate: &str| -> &str {
+            let start = swift
+                .find(delegate)
+                .unwrap_or_else(|| panic!("BleManager.swift must implement {delegate}"));
+            let arm_start = start
+                + swift[start..]
+                    .find("case .poweredOff, .resetting:")
+                    .unwrap_or_else(|| {
+                        panic!("{delegate} must handle .resetting together with .poweredOff")
+                    });
+            let arm_end = arm_start
+                + swift[arm_start..]
+                    .find("case .unauthorized:")
+                    .expect("the .unauthorized arm must follow the power-off arm");
+            &swift[arm_start..arm_end]
+        };
+        let central = arm("public func centralManagerDidUpdateState(");
+        let peripheral = arm("public func peripheralManagerDidUpdateState(");
+        for (name, body) in [("central", central), ("peripheral", peripheral)] {
+            assert!(
+                body.contains("dropLinksAfterRadioLoss()"),
+                "the {name} power-off arm must drop every link: no disconnect callback \
+                 arrives for them"
+            );
+        }
+        assert!(
+            peripheral.contains("isGattServiceReady = false"),
+            "the peripheral power-off arm must forget the published service, or power-on \
+             advertises a UUID with nothing behind it"
+        );
+
+        let setup_start = swift
+            .find("private func setupGattServer() -> Bool {")
+            .expect("BleManager.swift must publish its service in setupGattServer");
+        let setup = &swift[setup_start..];
+        let remove = setup
+            .find("peripheral.removeAllServices()")
+            .expect("setupGattServer must clear this app's services before adding");
+        let add = setup
+            .find("peripheral.add(service)")
+            .expect("setupGattServer must add the service");
+        assert!(
+            remove < add,
+            "removeAllServices must run before add, or a kept service is published twice"
+        );
+
+        assert_eq!(
+            swift
+                .matches("Ready && (state == .starting || state == .unavailable) {")
+                .count(),
+            2,
+            "both power-on arms must recover from .unavailable, or the core never hears \
+             bleStatusChanged(true) after a power-cycle"
+        );
+        assert!(
+            swift.contains(
+                "guard state == .running || state == .starting || state == .unavailable else {"
+            ),
+            "stop() must stop from .unavailable, or the next power-on revives a stopped \
+             transport"
+        );
+    }
+
+    /// An unclean server-side disconnect on Android keeps a peer that is live
+    /// at another address. An iPhone rotates its random address across a
+    /// Bluetooth power-cycle, and its old link to our GATT server can drop
+    /// uncleanly after the new one is up. Reporting the peer lost there is a
+    /// false `neighbor_lost` and drops the live link's role and MTU. The
+    /// central-role path has Robolectric coverage; `BleTransportFacade` has no
+    /// test harness, so this pins the check ahead of the peer-lost call.
+    #[test]
+    fn react_native_android_server_disconnect_keeps_a_peer_live_elsewhere() {
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+        let start = kotlin
+            .find("private fun handleCentralDisconnectedOnBleThread(")
+            .expect("BleTransportFacade.kt must handle a server-side disconnect");
+        let body = &kotlin[start..];
+        let guard = body
+            .find("if (connections.hasOtherLiveLink(peerId, address)) {")
+            .expect("the server-side disconnect must check for a live link elsewhere");
+        let lost = body
+            .find("protocol.blePeerLost(peerId)")
+            .expect("the server-side disconnect still reports a peer with no other link lost");
+        assert!(
+            guard < lost,
+            "the live-link check must come before blePeerLost, or a peer live at a new \
+             address is reported lost"
+        );
+    }
+
     /// The buffered-inbound event set agrees across TypeScript, Kotlin and
     /// Swift, and each layer's hold is wired to a flush.
     ///

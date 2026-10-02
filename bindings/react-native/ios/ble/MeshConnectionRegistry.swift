@@ -112,6 +112,13 @@ final class MeshConnectionRegistry: @unchecked Sendable {
         return has
     }
 
+    func allPeripheralDeviceIds() -> [String] {
+        lock.lock()
+        let ids = Array(peripheralDeviceIds.values)
+        lock.unlock()
+        return ids
+    }
+
     func discoveredPeerCount() -> Int {
         lock.lock()
         let count = peripheralDeviceIds.count + centralDeviceIds.count
