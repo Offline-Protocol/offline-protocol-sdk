@@ -2648,6 +2648,10 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
         protocolInstance = nil
         meshServicesInstance = nil
+        // The store holds a strong reference to the engine. Left set, every
+        // data call after destroy() reached the stopped engine instead of
+        // rejecting with "DataStore not initialized", and kept it alive.
+        dataStoreInstance = nil
         currentConfig = nil
         // The app tore the SDK down itself; a message held for this account
         // must not reach whatever it constructs next.

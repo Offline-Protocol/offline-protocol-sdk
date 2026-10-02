@@ -96,6 +96,14 @@ removals, so on a running engine with live sessions it is undone by the peer's
 next version offer, which recreates and refills every document.
 `DataStore.remove_space()` is what removes documents from the other replicas.
 
+Interest (`DataStore.set_interest`) belongs after `initialize_mls` and before
+`start()`, because the engine's start-up exchange offers each space with the
+interest in force when it starts. `ProtocolManager.start()` does both, and the
+local API server opens its store after it, so a store reached through either
+runs its first exchange under the default interest and narrows from the next
+one. An application that needs the first exchange narrowed drives
+`OfflineProtocol` itself in the engine's order.
+
 ## P7. The internet send loop is adaptive here, and fixed elsewhere
 
 The core's internet outbox is poll-only across the FFI in every binding. The

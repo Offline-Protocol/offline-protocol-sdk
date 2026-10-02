@@ -318,6 +318,7 @@ alone.
 | Reticulum available reported **only after** the gateway binds the session | An unbound session may submit and be told a verdict, and is never a recipient, so offering it to the selector offers a transport that can only refuse |
 | Relay capabilities cleared **on** internet drop | Otherwise a stale capability keeps the broadcast gate open |
 | Per-peer end-to-end capabilities restored **before** queued sends flush | Otherwise the startup flush emits downgraded envelopes to every established peer |
+| Interest applied **after** MLS initialization and **before** the engine starts | The start-up exchange offers every held space with the interest in force then, and a narrowing never deletes what a wider offer pulled in. React Native's `start()` does both steps, so it holds a declaration made before it and applies it in between |
 | `close_file_stores()` **after** `stop()`, and nothing after it | A running engine writes to its stores, so the call is refused until the protocol is stopped; afterwards the engine holds closed stores, so `start()`, `enable_telemetry()` and both `initialize_mls` entry points are refused |
 
 ## C8. The identifier the bridge reports must match the namespace it is asked for

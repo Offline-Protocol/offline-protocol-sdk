@@ -345,6 +345,31 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **React Native holds an interest declared before `start()` and applies it
+  before the engine starts.** (#472) The engine's start-up exchange offers
+  every held space with the interest in force at that moment, and a narrowing
+  never deletes what a wider exchange pulled in, so interest has to be
+  declared after storage opens and before the engine starts. React Native's
+  `start()` does both steps, and the JSDoc said to call `setInterest` before
+  it, where both native modules rejected it with `DataStore not initialized`.
+  An app that moved the call after `start()` had its first exchange ask for
+  everything. `DataStore.setInterest` now holds a call made before `start()`
+  and resolves it, and `start()` applies what is held after MLS
+  initialization and before the native start. A pattern refused then rejects
+  `start()` with an error naming the space and carrying the native code, and
+  the engine is not started, because starting would replicate the space
+  whole; when the data layer is off the held call is dropped with a warning
+  and `start()` proceeds. `destroy()` discards what is held. The behaviour
+  change for a deployed app: an invalid pattern declared before `start()`
+  used to reject that call and now rejects `start()`; a call after `start()`
+  is unchanged. Both native `destroy()` paths now also release the data
+  store, which holds a strong reference to the engine: left set, every data
+  call after `destroy()` reached the stopped engine instead of rejecting, and
+  on Android the engine stayed alive until the collector reached it. Python's
+  `ProtocolManager` initializes MLS inside its own `start()` too; its first
+  exchange still runs under the default interest, now stated in
+  `docs/bridges/python.md`.
+
 - **`DiagnosticEvent.level` declares `debug`, which both native platforms
   emit, and Android no longer emits `warn`.** (#471) The iOS and Android
   managers emit diagnostics at `debug` at about seventy sites, while the

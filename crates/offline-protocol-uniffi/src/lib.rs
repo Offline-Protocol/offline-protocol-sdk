@@ -17848,6 +17848,70 @@ mod tests {
         );
     }
 
+    /// React Native applies an interest declared before `start()` after
+    /// storage opens and before the engine starts.
+    ///
+    /// The engine's start-up exchange offers every held space with the
+    /// interest in force at that instant, and narrowing later never deletes
+    /// what the wider offer pulled in. React Native folds MLS initialization
+    /// and the engine start into one `start()`, so the SDK holds a declaration
+    /// made earlier and applies it in between (#472). Moved after the native
+    /// start, everything still compiles and resolves, and the first exchange
+    /// asks for every document. `js-ci-harness/data-interest-order.test.js`
+    /// is the behavioural pin; this one reads the order as text so a reorder
+    /// fails the Rust suite too.
+    #[test]
+    fn react_native_start_applies_held_interest_before_the_engine_starts() {
+        let index = rn_source_code_only("src/index.ts");
+        let start = index
+            .split_once("async start(): Promise<void> {")
+            .expect("index.ts must define start()")
+            .1
+            .split_once("async stop(): Promise<void> {")
+            .expect("stop() must follow start() in index.ts")
+            .0;
+        let at = |needle: &str| {
+            start
+                .find(needle)
+                .unwrap_or_else(|| panic!("start() in index.ts must call `{needle}`"))
+        };
+        let mls = at("OfflineProtocolNativeModule.initializeMlsWithSecureStorage()");
+        let apply = at("await applyPendingInterest();");
+        let ready = at("dataStoreReady = true;");
+        let engine = at("await OfflineProtocolNativeModule.start();");
+        assert!(
+            mls < apply && apply < ready && ready < engine,
+            "start() must initialize MLS, apply the held interest, mark the store ready, and \
+             only then start the engine: the engine's start-up exchange offers each space with \
+             the interest in force when it starts"
+        );
+
+        let set_interest = index
+            .split_once("async setInterest(spaceId: string, patterns: string[]): Promise<void> {")
+            .expect("DataStore must define setInterest")
+            .1
+            .split_once("async listDocs(")
+            .expect("listDocs must follow setInterest")
+            .0;
+        assert!(
+            set_interest.contains("if (!dataStoreReady) {")
+                && set_interest.contains("pendingInterest.set(spaceId, [...patterns]);"),
+            "setInterest must hold a declaration made before the store is ready; sent to \
+             native then, it is refused (no store before create, no storage before MLS)"
+        );
+
+        let destroy = index
+            .split_once("async destroy(): Promise<void> {")
+            .expect("index.ts must define destroy()")
+            .1;
+        assert!(
+            destroy.contains("dataStoreReady = false;")
+                && destroy.contains("pendingInterest.clear();"),
+            "destroy() must discard held interest and hold the next declaration again; a \
+             surviving flag sends it to a store that no longer exists"
+        );
+    }
+
     /// Frames a bridge synthesizes for the core carry the configured app id.
     ///
     /// Every relay answer, relay group frame and legacy plain-text DM is
