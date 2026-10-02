@@ -3092,9 +3092,18 @@ export interface MlsKeyPackage {
   userId: string;
   /** Raw key package data (bytes) */
   keyPackageData: number[];
-  /** Timestamp when this package was created */
+  /** When this package was created, in milliseconds since the epoch */
   createdAt: number;
-  /** Whether this package has been synced to a server */
+  /**
+   * When this package expires, in milliseconds since the epoch. A key server
+   * holding a copy should drop it by then: the device withdraws it at this
+   * moment and destroys its private key a week later.
+   */
+  expiresAt: number;
+  /**
+   * Whether the app has marked this package published with
+   * `mlsMarkKeyPackageSynced`. A synced package is never handed to a peer.
+   */
   isSynced: boolean;
 }
 

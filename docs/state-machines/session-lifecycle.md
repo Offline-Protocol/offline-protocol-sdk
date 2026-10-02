@@ -184,6 +184,20 @@ unparseable record is read as the serialized key package so its provider
 reference is derivable. A record-only delete there is the exact stranding this
 rule removes.
 
+### A package the application publishes stays under expiry
+
+An application that uploads a package to its own key server marks it with
+`mls_mark_key_package_synced`. The mark keeps the record and flags it, so the
+two stages above still own it: withdrawn at expiry, destroyed past the grace
+window, whether or not anybody used the uploaded copy. A synced package is
+withheld from the push path and from the peer-less getter, as a slot package
+is, because a stranger may already hold it. Deleting the record on the mark,
+which is what it once did, stranded the init key with nothing left to expire it
+([ADR 0012](../adr/0012-one-key-package-per-peer.md#a-package-the-application-publishes-keeps-its-record)).
+
+The pending list an application uploads from holds only packages nobody has
+spoken for: never a peer's, never a slot's, never one already synced.
+
 ## Desync and heal
 
 An **established** session whose two sides disagree on the MLS epoch yields an

@@ -654,8 +654,8 @@ bytes. Worked code is in the
 | **isMlsInitialized** | `isMlsInitialized(): Promise<boolean>` | Whether MLS is ready. |
 | **mlsGenerateKeyPackage** | `mlsGenerateKeyPackage(): Promise<MlsKeyPackage>` | Generates a new key package. |
 | **mlsGetOrCreateKeyPackage** | `mlsGetOrCreateKeyPackage(): Promise<MlsKeyPackage>` | Gets or creates key package. |
-| **mlsGetPendingKeyPackages** | `mlsGetPendingKeyPackages(): Promise<MlsKeyPackage[]>` | Pending key packages not yet synced. |
-| **mlsMarkKeyPackageSynced** | `mlsMarkKeyPackageSynced(packageId): Promise<void>` | Marks key package as synced. |
+| **mlsGetPendingKeyPackages** | `mlsGetPendingKeyPackages(): Promise<MlsKeyPackage[]>` | Key packages this app may publish itself: never one the SDK pushed to a peer or holds in its own slots, never one already synced. |
+| **mlsMarkKeyPackageSynced** | `mlsMarkKeyPackageSynced(packageId): Promise<void>` | Records that the app published a package. It stays on the device until it expires so a Welcome from the uploaded copy opens, and is never handed to a peer. |
 | **mlsImportKeyPackage** | `mlsImportKeyPackage(userId, keyPackageData: number[]): Promise<void>` | Imports another user's key package. |
 | **mlsHasSession** | `mlsHasSession(otherUserId): Promise<boolean>` | Whether an MLS session exists with that user. |
 | **hasPendingKeyPackage** | `hasPendingKeyPackage(peerId): Promise<boolean>` | Whether a pending key package is available for the peer. |

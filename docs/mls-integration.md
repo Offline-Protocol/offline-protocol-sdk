@@ -904,8 +904,25 @@ DELETE /keys/{userId}/{pkgId} # Delete used key package
 
 ### Syncing Key Packages
 
+The pending list holds only packages this app may publish, which means
+packages it minted itself with `mlsGenerateKeyPackage` and has not marked yet.
+The SDK mints its own packages for peers it pushes to and for its own slots,
+and those never appear in the list, so on a fresh install it is empty until
+the app generates what it intends to upload. Marking a package synced keeps it on the device, so a Welcome built from
+the uploaded copy still opens, and stops the SDK handing it to anybody else.
+It expires with the lifetime it was minted with (30 days), and its private key
+is destroyed a week after that, used or not. Your server should drop its copy
+by `expiresAtMs`: past it the package's own validity window has closed, and a
+week later this device can no longer open a Welcome built from it.
+
 ```swift
-// Get pending key packages to upload
+// Mint the packages this app intends to publish. The SDK never adds any of
+// its own to the pending list.
+for _ in 0..<packagesToKeepOnServer {
+    _ = try mesh.mlsGenerateKeyPackage()
+}
+
+// Get the key packages this app may publish
 let pending = mesh.mlsGetPendingKeyPackages()
 
 for pkg in pending {
@@ -1405,8 +1422,8 @@ Disabling the switch reverts to the legacy drop-and-ACK behaviour.
 | `mlsGenerateKeyPackage()` | Generate a new key package |
 | `mlsGetOrCreateKeyPackage()` | Get existing or generate new package |
 | `mlsImportKeyPackage(userId, data)` | Import a contact's key package |
-| `mlsGetPendingKeyPackages()` | Get packages to upload |
-| `mlsMarkKeyPackageSynced(packageId)` | Mark package as uploaded |
+| `mlsGetPendingKeyPackages()` | Get packages this app may upload: unclaimed, not in the SDK's own slots, not yet synced |
+| `mlsMarkKeyPackageSynced(packageId)` | Mark a package uploaded: kept until it expires, never handed to a peer |
 
 ### 1:1 Sessions
 

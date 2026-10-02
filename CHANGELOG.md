@@ -345,6 +345,34 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A key package the application marks synced keeps its record, so its
+  private key is still destroyed when it expires.**
+  `mls_mark_key_package_synced` deleted the record and left the init key in
+  the MLS provider. Keeping the key was right, because a Welcome built from
+  the uploaded copy has to open, but the record is the only thing that carries
+  expiry, so a published package nobody claimed kept its key for the life of
+  the install. The mark now sets `synced` on the record instead. The package is
+  withdrawn at expiry and its key destroyed a week later like any other, and
+  it is never handed to a peer, because a stranger may already hold it.
+  `mls_get_pending_key_packages` now lists only packages the application may
+  publish: it used to include packages the engine had pushed to a peer or held
+  in its own Nostr slots, which the documented upload loop would then have
+  marked, stranding each old key as the engine minted a successor. The SDK adds
+  none of its own packages to the list, so an application that publishes
+  packages mints them with `mls_generate_key_package` first. Marking an
+  unknown or already used id does nothing, and marking takes the MLS manager's
+  write lock, so a concurrent push can no longer erase it. A source guard refuses any new
+  record-only delete of a key package
+  ([ADR 0012](docs/adr/0012-one-key-package-per-peer.md#a-package-the-application-publishes-keeps-its-record),
+  [#367](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/367)).
+
+- **React Native key packages carry their timestamps and synced flag.** The
+  wrappers read `createdAt` and `isSynced` from a native record that has only
+  ever sent `createdAtMs`, `expiresAtMs` and `synced`, so both were always
+  `undefined` in JavaScript. All three key package methods now go through one
+  mapper, and `MlsKeyPackage` gains `expiresAt`, the moment a key server
+  should drop its copy.
+
 - **`import offline_protocol_sdk` works on Windows.** `pyproject.toml` has
   never installed `bless` on Windows, where it has no backend, and the
   package imported it on the way in, so the import failed on every Windows
