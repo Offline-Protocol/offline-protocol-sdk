@@ -68,7 +68,18 @@ pub struct KeyPackageBundle {
     /// Timestamp when the key package expires (milliseconds since epoch).
     pub expires_at_ms: u64,
 
-    /// Whether this key package has been uploaded to a server.
+    /// Whether the application has published this package itself, through
+    /// [`MlsManager::mark_key_package_synced`](crate::MlsManager::mark_key_package_synced).
+    ///
+    /// A synced package stands in a record somebody else holds, so a stranger
+    /// may still build a Welcome against it. Two things follow, and both are
+    /// the single-use rule [`Self::reserved_for_publication`] already applies:
+    /// the package is withheld from both entry points that hand packages out,
+    /// or a pushed-to peer and whoever fetched the uploaded copy would race
+    /// for one init key; and the record is *kept*, because the record is the
+    /// only thing that carries expiry. Deleting it instead, which is what
+    /// marking used to do, left the private init key in the provider with no
+    /// path to destruction at all (issue 367).
     pub synced: bool,
 
     /// Whether this package is reserved for a publication slot.
@@ -145,6 +156,16 @@ impl KeyPackageBundle {
             assigned_peer: None,
             provider_hash_ref: None,
         }
+    }
+
+    /// Whether this package stands in a record somebody else holds, and so
+    /// must never be handed out by this device.
+    ///
+    /// One predicate rather than two checks at each hand-out site, so the push
+    /// path and the peer-less getter cannot come to disagree about which
+    /// packages are spoken for.
+    pub fn withheld_from_hand_out(&self) -> bool {
+        self.reserved_for_publication || self.synced
     }
 
     /// Checks if the key package has expired (local device's own packages only).
