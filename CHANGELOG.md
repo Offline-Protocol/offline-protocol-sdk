@@ -345,6 +345,25 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **BLE survives a Bluetooth power-cycle on iOS and Android.** Turning an
+  iPhone's Bluetooth off and on, or a Bluetooth stack reset, left the pair
+  unable to talk. On iOS, power-off removes the GATT service, but the bridge
+  still marked it as published, so power-on advertised a service UUID with
+  nothing behind it and peers connected and dropped. Power-on also never
+  reported BLE as available again, so the core stopped sending over BLE
+  while inbound still arrived. Power-off and reset now drop every per-link
+  record, because CoreBluetooth invalidates the links without a disconnect
+  callback for each one. That includes the mesh controller's connection
+  count: a device that was at its connection limit came back with no free
+  slots and refused its returning peers. Power-on brings the transport
+  back to running, and `stop()` while Bluetooth is off now stops it instead
+  of returning early and letting the next power-on restart a stopped
+  transport. On Android, an iPhone that came back from a new random address
+  was verified there, but the old address kept being redialled. When the
+  redialling gave up, it reported the live peer as lost and deleted the
+  mapping that pointed at the new link. An address is now dropped on its
+  own once the peer is live at another one.
+
 - **`import offline_protocol_sdk` works on Windows.** `pyproject.toml` has
   never installed `bless` on Windows, where it has no backend, and the
   package imported it on the way in, so the import failed on every Windows
