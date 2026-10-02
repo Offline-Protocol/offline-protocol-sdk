@@ -2924,14 +2924,16 @@ extension BleManager: CBCentralManagerDelegate {
                 emitDiagnostic("info", "Dispatched protocol.bleStatusChanged(true)")
             }
             
-        case .poweredOff:
-            print("[BleManager] ⚠️ Bluetooth is powered off")
+        // `.resetting` too: any state below poweredOff invalidates every
+        // CBPeripheral, and a reset can return straight to poweredOn.
+        case .poweredOff, .resetting:
+            print("[BleManager] ⚠️ Bluetooth is \(stateString)")
             centralReady = false
             stopScanning(reason: "central_powered_off")
             clearLinkState()
             updateState(.unavailable)
             notifyBleStatus(false)
-            emitDiagnostic("warning", "Bluetooth is powered off", context: ["state": stateString])
+            emitDiagnostic("warning", "Bluetooth is powered off or resetting", context: ["state": stateString])
             
         case .unauthorized:
             print("[BleManager] ⚠️ Bluetooth is unauthorized")
@@ -2948,10 +2950,6 @@ extension BleManager: CBCentralManagerDelegate {
             updateState(.unavailable)
             notifyBleStatus(false)
             emitDiagnostic("error", "Bluetooth is not supported", context: ["state": stateString])
-            
-        case .resetting:
-            print("[BleManager] 🔄 Bluetooth is resetting...")
-            emitDiagnostic("info", "Bluetooth is resetting", context: ["state": stateString])
             
         case .unknown:
             print("[BleManager] ❓ Bluetooth state is unknown")
@@ -4115,8 +4113,10 @@ extension BleManager: CBPeripheralManagerDelegate {
                 emitDiagnostic("info", "Dispatched protocol.bleStatusChanged(true) from peripheral")
             }
             
-        case .poweredOff:
-            print("[BleManager] ⚠️ Bluetooth peripheral is powered off")
+        // `.resetting` too: any state below poweredOff clears the local GATT
+        // database, and a reset can return straight to poweredOn.
+        case .poweredOff, .resetting:
+            print("[BleManager] ⚠️ Bluetooth peripheral is \(stateString)")
             peripheralReady = false
             stopAdvertising()
             // Powering off unpublishes our GATT service. Without this, power-on
@@ -4127,7 +4127,7 @@ extension BleManager: CBPeripheralManagerDelegate {
             clearLinkState()
             updateState(.unavailable)
             notifyBleStatus(false)
-            emitDiagnostic("warning", "Bluetooth peripheral is powered off", context: ["state": stateString])
+            emitDiagnostic("warning", "Bluetooth peripheral is powered off or resetting", context: ["state": stateString])
             
         case .unauthorized:
             print("[BleManager] ⚠️ Bluetooth peripheral is unauthorized")
@@ -4144,10 +4144,6 @@ extension BleManager: CBPeripheralManagerDelegate {
             updateState(.unavailable)
             notifyBleStatus(false)
             emitDiagnostic("error", "Bluetooth peripheral is not supported", context: ["state": stateString])
-            
-        case .resetting:
-            print("[BleManager] 🔄 Bluetooth peripheral is resetting...")
-            emitDiagnostic("info", "Bluetooth peripheral is resetting", context: ["state": stateString])
             
         case .unknown:
             print("[BleManager] ❓ Bluetooth peripheral state is unknown")
