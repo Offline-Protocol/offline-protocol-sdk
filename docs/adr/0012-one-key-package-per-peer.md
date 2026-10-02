@@ -117,7 +117,10 @@ Marking now keeps the record and sets `synced` on it:
 Marking an unknown, expired or consumed id does nothing. Marking a package the
 push path already handed to a peer is allowed and logged: the two holders now
 share an init key, the peer's copy stays openable, and if the uploaded copy is
-spent first, the next push to that peer mints a successor. A package can still
+spent first, the next push to that peer mints a successor. The mark takes
+`&mut self`, so it holds the write half of the manager's lock while the push
+path's claim holds the read half. Both rewrite the same record, and under two
+read guards a claim stored second would erase the mark with nothing logged. A package can still
 be claimed by a push between the application's list call and its mark; the
 window is one discovery event wide and the outcome is the same as this case.
 

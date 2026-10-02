@@ -358,7 +358,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   publish: it used to include packages the engine had pushed to a peer or held
   in its own Nostr slots, which the documented upload loop would then have
   marked, stranding each old key as the engine minted a successor. Marking an
-  unknown or already used id does nothing. A source guard refuses any new
+  unknown or already used id does nothing, and marking takes the MLS manager's
+  write lock, so a concurrent push can no longer erase it. A source guard refuses any new
   record-only delete of a key package
   ([ADR 0012](docs/adr/0012-one-key-package-per-peer.md#a-package-the-application-publishes-keeps-its-record),
   [#367](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/367)).

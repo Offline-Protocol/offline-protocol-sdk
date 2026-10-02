@@ -865,7 +865,14 @@ impl MlsManager {
     /// that peer and the uploaded copy now share an init key; the peer's held
     /// copy stays openable, and a failed establishment is recovered by the
     /// next push, which mints that peer a successor.
-    pub fn mark_key_package_synced(&self, package_id: &str) -> Result<()> {
+    ///
+    /// Takes `&mut self` so a caller sharing the manager behind an `RwLock`
+    /// must hold the write half. The push path claims a package under the
+    /// read half, and both are a load, a change and a store of the same
+    /// record: under two read guards the claim's store can land second and
+    /// erase the mark, leaving the package uploaded *and* advertised to a
+    /// peer with nothing logged.
+    pub fn mark_key_package_synced(&mut self, package_id: &str) -> Result<()> {
         let Some(mut bundle) = self.load_stored_key_package(package_id)? else {
             debug!(
                 package_id = %package_id,
@@ -2617,7 +2624,7 @@ mod tests {
     /// the record has to, because it is the only thing that carries expiry.
     #[test]
     fn test_marking_synced_keeps_the_record_and_the_init_key() {
-        let (manager, storage) = create_test_manager_with_storage("alice");
+        let (mut manager, storage) = create_test_manager_with_storage("alice");
         let bundle = manager.generate_key_package().unwrap();
 
         manager.mark_key_package_synced(&bundle.package_id).unwrap();
@@ -2642,7 +2649,7 @@ mod tests {
     /// because the record that carries the expiry is still there.
     #[test]
     fn test_unclaimed_synced_package_has_its_init_key_destroyed_past_the_grace_window() {
-        let (manager, storage) = create_test_manager_with_storage("alice");
+        let (mut manager, storage) = create_test_manager_with_storage("alice");
         let bundle = manager.generate_key_package().unwrap();
         manager.mark_key_package_synced(&bundle.package_id).unwrap();
 
@@ -2667,7 +2674,7 @@ mod tests {
     /// to a peer too would point two parties at one init key.
     #[test]
     fn test_synced_package_is_withheld_from_both_hand_out_paths() {
-        let manager = create_test_manager("alice");
+        let mut manager = create_test_manager("alice");
         let synced = manager.generate_key_package().unwrap();
         manager.mark_key_package_synced(&synced.package_id).unwrap();
 
@@ -2684,7 +2691,7 @@ mod tests {
     /// listed here is one the documented upload loop would hand out twice.
     #[test]
     fn test_pending_list_holds_only_packages_the_application_may_publish() {
-        let manager = create_test_manager("alice");
+        let mut manager = create_test_manager("alice");
         // Pushed first: the push path claims any unclaimed package, so pushing
         // after `plain` is minted would make `plain` bob's.
         let for_bob = manager.take_push_key_package(&addr("bob")).unwrap().bundle;
@@ -2719,7 +2726,7 @@ mod tests {
     /// copy can still establish with us.
     #[test]
     fn test_welcome_built_against_a_synced_package_still_opens() {
-        let alice = create_test_manager("alice");
+        let mut alice = create_test_manager("alice");
         let bob = create_test_manager("bob");
         let uploaded = alice.generate_key_package().unwrap();
         alice.mark_key_package_synced(&uploaded.package_id).unwrap();
@@ -2738,7 +2745,7 @@ mod tests {
     /// read as unknown and left unflagged.
     #[test]
     fn test_marking_a_legacy_record_upgrades_and_marks_it() {
-        let (manager, storage) = create_test_manager_with_storage("alice");
+        let (mut manager, storage) = create_test_manager_with_storage("alice");
         let bundle = manager.generate_key_package().unwrap();
         storage
             .store(
@@ -2762,7 +2769,7 @@ mod tests {
     /// marking it is a no-op rather than an error the caller cannot act on.
     #[test]
     fn test_marking_an_unknown_or_consumed_package_is_a_no_op() {
-        let alice = create_test_manager("alice");
+        let mut alice = create_test_manager("alice");
         alice.mark_key_package_synced("no-such-package").unwrap();
 
         let bob = create_test_manager("bob");
