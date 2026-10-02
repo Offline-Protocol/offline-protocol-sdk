@@ -130,5 +130,19 @@ final class MeshControllerTests: XCTestCase {
         XCTAssertEqual(decision.evictPeerId, "weak")
         XCTAssertEqual(decision.reason, "swap_bridge_capacity")
     }
+
+    func testDroppingEveryLinkFreesEverySlot() {
+        // Bluetooth off drops every link with no disconnect callback per link.
+        // A mesh still counting them comes back full and refuses its peers.
+        let controller = MeshController(selfId: "self", config: .init(maxConnections: 2))
+        controller.registerConnection(peerId: "a", role: .member)
+        controller.registerConnection(peerId: "b", role: .member)
+        XCTAssertFalse(controller.connectionBudgetAvailable())
+
+        controller.registerAllDisconnected()
+
+        XCTAssertTrue(controller.connectionBudgetAvailable())
+        XCTAssertEqual(controller.advertisement().freeSlotEstimate, 2)
+    }
 }
 

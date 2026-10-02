@@ -645,6 +645,22 @@ final class MeshController: @unchecked Sendable {
         }
     }
 
+    /// Forgets every active link at once. For when the radio drops them all
+    /// without a disconnect callback per link (Bluetooth off, a stack reset,
+    /// `stop()`): the stale entries would keep the degree at its old value, so
+    /// a device that was full comes back with no free slots, refuses its own
+    /// returning peers and advertises itself as full.
+    func registerAllDisconnected() {
+        queue.async(flags: .barrier) {
+            let now = self.timeProvider()
+            for peerId in self.activeConnections.keys {
+                self.peersById[peerId]?.lastActivity = now
+            }
+            self.activeConnections.removeAll()
+            self.updateClusterSignature()
+        }
+    }
+
     func markPeerActive(_ peerId: String) {
         queue.async(flags: .barrier) {
             let now = self.timeProvider()
