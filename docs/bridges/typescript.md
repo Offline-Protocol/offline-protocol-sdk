@@ -35,6 +35,14 @@ field set inside it. The tests that pin event field shapes assert against Rust
 literals and never read `types.ts`. So a renamed or removed event **field**
 passes every guard in the repository and arrives mistyped at runtime.
 
+One field is the exception: `DiagnosticEvent.level`. The bridges emit
+diagnostics as JSON they build themselves, with the level as a plain string at
+several hundred call sites, so the union is the only place the
+vocabulary is typed. `react_native_diagnostic_levels_match_every_bridge` reads
+the union and every level literal handed to a diagnostic sink in the Swift,
+Kotlin and Python sources, and fails in both directions. It exists because
+`debug` was emitted for several releases while the union omitted it (#471).
+
 Adding an event field means updating `types.ts` in the same change, and nothing
 will remind you. When `types.ts` lags, nothing fails loudly: the event simply
 arrives untyped.

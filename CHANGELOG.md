@@ -345,6 +345,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **`DiagnosticEvent.level` declares `debug`, which both native platforms
+  emit, and Android no longer emits `warn`.** (#471) The iOS and Android
+  managers emit diagnostics at `debug` at about seventy sites, while the
+  TypeScript union said `'info' | 'warning' | 'error'`. Android's GATT server
+  also emitted four diagnostics as `warn`, a spelling nothing declared; they
+  are `warning` now. The union is `'debug' | 'info' | 'warning' | 'error'`, and
+  `react_native_diagnostic_levels_match_every_bridge` reads every level
+  literal the bridges hand to a diagnostic sink and fails when a level is
+  emitted but not declared, or declared but never emitted. This widens a
+  public type to match what already arrives at runtime. It is not
+  automatically source-compatible: a consumer with an exhaustive `switch` or
+  a `Record` keyed by the level needs a `debug` entry to typecheck, and a
+  filter that compared against `'warn'` for the four GATT server diagnostics
+  should compare against `'warning'`.
+
 - **Python holds a pinned copy of the relay-answer prefixes, and decides
   attribution in one place.** (#368) The relay's group answers reach the core
   only when they carry no transport peer identity, so an answer injected with

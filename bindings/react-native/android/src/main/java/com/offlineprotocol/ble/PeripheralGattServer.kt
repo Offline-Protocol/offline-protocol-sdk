@@ -453,7 +453,7 @@ class PeripheralGattServer(
             if (!isReady) {
                 Log.w(TAG, "GATT service ready timeout (attempt=$setupAttempts)")
                 diagnosticEmitter(
-                    "warn",
+                    "warning",
                     "gatt_service_ready_timeout",
                     mapOf("attempt" to setupAttempts),
                 )
@@ -700,13 +700,13 @@ class PeripheralGattServer(
             if (cached != null) {
                 identityReadSnapshots.remove(address)
                 diagnosticEmitter(
-                    "warn",
+                    "warning",
                     "identity_long_read_snapshot_stale",
                     mapOf("address" to address, "offset" to offset),
                 )
             } else {
                 diagnosticEmitter(
-                    "warn",
+                    "warning",
                     "identity_long_read_missing_snapshot",
                     mapOf("address" to address, "offset" to offset),
                 )
@@ -744,7 +744,7 @@ class PeripheralGattServer(
                     // the payload to the upstream fragment assembler.
                     if (value.size > MAX_INBOUND_WRITE_BYTES) {
                         diagnosticEmitter(
-                            "warn",
+                            "warning",
                             "gatt_inbound_write_oversize",
                             mapOf(
                                 "address" to device.address,

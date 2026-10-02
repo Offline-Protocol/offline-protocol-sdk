@@ -1533,7 +1533,15 @@ export interface FragmentAssemblyEvictedEvent extends BaseEvent {
  */
 export interface DiagnosticEvent extends BaseEvent {
   type: 'diagnostic';
-  level: 'info' | 'warning' | 'error';
+  /**
+   * The four levels the iOS and Android managers emit. `debug` is the
+   * high-volume one: filter it rather than surface it.
+   *
+   * Pinned from the Rust side by `react_native_diagnostic_levels_match_every_bridge`,
+   * which reads every native emitter: a level emitted but not declared here
+   * arrives at runtime as a value this type says is impossible.
+   */
+  level: 'debug' | 'info' | 'warning' | 'error';
   message: string;
   context?: Record<string, unknown>;
 }
