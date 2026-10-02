@@ -198,7 +198,7 @@ languages, Python included. See
 
 ## S7. Pinned constant lists
 
-`RelayAnswerPrefixes.swift` holds one of the three copies of the relay-answer
+`RelayAnswerPrefixes.swift` holds one of the four copies of the relay-answer
 exemption list. It is pinned against literals in `RelayAnswerPrefixesTests.swift`.
 
 See [C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language).

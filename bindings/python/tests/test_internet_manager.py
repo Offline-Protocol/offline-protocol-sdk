@@ -249,6 +249,22 @@ class TestRelayGroupFrames:
         assert frame["recipient"] == self.ADDRESS
         assert frame["content"] == prefix + json.dumps(payload)
 
+    def test_a_relay_answer_is_unattributed_whatever_the_caller_passes(
+        self, mock_protocol: MagicMock
+    ) -> None:
+        # The rule lives in one place, not at each call site: a future arm that
+        # hands an actor to a relay answer must still reach the core with no
+        # transport identity, or the gate drops it as unsigned.
+        mgr = self._manager(mock_protocol)
+        mgr._inject_group_frame("off1someone", "__USER_GROUPS__", {"groups": []})
+        sender_id, frame = self._injected(mock_protocol)
+        assert sender_id == ""
+        assert frame["sender"] == "relay"
+
+        mgr._inject_group_frame("off1someone", "__GROUP_MSG__", {"group_id": "g"})
+        sender_id, frame = self._injected(mock_protocol)
+        assert sender_id == "off1someone"
+
     def test_group_delivery_report_stays_off_the_message_plane(
         self, mock_protocol: MagicMock
     ) -> None:

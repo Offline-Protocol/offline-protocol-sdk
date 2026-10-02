@@ -2,7 +2,8 @@
 // RelayAnswerPrefixes.swift
 //
 // Which synthesized relay frames must reach the core unattributed.
-// Mirrors android's RelayAnswerPrefixes.kt — keep in sync.
+// Mirrors android's RelayAnswerPrefixes.kt and Python's
+// relay_answer_prefixes.py. Keep all four copies in sync.
 //
 
 import Foundation

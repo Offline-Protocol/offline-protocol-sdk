@@ -345,6 +345,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **Python holds a pinned copy of the relay-answer prefixes, and decides
+  attribution in one place.** (#368) The relay's group answers reach the core
+  only when they carry no transport peer identity, so an answer injected with
+  a `sender_id` is refused as unsigned while the inject reports success. The
+  Swift and Kotlin bridges each hold the list and force those answers
+  unattributed centrally; Python held no copy, and every call site had to get
+  it right on its own. 0.27.0 already corrected the prefix names and the
+  attribution at each site (#453). Now `relay_answer_prefixes.py` holds the
+  list, `_inject_group_frame` drops the actor for any answer whatever the
+  caller passed, and `test_relay_answer_prefixes.py` pins the six literals,
+  so the next registry change fails the Python suite rather than a relay
+  feature in the field. No behaviour change for a correct caller.
+
 - **A key package the application marks synced keeps its record, so its
   private key is still destroyed when it expires.**
   `mls_mark_key_package_synced` deleted the record and left the init key in

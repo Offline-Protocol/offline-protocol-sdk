@@ -339,6 +339,23 @@ pins the attach order, the correlation, the flags and what a dead
 connection owes. No daemon has been run against it; a conforming daemon is
 a deployment this repository does not ship.
 
+## P12. A relay answer reaches the core unattributed, and the rule lives in one place
+
+The relay's group answers (`__GROUP_CREATED__`, the membership pair,
+`__GROUP_INFO__`, `__USER_GROUPS__`, `__GROUP_ERROR__`) are frames this
+binding synthesizes, so nothing can sign them. The core exempts them from the
+control-frame signature gate only when they arrive on the Internet transport
+with no transport peer identity, so an answer injected with a `sender_id` is
+dropped as unsigned, and the caller sees a successful inject.
+
+`relay_answer_prefixes.py` holds the list, and `_inject_group_frame` passes
+every actor through its `attributable_actor`, as the Swift and Kotlin bridges
+do. A new arm cannot attribute an answer by mistake. The list is one of the
+four hand-mirrored copies under [C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language),
+and `test_relay_answer_prefixes.py` pins it as literals. Before #368 there was
+no Python copy, and the injection had drifted to `__GRP_*` names the registry
+never held.
+
 ## Testing
 
 ```bash

@@ -122,7 +122,10 @@ Fourteen sets do today, and they are pinned by **two different** mechanisms, so
 knowing which one you are touching matters.
 
 **The relay-answer prefix exemption list** is the canonical example: the core,
-the Swift bridge, and the Kotlin bridge each hold a copy. A prefix present in one
+the Swift bridge, the Kotlin bridge and the Python binding
+(`relay_answer_prefixes.py`) each hold a copy. Python had none until #368, and
+its injection had drifted to prefix names the registry never held, which is
+this failure exactly. A prefix present in one
 copy and absent from another **fails silently**: the bridge injects the answer
 unattributed, the core's gate declines to exempt it, and the frame is dropped as
 unsigned with no peer at fault. The visible symptom is a relay feature quietly
