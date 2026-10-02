@@ -13795,6 +13795,35 @@ mod tests {
         );
     }
 
+    /// An unclean server-side disconnect on Android keeps a peer that is live
+    /// at another address. An iPhone rotates its random address across a
+    /// Bluetooth power-cycle, and its old link to our GATT server can drop
+    /// uncleanly after the new one is up. Reporting the peer lost there is a
+    /// false `neighbor_lost` and drops the live link's role and MTU. The
+    /// central-role path has Robolectric coverage; `BleTransportFacade` has no
+    /// test harness, so this pins the check ahead of the peer-lost call.
+    #[test]
+    fn react_native_android_server_disconnect_keeps_a_peer_live_elsewhere() {
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+        let start = kotlin
+            .find("private fun handleCentralDisconnectedOnBleThread(")
+            .expect("BleTransportFacade.kt must handle a server-side disconnect");
+        let body = &kotlin[start..];
+        let guard = body
+            .find("if (connections.hasOtherLiveLink(peerId, address)) {")
+            .expect("the server-side disconnect must check for a live link elsewhere");
+        let lost = body
+            .find("protocol.blePeerLost(peerId)")
+            .expect("the server-side disconnect still reports a peer with no other link lost");
+        assert!(
+            guard < lost,
+            "the live-link check must come before blePeerLost, or a peer live at a new \
+             address is reported lost"
+        );
+    }
+
     /// The buffered-inbound event set agrees across TypeScript, Kotlin and
     /// Swift, and each layer's hold is wired to a flush.
     ///

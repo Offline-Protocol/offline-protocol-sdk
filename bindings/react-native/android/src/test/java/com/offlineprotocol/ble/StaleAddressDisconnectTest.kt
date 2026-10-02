@@ -9,6 +9,7 @@ import android.os.Looper
 import com.offlineprotocol.BleAppTag
 import com.offlineprotocol.mesh.MeshController
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -65,6 +66,7 @@ class StaleAddressDisconnectTest {
         host.connections.setDeviceIdentifier(old, "peerA")
         host.connections.registerGatt(new, gatt(new))
         host.connections.setDeviceIdentifier(new, "peerA")
+        host.pendingInbound.enqueue(old, byteArrayOf(1))
 
         disconnect(oldGatt)
 
@@ -72,6 +74,25 @@ class StaleAddressDisconnectTest {
         assertEquals("the stale address is not redialled", emptyList<String>(), host.dialed)
         assertEquals(new, host.connections.addressForDevice("peerA"))
         assertNull(host.connections.deviceIdForAddress(old))
+        assertEquals("the facade drops the dead address's state", listOf(old), host.staleDropped)
+        assertFalse("the dead address's inbound is dropped", host.pendingInbound.hasPending(old))
+    }
+
+    @Test
+    fun `a peer that comes back while the give-up is queued is not given up`() {
+        // A stale callback with no other link yet posts the give-up. The new
+        // link lands before it runs, so only the check inside the give-up
+        // itself can keep the live peer.
+        host.connections.setDeviceIdentifier(old, "peerC")
+
+        client.callback.onConnectionStateChange(gatt(old), 8, BluetoothProfile.STATE_DISCONNECTED)
+        host.connections.registerGatt(new, gatt(new))
+        host.connections.setDeviceIdentifier(new, "peerC")
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMinutes(2))
+
+        assertEquals("no false peer loss", emptyList<String>(), host.givenUp)
+        assertEquals(listOf(old), host.staleDropped)
+        assertEquals(new, host.connections.addressForDevice("peerC"))
     }
 
     @Test
@@ -82,12 +103,14 @@ class StaleAddressDisconnectTest {
         disconnect(gatt(old))
 
         assertEquals(listOf("peerB"), host.givenUp)
+        assertEquals(emptyList<String>(), host.staleDropped)
         assertNull(host.connections.addressForDevice("peerB"))
     }
 
     private class FakeHost : CentralGattClient.Host {
         val givenUp = mutableListOf<String>()
         val dialed = mutableListOf<String>()
+        val staleDropped = mutableListOf<String>()
 
         // `finalizeGivenUpPeer` catches what this throws, so the test records
         // peer loss through `onPeerGivenUp`, which runs right after it.
@@ -114,6 +137,7 @@ class StaleAddressDisconnectTest {
         override fun onPeerMtuNegotiated(address: String, maxPayload: Int) {}
         override fun onDeviceIdResolved(address: String, deviceId: String) {}
         override fun onPeerGivenUp(address: String, peerId: String) { givenUp += peerId }
+        override fun onStaleAddressDropped(address: String) { staleDropped += address }
         override fun connectToDevice(device: BluetoothDevice) { dialed += device.address }
     }
 }

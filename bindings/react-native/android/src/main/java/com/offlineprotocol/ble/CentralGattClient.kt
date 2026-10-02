@@ -140,6 +140,14 @@ internal class CentralGattClient(
          *  per-peer MTU entry). */
         fun onPeerGivenUp(address: String, peerId: String)
 
+        /** Notify the facade that [address] was dropped while its peer stays
+         *  live at another address (an iPhone rotates its random address
+         *  across a Bluetooth power-cycle). Called from [finalizeGivenUpPeer]
+         *  on the BLE thread instead of [onPeerGivenUp]: the facade drops only
+         *  what it keys by [address]. Anything keyed by the peer's device id
+         *  belongs to the live link and must survive. */
+        fun onStaleAddressDropped(address: String)
+
         /** Entry point used by the retry-on-disconnect path to re-attempt
          *  connecting to a known address. Facade enforces the per-device
          *  RSSI / capacity / cooldown gating inside connectToDevice. */
@@ -1028,8 +1036,13 @@ internal class CentralGattClient(
         clearServiceInstanceSelection(address)
         if (host.connections.hasOtherLiveLink(peerId, address)) {
             // Only this address is gone, not the peer: skip the peer-level
-            // teardown (peer lost, role, outbound queue) the live link needs.
+            // teardown (peer lost, role, outbound queue) the live link needs,
+            // and drop only what is keyed by the dead address. The outbound
+            // queue is keyed by peer id, so it stays for the live link.
             host.connections.removeIdentifiersForAddress(address)
+            host.pendingInbound.removeAll(address)
+            deviceIdResolutionAttempts.remove(address)
+            host.onStaleAddressDropped(address)
             diagnosticEmitter("info", "Dropped stale address for a peer with a live link", mapOf(
                 "address" to address,
                 "peerId" to peerId,
