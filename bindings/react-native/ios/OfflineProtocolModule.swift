@@ -192,8 +192,9 @@ class OfflineProtocolModule: RCTEventEmitter {
     
     // MARK: - iOS background / Wi‑Fi suspension
     
-    /// When the app enters background, iOS kills MultipeerConnectivity. Notify Rust so DORS
-    /// stops routing over Wi‑Fi Direct and uses BLE (allowed in background).
+    /// When the app enters background, iOS suspends the peer-stream listener and its
+    /// connections. Notify Rust so DORS stops routing over the peer-stream slot and uses
+    /// BLE (allowed in background).
     private func addBackgroundObservers() {
         NotificationCenter.default.addObserver(
             self,

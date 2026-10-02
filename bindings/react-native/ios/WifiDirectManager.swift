@@ -2,142 +2,176 @@
 // WifiDirectManager.swift
 // OfflineProtocol
 //
-// WiFi Direct transport implementation using MultipeerConnectivity
-// Note: iOS uses MultipeerConnectivity framework which provides similar
-// functionality to Android's WiFi Direct (Wi-Fi P2P)
+// The iOS peer-stream transport: TCP streams over Network framework, found
+// through DNS-SD, on the infrastructure network or over AWDL (Apple's
+// peer-to-peer Wi-Fi) when there is none. The name is the engine slot's, not
+// the radio's: iOS has no Wi-Fi Direct API (ADR 0027).
 //
 
 import Foundation
-import MultipeerConnectivity
+import Network
 
-/// WiFi Direct Manager implementing TransportManager for peer-to-peer WiFi communication
-/// Uses Apple's MultipeerConnectivity framework which provides WiFi Direct-like functionality
+/// The engine's peer-stream slot on iOS, over `NWListener`, `NWBrowser` and
+/// `NWConnection`.
 ///
 /// ## Every peer proves its address before it carries anything
 ///
-/// The engine registers this transport as its peer-stream slot, and
-/// `docs/spec/stream-framing.md` is the contract. When a Multipeer peer
-/// connects, each side sends its identity assertion as its first message and
-/// verifies the other's with `verifyIdentityAssertion`, the one verifier every
+/// `docs/spec/stream-framing.md` is the contract, and this manager is a plain
+/// implementation of it: a TCP stream to one peer, a `u32` big-endian length
+/// before every body, and the identity assertion as the first frame in each
+/// direction, checked with `verifyIdentityAssertion`, the one verifier every
 /// platform uses. The address it derives is the only id this manager hands the
-/// core: to `wifiDirectPeerConnected`, as the `senderId` of each body, and to
-/// `wifiDirectPeerDisconnected`. `MCPeerID.displayName` never reaches the core.
-/// It carries the remote's app-chosen profile, which nothing binds to a key and
-/// which is commonly a shared constant, and announcing it once put unprovable
-/// ids into the core's capacity-bounded `known_peers`.
+/// core. The discovery record's `addr` is a hint the preamble must prove,
+/// never a name to announce.
 ///
 /// What the chapter asks of a receiver lives in `PeerStreamSession`, which
-/// this manager forwards each per-peer event to: every message is one frame
-/// whose `u32` big-endian prefix equals the rest of the message (the session
-/// already delivers whole messages), the preamble must verify within
-/// `PREAMBLE_TIMEOUT`, and one peer is announced per address, the newer
-/// superseding the older without a loss report. It is Foundation-only and
-/// unit-tested with a fake session and clock. What stays here:
-/// - The service type is `offlineprotocol`, which the framework publishes as
-///   `_offlineprotocol._tcp` and `_offlineprotocol._udp`; an app's
-///   `NSBonjourServices` must list both, or local-network privacy blocks
-///   discovery with no error. The discovery info carries `txtvers` and `addr`,
-///   and `addr` is a claim the preamble must prove for a peer we invite.
+/// this manager forwards each per-stream event to, after `PeerStreamReader`
+/// has cut the stream into whole frames. Both are Foundation-only and
+/// unit-tested with fakes. What stays here:
+/// - The service is `_offlineprotocol._tcp` with `txtvers=1` first and `addr`,
+///   the same record the Python `PeerStreamManager` publishes, so an iPhone
+///   and a host on one LAN find each other. An app's `NSBonjourServices` must
+///   list `_offlineprotocol._tcp`, or local-network privacy blocks discovery;
+///   the browser reports that as a diagnostic instead of failing silently.
+/// - Both ends of a pair may dial. Which of two streams for one address is
+///   kept is decided by `PeerStreamLinks`, the same way on both ends, so the
+///   lower address dials at once and the higher waits
+///   `PeerStreamDialPolicy.higherAddressDelay` to see whether the lower one reached it first. Without the wait every
+///   first contact would open two streams and close one.
 ///
-/// Every per-peer transition (connect, each received message, disconnect) runs
-/// on `linkQueue`, one serial queue, so a peer's first message cannot overtake
-/// its connect callback and no body reaches the core after its loss report.
-/// The core re-adds a neighbour on any inbound body, so that ordering is what
-/// keeps a reported-lost peer lost. Mirrors android's WifiDirectManager.kt.
+/// Everything Network framework calls back with, and every per-stream step,
+/// runs on `linkQueue`, one serial queue: the listener, the browser and every
+/// connection are started on it. So a stream's first frame cannot overtake its
+/// connect, and no body reaches the core after its loss report. The core
+/// re-adds a neighbour on any inbound body, so that ordering is what keeps a
+/// reported-lost peer lost.
 public class WifiDirectManager: NSObject, TransportManager {
-    
+
     // MARK: - TransportManager Protocol
-    
+
     public let transportId = "wifi_direct"
-    public let transportName = "WiFi Direct (MultipeerConnectivity)"
-    /// Read through [stateLock] like the session below, because
-    /// it is touched by the same three threads: the lifecycle writes it from
-    /// the bridge queue, and the send path reads it from whichever thread the
-    /// Rust callback arrives on. This is the iOS half of the `@Volatile` the
-    /// Android manager's `state` carries, and it is what makes the claim on
-    /// [onMessagesAvailable] — that the drain's reads are safe from anywhere —
-    /// actually true.
+    public let transportName = "Peer stream (Network framework)"
+    /// Read through [stateLock], because it is touched by three threads: the
+    /// lifecycle writes it from the bridge queue, and the send path reads it
+    /// from whichever thread the Rust callback arrives on. This is the iOS
+    /// half of the `@Volatile` the Android manager's `state` carries.
     public var state: TransportState {
         stateLock.lock(); defer { stateLock.unlock() }
         return _state
     }
     public weak var delegate: TransportManagerDelegate?
-    
+
     // MARK: - Constants
-    
-    /// MCSession has a hard limit of 8 peers. Stay at 7 to avoid overwhelming the daemon
-    /// and prevent connection storms in dense environments (e.g. festival, protest).
-    private let WIFI_DIRECT_MAX_PEERS_SAFE = 7
 
-    /// Returns true when at or over the connection budget (so we must not invite or accept).
-    /// Used in browser and advertiser delegates; exposed for unit tests.
-    static func atConnectionBudgetLimit(connectedCount: Int) -> Bool {
-        return connectedCount >= 7
-    }
-
-    /// `offlineprotocol`: fifteen characters, the Multipeer maximum, and the
-    /// service label stream-framing.md requires. It was `offline-proto`, which
-    /// no app's `NSBonjourServices` listed under the documented name.
-    private let SERVICE_TYPE = "offlineprotocol"
+    /// Fifteen characters, the most a DNS-SD service label allows, and the
+    /// type stream-framing.md requires.
+    static let SERVICE_TYPE = "_offlineprotocol._tcp"
     /// How long a connected peer may take to prove its address. Local policy,
     /// not wire format (stream-framing.md).
     private let PREAMBLE_TIMEOUT: TimeInterval = 10.0
-    private let DISCOVERY_TIMEOUT: TimeInterval = 30.0
-    private let CONNECTION_TIMEOUT: TimeInterval = 30.0
-    
+    /// Open streams, proved or not. The inbound share and the per-host bound
+    /// are `PeerStreamDialPolicy.admitsInbound`'s.
+    private static let MAX_STREAMS = PeerStreamDialPolicy.maxStreams
+    /// A listener or browser that failed is rebuilt after this long.
+    private static let REBUILD_DELAY: TimeInterval = 5.0
+    /// How long a dial may take to become ready, whatever it waits on
+    /// (resolving the record, a path, AWDL coming up, the handshake), before
+    /// it is ended and left to the redial ladder. Python's `CONNECT_TIMEOUT`
+    /// and Android's connect timeout bound the whole connect the same way.
+    private static let DIAL_TIMEOUT: TimeInterval = 10.0
+    /// Android's `Limits`: queued bytes toward one peer beyond which a body
+    /// is dropped (the core retries it), and only while that peer's oldest
+    /// write has been outstanding for `WRITE_STALL_MS`. The core hands a burst
+    /// over at once, so a bound applied regardless drops frames for a peer
+    /// that is reading.
+    private static let MAX_QUEUED_BYTES = 4 * PeerStreamFraming.maxBodyBytes
+    private static let WRITE_STALL_MS: Int64 = 2_000
+    /// A write outstanding this long ends the stream.
+    // ponytail: per write, not per unit of progress as on Android, so a 1 MiB
+    // frame needs about 35 KB/s. AWDL and a LAN are far above that; move to
+    // chunked progress if a slow link ever trips it.
+    private static let WRITE_TIMEOUT_MS: Int64 = 30_000
+    /// `kDNSServiceErr_PolicyDenied`: local-network privacy refused us.
+    private static let DNS_POLICY_DENIED: Int32 = -65570
+
     // MARK: - Properties
-    
+
     private let protocolInstance: OfflineProtocol
     private let deviceId: String
-    
-    // MultipeerConnectivity components
-    private var advertiser: MCNearbyServiceAdvertiser?
-    private var browser: MCNearbyServiceBrowser?
 
     // Message sending (event-driven, no polling)
     private let messageQueue = DispatchQueue(label: "com.offlineprotocol.wifidirect.messages")
 
-    /// Every per-peer transition runs here, in order: the connect, each
-    /// received message, the disconnect, and the preamble deadline. See the
-    /// type's documentation for why one serial queue is the invariant.
+    /// Every Network framework callback and every per-stream step runs here.
+    /// See the type's documentation for why one serial queue is the invariant.
     private let linkQueue = DispatchQueue(label: "com.offlineprotocol.wifidirect.links")
     private static let linkQueueKey = DispatchSpecificKey<Bool>()
 
-    /// Each connected peer from its first message to its disconnect: the
-    /// preamble, the framing, one announced peer per address. This manager
-    /// owns the session and forwards per-peer events on `linkQueue`; see
-    /// `PeerStreamSession` for the rest. Set once in `init`, before any
-    /// callback can arrive, and never reassigned.
-    private var peers: PeerStreamSession<MCPeerID>!
+    /// Each stream from its first frame to its end: the preamble, the
+    /// framing, one announced stream per address. Set once in `init`, before
+    /// any callback can arrive, and never reassigned.
+    private var peers: PeerStreamSession<Stream>!
 
-    /// Guards [_state], [_session] and [_isPaused], which three different
-    /// threads touch: the lifecycle writes them from the bridge queue, the
-    /// MCSession / browser / advertiser delegates from MultipeerConnectivity's
-    /// own queues, and the send path reads them from [messageQueue]. The proved
-    /// peers live in `links`, which has its own lock under the same rule. They were
-    /// plain properties, which is the same unsynchronised cross-thread access
-    /// #338 removed from BleManager's `peripheralRSSI`.
+    /// One TCP stream. A new one per connection and never reused, so no state
+    /// from an earlier stream can be mistaken for this one's.
+    private final class Stream: Hashable {
+        let connection: NWConnection
+        /// Whether this device opened it, which decides which of two streams
+        /// for one address is kept.
+        let outbound: Bool
+        /// The address an outbound stream was dialed toward, for the redial.
+        let dialed: String?
+        let reader = PeerStreamReader()
+        let writes = WriteStallWatchdog(timeoutMs: WifiDirectManager.WRITE_STALL_MS)
+        var queuedBytes = 0
+        /// Whether the peer sent a whole frame, and whether a dialed stream
+        /// proved the address it was dialed toward. Heard and never proved is
+        /// a record that does not hold the address it advertises; a stream cut
+        /// mid-preamble has not been heard.
+        var heard = false
+        var proved = false
+
+        init(connection: NWConnection, outbound: Bool, dialed: String?) {
+            self.connection = connection
+            self.outbound = outbound
+            self.dialed = dialed
+        }
+
+        static func == (lhs: Stream, rhs: Stream) -> Bool { lhs === rhs }
+        func hash(into hasher: inout Hasher) { hasher.combine(ObjectIdentifier(self)) }
+    }
+
+    // linkQueue only, all of it.
+    private var listener: NWListener?
+    private var browser: NWBrowser?
+    private var streams = Set<Stream>()
+    /// The endpoint each advertised address is reachable at, while it is.
+    private var adverts: [String: NWEndpoint] = [:]
+    /// Records whose dial was answered by a peer that did not prove the
+    /// address they advertise. Left out of `adverts` until the browser reports
+    /// the record again, so another record for the address is dialed, or none.
+    private var unprovable = Set<NWEndpoint>()
+    /// When to dial each advertised address, and when to dial it again.
+    private var dialPolicy = PeerStreamDialPolicy()
+    /// Bumped by every start() and stop(), so a timer armed for one run finds
+    /// nothing to act on in the next.
+    private var generation = 0
+
+    /// Guards [_state] and [_isPaused], which the lifecycle writes from the
+    /// bridge queue and the send path reads from any thread. Everything
+    /// Network framework touches lives on `linkQueue` instead, and the proved
+    /// peers in `PeerStreamLinks`, under its own lock and the same rule.
     ///
-    /// Held across one field read or write and nothing else — never across a
-    /// UniFFI call, an `MCSession.send`, or a delegate callback. Every accessor
-    /// below returns a snapshot so callers work on values, not on shared
-    /// storage. That is also why it can be a plain [NSLock]: no accessor calls
-    /// out, so nothing can re-enter and need recursion.
+    /// Held across one field read or write and nothing else: never across a
+    /// UniFFI call, a send, or a delegate callback. That is also why it can be
+    /// a plain [NSLock]: no accessor calls out, so nothing can re-enter.
     private let stateLock = NSLock()
     private var _state: TransportState = .unavailable
 
     /// True between `pause()` and `resume()`. Mirrors `InternetManager`'s flag
-    /// of the same name.
-    ///
-    /// This manager's `pause()` stopped browsing and nothing else, so the send
-    /// path ignored it entirely: `onMessagesAvailable` runs
-    /// `drainAndSendMessages`, which gated on `state` — and pause does not
-    /// change `state` — so a paused transport drained the whole queue, each
-    /// message taking the core's global protocol mutex. Guarded here rather
-    /// than only at the callback because `drainAndSendMessages` is also reached
-    /// from `resume()`, and because the drain loop re-reads it every iteration.
+    /// of the same name: pausing stops discovery and the send path, which the
+    /// drain loop re-reads every iteration.
     private var _isPaused = false
-    private var _session: MCSession?
 
     private func setState(_ newState: TransportState) {
         stateLock.lock(); defer { stateLock.unlock() }
@@ -149,11 +183,6 @@ public class WifiDirectManager: NSObject, TransportManager {
         set { stateLock.lock(); defer { stateLock.unlock() }; _isPaused = newValue }
     }
 
-    private var session: MCSession? {
-        get { stateLock.lock(); defer { stateLock.unlock() }; return _session }
-        set { stateLock.lock(); defer { stateLock.unlock() }; _session = newValue }
-    }
-
     /// Whether any peer has proved an address. Reads `peers`, not
     /// `stateLock`: the proved peers are the only ones there is anything to
     /// send to.
@@ -161,48 +190,65 @@ public class WifiDirectManager: NSObject, TransportManager {
         return !peers.isEmpty
     }
 
-    private var transportStartAt: Date?
-
     // MARK: - Initialization
-    
+
     public init(protocol protocolInstance: OfflineProtocol, deviceId: String) {
         self.protocolInstance = protocolInstance
         self.deviceId = deviceId
         super.init()
         linkQueue.setSpecific(key: Self.linkQueueKey, value: true)
-        peers = PeerStreamSession<MCPeerID>(
+        peers = PeerStreamSession<Stream>(
             host: self,
             preambleTimeout: PREAMBLE_TIMEOUT,
-            send: { [weak self] frame, peer in
-                guard let session = self?.session else { throw TransportError.notRunning }
-                try session.send(frame, toPeers: [peer], with: .reliable)
+            send: { [weak self] frame, stream in
+                guard let self = self, self.write(frame, to: stream) else {
+                    throw TransportError.notRunning
+                }
             },
-            disconnect: { [weak self] peer in
-                self?.session?.cancelConnectPeer(peer)
+            disconnect: { stream in
+                // Its `.cancelled` then ends it, and finds nothing to report.
+                stream.connection.cancel()
             },
             schedule: { [weak self] delay, block in
                 self?.linkQueue.asyncAfter(deadline: .now() + delay, execute: block)
-            }
+            },
+            isOutbound: { $0.outbound }
         )
     }
-    
+
     deinit {
         stop()
     }
-    
+
+    /// TCP with keepalive, over AWDL as well as the infrastructure network.
+    /// The one place a carrier is chosen: Wi-Fi Aware, when it comes, starts
+    /// here (ADR 0027). Keepalive is the Python manager's: a stream whose peer
+    /// died idle ends within about thirty seconds, which is what lets the
+    /// losing kind of reconnect through once the stale winner is gone.
+    private static func makeParameters() -> NWParameters {
+        let tcp = NWProtocolTCP.Options()
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 15
+        tcp.keepaliveInterval = 5
+        tcp.keepaliveCount = 3
+        tcp.connectionTimeout = 10
+        let parameters = NWParameters(tls: nil, tcp: tcp)
+        parameters.includePeerToPeer = true
+        return parameters
+    }
+
     // MARK: - TransportManager Implementation
-    
+
     public func isAvailable() -> Bool {
-        // MultipeerConnectivity is available on all iOS devices
         return true
     }
-    
+
     public func start() throws {
         guard state != .running else {
             throw TransportError.alreadyRunning
         }
-        
-        emitDiagnostic("info", "Starting WiFi Direct transport", context: [
+
+        emitDiagnostic("info", "Starting peer-stream transport", context: [
             "deviceId": deviceId
         ])
 
@@ -210,108 +256,78 @@ public class WifiDirectManager: NSObject, TransportManager {
         // must not leave this fresh transport connected-but-mute. Mirrors
         // `InternetManager.start()`.
         isPaused = false
-
         updateState(.starting)
-        transportStartAt = Date()
-        
-        // A fresh MCPeerID per start, never one per manager. PeerStreamSession
-        // keys each peer's state by its MCPeerID, and a remote that stopped
-        // and started again under the same one could have its new connect
-        // land before the old session's disconnect: the connect would find a
-        // preamble already sent and an address already proved, send nothing,
-        // and the remote would refuse us at its deadline. A new id makes every
-        // restart a new peer, which the supersede rule already handles.
-        let peerId = MCPeerID(displayName: deviceId)
 
-        // Create session
-        session = MCSession(
-            peer: peerId,
-            securityIdentity: nil,
-            encryptionPreference: .required
-        )
-        session?.delegate = self
-        
-        // Start advertising. `addr` is a hint a browser checks the preamble
-        // against, and absent until this device has an identity. The profile
-        // (`deviceId`) is no longer advertised: it is not an identity.
-        var discoveryInfo = ["txtvers": "1"]
-        if let address = protocolInstance.localAddress(), !address.isEmpty {
-            discoveryInfo["addr"] = address
+        var failure: Error?
+        onLinkQueueSync {
+            generation += 1
+            do {
+                try startListening()
+                startBrowsing()
+            } catch {
+                failure = error
+            }
         }
-        advertiser = MCNearbyServiceAdvertiser(
-            peer: peerId,
-            discoveryInfo: discoveryInfo,
-            serviceType: SERVICE_TYPE
-        )
-        advertiser?.delegate = self
-        advertiser?.startAdvertisingPeer()
-
-        // Start browsing
-        browser = MCNearbyServiceBrowser(peer: peerId, serviceType: SERVICE_TYPE)
-        browser?.delegate = self
-        browser?.startBrowsingForPeers()
+        if let failure = failure {
+            updateState(.stopped)
+            throw TransportError.startFailed(failure.localizedDescription)
+        }
 
         updateState(.running)
-        
-        // Notify protocol
         try? protocolInstance.wifiDirectStatusChanged(isConnected: true)
-        
-        emitDiagnostic("info", "WiFi Direct transport started")
+        emitDiagnostic("info", "Peer-stream transport started")
     }
-    
+
     public func stop() {
         guard state == .running || state == .starting else {
             return
         }
-        
+
         updateState(.stopping)
-        
-        // Stop browsing
-        browser?.stopBrowsingForPeers()
-        browser = nil
 
-        // Stop advertising
-        advertiser?.stopAdvertisingPeer()
-        advertiser = nil
-
-        // The session is forgotten first. The state-change and data callbacks
-        // check `self.session === session` on linkQueue, so from here a .connected
-        // that was already queued finds nothing to attach to. Cleared after
-        // endAll(), such a callback created a link in the just-emptied table,
-        // start() never clears it, and a remote that kept its MCPeerID met a
-        // stale refused link after a restart: no preamble, a refusal at its
-        // deadline, and one wasted round before the disconnect cleared it.
-        let old = session
-        session = nil
-
-        // Report every proved peer lost while the core still holds its link,
-        // on linkQueue so no delivery lands after a loss report. The session's
-        // own .notConnected callbacks then find nothing left to report.
         onLinkQueueSync {
+            // Everything is forgotten first. Each callback checks that its
+            // listener, browser or stream is still this manager's, so from
+            // here one already queued finds nothing to attach to; forgotten
+            // after endAll(), a stream that became ready in between would be
+            // announced into the just-emptied table.
+            generation += 1
+            let old = (listener: listener, browser: browser, streams: streams)
+            listener = nil
+            browser = nil
+            streams = []
+            adverts = [:]
+            unprovable = []
+            dialPolicy.reset()
+
+            // Report every proved peer lost while the core still holds its
+            // link, before the layer goes down, on linkQueue so no delivery
+            // lands after a loss report.
             peers.endAll()
+
+            old.listener?.cancel()
+            old.browser?.cancel()
+            old.streams.forEach { $0.connection.cancel() }
         }
 
-        old?.disconnect()
-        
-        // Notify protocol
         try? protocolInstance.wifiDirectStatusChanged(isConnected: false)
-        
+
         updateState(.stopped)
-        emitDiagnostic("info", "WiFi Direct transport stopped")
+        emitDiagnostic("info", "Peer-stream transport stopped")
     }
-    
+
     public func pause() {
-        // Set before browsing stops. This is what actually pauses the send
-        // path — see `isPaused`; stopping the browser only stops finding new
-        // peers, and this manager has no timer to cancel.
+        // Set before discovery stops. This is what actually pauses the send
+        // path, see `isPaused`; stopping the browser only stops finding new
+        // peers. The listener stays up, so a peer can still reach us.
         isPaused = true
-        browser?.stopBrowsingForPeers()
+        onLinkQueueSync { stopBrowsing() }
     }
 
     public func resume() {
         isPaused = false
         if state == .running {
-            browser?.startBrowsingForPeers()
+            onLinkQueueSync { startBrowsing() }
             // Drain any messages that accumulated while paused. Required
             // rather than tidy: the core does not re-issue
             // `onMessagesAvailable` for messages it already announced, and
@@ -319,98 +335,381 @@ public class WifiDirectManager: NSObject, TransportManager {
             drainAndSendMessages()
         }
     }
-    
+
     // MARK: - Message Handling (Event-Driven)
-    
-    /// Called by the Rust transport callback when new outgoing messages are available.
-    /// Replaces timer-based `startMessagePolling`.
-    ///
-    /// Goes straight to the drain rather than hopping through main first, as
-    /// the Reticulum and Nostr managers already do. The hop bought nothing:
-    /// the only work it did on main was read `state` and the peer map, both of
-    /// which are now synchronised and readable from anywhere, and it put a
-    /// scheduling dependency on the UI thread into the send path of a
-    /// transport that never touches the UI.
+
+    /// Called by the Rust transport callback when new outgoing messages are
+    /// available. Goes straight to the drain: `state` and the proved peers are
+    /// both readable from any thread.
     public func onMessagesAvailable() {
         drainAndSendMessages()
     }
 
-    /// Drains the Rust message queue and sends each message over MultipeerConnectivity.
+    /// Drains the Rust message queue, framing each body and handing it to
+    /// `linkQueue` to write.
     ///
     /// Unbounded, where the Android manager's mirror of this spends a batch
-    /// budget and reposts. The asymmetry is deliberate: the budget there exists
-    /// because that looper is shared — it also delivers the Wi-Fi P2P framework
-    /// callbacks and the broadcast receiver, and a broadcast that misses its
-    /// dispatch budget is an ANR wherever the receiver runs — and because a
-    /// `stop()` waits on that same thread without a bound. Neither holds here.
-    /// `messageQueue` is this manager's alone, carries no framework callbacks,
-    /// and no lifecycle path waits on it, so a long drain delays nothing but
-    /// the next drain. Add a budget here only if one of those three facts
-    /// changes.
-    ///
-    /// Unbounded is not the same as unconditional, though, which is the one
-    /// thing the Android mirror gets for free and this does not. Re-entering
-    /// `drainAndSendMessages` after each batch re-runs its guard; a single
-    /// `while` does not, so the state has to be re-read *inside* the loop. The
-    /// guard below runs before the hop, and a `stop()` landing after it leaves
-    /// every remaining iteration taking the core's global mutex to fetch a
-    /// message that `sendMessage` then drops for want of a session — a warning
-    /// per message, against a transport that is already down.
+    /// budget and reposts. The budget there exists because that looper is
+    /// shared with the framework callbacks; `messageQueue` is this manager's
+    /// alone, and no lifecycle path waits on it. Unbounded is not
+    /// unconditional, though: the state and `isPaused` are re-read inside the
+    /// loop, because a `stop()` or `pause()` landing after the guard would
+    /// otherwise leave every remaining iteration taking the core's global
+    /// mutex for a message that is then dropped.
     private func drainAndSendMessages() {
         guard !isPaused, state == .running, hasConnectedPeers else { return }
 
         messageQueue.async { [weak self] in
             guard let self = self else { return }
-
-            // `isPaused` re-read every iteration alongside the state, and for
-            // the same reason the state is: this loop can run for as long as
-            // the queue is deep, and a `pause()` landing inside it would
-            // otherwise keep taking the core's global protocol mutex once per
-            // remaining message against a transport the app has backgrounded.
             while !self.isPaused, self.state == .running,
                   let message = self.protocolInstance.wifiDirectGetNextMessage() {
                 self.sendMessage(recipientId: message.recipientId, data: Data(message.data))
             }
         }
     }
-    
-    /// Frames one body and sends it to the peer that proved `recipientId`.
+
+    /// Frames one body and writes it to the stream that proved `recipientId`.
     ///
-    /// Never broadcasts. The core returns a body only for an address a peer
-    /// proved, so a recipient with no peer here means that peer left between
-    /// the core's answer and this lookup; the body is dropped and the core's
-    /// acknowledgement and retry cover it. The broadcast fallback this
-    /// replaced handed a message for one peer to every peer in the session.
+    /// Never broadcasts. The core returns a body only for an address a stream
+    /// proved, so a recipient with no stream here means it ended between the
+    /// core's answer and this lookup; the body is dropped and the core's
+    /// acknowledgement and retry cover it.
     private func sendMessage(recipientId: String, data: Data) {
-        guard let session = session else {
-            emitDiagnostic("warning", "Cannot send message - no session")
-            return
-        }
-        guard let peer = peers.handle(for: recipientId) else {
-            emitDiagnostic("warning", "Wi-Fi Direct body dropped: no peer holds the recipient", context: [
-                "recipientId": recipientId,
-                "dataSize": data.count
-            ])
-            return
-        }
         guard let frame = PeerStreamFraming.frame(data) else {
-            emitDiagnostic("error", "Wi-Fi Direct body dropped: outside the frame bounds", context: [
+            emitDiagnostic("error", "Peer-stream body dropped: outside the frame bounds", context: [
                 "recipientId": recipientId,
                 "dataSize": data.count
             ])
             return
         }
-        do {
-            try session.send(frame, toPeers: [peer], with: .reliable)
-        } catch {
-            emitDiagnostic("error", "Failed to send message", context: [
-                "recipientId": recipientId,
-                "error": error.localizedDescription
-            ])
+        linkQueue.async { [weak self] in
+            guard let self = self else { return }
+            guard let stream = self.peers.handle(for: recipientId), self.streams.contains(stream) else {
+                self.emitDiagnostic("warning", "Peer-stream body dropped: no stream holds the recipient", context: [
+                    "recipientId": recipientId,
+                    "dataSize": data.count
+                ])
+                return
+            }
+            if !self.write(frame, to: stream) {
+                self.emitDiagnostic("warning", "Peer-stream body dropped: the peer is not reading", context: [
+                    "recipientId": recipientId,
+                    "dataSize": data.count
+                ])
+            }
         }
     }
 
-    // MARK: - Peer links (linkQueue only)
+    /// Writes one frame, or returns false when the peer is stalled and its
+    /// queue is over the bound. `linkQueue` only; the completion and the
+    /// deadline run there too, since the connection was started on it.
+    private func write(_ frame: Data, to stream: Stream) -> Bool {
+        let now = MonotonicClock.nowMs()
+        if stream.queuedBytes + frame.count > Self.MAX_QUEUED_BYTES,
+           stream.writes.stalledAgeMs(nowMs: now) != nil {
+            return false
+        }
+        stream.queuedBytes += frame.count
+        let token = stream.writes.arm(nowMs: now)
+        stream.connection.send(content: frame, completion: .contentProcessed { [weak stream] error in
+            guard let stream = stream else { return }
+            stream.queuedBytes -= frame.count
+            stream.writes.disarm(token)
+            // A failed write ends the stream; its `.failed` or `.cancelled`
+            // does the bookkeeping.
+            if error != nil { stream.connection.cancel() }
+        })
+        linkQueue.asyncAfter(deadline: .now() + .milliseconds(Int(Self.WRITE_TIMEOUT_MS))) { [weak self, weak stream] in
+            guard let self = self, let stream = stream, self.streams.contains(stream),
+                  let age = stream.writes.stalledAgeMs(nowMs: MonotonicClock.nowMs()),
+                  age >= Self.WRITE_TIMEOUT_MS else { return }
+            self.emitDiagnostic("warning", "Peer stream closed: a write made no progress", context: [
+                "ageMs": age
+            ])
+            stream.connection.cancel()
+        }
+        return true
+    }
+
+    // MARK: - Listening and discovery (linkQueue only)
+
+    private func startListening() throws {
+        let listener = try NWListener(using: Self.makeParameters())
+        let address = protocolInstance.localAddress()
+        listener.service = NWListener.Service(
+            name: PeerStreamFraming.instanceName(address: address),
+            type: Self.SERVICE_TYPE,
+            domain: nil,
+            txtRecord: PeerStreamFraming.txtRecord(address: address)
+        )
+        listener.stateUpdateHandler = { [weak self, weak listener] newState in
+            guard let self = self, let listener = listener, listener === self.listener else { return }
+            self.listenerChanged(newState)
+        }
+        listener.newConnectionHandler = { [weak self, weak listener] connection in
+            guard let self = self, let listener = listener, listener === self.listener,
+                  PeerStreamDialPolicy.admitsInbound(
+                      from: Self.host(of: connection),
+                      inboundFrom: self.streams.filter { !$0.outbound }.map { Self.host(of: $0.connection) },
+                      open: self.streams.count) else {
+                connection.cancel()
+                return
+            }
+            self.open(Stream(connection: connection, outbound: false, dialed: nil))
+        }
+        self.listener = listener
+        listener.start(queue: linkQueue)
+    }
+
+    /// The remote host an accepted connection came from, nil if unknown
+    /// (unknowns share one bound).
+    private static func host(of connection: NWConnection) -> String? {
+        guard case .hostPort(let host, _) = connection.endpoint else { return nil }
+        return "\(host)"
+    }
+
+    private func listenerChanged(_ newState: NWListener.State) {
+        switch newState {
+        case .waiting(let error):
+            reportNetworkError("Peer-stream listener waiting", error)
+        case .failed(let error):
+            // Suspension in the background ends a listener this way.
+            reportNetworkError("Peer-stream listener failed", error)
+            listener?.cancel()
+            listener = nil
+            let expected = generation
+            linkQueue.asyncAfter(deadline: .now() + Self.REBUILD_DELAY) { [weak self] in
+                guard let self = self, self.generation == expected, self.listener == nil else { return }
+                do {
+                    try self.startListening()
+                } catch {
+                    self.emitDiagnostic("error", "Peer-stream listener could not restart", context: [
+                        "error": error.localizedDescription
+                    ])
+                }
+            }
+        default:
+            break
+        }
+    }
+
+    private func startBrowsing() {
+        guard browser == nil, !isPaused else { return }
+        let browser = NWBrowser(
+            for: .bonjourWithTXTRecord(type: Self.SERVICE_TYPE, domain: nil),
+            using: Self.makeParameters()
+        )
+        browser.stateUpdateHandler = { [weak self, weak browser] newState in
+            guard let self = self, let browser = browser, browser === self.browser else { return }
+            self.browserChanged(newState)
+        }
+        browser.browseResultsChangedHandler = { [weak self, weak browser] results, changes in
+            guard let self = self, let browser = browser, browser === self.browser else { return }
+            self.advertsChanged(results, changes)
+        }
+        self.browser = browser
+        browser.start(queue: linkQueue)
+    }
+
+    private func stopBrowsing() {
+        browser?.cancel()
+        browser = nil
+        adverts = [:]
+        unprovable = []
+    }
+
+    private func browserChanged(_ newState: NWBrowser.State) {
+        switch newState {
+        case .waiting(let error):
+            reportNetworkError("Peer-stream discovery waiting", error)
+        case .failed(let error):
+            reportNetworkError("Peer-stream discovery failed", error)
+            stopBrowsing()
+            let expected = generation
+            linkQueue.asyncAfter(deadline: .now() + Self.REBUILD_DELAY) { [weak self] in
+                guard let self = self, self.generation == expected else { return }
+                self.startBrowsing()
+            }
+        default:
+            break
+        }
+    }
+
+    private func reportNetworkError(_ message: String, _ error: NWError) {
+        if case .dns(let code) = error, code == Self.DNS_POLICY_DENIED {
+            emitDiagnostic("error", "Local network access denied: list _offlineprotocol._tcp in NSBonjourServices and set NSLocalNetworkUsageDescription", context: [
+                "error": error.localizedDescription
+            ])
+        } else {
+            emitDiagnostic("warning", message, context: ["error": error.localizedDescription])
+        }
+    }
+
+    /// Records each advertised address from every record the browser holds,
+    /// and dials the ones a change added or changed. An advert with no `addr`
+    /// is a device with no identity yet, which has no preamble to send, and
+    /// ours is skipped by its address.
+    private func advertsChanged(_ results: Set<NWBrowser.Result>, _ changes: Set<NWBrowser.Result.Change>) {
+        guard let local = protocolInstance.localAddress() else { return }
+        var fresh = Set<NWEndpoint>()
+        for change in changes {
+            if case .added(let result) = change { fresh.insert(result.endpoint) }
+            if case .changed(_, let result, _) = change { fresh.insert(result.endpoint) }
+        }
+        // A record reported again may now hold what it advertises.
+        unprovable.subtract(fresh)
+        recordAdverts(results, fresh: fresh, local: local)
+        for (address, endpoint) in adverts where fresh.contains(endpoint) {
+            // The lower address's stream is the one both ends keep, so the
+            // lower one dials at once and the higher gives it time.
+            let weAreLower = PeerStreamLinks<Stream>.newStreamWins(
+                outbound: true, localAddress: local, peer: address)
+            if let delay = dialPolicy.discovered(
+                address, weAreLower: weAreLower, held: peers.handle(for: address) != nil) {
+                scheduleDial(address, after: delay)
+            }
+        }
+    }
+
+    private func recordAdverts(_ results: Set<NWBrowser.Result>, fresh: Set<NWEndpoint>, local: String) {
+        var records: [(address: String, endpoint: NWEndpoint)] = []
+        for result in results {
+            guard let address = Self.advertisedAddress(result), address != local else { continue }
+            records.append((address, result.endpoint))
+        }
+        unprovable.formIntersection(records.map { $0.endpoint })
+        adverts = PeerStreamDialPolicy.adverts(
+            records, fresh: fresh, current: adverts, unprovable: unprovable)
+    }
+
+    /// The peer address a record advertises, or nil for a record that is not
+    /// a peer hint. A record carrying `sid` is a service instance under the
+    /// DNS-SD mapping chapter: it names the same host and address as the peer
+    /// record, so taking it as a peer would open a second stream to one host
+    /// per service published there. The stream chapter says a peer browser
+    /// MUST ignore it, as the Python manager does.
+    private static func advertisedAddress(_ result: NWBrowser.Result) -> String? {
+        guard case .bonjour(let txt) = result.metadata else { return nil }
+        if txt.dictionary.keys.contains("sid") { return nil }
+        guard let address = txt["addr"], !address.isEmpty else { return nil }
+        return address
+    }
+
+    /// Arms a dial `dialPolicy` decided on.
+    private func scheduleDial(_ address: String, after delay: TimeInterval) {
+        let expected = generation
+        linkQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self, self.generation == expected else { return }
+            self.dial(address)
+        }
+    }
+
+    /// Opens a stream toward `address`, unless it went away or is already
+    /// held (an inbound stream got here first), or later when no slot is free.
+    private func dial(_ address: String) {
+        guard !isPaused, let endpoint = adverts[address], peers.handle(for: address) == nil else {
+            dialPolicy.abandoned(address)
+            return
+        }
+        guard streams.count < Self.MAX_STREAMS else {
+            if let delay = dialPolicy.noSlot(address) { scheduleDial(address, after: delay) }
+            return
+        }
+        let stream = Stream(
+            connection: NWConnection(to: endpoint, using: Self.makeParameters()),
+            outbound: true,
+            dialed: address
+        )
+        peers.claim(address, for: stream)
+        open(stream)
+    }
+
+    // MARK: - Streams (linkQueue only)
+
+    private func open(_ stream: Stream) {
+        streams.insert(stream)
+        stream.connection.stateUpdateHandler = { [weak self, weak stream] newState in
+            guard let self = self, let stream = stream, self.streams.contains(stream) else { return }
+            switch newState {
+            case .ready:
+                self.peers.connected(stream)
+                self.receive(on: stream)
+            case .failed, .cancelled:
+                self.end(stream)
+            default:
+                break
+            }
+        }
+        stream.connection.start(queue: linkQueue)
+        guard stream.outbound else { return }
+        // The TCP connect timeout does not cover resolving the record, and a
+        // dial toward a host that left without a goodbye can sit there with no
+        // state change, holding a slot and its address's one dial.
+        linkQueue.asyncAfter(deadline: .now() + Self.DIAL_TIMEOUT) { [weak stream] in
+            guard let stream = stream else { return }
+            if case .ready = stream.connection.state { return }
+            stream.connection.cancel()
+        }
+    }
+
+    /// Reads the stream and hands each whole frame to the session, which owns
+    /// the preamble, the frame rules and every call to the core. A reader
+    /// refusal ends the stream, and the end reports the loss if the peer was
+    /// announced.
+    private func receive(on stream: Stream) {
+        stream.connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self, weak stream] content, _, isComplete, error in
+            guard let self = self, let stream = stream, self.streams.contains(stream) else { return }
+            if let content = content, !content.isEmpty {
+                for result in stream.reader.append(content) {
+                    switch result {
+                    case .success(let frame):
+                        stream.heard = true
+                        self.peers.received(frame, from: stream)
+                        if !stream.proved, let address = stream.dialed,
+                           self.peers.provedAddress(of: stream) == address {
+                            stream.proved = true
+                            self.dialPolicy.proved(address)
+                        }
+                    case .failure(let refusal):
+                        self.emitDiagnostic("warning", "Peer stream refused", context: ["reason": refusal.reason])
+                        stream.connection.cancel()
+                        return
+                    }
+                }
+            }
+            if isComplete || error != nil {
+                stream.connection.cancel()
+                return
+            }
+            self.receive(on: stream)
+        }
+    }
+
+    /// The stream is over. Reported lost if it held an address, and an
+    /// outbound one is dialed again, later each time, while its advert stays.
+    /// A stream refused because the other one for its address won finds the
+    /// address held and does not redial.
+    private func end(_ stream: Stream) {
+        guard streams.remove(stream) != nil else { return }
+        peers.ended(stream)
+        stream.writes.reset()
+        stream.connection.cancel()
+        // Answered by a peer that never proved the address its record
+        // advertises: a device on the LAN claiming another's address, or one
+        // that moved. Redialing it would fail the same way on the ladder for
+        // as long as the record lives, and keep the real record for the
+        // address undialed. A dial that lost the tie-break did prove it.
+        if stream.dialed != nil, stream.heard, !stream.proved,
+           let local = protocolInstance.localAddress() {
+            unprovable.insert(stream.connection.endpoint)
+            recordAdverts(browser?.browseResults ?? [], fresh: [], local: local)
+        }
+        guard let address = stream.dialed,
+              let delay = dialPolicy.ended(
+                address, advertised: adverts[address] != nil,
+                held: peers.handle(for: address) != nil) else { return }
+        scheduleDial(address, after: delay)
+    }
 
     /// Runs `body` on `linkQueue` and waits, or inline when already there.
     /// Inline matters: `deinit` calls `stop()`, and the last reference can be
@@ -425,166 +724,20 @@ public class WifiDirectManager: NSObject, TransportManager {
     }
 
     // MARK: - State Management
-    
+
     private func updateState(_ newState: TransportState) {
         setState(newState)
         // Deliberately outside the lock: the delegate is the bridge module,
         // and calling into it while holding [stateLock] would put arbitrary
-        // downstream work — including UniFFI calls — inside this manager's
+        // downstream work, including UniFFI calls, inside this manager's
         // critical section.
         delegate?.transportManager(self, didChangeState: newState)
     }
-    
+
     // MARK: - Diagnostics
-    
+
     private func emitDiagnostic(_ level: String, _ message: String, context: [String: Any] = [:]) {
         delegate?.transportManager(self, didEmitDiagnostic: level, message: message, context: context)
-    }
-}
-
-// MARK: - MCSessionDelegate
-
-extension WifiDirectManager: MCSessionDelegate {
-    
-    public func session(_ session: MCSession, peer peerID: MCPeerID, didChange state: MCSessionState) {
-        linkQueue.async { [weak self] in
-            guard let self = self else { return }
-
-            switch state {
-            case .connected:
-                // A callback from a session this manager has since replaced
-                // (a stop() then start()) has nothing to attach to.
-                guard self.session === session else { return }
-                self.peers.connected(peerID)
-
-            case .notConnected:
-                // Scoped to the current session like the other two callbacks.
-                // stop() already reported the old session's peers through
-                // endAll(), and a late disconnect from it would otherwise end
-                // the same MCPeerID's live link in the new session.
-                guard self.session === session else { return }
-                self.peers.ended(peerID)
-
-            case .connecting:
-                self.emitDiagnostic("debug", "Connecting to peer", context: [
-                    "peerId": peerID.displayName
-                ])
-
-            @unknown default:
-                break
-            }
-        }
-    }
-
-    public func session(_ session: MCSession, didReceive data: Data, fromPeer peerID: MCPeerID) {
-        linkQueue.async { [weak self] in
-            guard let self = self, self.session === session else { return }
-            self.peers.received(data, from: peerID)
-        }
-    }
-
-    public func session(_ session: MCSession, didReceive stream: InputStream, withName streamName: String, fromPeer peerID: MCPeerID) {
-        // Not used for our message-based protocol
-    }
-    
-    public func session(_ session: MCSession, didStartReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, with progress: Progress) {
-        // Not used for our message-based protocol
-    }
-    
-    public func session(_ session: MCSession, didFinishReceivingResourceWithName resourceName: String, fromPeer peerID: MCPeerID, at localURL: URL?, withError error: Error?) {
-        // Not used for our message-based protocol
-    }
-}
-
-// MARK: - MCNearbyServiceAdvertiserDelegate
-
-extension WifiDirectManager: MCNearbyServiceAdvertiserDelegate {
-    
-    public func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didReceiveInvitationFromPeer peerID: MCPeerID, withContext context: Data?, invitationHandler: @escaping (Bool, MCSession?) -> Void) {
-        emitDiagnostic("info", "Received invitation from peer", context: [
-            "peerId": peerID.displayName
-        ])
-        
-        // One snapshot for the whole decision, like `foundPeer` below: reading
-        // `session` again at the accept would let a concurrent stop() hand the
-        // framework a different value than the budget check saw. A stopped
-        // transport has nothing to accept into, so it declines instead of
-        // accepting with a nil session.
-        guard let session = session else {
-            invitationHandler(false, nil)
-            return
-        }
-
-        // Enforce connection budget: MCSession limit is 8; stay at 7 to avoid daemon overload.
-        let currentCount = session.connectedPeers.count
-        if Self.atConnectionBudgetLimit(connectedCount: currentCount) {
-            emitDiagnostic("info", "Rejecting invitation: at connection budget limit", context: [
-                "connectedCount": currentCount,
-                "limit": WIFI_DIRECT_MAX_PEERS_SAFE
-            ])
-            invitationHandler(false, nil)
-            return
-        }
-        invitationHandler(true, session)
-    }
-    
-    public func advertiser(_ advertiser: MCNearbyServiceAdvertiser, didNotStartAdvertisingPeer error: Error) {
-        emitDiagnostic("error", "Failed to start advertising", context: [
-            "error": error.localizedDescription
-        ])
-    }
-}
-
-// MARK: - MCNearbyServiceBrowserDelegate
-
-extension WifiDirectManager: MCNearbyServiceBrowserDelegate {
-    
-    public func browser(_ browser: MCNearbyServiceBrowser, foundPeer peerID: MCPeerID, withDiscoveryInfo info: [String : String]?) {
-        emitDiagnostic("info", "Found peer", context: [
-            "peerId": peerID.displayName,
-            "discoveryInfo": info ?? [:]
-        ])
-        
-        // One snapshot for the whole decision. This read used to happen three
-        // separate times and end in `session!`, so a stop() landing between
-        // the guard and the invite crashed on the force-unwrap — the exact
-        // race the accessors above exist to close, at the one call site that
-        // still reached around them. A nil session means the transport is
-        // down, which is nothing to invite anyone to.
-        guard let session = session else { return }
-
-        // Don't invite ourselves. Read off the session: the id is minted per
-        // start(), and the session is the one this browser belongs to.
-        guard peerID != session.myPeerID else { return }
-
-        // Don't invite if already connected
-        guard !session.connectedPeers.contains(peerID) else { return }
-
-        // Enforce connection budget: avoid MCSession overflow and connection storms.
-        guard !Self.atConnectionBudgetLimit(connectedCount: session.connectedPeers.count) else {
-            return
-        }
-
-        // Record the advertised address before inviting, on the queue the
-        // connect callback will run on, so the preamble is checked against it.
-        let claim = info?["addr"]
-        linkQueue.async { [weak self] in
-            self?.peers.claim(claim, for: peerID)
-        }
-
-        browser.invitePeer(peerID, to: session, withContext: nil, timeout: CONNECTION_TIMEOUT)
-    }
-    
-    public func browser(_ browser: MCNearbyServiceBrowser, lostPeer peerID: MCPeerID) {
-        emitDiagnostic("info", "Lost peer", context: [
-            "peerId": peerID.displayName
-        ])
-    }
-    
-    public func browser(_ browser: MCNearbyServiceBrowser, didNotStartBrowsingForPeers error: Error) {
-        emitDiagnostic("error", "Failed to start browsing", context: [
-            "error": error.localizedDescription
-        ])
     }
 }
 
@@ -610,7 +763,7 @@ extension WifiDirectManager: PeerStreamHost {
         do {
             try protocolInstance.wifiDirectPeerConnected(peerId: address)
         } catch {
-            emitDiagnostic("error", "Error announcing Wi-Fi Direct peer", context: [
+            emitDiagnostic("error", "Error announcing peer-stream peer", context: [
                 "error": error.localizedDescription
             ])
         }
@@ -622,7 +775,7 @@ extension WifiDirectManager: PeerStreamHost {
         } catch {
             // The core refused this body. That is about the message, not the
             // peer, so the peer stays.
-            emitDiagnostic("warning", "Wi-Fi Direct body refused by the core", context: [
+            emitDiagnostic("warning", "Peer-stream body refused by the core", context: [
                 "address": address,
                 "error": error.localizedDescription
             ])
@@ -633,11 +786,11 @@ extension WifiDirectManager: PeerStreamHost {
         do {
             try protocolInstance.wifiDirectPeerDisconnected(peerId: address)
         } catch {
-            emitDiagnostic("error", "Error reporting Wi-Fi Direct peer lost", context: [
+            emitDiagnostic("error", "Error reporting peer-stream peer lost", context: [
                 "error": error.localizedDescription
             ])
         }
-        emitDiagnostic("info", "Wi-Fi Direct peer disconnected", context: ["address": address])
+        emitDiagnostic("info", "Peer-stream peer disconnected", context: ["address": address])
     }
 
     func peerStreamDiagnostic(_ level: String, _ message: String, _ context: [String: Any]) {
@@ -646,4 +799,3 @@ extension WifiDirectManager: PeerStreamHost {
 }
 
 extension WifiDirectManager: @unchecked Sendable {}
-

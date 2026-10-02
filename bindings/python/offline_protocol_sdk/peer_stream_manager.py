@@ -1,7 +1,7 @@
 """Peer-stream transport manager: TCP streams behind the ``wifi_direct`` slot.
 
 A peer stream is a byte stream established to exactly one other device. On a
-phone that is a Wi-Fi Direct group socket or a Multipeer session; on a host
+phone that is a Wi-Fi Direct group socket or a TCP stream over AWDL; on a host
 it is a TCP connection over a LAN or a routed mesh. To the engine they are one
 transport, registered in the slot the FFI names ``wifi_direct`` for
 historical reasons, and this manager is the host's implementation of the

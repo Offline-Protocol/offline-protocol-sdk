@@ -817,7 +817,7 @@ jobs:
         run: swift test --package-path bindings/react-native/ios
 
       # The largest bridge files are on Package.swift's `exclude:` list (they
-      # need CoreBluetooth / MultipeerConnectivity / React / the generated
+      # need CoreBluetooth / Network / React / the generated
       # UniFFI module, none of which the SwiftPM harness can supply), so
       # `swift test` above compiles none of them and every change to them has
       # historically shipped with zero compile coverage. They CAN be

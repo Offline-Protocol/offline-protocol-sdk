@@ -4,14 +4,16 @@
 //
 // The parts of docs/spec/stream-framing.md a platform manager owns: the
 // length prefix, its bounds, the position rule that makes the first body on a
-// stream the peer's identity assertion, and one announced stream per address.
+// stream the peer's identity assertion, one announced stream per address, and
+// the DNS-SD advert a peer finds it by.
 //
-// Foundation only, so the SwiftPM harness tests it without a Multipeer session
+// Foundation and CryptoKit only, so the SwiftPM harness tests it without a socket
 // (PeerStreamFramingTests replays the chapter's conformance vectors).
-// WifiDirectManager owns the session and calls into this. Mirrors android's
-// PeerStreamFraming.kt, keep in sync.
+// WifiDirectManager owns the connections and calls into this. Mirrors
+// android's PeerStreamFraming.kt, keep in sync.
 //
 
+import CryptoKit
 import Foundation
 
 /// Why a frame or a preamble was refused. The stream closes in every case.
@@ -55,13 +57,13 @@ enum PeerStreamFraming {
         return nil
     }
 
-    /// The body of one whole frame delivered by a message-oriented carrier.
+    /// The body of one whole frame, as `PeerStreamReader` cuts it off the
+    /// stream.
     ///
-    /// A Multipeer session already delivers whole messages, and the chapter
-    /// still wraps each as one frame so that the ceiling is read off the same
-    /// four bytes on every carrier. The prefix must therefore account for
-    /// every byte after it: a message carrying more or less than its prefix
-    /// says is refused, since there is no stream to resynchronise on.
+    /// The prefix must account for every byte after it: a message carrying
+    /// more or less than its prefix says is refused. The reader already
+    /// refused a length over the ceiling before buffering its body; the
+    /// preamble floor is checked here, where the position is known.
     static func unframe(_ message: Data, preamble: Bool) -> Result<Data, PeerStreamRefusal> {
         guard message.count >= prefixBytes else {
             return .failure(PeerStreamRefusal(reason: "shorter than a prefix"))
@@ -77,6 +79,85 @@ enum PeerStreamFraming {
         }
         // Rebased, so the caller can index from zero.
         return .success(Data(message.dropFirst(prefixBytes)))
+    }
+
+    /// The DNS-SD TXT record, built by hand because the chapter requires
+    /// `txtvers=1` to be the first entry and `NWTXTRecord` does not promise an
+    /// order. `addr` is absent until this device has an identity. An entry
+    /// longer than its one length byte can say is left out rather than
+    /// trapping the host app; an address is far shorter.
+    static func txtRecord(address: String?) -> Data {
+        var entries = ["txtvers=1"]
+        if let address = address, !address.isEmpty {
+            entries.append("addr=\(address)")
+        }
+        var out = Data()
+        for entry in entries {
+            let bytes = Data(entry.utf8)
+            guard let length = UInt8(exactly: bytes.count) else { continue }
+            out.append(length)
+            out.append(bytes)
+        }
+        return out
+    }
+
+    /// The DNS-SD instance name: a digest of the address, as the Python
+    /// manager names its own. A restarted listener (every return from the
+    /// background) then replaces its record in each peer's cache instead of
+    /// publishing a second one beside the stale one. Random only while there
+    /// is no identity, when the record carries no address and no browser
+    /// dials it.
+    static func instanceName(address: String?) -> String {
+        guard let address = address else { return "op-\(UUID().uuidString.prefix(8).lowercased())" }
+        let digest = SHA256.hash(data: Data(address.utf8))
+        return "op-" + digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// Cuts whole frames, prefix included, off a byte stream (the chapter's
+/// "What a receiver owes", steps one and two).
+///
+/// A prefix over the ceiling, or zero, is refused the moment its four bytes
+/// are in, before a byte of the body is buffered: a reader that buffered first
+/// would hand the peer a megabyte of this device's memory per stream for four
+/// bytes. So the reader holds at most one frame, the ceiling plus the prefix.
+/// After a refusal the stream is garbage and the reader returns nothing more;
+/// the owner closes the stream.
+///
+/// Not thread-safe. One stream's owner drives its instance from one queue.
+final class PeerStreamReader {
+    private var buffer = Data()
+    private var refused = false
+
+    /// Every frame `chunk` completes, in order, ending with a refusal if one
+    /// was met.
+    func append(_ chunk: Data) -> [Result<Data, PeerStreamRefusal>] {
+        guard !refused else { return [] }
+        buffer.append(chunk)
+        var out: [Result<Data, PeerStreamRefusal>] = []
+        // Frames are read at an offset and the buffer compacted once at the
+        // end. Compacting per frame re-copied the rest of the buffer each
+        // time, so a chunk of many small frames cost its size squared.
+        var start = buffer.startIndex
+        while buffer.endIndex - start >= PeerStreamFraming.prefixBytes {
+            let length = UInt32(buffer[start]) << 24 | UInt32(buffer[start + 1]) << 16
+                | UInt32(buffer[start + 2]) << 8 | UInt32(buffer[start + 3])
+            // The floor is `unframe`'s to check, which knows the position.
+            if let refusal = PeerStreamFraming.refusal(forLength: length, preamble: false) {
+                refused = true
+                buffer = Data()
+                out.append(.failure(refusal))
+                return out
+            }
+            let end = start + PeerStreamFraming.prefixBytes + Int(length)
+            guard buffer.endIndex >= end else { break }
+            out.append(.success(Data(buffer[start..<end])))
+            start = end
+        }
+        if start != buffer.startIndex {
+            buffer = Data(buffer[start...])
+        }
+        return out
     }
 }
 
@@ -151,12 +232,17 @@ final class PeerStreamPreamble {
 /// preamble is enough to open a second stream for a live address, so the count
 /// has to be kept here, where the streams are.
 ///
-/// Policy: the newer stream supersedes the older. On a phone the duplicate is
-/// almost always the same peer reconnecting past a stream that went half-open
-/// (a Multipeer peer that restarted and came back under a new `MCPeerID`), and
-/// refusing the newer one would leave that peer unreachable until the stale
-/// one timed out. The cost, recorded in R16, is that a replayer can choose when
-/// a real stream ends; it cannot use the stream it gets.
+/// Policy: the stream the lower address opened is kept, and between two of
+/// those the newer supersedes the older. Both ends compute it alike, which is
+/// the point: both ends of a pair may dial, and so does a Python host on the
+/// same LAN, so without a shared rule each end would keep the stream the other
+/// closes, and the pair would reconnect forever. It is the Python manager's
+/// `_new_stream_wins`, and `ios_and_python_peer_streams_keep_the_same_stream`
+/// pins the two copies together (ADR 0027). "Newer" among winners is what
+/// lets the lower address reconnect past its own half-open stream; the higher
+/// address's reconnect waits for keepalive to end the stale one. The cost,
+/// recorded in R16, is that a replayer can end a real stream when its copy is
+/// the winning kind; it cannot use the stream it gets.
 ///
 /// Thread-safe, and deliberately knows nothing of the protocol: the send path
 /// reads it from whichever thread the core calls `onMessagesAvailable` on,
@@ -168,13 +254,29 @@ final class PeerStreamLinks<Handle: Hashable> {
         let firstForAddress: Bool
         /// The older stream for the same address, to close without a loss report.
         let superseded: Handle?
+        /// True when an older stream holds the address and wins: close this
+        /// one without a report, and leave the older untouched.
+        var refused = false
+    }
+
+    /// Whether a new stream for `peer` takes the address over from the one
+    /// that holds it. `outbound` is whether this device opened the new
+    /// stream. Addresses compare by their UTF-8 bytes, which is the code point
+    /// order Python's `<` uses. With no address of our own there is nothing to
+    /// order by, and the announced stream stays.
+    static func newStreamWins(outbound: Bool, localAddress: String?, peer: String) -> Bool {
+        guard let local = localAddress else { return false }
+        let weOpen = local.utf8.lexicographicallyPrecedes(peer.utf8)
+        return outbound == weOpen
     }
 
     private let lock = NSLock()
     private var byAddress: [String: Handle] = [:]
     private var byHandle: [Handle: String] = [:]
 
-    func announce(_ handle: Handle, address: String) -> Announcement {
+    func announce(
+        _ handle: Handle, address: String, outbound: Bool, localAddress: String?
+    ) -> Announcement {
         lock.lock(); defer { lock.unlock() }
         if byHandle[handle] != nil {
             // A stream proves one address, once. A second announcement, for
@@ -183,6 +285,10 @@ final class PeerStreamLinks<Handle: Hashable> {
             // Not a precondition, because this runs inside the host app and a
             // trap here would take the app down for a bookkeeping mistake.
             return Announcement(firstForAddress: false, superseded: nil)
+        }
+        if byAddress[address] != nil,
+           !Self.newStreamWins(outbound: outbound, localAddress: localAddress, peer: address) {
+            return Announcement(firstForAddress: false, superseded: nil, refused: true)
         }
         let older = byAddress.updateValue(handle, forKey: address)
         byHandle[handle] = address

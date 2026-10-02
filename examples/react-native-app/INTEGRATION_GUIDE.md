@@ -90,7 +90,6 @@ Add required permissions to `ios/YourApp/Info.plist`:
 <key>NSBonjourServices</key>
 <array>
     <string>_offlineprotocol._tcp</string>
-    <string>_offlineprotocol._udp</string>
 </array>
 
 <!-- Background modes (REQUIRED for reliable BLE operation) -->

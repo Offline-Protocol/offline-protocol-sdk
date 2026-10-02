@@ -133,6 +133,16 @@ design:
 | Data plane (`__MLS_ENC__`, `__GROUP_MSG__`) | Authenticated **later**, by MLS decryption plus the credential comparison |
 | Relay answers (six prefixes) | **Not authenticated by this protocol at all** |
 
+No peer-stream carrier encrypts its hop: the Android and iOS managers and the
+Python host all speak plain TCP, which the
+[stream chapter](../spec/stream-framing.md) allows because the hop forms no
+part of the trust argument. A device on the path is A1 for those frames. It
+reads what an envelope leaves in clear, such as the application id
+([R17](#r17-the-application-id-on-every-frame-is-cleartext-and-unsigned)),
+and never a payload. The iOS manager's hop was encrypted while it used
+MultipeerConnectivity
+([ADR 0027](../adr/0027-ios-peer-streams-ride-network-framework.md)).
+
 ### Boundary 5: end to end
 
 **Enforced by:** MLS (RFC 9420), plus the application-side leaf identity binding
@@ -700,13 +710,15 @@ the stream chapter's one-stream-per-address rule it gains one more thing: its
 close is reported as the peer's loss, which evicts the real peer's link until
 it reconnects. That is why the rule is normative rather than policy. Which
 stream the rule keeps is policy, and each choice leaves the replayer something.
-The mobile managers keep the newer stream, so a replayer chooses when a real
+The Android manager keeps the newer stream, so a replayer chooses when a real
 stream ends: its copy supersedes the real one, the real peer reconnects past
 it, and each round costs both sides a signature check, while the core sees no
-loss because the address never stopped being held. The Python manager keeps
-the stream opened by the lower address, which a replayer cannot use to evict
-anyone but which lets a stale stream block a reconnect until keepalive
-notices. A receiver MUST NOT read a verified
+loss because the address never stopped being held. The Python and iOS
+managers keep the stream opened by the lower address, and the newer of two
+such, so the same replay works only against a receiver whose address is
+higher than the peer it copies; a lower receiver refuses the copy. The price
+is that a stale stream can block the higher address's reconnect until
+keepalive notices. A receiver MUST NOT read a verified
 assertion as evidence that the peer is live, recent, or the only holder of the
 address. Two things that look like they would close the gap do not, and the
 stream chapter says so normatively: link encryption (TLS, a framework's

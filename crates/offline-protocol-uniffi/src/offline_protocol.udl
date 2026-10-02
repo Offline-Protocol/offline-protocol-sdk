@@ -1386,8 +1386,8 @@ interface OfflineProtocol {
     // Peer-stream transport operations (the `wifi_direct` slot)
     //
     // A byte stream the platform established to exactly one peer: a Wi-Fi
-    // Direct group socket, a Multipeer session, a TCP connection over a LAN
-    // or a routed mesh. To the engine they are one transport, registered
+    // Direct group socket, a TCP connection over a LAN, AWDL or a routed
+    // mesh. To the engine they are one transport, registered
     // behind `wifi_direct_enabled`; the slot's name is historical, recorded
     // as debt in docs/spec/stream-framing.md, which is the contract for
     // everything below.

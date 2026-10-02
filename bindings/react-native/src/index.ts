@@ -2437,7 +2437,7 @@ export class OfflineProtocol {
   // PEER-STREAM TRANSPORT METHODS (the `wifiDirect` slot, Low-Level)
   //
   // A byte stream the platform established to exactly one peer: a Wi-Fi
-  // Direct group socket, a Multipeer session, a TCP connection over a LAN or
+  // Direct group socket, a TCP connection over a LAN, over AWDL, or over
   // a routed mesh. To the engine they are one transport, and the slot's name
   // is historical. The contract is docs/spec/stream-framing.md: every frame
   // is a u32 big-endian length then the body (at most 1 MiB); the first frame

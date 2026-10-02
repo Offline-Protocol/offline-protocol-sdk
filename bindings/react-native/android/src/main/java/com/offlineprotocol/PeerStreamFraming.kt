@@ -152,7 +152,7 @@ class PeerStreamPreamble(
  *
  * Policy: the newer stream supersedes the older. On a phone the duplicate is
  * almost always the same peer reconnecting past a stream that went half-open
- * (a group client that re-joined, a Multipeer peer that restarted), and
+ * (a group client that re-joined), and
  * refusing the newer one would leave that peer unreachable until the stale
  * stream's socket noticed. The cost, recorded in R16, is that a replayer can
  * choose when a real stream ends; it cannot use the stream it gets.
