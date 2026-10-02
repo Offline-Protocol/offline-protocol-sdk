@@ -1782,18 +1782,27 @@ impl MlsManager {
     ///   ceiling stops it ever handing out, while holding the pool at capacity
     ///   so every peer past the last claim is advertised a shared package.
     ///
+    /// Only packages the push path can hand out count toward `min`. A slot
+    /// package or one the application marked synced is held by somebody
+    /// else and never advertised to a peer, so counting it would leave the
+    /// pool short by exactly that many.
+    ///
     /// # Returns
     ///
-    /// Returns the total number of valid key packages after ensuring minimum.
+    /// Returns the number of live packages the push path can hand out after
+    /// ensuring the minimum.
     pub fn ensure_min_key_packages(&self, min: usize) -> Result<usize> {
         let min = min.min(MAX_PUSH_KEY_PACKAGES);
         let key_type = StorageKeyType::KeyPackage.as_str();
         let package_ids = self.storage.list_keys(key_type)?;
 
-        // Count valid (non-expired) packages
+        // The same pool `take_push_key_package` counts against its ceiling.
         let mut valid_count = 0;
         for package_id in &package_ids {
-            if self.load_stored_key_package(package_id)?.is_some() {
+            if self
+                .load_stored_key_package(package_id)?
+                .is_some_and(|bundle| !bundle.withheld_from_hand_out())
+            {
                 valid_count += 1;
             }
         }
@@ -1814,7 +1823,12 @@ impl MlsManager {
         Ok(valid_count)
     }
 
-    /// Returns the number of valid (non-expired) key packages available.
+    /// Returns the number of live key package records: unexpired, init key
+    /// resident.
+    ///
+    /// This includes slot packages and packages the application marked
+    /// synced, which are never handed to a peer. For the pool the push path
+    /// draws from, see [`Self::ensure_min_key_packages`].
     pub fn count_valid_key_packages(&self) -> Result<usize> {
         let key_type = StorageKeyType::KeyPackage.as_str();
         let package_ids = self.storage.list_keys(key_type)?;
@@ -2719,6 +2733,23 @@ mod tests {
         assert!(
             !pending.contains(&synced.package_id),
             "lists a synced package"
+        );
+    }
+
+    /// A synced package is never advertised to a peer, so it is no part of the
+    /// pool `ensure_min_key_packages` keeps stocked. Counting it would leave
+    /// the push path one package short for every package the app published.
+    #[test]
+    fn test_ensure_min_does_not_count_a_synced_package_toward_the_pool() {
+        let mut manager = create_test_manager("alice");
+        let synced = manager.generate_key_package().unwrap();
+        manager.mark_key_package_synced(&synced.package_id).unwrap();
+
+        assert_eq!(manager.ensure_min_key_packages(1).unwrap(), 1);
+        assert_eq!(
+            manager.count_valid_key_packages().unwrap(),
+            2,
+            "a replacement was minted beside the synced package"
         );
     }
 
