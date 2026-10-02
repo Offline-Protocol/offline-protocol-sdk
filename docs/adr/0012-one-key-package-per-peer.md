@@ -83,21 +83,46 @@ Deletion also purges legacy records predating the bundle format: an unparseable
 record is read as the serialized key package so its provider reference is
 derivable. A record-only delete there is the exact stranding this rule removes.
 
-### The one record-only delete that survives
+### A package the application publishes keeps its record
 
-`mark_key_package_synced` is an exception, and an unresolved one. It deletes the
-record and leaves the provider key in place. No engine path calls it; it exists
-only on the FFI surface, for an application that publishes a package itself and
-wants it out of the pending list.
+**Invariant: no key package record of ours is deleted while its provider key
+is still resident, unless the provider key is destroyed in the same step.** The
+only record-only deletes are the loader's, for a package whose provider key is
+already gone or whose bytes name no key at all.
+`only_the_known_sites_delete_a_key_package_record_alone` reads the source and
+refuses a third.
 
-Retaining the provider key there is not obviously wrong. A published package
-must stay openable, and only the peer's Welcome consumes the key. But the record
-is what carries expiry, so a published-but-never-claimed package's key has no
-path to destruction at all, which is the stranding this section otherwise
-forbids.
+`mark_key_package_synced` is the case this used to miss. It exists only on the
+FFI surface, for an application that uploads a package to its own key server,
+and it deleted the record and left the provider key in place. Keeping the key
+was right: a stranger who fetched the uploaded copy may still Welcome us, and
+only that Welcome consumes it. Deleting the record was not, because the record
+is what carries expiry, so a published package nobody claimed kept its init
+key for the life of the install (issue 367).
 
-Treat it as a known gap rather than a pattern to copy: a caller that wants the
-package withdrawn should expire it, not mark it synced.
+Marking now keeps the record and sets `synced` on it:
+
+1. **The record stays,** so the package is withdrawn at expiry and its key
+   destroyed past the grace window like every other package.
+2. **The package is withheld from both hand-out paths,** through the same
+   predicate that withholds a slot package. A synced package is one somebody
+   else holds, and pointing a peer at it too is the shared-key failure this
+   ADR exists to prevent.
+3. **The pending list holds only what the application may publish:** unclaimed,
+   unreserved and unsynced. It used to list every live package, so an
+   application following the documented upload loop marked the engine's own
+   slot and push packages synced. With the old delete, each one was stranded as
+   soon as the engine minted its successor.
+
+Marking an unknown, expired or consumed id does nothing. Marking a package the
+push path already handed to a peer is allowed and logged: the two holders now
+share an init key, the peer's copy stays openable, and if the uploaded copy is
+spent first, the next push to that peer mints a successor. The mark takes
+`&mut self`, so it holds the write half of the manager's lock while the push
+path's claim holds the read half. Both rewrite the same record, and under two
+read guards a claim stored second would erase the mark with nothing logged. A package can still
+be claimed by a push between the application's list call and its mark; the
+window is one discovery event wide and the outcome is the same as this case.
 
 ## What would undo this
 
@@ -106,3 +131,6 @@ skip assigned packages. The peerless escape hatch exists for FFI and tests, and
 it must skip both reserved and peer-assigned packages.
 
 Deleting a key package record without purging its provider key.
+
+A hand-out path that stops skipping synced packages, or a pending list that
+shows a package the engine owns.

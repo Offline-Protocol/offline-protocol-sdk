@@ -6721,8 +6721,8 @@ impl OfflineProtocol {
     /// Mark a key package as synced
     pub fn mls_mark_key_package_synced(&self, package_id: String) -> Result<(), ProtocolError> {
         let manager = self.get_mls_manager()?;
-        let guard = manager
-            .read()
+        let mut guard = manager
+            .write()
             .map_err(|e| ProtocolError::LockPoisoned(format!("mls_manager: {}", e)))?;
         guard
             .mark_key_package_synced(&package_id)

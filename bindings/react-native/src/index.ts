@@ -241,6 +241,25 @@ function sanitize<T extends object>(value: T | undefined | null): T | undefined 
 }
 
 /**
+ * Maps a native key package record to the JS shape.
+ *
+ * Both native bridges send `createdAtMs`, `expiresAtMs` and `synced`. Reading
+ * `createdAt` and `isSynced` instead, which these wrappers did, gave every
+ * caller `undefined` for both, with no error anywhere. The plain names are
+ * still read first, the same tolerance the session and group mappers use.
+ */
+function toMlsKeyPackage(raw: any): MlsKeyPackage {
+  return {
+    packageId: raw.packageId,
+    userId: raw.userId,
+    keyPackageData: raw.keyPackageData,
+    createdAt: raw.createdAt ?? raw.createdAtMs ?? 0,
+    expiresAt: raw.expiresAt ?? raw.expiresAtMs ?? 0,
+    isSynced: raw.isSynced ?? raw.synced ?? false,
+  };
+}
+
+/**
  * Main Offline Protocol class
  *
  * **BLE Transport Management:**
@@ -2846,13 +2865,7 @@ export class OfflineProtocol {
    */
   async mlsGenerateKeyPackage(): Promise<MlsKeyPackage> {
     const result = await OfflineProtocolNativeModule.mlsGenerateKeyPackage();
-    return {
-      packageId: result.packageId,
-      userId: result.userId,
-      keyPackageData: result.keyPackageData,
-      createdAt: result.createdAt,
-      isSynced: result.isSynced,
-    };
+    return toMlsKeyPackage(result);
   }
 
   /**
@@ -2863,34 +2876,35 @@ export class OfflineProtocol {
    */
   async mlsGetOrCreateKeyPackage(): Promise<MlsKeyPackage> {
     const result = await OfflineProtocolNativeModule.mlsGetOrCreateKeyPackage();
-    return {
-      packageId: result.packageId,
-      userId: result.userId,
-      keyPackageData: result.keyPackageData,
-      createdAt: result.createdAt,
-      isSynced: result.isSynced,
-    };
+    return toMlsKeyPackage(result);
   }
 
   /**
-   * Gets pending key packages that haven't been synced yet.
+   * Lists the key packages this app may publish itself, for example to its
+   * own key server.
    *
-   * @returns Array of pending key packages
+   * Only packages nobody has spoken for are listed: never one the SDK has
+   * already handed to a peer or one standing in its own publication slots,
+   * and never one already marked synced. The SDK adds none of its own, so
+   * the list is empty until the app mints packages with
+   * `mlsGenerateKeyPackage`.
+   *
+   * @returns Array of key packages free to publish
    */
   async mlsGetPendingKeyPackages(): Promise<MlsKeyPackage[]> {
     const results =
       await OfflineProtocolNativeModule.mlsGetPendingKeyPackages();
-    return results.map((r: any) => ({
-      packageId: r.packageId,
-      userId: r.userId,
-      keyPackageData: r.keyPackageData,
-      createdAt: r.createdAt,
-      isSynced: r.isSynced,
-    }));
+    return results.map(toMlsKeyPackage);
   }
 
   /**
-   * Marks a key package as synced.
+   * Records that the app has published a key package itself.
+   *
+   * The package stays on the device so a Welcome built from the published
+   * copy still opens. It is no longer listed as pending and is never handed
+   * to a peer. It expires with the lifetime it was minted with, and its
+   * private key is destroyed after that, whether or not anybody used it.
+   * Marking an unknown, expired or already used package does nothing.
    *
    * @param packageId - Key package ID to mark
    * @throws Error if operation fails

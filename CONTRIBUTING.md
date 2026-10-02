@@ -418,10 +418,18 @@ guesses:
   that window uploads a duplicate the Portal refuses, which turns the job
   red and changes nothing.
 - **The wheels' platform tags are read from the libraries.** A Linux wheel is
-  tagged `manylinux_2_N` for the newest glibc symbol its library asks for,
-  which is the glibc of the image that built it. Building on a newer image
-  raises the floor for every Linux user; that is a change to say in the
-  changelog.
+  tagged `manylinux_2_N` for the newest glibc its library needs, which is the
+  glibc of the image that built it. That counts the `GLIBC_ABI_*` markers as
+  well as the symbol versions: a library linked with packed relative
+  relocations needs `GLIBC_ABI_DT_RELR`, which is glibc 2.36 whatever its
+  symbols say, and `build-wheel.sh` refuses a marker it does not know rather
+  than ignore it. Building on a newer image, or a linker that starts packing
+  relocations by default, raises the floor for every Linux user; that is a
+  change to say in the changelog. The macOS tag is a chosen floor, 14.0 (the
+  oldest arm64 runner the suite runs on), and the library's own minimum must
+  not exceed it. Every wheel's architecture is read from its library's
+  header, so a library from the wrong build is refused rather than wheeled
+  under a correct name.
 
 ## Architecture Decisions
 

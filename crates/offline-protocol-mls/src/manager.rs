@@ -423,11 +423,12 @@ impl MlsManager {
 
     /// Gets an existing *unclaimed* key package or generates a new one.
     ///
-    /// Two kinds of package are skipped, for the same underlying reason — an
+    /// Three kinds of package are skipped, for the same underlying reason — an
     /// MLS init key is consumed by its first user, so two parties must never be
     /// pointed at one:
     ///
-    /// - packages reserved for publication slots, or a pushed-to peer and a
+    /// - packages reserved for publication slots, or synced by the application
+    ///   ([`Self::mark_key_package_synced`]), or a pushed-to peer and a
     ///   stranger who fetched the published record would race for it;
     /// - packages already claimed by a peer over the push path
     ///   ([`Self::take_push_key_package`]), or this peer-less entry point would
@@ -444,7 +445,7 @@ impl MlsManager {
 
         for package_id in packages {
             if let Some(bundle) = self.load_stored_key_package(&package_id)? {
-                if bundle.reserved_for_publication || bundle.assigned_peer.is_some() {
+                if bundle.withheld_from_hand_out() || bundle.assigned_peer.is_some() {
                     continue;
                 }
                 return Ok(bundle);
@@ -517,7 +518,9 @@ impl MlsManager {
             let Some(bundle) = self.load_stored_key_package(&package_id)? else {
                 continue;
             };
-            if bundle.reserved_for_publication {
+            // Before the count: a package somebody else holds is never handed
+            // out here, so it is no part of the pool the ceiling bounds.
+            if bundle.withheld_from_hand_out() {
                 continue;
             }
             live += 1;
@@ -817,7 +820,15 @@ impl MlsManager {
         Ok(())
     }
 
-    /// Gets pending key packages.
+    /// Lists the live packages an application may publish itself.
+    ///
+    /// Only packages nobody has spoken for: unclaimed, unreserved and not yet
+    /// synced. A package the push path assigned to a peer, or one standing in
+    /// one of the engine's own publication slots, is the engine's to publish.
+    /// Listing them here invited an application following the documented
+    /// upload loop to mark them synced, which handed one init key to two
+    /// parties and, while marking deleted the record, stranded the old key
+    /// every time the engine minted a successor.
     pub fn get_pending_key_packages(&self) -> Result<Vec<KeyPackageBundle>> {
         let key_type = StorageKeyType::KeyPackage.as_str();
         let package_ids = self.storage.list_keys(key_type)?;
@@ -825,6 +836,9 @@ impl MlsManager {
         let mut bundles = Vec::new();
         for package_id in package_ids {
             if let Some(bundle) = self.load_stored_key_package(&package_id)? {
+                if bundle.withheld_from_hand_out() || bundle.assigned_peer.is_some() {
+                    continue;
+                }
                 bundles.push(bundle);
             }
         }
@@ -832,10 +846,55 @@ impl MlsManager {
         Ok(bundles)
     }
 
-    /// Marks a key package as synced.
-    pub fn mark_key_package_synced(&self, package_id: &str) -> Result<()> {
-        let key_type = StorageKeyType::KeyPackage.as_str();
-        self.storage.delete(key_type, package_id)?;
+    /// Records that the application has published a package itself.
+    ///
+    /// The record is kept, flagged, and withheld from both hand-out paths. It
+    /// is not deleted, and the private init key is not destroyed:
+    ///
+    /// - The key must outlive the mark, because a stranger who fetched the
+    ///   uploaded copy may still Welcome us, and only that Welcome consumes it.
+    /// - The record must outlive the mark, because the record is the only
+    ///   thing that carries expiry. Deleting it, which is what this used to
+    ///   do, left the init key resident for the life of the install whenever
+    ///   the uploaded copy was never claimed (issue 367). Kept, it is withdrawn
+    ///   at expiry and its key destroyed past the grace window like any other.
+    ///
+    /// Marking an id that is unknown, expired or already consumed does
+    /// nothing: there is no live package left to publish. Marking a package
+    /// the push path already handed to a peer is allowed but logged, since
+    /// that peer and the uploaded copy now share an init key; the peer's held
+    /// copy stays openable, and a failed establishment is recovered by the
+    /// next push, which mints that peer a successor.
+    ///
+    /// Takes `&mut self` so a caller sharing the manager behind an `RwLock`
+    /// must hold the write half. The push path claims a package under the
+    /// read half, and both are a load, a change and a store of the same
+    /// record: under two read guards the claim's store can land second and
+    /// erase the mark, leaving the package uploaded *and* advertised to a
+    /// peer with nothing logged.
+    pub fn mark_key_package_synced(&mut self, package_id: &str) -> Result<()> {
+        let Some(mut bundle) = self.load_stored_key_package(package_id)? else {
+            debug!(
+                package_id = %package_id,
+                "No live key package to mark synced"
+            );
+            return Ok(());
+        };
+        if bundle.synced {
+            return Ok(());
+        }
+        if let Some(peer) = bundle.assigned_peer.as_deref() {
+            warn!(
+                package_id = %package_id,
+                peer_id = %peer,
+                "Marking a key package synced that the push path already handed to a peer"
+            );
+        }
+        bundle.synced = true;
+        let serialized =
+            serde_json::to_vec(&bundle).map_err(|e| MlsError::Serialization(e.to_string()))?;
+        self.storage
+            .store(StorageKeyType::KeyPackage.as_str(), package_id, &serialized)?;
         debug!(package_id = %package_id, "Marked key package as synced");
         Ok(())
     }
@@ -1723,18 +1782,27 @@ impl MlsManager {
     ///   ceiling stops it ever handing out, while holding the pool at capacity
     ///   so every peer past the last claim is advertised a shared package.
     ///
+    /// Only packages the push path can hand out count toward `min`. A slot
+    /// package or one the application marked synced is held by somebody
+    /// else and never advertised to a peer, so counting it would leave the
+    /// pool short by exactly that many.
+    ///
     /// # Returns
     ///
-    /// Returns the total number of valid key packages after ensuring minimum.
+    /// Returns the number of live packages the push path can hand out after
+    /// ensuring the minimum.
     pub fn ensure_min_key_packages(&self, min: usize) -> Result<usize> {
         let min = min.min(MAX_PUSH_KEY_PACKAGES);
         let key_type = StorageKeyType::KeyPackage.as_str();
         let package_ids = self.storage.list_keys(key_type)?;
 
-        // Count valid (non-expired) packages
+        // The same pool `take_push_key_package` counts against its ceiling.
         let mut valid_count = 0;
         for package_id in &package_ids {
-            if self.load_stored_key_package(package_id)?.is_some() {
+            if self
+                .load_stored_key_package(package_id)?
+                .is_some_and(|bundle| !bundle.withheld_from_hand_out())
+            {
                 valid_count += 1;
             }
         }
@@ -1755,7 +1823,12 @@ impl MlsManager {
         Ok(valid_count)
     }
 
-    /// Returns the number of valid (non-expired) key packages available.
+    /// Returns the number of live key package records: unexpired, init key
+    /// resident.
+    ///
+    /// This includes slot packages and packages the application marked
+    /// synced, which are never handed to a peer. For the pool the push path
+    /// draws from, see [`Self::ensure_min_key_packages`].
     pub fn count_valid_key_packages(&self) -> Result<usize> {
         let key_type = StorageKeyType::KeyPackage.as_str();
         let package_ids = self.storage.list_keys(key_type)?;
@@ -2550,6 +2623,338 @@ mod tests {
         let unclaimed = manager.get_or_create_key_package().unwrap();
         assert_ne!(unclaimed.package_id, for_bob.package_id);
         assert!(unclaimed.assigned_peer.is_none());
+    }
+
+    /// Whether `package_id` still has a record in storage at all.
+    fn record_present(storage: &InMemoryStorage, package_id: &str) -> bool {
+        storage
+            .load(StorageKeyType::KeyPackage.as_str(), package_id)
+            .unwrap()
+            .is_some()
+    }
+
+    /// Marking a package synced keeps its record and its init key. The key has
+    /// to outlive the mark so a Welcome built from the uploaded copy opens, and
+    /// the record has to, because it is the only thing that carries expiry.
+    #[test]
+    fn test_marking_synced_keeps_the_record_and_the_init_key() {
+        let (mut manager, storage) = create_test_manager_with_storage("alice");
+        let bundle = manager.generate_key_package().unwrap();
+
+        manager.mark_key_package_synced(&bundle.package_id).unwrap();
+
+        assert!(
+            record_present(&storage, &bundle.package_id),
+            "marking synced deleted the record, so nothing can ever expire the key"
+        );
+        assert!(
+            init_key_present(&manager, &bundle),
+            "marking synced destroyed the init key a Welcome from the upload needs"
+        );
+        let reread = manager
+            .key_package_by_id(&bundle.package_id)
+            .unwrap()
+            .expect("a synced package is still live");
+        assert!(reread.synced);
+    }
+
+    /// The issue 367 leak: a published package nobody ever claimed. Past the
+    /// grace window its init key is destroyed like any other package's,
+    /// because the record that carries the expiry is still there.
+    #[test]
+    fn test_unclaimed_synced_package_has_its_init_key_destroyed_past_the_grace_window() {
+        let (mut manager, storage) = create_test_manager_with_storage("alice");
+        let bundle = manager.generate_key_package().unwrap();
+        manager.mark_key_package_synced(&bundle.package_id).unwrap();
+
+        expire_package(
+            &storage,
+            &bundle.package_id,
+            KEY_PACKAGE_PURGE_GRACE_SECS + 60,
+        );
+        assert!(manager
+            .key_package_by_id(&bundle.package_id)
+            .unwrap()
+            .is_none());
+
+        assert!(
+            !init_key_present(&manager, &bundle),
+            "a synced package's init key outlived its grace window"
+        );
+        assert!(!record_present(&storage, &bundle.package_id));
+    }
+
+    /// A synced package stands in a record a stranger may fetch, so handing it
+    /// to a peer too would point two parties at one init key.
+    #[test]
+    fn test_synced_package_is_withheld_from_both_hand_out_paths() {
+        let mut manager = create_test_manager("alice");
+        let synced = manager.generate_key_package().unwrap();
+        manager.mark_key_package_synced(&synced.package_id).unwrap();
+
+        let pushed = manager.take_push_key_package(&addr("bob")).unwrap();
+        assert_ne!(pushed.bundle.package_id, synced.package_id);
+        assert!(!pushed.pool_exhausted);
+
+        let peerless = manager.get_or_create_key_package().unwrap();
+        assert_ne!(peerless.package_id, synced.package_id);
+    }
+
+    /// The pending list is what an application publishes itself, so it holds
+    /// only packages nobody has spoken for. A slot package or a peer's package
+    /// listed here is one the documented upload loop would hand out twice.
+    #[test]
+    fn test_pending_list_holds_only_packages_the_application_may_publish() {
+        let mut manager = create_test_manager("alice");
+        // Pushed first: the push path claims any unclaimed package, so pushing
+        // after `plain` is minted would make `plain` bob's.
+        let for_bob = manager.take_push_key_package(&addr("bob")).unwrap().bundle;
+        let plain = manager.generate_key_package().unwrap();
+        let reserved = manager.generate_publication_key_package().unwrap();
+        let synced = manager.generate_key_package().unwrap();
+        manager.mark_key_package_synced(&synced.package_id).unwrap();
+
+        let pending: Vec<String> = manager
+            .get_pending_key_packages()
+            .unwrap()
+            .into_iter()
+            .map(|b| b.package_id)
+            .collect();
+
+        assert!(pending.contains(&plain.package_id));
+        assert!(
+            !pending.contains(&reserved.package_id),
+            "lists a slot package"
+        );
+        assert!(
+            !pending.contains(&for_bob.package_id),
+            "lists a peer's package"
+        );
+        assert!(
+            !pending.contains(&synced.package_id),
+            "lists a synced package"
+        );
+    }
+
+    /// A synced package is never advertised to a peer, so it is no part of the
+    /// pool `ensure_min_key_packages` keeps stocked. Counting it would leave
+    /// the push path one package short for every package the app published.
+    #[test]
+    fn test_ensure_min_does_not_count_a_synced_package_toward_the_pool() {
+        let mut manager = create_test_manager("alice");
+        let synced = manager.generate_key_package().unwrap();
+        manager.mark_key_package_synced(&synced.package_id).unwrap();
+
+        assert_eq!(manager.ensure_min_key_packages(1).unwrap(), 1);
+        assert_eq!(
+            manager.count_valid_key_packages().unwrap(),
+            2,
+            "a replacement was minted beside the synced package"
+        );
+    }
+
+    /// The point of keeping the init key: a stranger who fetched the uploaded
+    /// copy can still establish with us.
+    #[test]
+    fn test_welcome_built_against_a_synced_package_still_opens() {
+        let mut alice = create_test_manager("alice");
+        let bob = create_test_manager("bob");
+        let uploaded = alice.generate_key_package().unwrap();
+        alice.mark_key_package_synced(&uploaded.package_id).unwrap();
+
+        bob.import_key_package(&addr("alice"), &uploaded.key_package_data)
+            .unwrap();
+        let welcome = bob.create_session(&addr("alice")).unwrap();
+
+        alice
+            .join_session(&welcome)
+            .expect("a Welcome against a synced package must open");
+        assert!(alice.has_session(&addr("bob")).unwrap());
+    }
+
+    /// A record written before the bundle format is upgraded and marked, not
+    /// read as unknown and left unflagged.
+    #[test]
+    fn test_marking_a_legacy_record_upgrades_and_marks_it() {
+        let (mut manager, storage) = create_test_manager_with_storage("alice");
+        let bundle = manager.generate_key_package().unwrap();
+        storage
+            .store(
+                StorageKeyType::KeyPackage.as_str(),
+                &bundle.package_id,
+                &bundle.key_package_data,
+            )
+            .unwrap();
+
+        manager.mark_key_package_synced(&bundle.package_id).unwrap();
+
+        let reread = manager
+            .key_package_by_id(&bundle.package_id)
+            .unwrap()
+            .expect("the legacy package is still live");
+        assert!(reread.synced);
+        assert!(init_key_present(&manager, &bundle));
+    }
+
+    /// An unknown or already consumed id has no live package to publish, so
+    /// marking it is a no-op rather than an error the caller cannot act on.
+    #[test]
+    fn test_marking_an_unknown_or_consumed_package_is_a_no_op() {
+        let mut alice = create_test_manager("alice");
+        alice.mark_key_package_synced("no-such-package").unwrap();
+
+        let bob = create_test_manager("bob");
+        let advertised = alice.take_push_key_package(&addr("bob")).unwrap().bundle;
+        bob.import_key_package(&addr("alice"), &advertised.key_package_data)
+            .unwrap();
+        let welcome = bob.create_session(&addr("alice")).unwrap();
+        alice.join_session(&welcome).unwrap();
+
+        alice
+            .mark_key_package_synced(&advertised.package_id)
+            .unwrap();
+        assert!(alice
+            .key_package_by_id(&advertised.package_id)
+            .unwrap()
+            .is_none());
+    }
+
+    /// Every record-only delete of one of this device's key packages has to be
+    /// one where the provider key is already gone or was never derivable.
+    /// Anywhere else it strands the init key with nothing left to expire it,
+    /// which is how `mark_key_package_synced` leaked (issue 367).
+    ///
+    /// Read per function: a body that names the key package storage type and
+    /// calls `delete(` on the storage is a record delete of ours, and only the
+    /// loader (consumed or unparseable records) and the purge (after the
+    /// provider key) may do that.
+    ///
+    /// Read line by line, never by matching `\n`: `*.rs` is not pinned to LF,
+    /// so a Windows checkout hands `include_str!` CRLF text, and a `\n` pattern
+    /// finds nothing there (the first version of this guard failed only on the
+    /// Windows runner for that reason).
+    #[test]
+    fn only_the_known_sites_delete_a_key_package_record_alone() {
+        let allowed = ["load_stored_key_package", "purge_key_package_material"];
+        let (checked, offenders) = record_only_key_package_deletes(include_str!("manager.rs"));
+
+        assert!(
+            checked >= 8,
+            "found only {checked} key package functions; the scan is broken, not the code"
+        );
+        let offenders: Vec<_> = offenders
+            .into_iter()
+            .filter(|name| !allowed.contains(&name.as_str()))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "record-only delete of a key package in {offenders:?}. Destroy the init \
+             key too (purge_key_package_material), or keep the record"
+        );
+    }
+
+    /// The scanner behind the guard above, run on text it must flag: a CRLF
+    /// source, and offenders declared `pub(crate)`, `async` and at column 0,
+    /// each placed right after an allowed function so a header the tokenizer
+    /// missed would fold the offender into the allowed body.
+    #[test]
+    fn the_record_delete_scanner_sees_every_function_header_and_crlf() {
+        let source = [
+            "impl MlsManager {",
+            "    fn purge_key_package_material(&self) {",
+            "        let t = StorageKeyType::KeyPackage.as_str();",
+            "        self.storage.delete(t, id)?;",
+            "    }",
+            "    pub(crate) fn hidden_crate(&self) {",
+            "        self.storage.delete(StorageKeyType::KeyPackage.as_str(), id)?;",
+            "    }",
+            "    fn load_stored_key_package(&self) {}",
+            "    pub async fn hidden_async(&self) {",
+            "        self.storage.delete(StorageKeyType::KeyPackage.as_str(), id)?;",
+            "    }",
+            "}",
+            "fn hidden_free() {",
+            "    storage.delete(StorageKeyType::KeyPackage.as_str(), id)?;",
+            "}",
+            "#[cfg(test)]",
+            "mod tests {",
+            "    fn in_tests() {",
+            "        storage.delete(StorageKeyType::KeyPackage.as_str(), id)?;",
+            "    }",
+            "}",
+        ]
+        .join("\r\n");
+
+        let (checked, offenders) = record_only_key_package_deletes(&source);
+
+        assert_eq!(checked, 4, "the test module is out of scope");
+        assert_eq!(
+            offenders,
+            [
+                "purge_key_package_material",
+                "hidden_crate",
+                "hidden_async",
+                "hidden_free"
+            ]
+        );
+    }
+
+    /// Scans the production half of `source` (everything before the
+    /// `#[cfg(test)]` test module) one function at a time. Returns how many
+    /// functions name the key package storage type, and the names of those
+    /// that also call `.delete(`.
+    fn record_only_key_package_deletes(source: &str) -> (usize, Vec<String>) {
+        let lines: Vec<&str> = source.lines().collect();
+        let test_module = lines
+            .windows(2)
+            .position(|pair| pair[0].trim() == "#[cfg(test)]" && pair[1].starts_with("mod tests"))
+            .expect("the source has a test module");
+
+        let mut functions: Vec<(String, String)> = Vec::new();
+        for line in &lines[..test_module] {
+            if let Some(name) = function_header_name(line) {
+                functions.push((name.to_string(), String::new()));
+            } else if let Some((_, body)) = functions.last_mut() {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+
+        let mut checked = 0;
+        let mut offenders = Vec::new();
+        for (name, body) in functions {
+            if !body.contains("StorageKeyType::KeyPackage.as_str()") {
+                continue;
+            }
+            checked += 1;
+            if body.contains(".delete(") {
+                offenders.push(name);
+            }
+        }
+        (checked, offenders)
+    }
+
+    /// The name a function header at column 0 or 4 declares, whatever its
+    /// visibility (`pub`, `pub(crate)`, `pub(super)`) and qualifiers.
+    fn function_header_name(line: &str) -> Option<&str> {
+        let trimmed = line.trim_start();
+        if !matches!(line.len() - trimmed.len(), 0 | 4) {
+            return None;
+        }
+        let mut rest = trimmed;
+        loop {
+            if let Some(after) = rest.strip_prefix("pub(") {
+                rest = after.split_once(')')?.1.trim_start();
+            } else if let Some(after) = ["pub ", "async ", "const ", "unsafe "]
+                .iter()
+                .find_map(|qualifier| rest.strip_prefix(qualifier))
+            {
+                rest = after.trim_start();
+            } else {
+                break;
+            }
+        }
+        rest.strip_prefix("fn ")?.split(['(', '<']).next()
     }
 
     /// An unclaimed package — minted by the peer-less entry point, or by a
