@@ -13712,6 +13712,89 @@ mod tests {
         }
     }
 
+    /// A Bluetooth power-off or stack reset drops every link and the published
+    /// service, and power-on brings the transport back. Each piece is a
+    /// one-token edit that compiles, `BleManager` has no unit coverage, and
+    /// the power-cycle path has no automated device run, so this is what
+    /// holds them:
+    ///
+    /// - both managers treat `.resetting` as `.poweredOff`, and both arms drop
+    ///   the links (no per-link disconnect callback arrives, so without it the
+    ///   mesh stays full and a peer that never returns stays a neighbor);
+    /// - the peripheral arm forgets the published service, or power-on
+    ///   advertises a UUID with nothing behind it;
+    /// - `setupGattServer` clears this app's services before adding, so the
+    ///   service is never published twice;
+    /// - both power-on arms recover from `.unavailable`, or the core never
+    ///   hears BLE is back and outbound stays off;
+    /// - `stop()` stops from `.unavailable`, or the next power-on revives a
+    ///   stopped transport.
+    #[test]
+    fn react_native_ios_bluetooth_power_cycle_drops_and_restores_the_transport() {
+        let swift = rn_source_code_only("ios/BleManager.swift");
+        let arm = |delegate: &str| -> &str {
+            let start = swift
+                .find(delegate)
+                .unwrap_or_else(|| panic!("BleManager.swift must implement {delegate}"));
+            let arm_start = start
+                + swift[start..]
+                    .find("case .poweredOff, .resetting:")
+                    .unwrap_or_else(|| {
+                        panic!("{delegate} must handle .resetting together with .poweredOff")
+                    });
+            let arm_end = arm_start
+                + swift[arm_start..]
+                    .find("case .unauthorized:")
+                    .expect("the .unauthorized arm must follow the power-off arm");
+            &swift[arm_start..arm_end]
+        };
+        let central = arm("public func centralManagerDidUpdateState(");
+        let peripheral = arm("public func peripheralManagerDidUpdateState(");
+        for (name, body) in [("central", central), ("peripheral", peripheral)] {
+            assert!(
+                body.contains("dropLinksAfterRadioLoss()"),
+                "the {name} power-off arm must drop every link: no disconnect callback \
+                 arrives for them"
+            );
+        }
+        assert!(
+            peripheral.contains("isGattServiceReady = false"),
+            "the peripheral power-off arm must forget the published service, or power-on \
+             advertises a UUID with nothing behind it"
+        );
+
+        let setup_start = swift
+            .find("private func setupGattServer() -> Bool {")
+            .expect("BleManager.swift must publish its service in setupGattServer");
+        let setup = &swift[setup_start..];
+        let remove = setup
+            .find("peripheral.removeAllServices()")
+            .expect("setupGattServer must clear this app's services before adding");
+        let add = setup
+            .find("peripheral.add(service)")
+            .expect("setupGattServer must add the service");
+        assert!(
+            remove < add,
+            "removeAllServices must run before add, or a kept service is published twice"
+        );
+
+        assert_eq!(
+            swift
+                .matches("Ready && (state == .starting || state == .unavailable) {")
+                .count(),
+            2,
+            "both power-on arms must recover from .unavailable, or the core never hears \
+             bleStatusChanged(true) after a power-cycle"
+        );
+        assert!(
+            swift.contains(
+                "guard state == .running || state == .starting || state == .unavailable else {"
+            ),
+            "stop() must stop from .unavailable, or the next power-on revives a stopped \
+             transport"
+        );
+    }
+
     /// The buffered-inbound event set agrees across TypeScript, Kotlin and
     /// Swift, and each layer's hold is wired to a flush.
     ///

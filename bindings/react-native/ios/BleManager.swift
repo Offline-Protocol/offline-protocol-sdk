@@ -1494,6 +1494,15 @@ public class BleManager: NSObject, TransportManager {
         let service = CBMutableService(type: SERVICE_UUID, primary: true)
         service.characteristics = [messageCharacteristic!, deviceIdCharacteristic!, identityCharacteristic!, appTagCharacteristic!]
         
+        // Clear this app's published services first, so this add is the only
+        // instance. CoreBluetooth documents the local GATT database as cleared
+        // only below `.poweredOff`, so after a plain power-off a build may keep
+        // the old service, and a relaunch restores it with every characteristic
+        // reference here nil. Adding on top of either publishes the service
+        // twice, and a central then sees two instances behind one link. Only
+        // this app's services are removed: other SDK apps on the phone
+        // publish their own.
+        peripheral.removeAllServices()
         // Add service to peripheral manager (asynchronous - callback in peripheralManager(_:didAdd:error:))
         peripheral.add(service)
         print("[BleManager] GATT server setup initiated, waiting for service registration callback...")
