@@ -724,6 +724,35 @@ public class BleManager: NSObject, TransportManager {
         for peripheral in connections.allPeripherals() {
             centralManager?.cancelPeripheralConnection(peripheral)
         }
+        clearLinkState()
+        pendingAdvertiseRestart?.cancel()
+        pendingAdvertiseRestart = nil
+        lastAdvertiseRestartAt = nil
+        transportStartAt = nil
+        lastProactiveScanRefresh = nil
+        lastForcedBleRefresh = nil
+        aggressiveDiscoveryStarted = nil
+
+        // Clean up managers
+        centralManager = nil
+        peripheralManager = nil
+        
+        centralReady = false
+        peripheralReady = false
+        isGattServiceReady = false
+        pendingAdvertiseAfterServiceReady = false
+        
+        updateState(.stopped)
+        emitDiagnostic("info", "BLE transport stopped")
+    }
+    
+    /// Drops every piece of per-link state: connections, fragments, GATT
+    /// subscribers, bootstrap and service-instance bookkeeping. Used by
+    /// `stop()` and when the radio powers off, because CoreBluetooth then
+    /// invalidates every connection and published service without delivering
+    /// disconnect callbacks; stale entries would keep routing sends into dead
+    /// links after Bluetooth comes back.
+    private func clearLinkState() {
         connections.reset()
         discoveredPeripherals.removeAll()
         peripheralRSSI.removeAll()
@@ -753,13 +782,6 @@ public class BleManager: NSObject, TransportManager {
         unknownBootstrapAttempts.removeAll()
         verifiedNonMeshDevices.removeAll()
         recentAdvertisementHashes.removeAll()
-        pendingAdvertiseRestart?.cancel()
-        pendingAdvertiseRestart = nil
-        lastAdvertiseRestartAt = nil
-        transportStartAt = nil
-        lastProactiveScanRefresh = nil
-        lastForcedBleRefresh = nil
-        aggressiveDiscoveryStarted = nil
         notifyLock.lock()
         subscribedCentralsById.removeAll()
         notifyLock.unlock()
@@ -772,18 +794,6 @@ public class BleManager: NSObject, TransportManager {
         serviceInstanceLock.lock()
         serviceInstanceBindings.removeAll()
         serviceInstanceLock.unlock()
-
-        // Clean up managers
-        centralManager = nil
-        peripheralManager = nil
-        
-        centralReady = false
-        peripheralReady = false
-        isGattServiceReady = false
-        pendingAdvertiseAfterServiceReady = false
-        
-        updateState(.stopped)
-        emitDiagnostic("info", "BLE transport stopped")
     }
     
     public func pause() {
@@ -2898,7 +2908,10 @@ extension BleManager: CBCentralManagerDelegate {
             drainAndSendFragments()
             
             // If both central and peripheral are ready, mark as running
-            if peripheralReady && state == .starting {
+            // `.unavailable` too: after Bluetooth is powered off and back on, the
+            // core must hear bleStatusChanged(true) again or it never routes
+            // outbound traffic to BLE (inbound still arrives via the delegates).
+            if peripheralReady && (state == .starting || state == .unavailable) {
                 updateState(.running)
                 print("[BleManager] ✅ BLE Manager ready - dispatching bleStatusChanged(true)")
                 // "dispatched", not "called": the FFI now runs on the protocol
@@ -2912,6 +2925,7 @@ extension BleManager: CBCentralManagerDelegate {
             print("[BleManager] ⚠️ Bluetooth is powered off")
             centralReady = false
             stopScanning(reason: "central_powered_off")
+            clearLinkState()
             updateState(.unavailable)
             notifyBleStatus(false)
             emitDiagnostic("warning", "Bluetooth is powered off", context: ["state": stateString])
@@ -4087,7 +4101,10 @@ extension BleManager: CBPeripheralManagerDelegate {
             emitDiagnostic("info", "Peripheral manager powered on and ready")
             
             // If both central and peripheral are ready, mark as running
-            if centralReady && state == .starting {
+            // `.unavailable` too: after Bluetooth is powered off and back on, the
+            // core must hear bleStatusChanged(true) again or it never routes
+            // outbound traffic to BLE (inbound still arrives via the delegates).
+            if centralReady && (state == .starting || state == .unavailable) {
                 updateState(.running)
                 print("[BleManager] ✅ BLE Manager ready (peripheral) - dispatching bleStatusChanged(true)")
                 // See the central-side note: dispatched, not completed.
@@ -4099,6 +4116,12 @@ extension BleManager: CBPeripheralManagerDelegate {
             print("[BleManager] ⚠️ Bluetooth peripheral is powered off")
             peripheralReady = false
             stopAdvertising()
+            // Powering off unpublishes our GATT service. Without this, power-on
+            // advertises the UUID with no service behind it (setupGattServer
+            // sees the stale flag and skips re-adding), so peers connect and drop.
+            isGattServiceReady = false
+            pendingAdvertiseAfterServiceReady = false
+            clearLinkState()
             updateState(.unavailable)
             notifyBleStatus(false)
             emitDiagnostic("warning", "Bluetooth peripheral is powered off", context: ["state": stateString])
