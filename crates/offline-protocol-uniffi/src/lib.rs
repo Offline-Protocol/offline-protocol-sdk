@@ -13677,6 +13677,41 @@ mod tests {
         }
     }
 
+    /// Dropping every link at once (Bluetooth off, a stack reset, `stop()`)
+    /// clears the handshake state with it.
+    ///
+    /// `didDisconnectPeripheral` clears `announcedPeripherals` per link, and
+    /// the identity reads are skipped for any peripheral still in it. Power-off
+    /// delivers no disconnect callbacks, so without the clear in
+    /// `clearLinkState` a peer that comes back under the same identifier (its
+    /// address did not rotate) is reported lost and then never announced
+    /// again: no device id, no MTU, no route. No Swift test can reach
+    /// `BleManager`, and a device only shows it with a peer that did not
+    /// power-cycle.
+    #[test]
+    fn react_native_ios_link_loss_clears_handshake_state() {
+        let swift = rn_source_code_only("ios/BleManager.swift");
+        let start = swift
+            .find("private func clearLinkState() {")
+            .expect("BleManager.swift must drop per-link state in clearLinkState");
+        let end = start
+            + swift[start..]
+                .find("public func pause() {")
+                .expect("pause() must follow clearLinkState so the slice is its body");
+        let body = &swift[start..end];
+        for clear in [
+            "advertisedDeviceIds.removeAll()",
+            "verifiedPeerAddresses.removeAll()",
+            "announcedPeripherals.removeAll()",
+        ] {
+            assert!(
+                body.contains(clear),
+                "clearLinkState must call {clear}: a peer returning after a Bluetooth \
+                 power-cycle under the same identifier is otherwise never announced again"
+            );
+        }
+    }
+
     /// The buffered-inbound event set agrees across TypeScript, Kotlin and
     /// Swift, and each layer's hold is wired to a flush.
     ///

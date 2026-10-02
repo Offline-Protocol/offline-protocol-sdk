@@ -773,6 +773,13 @@ public class BleManager: NSObject, TransportManager {
     /// links after Bluetooth comes back.
     private func clearLinkState() {
         connections.reset()
+        // The handshake state too. `didDisconnectPeripheral` normally clears
+        // it per link; without that callback a peer returning under the same
+        // identifier hits the `announcedPeripherals` guard, skips the identity
+        // reads and is never announced again.
+        advertisedDeviceIds.removeAll()
+        verifiedPeerAddresses.removeAll()
+        announcedPeripherals.removeAll()
         // The mesh counts the same links; without this it stays full.
         meshController.registerAllDisconnected()
         discoveredPeripherals.removeAll()
