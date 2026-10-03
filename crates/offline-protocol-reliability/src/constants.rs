@@ -32,6 +32,21 @@ pub const DEFAULT_BACKOFF_MULTIPLIER: f32 = 2.0;
 /// must survive at least that long before the outbox gives up on them.
 pub const DEFAULT_OUTBOX_LIFETIME_MS: u64 = 604_800_000;
 
+/// How long one message id may be re-sent after its first send: 7 days.
+///
+/// The one window both ends of a delivery agree on. A sender drops an outbox
+/// entry the relay has pushed once it is this old, measured from its first
+/// send and never re-granted; a receiver's deduplicator remembers ids this
+/// long, so every replay inside the window is answered as a duplicate (with
+/// a re-ACK) instead of reaching a ratchet whose generation is already spent.
+///
+/// Pairs with the relay's push-claim TTL (one visible notification per
+/// message id) and its mailbox retention, both 7 days: past this age the
+/// relay would push the id again and its mailbox has already let it go.
+/// Fixed rather than read from `outbox_max_lifetime_ms`, because those relay
+/// windows do not move with an app's configuration.
+pub const REDELIVERY_WINDOW_MS: u64 = DEFAULT_OUTBOX_LIFETIME_MS;
+
 /// Maximum lifetime for messages waiting on MLS session establishment.
 ///
 /// This is deliberately finite so an unresolved or permanently invalid

@@ -39,6 +39,15 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration as StdDuration, Instant};
 use tracing::{debug, error, info, warn};
 
+/// Most delivery acknowledgements held for want of a route (see
+/// `route_ack`). ~200 bytes each, so a ceiling of ~100 KB.
+pub(crate) const MAX_UNROUTED_ACKS: usize = 500;
+
+/// How long a held acknowledgement stays worth sending. Short on purpose:
+/// it bridges a carrier coming up moments later, and a sender still waiting
+/// past it re-sends, which the duplicate re-ACK path answers.
+pub(crate) const UNROUTED_ACK_TTL: StdDuration = StdDuration::from_secs(600);
+
 impl OfflineProtocol {
     // ========================================================================
     // CORE SEND
@@ -3415,19 +3424,40 @@ impl OfflineProtocol {
 
         let mut expired_from_outbox = Vec::new();
         for (message_id, entry) in &self.outbox {
-            if !lifetime_expired(now, entry.last_sent_at, lifetime_ms)
+            // A relay-pushed entry's fixed window is a hard stop: it does not
+            // wait out an in-flight probe, whose re-sends are exactly what
+            // the window exists to end.
+            let push_window_closed = super::relay_push_window_closed(now, entry);
+            if !push_window_closed
+                && !lifetime_expired(now, entry.last_sent_at, lifetime_ms)
                 && !lifetime_expired(now, entry.first_sent_at, absolute_lifetime_ms)
             {
                 continue;
             }
-            if entry.message.requires_ack && self.ack_manager.is_waiting_for_ack(&entry.message.id)
+            if !push_window_closed
+                && entry.message.requires_ack
+                && self.ack_manager.is_waiting_for_ack(&entry.message.id)
             {
                 continue;
             }
-            expired_from_outbox.push((message_id.clone(), entry.attempt_count));
+            expired_from_outbox.push((message_id.clone(), entry.attempt_count, entry.relay_pushed));
         }
-        for (message_id, attempt_count) in expired_from_outbox {
+        for (message_id, attempt_count, relay_pushed) in expired_from_outbox {
             self.retire_undeliverable_message(&message_id, "outbox lifetime exceeded");
+
+            // Outcome unknown, so nothing app-facing: the push may already
+            // have delivered it (the `park_relay_pushed_dm` contract), and
+            // `MessageSent` already told the app it left. `message_failed`
+            // would invite a manual resend under a fresh id that the
+            // recipient's dedup cannot collapse. Only plain DMs are ever
+            // flagged, so there is no connection request to settle either.
+            if relay_pushed {
+                debug!(
+                    message_id = %message_id,
+                    "Relay-pushed DM reached its redelivery window; dropping it silently"
+                );
+                continue;
+            }
 
             // Expiry is terminal: without an event the app shows the message
             // as pending forever. Mirrors handle_max_retries_exceeded, which
@@ -4223,6 +4253,14 @@ impl OfflineProtocol {
     ///   [`Self::handle_recipient_unreachable_for_message`] re-parks a flagged
     ///   entry silently. Without the flag the guarantee would last exactly
     ///   one probe interval.
+    ///
+    /// The flag also bounds the entry: it is dropped, silently and for the
+    /// same reason, once [`offline_protocol_reliability::constants::REDELIVERY_WINDOW_MS`]
+    /// has passed since `first_sent_at`, in process (`cleanup_outbox`) and at
+    /// restore alike. Neither the sliding lifetime nor the restore refresh
+    /// extends it — a re-send past the relay's push-claim TTL is a second
+    /// visible notification, and past the recipient's dedup window it is a
+    /// replay that fails to decrypt and is never acknowledged.
     fn park_relay_pushed_dm(
         &mut self,
         message_id: &str,
@@ -4336,8 +4374,9 @@ impl OfflineProtocol {
     ///   `MessageSent { pushed: true }`, which parks the message again
     ///   ([`Self::park_relay_pushed_dm`]) and escalates the interval. That
     ///   happens once per push: the relay remembers which
-    ///   `(sender, recipient, message_id)` triples it has pushed, for a day,
-    ///   and answers a repeat inside that window with `DeliveryError`
+    ///   `(sender, recipient, message_id)` triples it has pushed, for 7 days
+    ///   (one day on older relays), and answers a repeat inside that window
+    ///   with `DeliveryError`
     ///   (`already_pushed`) instead of a second notification. The outbox id
     ///   is stable across every probe, so each later rung earns that
     ///   `DeliveryError`, which re-parks the entry silently
@@ -4378,7 +4417,9 @@ impl OfflineProtocol {
     /// The outbox lifetime bounds the entry itself — and note the probe
     /// refreshes `last_sent_at` on every send, so the sliding 7-day window
     /// stops binding and settlement moves out to the absolute cap
-    /// ([`crate::constants::OUTBOX_ABSOLUTE_LIFETIME_FACTOR`] × the lifetime).
+    /// ([`crate::constants::OUTBOX_ABSOLUTE_LIFETIME_FACTOR`] × the lifetime),
+    /// or, for a relay-pushed entry, to its fixed redelivery window (see
+    /// [`Self::park_relay_pushed_dm`]).
     /// Note also that a probe can be routed onto the relay when a mesh
     /// carrier is up — DORS has always been free to choose it — so this path
     /// is not new behavior for the relay, only newly reachable on
@@ -4845,7 +4886,65 @@ impl OfflineProtocol {
     /// and step 2 would never run. The sender's retransmissions would take the
     /// same path every time, ending in a failure report for a delivered
     /// message.
+    ///
+    /// An acknowledgement no route takes is held, not dropped
+    /// ([`Self::hold_unrouted_ack`]): it was owed the moment the message was
+    /// accepted, and the common miss is a carrier that is merely not up yet —
+    /// a push-injected frame acknowledged before the relay socket has
+    /// authenticated. Held is reported as `Ok`, like any carrier queue.
     fn route_ack(&mut self, ack_message: &Message, inbound_transport: TransportType) -> Result<()> {
+        if self.try_route_ack(ack_message, inbound_transport) {
+            return Ok(());
+        }
+        debug!(
+            ack_to = %ack_message.recipient,
+            "No route back for a delivery acknowledgement; holding it for the next carrier edge"
+        );
+        self.hold_unrouted_ack(ack_message.clone(), inbound_transport, Instant::now());
+        Ok(())
+    }
+
+    /// Holds an acknowledgement until [`Self::flush_unrouted_acks`]. Bounded
+    /// both ways: [`MAX_UNROUTED_ACKS`] (oldest dropped first) and
+    /// [`UNROUTED_ACK_TTL`]. Nothing past either is lost for good — a sender
+    /// that never hears back re-sends, and the duplicate is re-ACKed.
+    fn hold_unrouted_ack(&mut self, ack: Message, inbound: TransportType, held_at: Instant) {
+        // One ACK answers every copy of a message, and a peer replaying it
+        // while no carrier is up would otherwise spend a slot per copy.
+        let acked = ack.metadata.get(ACK_FOR_KEY).cloned();
+        self.unrouted_acks.retain(|(held, _, _)| {
+            held.recipient != ack.recipient || held.metadata.get(ACK_FOR_KEY).cloned() != acked
+        });
+        if self.unrouted_acks.len() >= MAX_UNROUTED_ACKS {
+            self.unrouted_acks.pop_front();
+            warn!("Unrouted acknowledgement queue full; dropped the oldest");
+        }
+        self.unrouted_acks.push_back((ack, inbound, held_at));
+    }
+
+    /// Re-routes every held acknowledgement through the same ladder. Run on
+    /// the carrier-level edge (`flush_outbox_all`: start, and every carrier's
+    /// false→true), ahead of the outbox, because an ACK is what lets the
+    /// peer's outbox stop re-sending to us. Still unroutable stays held, on
+    /// its original clock.
+    ///
+    /// A peer blocked since its ACK was held gets nothing: the receive path
+    /// never answers a blocked sender, so its presence is not leaked, and a
+    /// held ACK must not reverse that decision late.
+    pub(super) fn flush_unrouted_acks(&mut self) {
+        for (ack, inbound, held_at) in std::mem::take(&mut self.unrouted_acks) {
+            if held_at.elapsed() > UNROUTED_ACK_TTL
+                || self.is_user_blocked(ack.recipient.as_str())
+                || self.try_route_ack(&ack, inbound)
+            {
+                continue;
+            }
+            self.hold_unrouted_ack(ack, inbound, held_at);
+        }
+    }
+
+    /// The ladder itself; `true` when some route took the acknowledgement.
+    fn try_route_ack(&mut self, ack_message: &Message, inbound_transport: TransportType) -> bool {
         let ack_to = ack_message.recipient.as_str().to_string();
 
         if self
@@ -4856,7 +4955,7 @@ impl OfflineProtocol {
                 .send_via_transport(ack_message, inbound_transport)
                 .is_ok()
         {
-            return Ok(());
+            return true;
         }
 
         debug!(
@@ -4883,25 +4982,14 @@ impl OfflineProtocol {
                     "Handed the acknowledgement to the mesh"
                 );
                 if no_direct_route {
-                    return Ok(());
+                    return true;
                 }
             }
         }
 
-        if self.transport_manager.send(ack_message).is_ok() {
-            return Ok(());
-        }
-
         // Neighbors took it, so the answer is on its way even though nothing
         // else could carry it.
-        if handed_to_mesh > 0 {
-            return Ok(());
-        }
-
-        Err(Error::Other(format!(
-            "no route back to {} for delivery acknowledgement",
-            ack_to
-        )))
+        self.transport_manager.send(ack_message).is_ok() || handed_to_mesh > 0
     }
 
     /// Builds and sends a delivery ACK from the group-message drain, which

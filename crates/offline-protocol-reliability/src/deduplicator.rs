@@ -48,10 +48,21 @@ impl Default for DeduplicatorConfig {
             // copy after a reconnect, hours apart if the app was closed in
             // between — and the second copy is only recognisable as a
             // duplicate while its id is still tracked. An hour did not cover
-            // "reopened the next day"; a day does, and 2000 ids at ~50 bytes
-            // each is a 100 KB ceiling.
-            max_tracked_messages: 2000,
-            retention_time_secs: 86_400, // 24 hours
+            // "reopened the next day", and a day did not cover a sender that
+            // keeps re-sending an unacknowledged id for up to
+            // `REDELIVERY_WINDOW_MS`: that replay reached the ratchet, failed
+            // to decrypt and was never ACKed, so it came back on every
+            // reconnect. Retention is that window; a duplicate is re-ACKed,
+            // which is what finally settles the sender.
+            //
+            // The cap has to hold a week of a busy device's inbound ids,
+            // which 2000 did not.
+            // Every flush rewrites the whole persisted set (one sealed record,
+            // ~73 bytes of JSON per id), so it is also a write-size ceiling:
+            // 5000 ids is ~365 KB per write, and a write needs 32 new ids
+            // or a change 5 s old, so a quiet device writes nothing.
+            max_tracked_messages: 5000,
+            retention_time_secs: crate::constants::REDELIVERY_WINDOW_MS / 1000, // 7 days
             use_bloom_filter: false,
             bloom_filter_bits: 1 << 20, // ~1MB per filter (1,048,576 bits)
             bloom_hash_count: 7,        // ~1% false positive rate when Bloom is enabled
@@ -440,11 +451,18 @@ impl Deduplicator {
                 self.cleanup_expired();
 
                 if self.seen_messages.len() >= self.config.max_tracked_messages {
-                    // LRU eviction: evict the least recently accessed entry
+                    // LRU eviction, local marks first: they only stop our own
+                    // frames echoing back through the mesh, which is a matter
+                    // of minutes, so at the cap a local mark may last only
+                    // until the next insert. An inbound id has to last the
+                    // whole retention, because a sender may still replay it
+                    // days later, and a replay this set forgot reaches
+                    // decryption instead of a re-ACK. `false < true`, so
+                    // local marks sort first.
                     if let Some((lru_id, _)) = self
                         .seen_messages
                         .iter()
-                        .min_by_key(|(_, entry)| entry.last_accessed)
+                        .min_by_key(|(_, entry)| (entry.exportable, entry.last_accessed))
                         .map(|(id, entry)| (id.clone(), entry.clone()))
                     {
                         self.seen_messages.remove(&lru_id);
@@ -705,14 +723,15 @@ mod tests {
     }
 
     #[test]
-    fn test_default_config_is_hashmap_and_capacity_2000() {
+    fn test_default_config_is_hashmap_and_capacity_5000() {
         let config = DeduplicatorConfig::default();
         assert!(
             !config.use_bloom_filter,
             "default should be exact-match HashMap to avoid false positives"
         );
-        assert_eq!(config.max_tracked_messages, 2000);
-        assert_eq!(config.retention_time_secs, 86_400);
+        assert_eq!(config.max_tracked_messages, 5000);
+        // 7 days: the sender's redelivery window, not a day.
+        assert_eq!(config.retention_time_secs, 604_800);
 
         let dedup = Deduplicator::new();
         assert!(!dedup.is_bloom_filter_mode());
@@ -1057,6 +1076,36 @@ mod tests {
         let stats = dedup.stats();
         // False positive rate should still be low
         assert!(stats.false_positive_rate.unwrap() < 0.02);
+    }
+
+    #[test]
+    fn test_eviction_takes_local_marks_before_inbound_ids() {
+        let config = DeduplicatorConfig {
+            max_tracked_messages: 3,
+            retention_time_secs: 3600,
+            use_bloom_filter: false,
+            ..Default::default()
+        };
+        let mut dedup = Deduplicator::with_config(config);
+
+        // The inbound id is the oldest, so plain LRU would take it first.
+        let inbound = MessageId::new();
+        dedup.mark_seen(inbound.clone());
+        thread::sleep(Duration::from_millis(10));
+        let local_a = MessageId::new();
+        dedup.mark_seen_local(local_a.clone());
+        thread::sleep(Duration::from_millis(10));
+        let local_b = MessageId::new();
+        dedup.mark_seen_local(local_b.clone());
+
+        dedup.mark_seen(MessageId::new());
+
+        assert!(
+            dedup.is_duplicate(&inbound),
+            "a replay of the inbound id must still be recognised"
+        );
+        assert!(!dedup.is_duplicate(&local_a), "the oldest local mark goes");
+        assert!(dedup.is_duplicate(&local_b));
     }
 
     #[test]

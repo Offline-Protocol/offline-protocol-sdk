@@ -64,6 +64,7 @@ use offline_protocol_services::MeshServices;
 use offline_protocol_transport::{BleTransport, TransportStatus, TransportType};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use tracing::{debug, error, info, warn};
@@ -80,6 +81,20 @@ fn lifetime_expired(now: DateTime<Utc>, timestamp: DateTime<Utc>, lifetime_ms: u
     };
     now.checked_sub_signed(chrono::Duration::milliseconds(lifetime_ms))
         .is_some_and(|cutoff| timestamp <= cutoff)
+}
+
+/// Whether a relay-pushed outbox entry has outlived its fixed redelivery
+/// window ([`offline_protocol_reliability::constants::REDELIVERY_WINDOW_MS`]
+/// from `first_sent_at`). Neither the sliding window nor the restore refresh
+/// moves this: every re-send past it would earn a second visible push, and
+/// the recipient no longer recognises the id as a duplicate.
+fn relay_push_window_closed(now: DateTime<Utc>, entry: &OutboxEntry) -> bool {
+    entry.relay_pushed
+        && lifetime_expired(
+            now,
+            entry.first_sent_at,
+            offline_protocol_reliability::constants::REDELIVERY_WINDOW_MS,
+        )
 }
 
 /// Main entry point for the Offline Protocol SDK.
@@ -182,6 +197,13 @@ pub struct OfflineProtocol {
     /// settling terminally (`try_repark_exhausted_dm`). In-memory only: a
     /// restart re-drives the outbox anyway, which is itself a fresh probe.
     dm_unreachable_parks: HashMap<String, u32>,
+
+    /// Delivery acknowledgements no carrier could take when they were owed,
+    /// with the transport the acknowledged frame arrived on and when they
+    /// were held. Re-routed on the next carrier-level edge
+    /// (`flush_unrouted_acks` from `flush_outbox_all`); bounded by
+    /// `MAX_UNROUTED_ACKS` and `UNROUTED_ACK_TTL`. In-memory only.
+    unrouted_acks: VecDeque<(Message, TransportType, Instant)>,
 
     /// Per-recipient reachability claims, keyed by recipient and carrier.
     ///
@@ -1103,6 +1125,7 @@ impl OfflineProtocol {
             pending_reseal: HashMap::new(),
             media_outbox: HashMap::new(),
             dm_unreachable_parks: HashMap::new(),
+            unrouted_acks: VecDeque::new(),
             reachability: reachability::ReachabilityFacts::default(),
             gateway_capabilities: HashSet::new(),
             mls_manager: None,
@@ -2497,6 +2520,9 @@ impl OfflineProtocol {
     /// Called when a transport becomes available (e.g. internet reconnects) to
     /// flush all queued messages, bypassing backoff timers.
     pub fn flush_outbox_all(&mut self) {
+        // Acknowledgements we owe first: they are what stop peers re-sending
+        // to us, and they have no outbox entry for the walk below to find.
+        self.flush_unrouted_acks();
         // Probe ACKs first (see `flush_outbox_for_peer_via`): mid-probe DMs
         // are awaiting unanswerable mesh ACKs, and the awaiting-ACK guard
         // below would strand them past this edge with their counters

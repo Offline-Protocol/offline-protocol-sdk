@@ -3787,8 +3787,8 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
             
             let dedupConfig = DedupConfig(
-                maxTrackedMessages: (config["maxTrackedMessages"] as? NSNumber)?.uint64Value ?? 2000,
-                retentionTimeSecs: (config["retentionTimeSecs"] as? NSNumber)?.uint64Value ?? 86400
+                maxTrackedMessages: (config["maxTrackedMessages"] as? NSNumber)?.uint64Value ?? 5000,
+                retentionTimeSecs: (config["retentionTimeSecs"] as? NSNumber)?.uint64Value ?? 604800
             )
             
             try proto.updateDedupConfig(config: dedupConfig)
