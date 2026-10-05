@@ -651,6 +651,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   waited for the manager's 2s fallback poll: on two phones a delivery took a
   median of about three seconds (0.3 to 8), against about 85 ms with the
   callback. It is now registered whenever the config enables the slot.
+- **A neighbour is reported lost once, and only when nothing reaches it.**
+  Android reports a Bluetooth peer lost once per stale address it gives up
+  on, so one departure arrived as two `neighbor_lost`. And a peer that left
+  the Wi-Fi Direct group but was still linked over Bluetooth LE (or the
+  reverse) was reported lost and cleared from core discovery tracking, so an
+  app dropped a neighbour it could still reach. `neighbor_lost` now fires
+  when the last mesh link to a peer ends.
+- **`transport_switched` to Wi-Fi Direct means a peer is connected.** It
+  fired when the stream layer came up, which a platform manager does at start
+  with or without a peer, saying "Connected to WiFi Direct peer group" while
+  every send went over Bluetooth LE. It now fires when the first Wi-Fi Direct
+  link proves and, to `None`, when the last one ends.
 - **Android rejoins a Wi-Fi Direct group after the app restarts.** The group
   belongs to the system and outlives the process, but since Android 10 the
   connection broadcast is not sticky, so a manager that started inside an
