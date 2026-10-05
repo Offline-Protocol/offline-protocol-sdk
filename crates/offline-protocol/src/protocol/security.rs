@@ -899,6 +899,10 @@ impl OfflineProtocol {
             SecurityWarningCode::UnsignedControlRejected => 1 << 2,
             SecurityWarningCode::SenderAddressMismatch => 1 << 3,
             SecurityWarningCode::StaleControlFrame => 1 << 4,
+            // Not a gate rejection, but the same exposure: the key package has
+            // not proved its sender when its window is checked, so the peer id
+            // is attacker-chosen and needs the same once-per-peer bound.
+            SecurityWarningCode::KeyPackageOutsideValidityWindow => 1 << 5,
             _ => 0,
         }
     }

@@ -2971,12 +2971,33 @@ impl OfflineProtocol {
                 self.pending_key_packages.remove(peer_id);
                 self.delete_peer_key_package_from_storage(peer_id);
             } else {
-                {
+                let imported = {
                     let manager = mls
                         .read()
                         .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-                    manager.import_key_package(peer_id, &received_pkg.key_package_data)?;
+                    manager.import_key_package(peer_id, &received_pkg.key_package_data)
+                };
+                if let Err(offline_protocol_mls::MlsError::KeyPackageOutsideValidityWindow) =
+                    &imported
+                {
+                    // The usual cause is a clock, on one side or the other, and
+                    // it blocks every session with this peer for as long as the
+                    // clocks disagree. Logged and reported, because this was a
+                    // debug line and nothing else.
+                    warn!(
+                        peer_id = %peer_id,
+                        "Peer key package is outside its validity window by this \
+                         device's clock; this device cannot start a session with the \
+                         peer until the clocks agree"
+                    );
+                    self.warn_control_gate_rejection(
+                        peer_id,
+                        crate::events::SecurityWarningCode::KeyPackageOutsideValidityWindow,
+                        "The peer's key package is not valid at this device's time. \
+                         Check this device's date and time, then the peer's.",
+                    );
                 }
+                imported?;
 
                 // Create session and get welcome message
                 let welcome = {

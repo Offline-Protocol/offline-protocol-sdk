@@ -73,6 +73,23 @@ pub enum MlsError {
     #[error("Invalid key package: {0}")]
     InvalidKeyPackage(String),
 
+    /// A peer's key package is well formed, but this device's clock falls
+    /// outside its validity window: before its `not_before`, or after its
+    /// `not_after`.
+    ///
+    /// Split from [`Self::InvalidKeyPackage`] because it has a different
+    /// remedy, and that remedy is usually a clock rather than the peer. The
+    /// window is judged against this device's own time, and a package starts
+    /// only an hour before it was minted, so a device whose clock runs more
+    /// than an hour behind its peer's refuses every package that peer sends.
+    /// Past the 30-day lifetime the peer refuses this device's packages too,
+    /// and no session forms from either side. Reported to the application as
+    /// `KEY_PACKAGE_OUTSIDE_VALIDITY_WINDOW`; before that it was a debug line,
+    /// and two phones a year apart sat on a pending connection request with
+    /// nothing anywhere to say why.
+    #[error("Key package is outside its validity window by this device's clock")]
+    KeyPackageOutsideValidityWindow,
+
     /// Failed to create a group.
     #[error("Group creation failed: {0}")]
     GroupCreation(String),
@@ -507,6 +524,9 @@ impl MlsError {
             Self::CredentialCreation(_) => "MLS credential creation failed",
             Self::KeyPackageCreation(_) => "Key package creation failed",
             Self::InvalidKeyPackage(_) => "The peer's key package was malformed or unusable",
+            Self::KeyPackageOutsideValidityWindow => {
+                "The peer's key package is not valid at this device's time"
+            }
             Self::GroupCreation(_) => "MLS group creation failed",
             Self::GroupNotFound(_) => "No local MLS group state for the requested conversation",
             Self::AddMember(_) => "Adding a member to the MLS group failed",

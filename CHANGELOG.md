@@ -345,6 +345,20 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A key package refused by this device's clock is reported.** A peer's key
+  package is valid from an hour before it was minted until 30 days after,
+  judged by the receiver's clock. A device more than an hour behind a peer
+  cannot start a session with it, and past 30 days neither side can, so no
+  session forms and messages and connection requests stay pending forever.
+  The only trace was a debug line. Two Android phones that had never been
+  online (one set to 2024, the other to 2025) reproduced it. The refusal
+  now raises a `security_warning` with the new code
+  `KEY_PACKAGE_OUTSIDE_VALIDITY_WINDOW`, once per peer, and is logged at
+  `warn`; `MlsError::KeyPackageOutsideValidityWindow` replaces the
+  `InvalidKeyPackage` text for this one refusal on every route that admits a
+  peer's package. The window itself is unchanged. TypeScript's
+  `SecurityWarningCode` union gains the code, so an exhaustive `switch` over it
+  needs a new arm.
 - **An old message no longer comes back as a push notification, again and
   again.** A direct message the relay had pushed stayed in the outbox well past
   a week, because each probe re-send refreshed its lifetime and so did each

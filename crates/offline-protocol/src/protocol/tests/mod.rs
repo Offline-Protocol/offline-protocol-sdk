@@ -40217,6 +40217,71 @@ fn the_ratchet_survives_a_restart() {
     );
 }
 
+/// A peer's key package whose window this device's clock is outside of
+/// blocks every session with that peer, and used to say so only in a debug
+/// line: two offline phones a year apart sat on a pending connection request
+/// with nothing to tell either user to check the date. It is now reported
+/// under its own code, once per peer however often the session is retried.
+#[test]
+fn a_key_package_outside_its_window_by_our_clock_is_reported_once_per_peer() {
+    let mut alice = protocol_with_mls("alice");
+    let warnings: Arc<Mutex<Vec<(String, SecurityWarningCode)>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let sink = Arc::clone(&warnings);
+        alice.on_event(move |e| {
+            if let Event::SecurityWarning {
+                peer_id,
+                reason_code,
+                ..
+            } = e
+            {
+                sink.lock().unwrap().push((peer_id, reason_code));
+            }
+        });
+    }
+
+    // Bob's clock runs a year ahead of Alice's.
+    let now = Utc::now().timestamp() as u64;
+    let year = 365 * 24 * 3600;
+    let bob = id("bob");
+    let bytes = offline_protocol_mls::MlsManager::key_package_with_window_for_testing(
+        &bob,
+        now + year - 3600,
+        now + year + 30 * 24 * 3600,
+    )
+    .unwrap();
+    alice.pending_key_packages.insert(
+        bob.clone(),
+        ReceivedKeyPackage {
+            key_package_data: bytes,
+            local_expires_at_ms: u64::MAX,
+        },
+    );
+
+    for _ in 0..3 {
+        let err = alice
+            .establish_secure_session(&bob)
+            .expect_err("no session can form from a package that is not valid yet");
+        assert!(
+            matches!(
+                err,
+                Error::Mls(offline_protocol_mls::MlsError::KeyPackageOutsideValidityWindow)
+            ),
+            "refused for the wrong reason: {err:?}"
+        );
+    }
+
+    let seen = warnings.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![(
+            bob.clone(),
+            SecurityWarningCode::KeyPackageOutsideValidityWindow
+        )],
+        "exactly one warning naming the peer, whatever the retry count"
+    );
+}
+
 /// The refusal is reported under its own code, so an integrator can tell a
 /// clock fault from the signature failures it would otherwise be filed under.
 #[test]

@@ -393,7 +393,12 @@ takes its own control plane down, key package exchange included.
 **Mitigation:** the refusal is reported under its own `STALE_CONTROL_FRAME` code
 so that a run of them across many peers reads as a local fault rather than an
 attack, and `security.control_freshness_enforced` turns enforcement off without
-a new binary. A leaf node is required to have a time source at pairing for this
+a new binary. A key package's validity window is judged the same way and fails
+the same way: it runs from an hour before minting to 30 days after, so a device
+more than an hour behind its peer cannot start a session (the peer still can),
+and past 30 days neither side can and no session forms. The refusal is
+reported under `KEY_PACKAGE_OUTSIDE_VALIDITY_WINDOW`, once per peer, and the
+window itself is not relaxed. A leaf node is required to have a time source at pairing for this
 among other reasons; see
 [leaf provisioning](../spec/leaf-provisioning.md).
 
