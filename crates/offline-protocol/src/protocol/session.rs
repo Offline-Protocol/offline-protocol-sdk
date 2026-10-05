@@ -449,6 +449,7 @@ impl OfflineProtocol {
         self.confirmation_retry_due_at.remove(peer_id);
         self.confirmation_probe_due_at.remove(peer_id);
         self.confirmation_probe_unreachable_parks.remove(peer_id);
+        self.confirmation_probe_outstanding.remove(peer_id);
     }
 
     /// Fold a relay "recipient unreachable" verdict into the session-confirmation
@@ -517,7 +518,9 @@ impl OfflineProtocol {
             internal_prefixes::SESSION_CONFIRM_PROBE.to_string(),
             MessagePriority::High,
         ) {
-            Ok(_) => {
+            Ok(message_id) => {
+                self.confirmation_probe_outstanding
+                    .insert(peer_id.to_string(), message_id);
                 info!(
                     event = "session_confirmation_probe_sent",
                     session_or_group_id = %peer_id,
@@ -596,6 +599,8 @@ impl OfflineProtocol {
             .retain(|peer, _| pending_set.contains(peer));
         self.confirmation_probe_unreachable_parks
             .retain(|peer, _| pending_set.contains(peer));
+        self.confirmation_probe_outstanding
+            .retain(|peer, _| pending_set.contains(peer));
 
         for peer_id in pending_peers {
             let due_at = self
@@ -605,6 +610,14 @@ impl OfflineProtocol {
                 .unwrap_or(now);
             if due_at > now {
                 continue;
+            }
+            // Superseded, not failed: the new probe asks the same question, so
+            // the old one's retry ladder would only stack onto it. Silent, and
+            // no delivery failure is recorded against the carrier.
+            if let Some(previous) = self.confirmation_probe_outstanding.remove(&peer_id) {
+                self.retry_queue.remove(&previous.as_str());
+                self.ack_manager.remove_ack(&previous);
+                self.remove_outbox_entry(&previous);
             }
 
             self.send_session_confirmation_probe(&peer_id, source_event);

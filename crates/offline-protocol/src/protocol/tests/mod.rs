@@ -40679,6 +40679,87 @@ fn test_confirmation_probe_unreachable_escalation() {
     );
 }
 
+/// A peer whose session never confirms, and that no `unreachable` verdict
+/// backs off (a relay that pushes to offline users, or a mesh-only link),
+/// holds one probe in the outbox, however many intervals pass. Each due scan
+/// still probes, so a lost probe is replaced on the next one, but the new
+/// probe supersedes the last instead of stacking a fresh retry ladder on it:
+/// stacking filled the outbox at one probe per such peer per 5s, and capacity
+/// eviction failed real messages.
+#[test]
+fn an_unanswered_confirmation_probe_supersedes_the_last_one() {
+    let mut alice_config = create_test_config_for_user("alice");
+    alice_config.encryption.enabled = true;
+    let mut alice = OfflineProtocol::new(alice_config).unwrap();
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    alice
+        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    // A session alice holds but bob never confirms.
+    let bob_key_package = {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    {
+        let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        manager
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
+            .unwrap();
+        manager.create_session(&id("bob")).unwrap();
+    }
+    alice
+        .ensure_session_state_entry(&id("bob"), "test_setup")
+        .unwrap();
+
+    let transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    let handle = transport.clone();
+    alice
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport));
+    alice.start().unwrap();
+
+    let probes = |handle: &MockTransport| -> Vec<MessageId> {
+        handle
+            .sent_messages()
+            .into_iter()
+            .filter(|m| {
+                m.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
+            })
+            .map(|m| m.id)
+            .collect()
+    };
+    let make_due = |alice: &mut OfflineProtocol| {
+        alice.confirmation_probe_due_at.insert(
+            id("bob").to_string(),
+            Utc::now() - ChronoDuration::seconds(1),
+        );
+    };
+
+    handle.clear_sent_messages();
+    for _ in 0..6 {
+        make_due(&mut alice);
+        alice.kick_pending_session_reconciliation("test");
+    }
+    let sent = probes(&handle);
+    assert_eq!(sent.len(), 6, "every due scan still probes");
+
+    let outstanding: Vec<_> = alice.outbox.keys().filter(|id| sent.contains(id)).collect();
+    assert_eq!(
+        outstanding,
+        vec![sent.last().unwrap()],
+        "only the latest probe waits in the outbox; each superseded the last"
+    );
+    assert!(
+        !alice.retry_queue.contains(&sent[0].as_str()),
+        "a superseded probe keeps no retry ladder"
+    );
+}
+
 /// Pins component (D) of the flap fix: the opt-in edge-driven parking gate.
 /// With `edge_driven_unreachable_dm` on, a durably-unreachable DM keeps being
 /// timed-probed up to `DM_UNREACHABLE_PROBE_LIMIT` times, then stops (rests in

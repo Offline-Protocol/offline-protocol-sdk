@@ -115,6 +115,14 @@ top so that the one side no other trigger can reach, the both-create owner, is
 still covered. Only that owner, waiting on the adopt path, depends on decrypt
 alone.
 
+An unconfirmed session is probed on a fixed cadence, and **a peer holds at most
+one probe in the outbox**: each new probe supersedes the last rather than
+stacking its own retry ladder on top. The cadence only backs off on a relay
+`unreachable` verdict, which a relay that pushes to offline users or a mesh-only
+link never produces, so stacked probes once filled the outbox and capacity
+eviction failed real messages. Superseding is not a delivery failure and is not
+counted against the carrier.
+
 The drain is downstream of the confirmation **transition**, not of decryption as
 such: a decrypt on a session that is already confirmed does not re-run it.
 
