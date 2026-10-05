@@ -262,6 +262,14 @@ and carries no meaning; an implementation SHOULD NOT put the address there,
 since the TXT entry already carries it and one copy is one place to get it
 wrong.
 
+On Android, Wi-Fi Direct carries the same record over Wi-Fi P2P service
+discovery when an application lets the SDK form the group
+(`wifiDirect.autoAccept`). The record adds two entries for that use: `app`, a
+tag of the application id that keeps applications' devices apart, and `net`,
+present only while the advertiser owns a group, naming it. The `addr` entry
+keeps its meaning here: the group the record leads to is only a link, and the
+stream opened over it proves its peer like any other.
+
 A record that carries a `sid` entry is not a peer hint. It is a service
 instance under the [DNS-SD mapping](dns-sd-mapping.md), published under the
 subtype `_svc._sub` of this type and listed under the base type as well by

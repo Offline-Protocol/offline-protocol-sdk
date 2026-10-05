@@ -15,6 +15,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Android forms its Wi-Fi Direct group itself.** With
+  `wifiDirect: { enabled: true, autoAccept: true }` on Android 10 and later,
+  devices of the same app find each other over Wi-Fi P2P service discovery
+  (`_offlineprotocol._tcp`, the stream chapter's record plus `app` and `net`
+  entries), the lowest address creates a group under a name derived from its
+  address, and the others join it with a passphrase derived from the app id.
+  No system dialog appears on either phone, which a `WifiP2pManager.connect`
+  invitation would show. Two phones (Android 13 and 15) went from launch to a
+  proved stream in 26 to 55 seconds over five clean starts. An owner whose
+  group stays empty for 45 seconds dissolves it, because a group owner answers
+  no service discovery query and would otherwise be invisible to the peer it
+  was made for. Off by default; without it a group is formed in the system's
+  Wi-Fi Direct settings, as before, and that group is never dissolved.
+  `groupOwnerIntent` is not used. Groups of three or more devices are untested.
+
 - **Python has a gateway-daemon client.** `GatewayManager`, as
   `ProtocolManager.gateway` when `reticulum_enabled=True`, speaks the
   [gateway-daemon contract](docs/spec/gateway-contract.md) over TCP to a
