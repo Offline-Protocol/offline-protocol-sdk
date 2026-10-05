@@ -457,7 +457,7 @@ pub(crate) const LAMPORT_PERSIST_INTERVAL: u64 = 64;
 /// Most seen ids one `DedupSeenRecord` carries. Matches the default
 /// `max_tracked_messages`; a larger configured tracker persists its newest
 /// ids only, which are the ones a replay is most likely to repeat.
-pub(crate) const MAX_PERSISTED_DEDUP_IDS: usize = 2000;
+pub(crate) const MAX_PERSISTED_DEDUP_IDS: usize = 5000;
 
 /// Seen-set changes that force a write before the time cadence elapses. A
 /// burst of inbound traffic is exactly when the set is worth having on disk,

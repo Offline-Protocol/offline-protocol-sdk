@@ -609,10 +609,10 @@ per-member delivery path.
 **Dedup Config**:
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `maxTrackedMessages` | number | 2000 | Max message IDs to track (must be > 0) |
-| `retentionTimeSecs` | number | 86400 | Retention time (24 hours; must be > 0) |
+| `maxTrackedMessages` | number | 5000 | Max message IDs to track (must be > 0) |
+| `retentionTimeSecs` | number | 604800 | Retention time (7 days, the sender's redelivery window; must be > 0) |
 
-The seen set is persisted (up to 2000 ids, newest first, sealed like the pending
+The seen set is persisted (up to 5000 ids, newest first, sealed like the pending
 queues) and restored on the next launch. A message can reach the device twice on
 two paths, a push injection and then the relay socket after a reconnect, and the
 second copy is still recognised as a duplicate across an app restart. The

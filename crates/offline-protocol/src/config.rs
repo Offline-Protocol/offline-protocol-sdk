@@ -1724,8 +1724,8 @@ mod tests {
         // 5 min ceiling — also mirrored by the RN bridge fallbacks.
         assert_eq!(reliability.retry.max_delay_ms, 300_000);
         // Sized for the persisted seen set: see `DeduplicatorConfig::default`.
-        assert_eq!(reliability.dedup.max_tracked_messages, 2000);
-        assert_eq!(reliability.dedup.retention_time_secs, 86_400);
+        assert_eq!(reliability.dedup.max_tracked_messages, 5000);
+        assert_eq!(reliability.dedup.retention_time_secs, 604_800);
     }
 
     #[test]

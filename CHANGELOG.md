@@ -345,6 +345,20 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **An old message no longer comes back as a push notification, again and
+  again.** A direct message the relay had pushed stayed in the outbox well past
+  a week, because each probe re-send refreshed its lifetime and so did each
+  restart. Every time the relay's push claim lapsed, the recipient got another
+  notification. And because the recipient forgot message ids after a day, the
+  re-send it then received failed to decrypt and was never acknowledged, so it
+  came back on every reconnect. A pushed message is now dropped 7 days after
+  its first send, with no event, since the push may have delivered it.
+  Recipients now remember ids for 7 days by default, so a re-send inside that
+  window is answered as a duplicate and acknowledged, which settles the sender.
+  An acknowledgement owed when no carrier was up (a frame from a push arriving
+  before the relay socket authenticated) used to be dropped. It is now held,
+  for up to 10 minutes, and sent when a carrier comes up.
+
 - **BLE survives an iPhone's Bluetooth being turned off and on, on both ends
   of the link.** Turning an iPhone's Bluetooth off and on, or a Bluetooth
   stack reset, left the pair unable to talk. On iOS, power-off removes the
@@ -663,6 +677,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   for the Rust target's floor of iOS 10.
 
 ### Changed
+
+- **Dedup defaults grow to 5000 ids and 7 days.** `maxTrackedMessages` goes
+  from 2000 to 5000 and `retentionTimeSecs` from 86400 to 604800, on every
+  binding and in both React Native fallbacks. Up to 5000 ids are persisted,
+  about 365 KB per write. At the cap, this device's own send marks are
+  evicted before inbound ids, which have to last the week a sender may
+  replay them in. A config that sets `retentionTimeSecs: 86400`
+  keeps the old window and the repeated re-sends; see
+  [UPGRADING §21](docs/UPGRADING.md#21-delivery-state-survives-a-restart-and-two-defaults-grow-v0260).
 
 - **iOS: an overflowing outbound fragment queue is discarded whole.** Both
   outbound queues, central write and peripheral NOTIFY, used to drop their

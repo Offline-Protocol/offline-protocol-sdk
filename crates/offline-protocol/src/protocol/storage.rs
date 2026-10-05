@@ -3853,6 +3853,9 @@ impl OfflineProtocol {
     ///   [`OUTBOX_ABSOLUTE_LIFETIME_FACTOR`] × the outbox lifetime is dropped
     ///   terminally with a `message_failed`, so repeated restarts can't
     ///   re-grant a fresh window forever;
+    /// - a relay-pushed entry past its fixed redelivery window (from
+    ///   `first_sent_at`, never refreshed) is dropped the same way but with
+    ///   no settlement, since the push may have delivered it;
     /// - otherwise the TTL clock is carrier-relative: an entry whose
     ///   `last_sent_at` has already lapsed the outbox lifetime is refreshed
     ///   rather than restored already-expired, so it gets a fresh delivery
@@ -4005,9 +4008,12 @@ impl OfflineProtocol {
             lifetime_ms.saturating_mul(crate::constants::OUTBOX_ABSOLUTE_LIFETIME_FACTOR as u64);
         let now = Utc::now();
         let mut absolutely_expired: Vec<OutboxEntry> = Vec::new();
+        // A relay-pushed entry has a fixed window of its own, which the
+        // refresh below must not re-grant either (`relay_push_window_closed`).
         restored.retain(|entry| {
-            if lifetime_expired(now, entry.last_sent_at, lifetime_ms)
-                && lifetime_expired(now, entry.first_sent_at, absolute_lifetime_ms)
+            if super::relay_push_window_closed(now, entry)
+                || (lifetime_expired(now, entry.last_sent_at, lifetime_ms)
+                    && lifetime_expired(now, entry.first_sent_at, absolute_lifetime_ms))
             {
                 absolutely_expired.push(entry.clone());
                 return false;
@@ -4039,6 +4045,17 @@ impl OfflineProtocol {
             }
             budget.claim();
             self.delete_outbox_key(&entry.message.id.as_str());
+            // Pushed: dropped without a settlement, exactly as in process
+            // (`cleanup_outbox`) — the push may have delivered it.
+            if entry.relay_pushed {
+                info!(
+                    event = "outbox_entry_dropped",
+                    message_id = %entry.message.id,
+                    repair_action = "relay_push_window_closed",
+                    "outbox_entry_dropped"
+                );
+                continue;
+            }
             info!(
                 event = "outbox_entry_dropped",
                 message_id = %entry.message.id,

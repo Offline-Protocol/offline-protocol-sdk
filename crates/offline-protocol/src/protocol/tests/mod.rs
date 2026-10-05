@@ -41152,3 +41152,303 @@ fn the_send_path_establisher_marks_the_handshake_start_as_well() {
         "the send path created a session without marking the handshake start: {records:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Old-message push floods: bounded relay-pushed parks, week-long dedup, held
+// acknowledgements.
+// ---------------------------------------------------------------------------
+
+fn outbox_entry_at(
+    first_sent_at: chrono::DateTime<Utc>,
+    last_sent_at: chrono::DateTime<Utc>,
+    relay_pushed: bool,
+) -> OutboxEntry {
+    OutboxEntry {
+        message: test_message("bob", "hello"),
+        attempt_count: 3,
+        first_sent_at,
+        last_sent_at,
+        last_transport: None,
+        reseal: None,
+        relay_pushed,
+    }
+}
+
+/// A relay-pushed entry stops at its fixed window from `first_sent_at` even
+/// while its probe keeps `last_sent_at` fresh and a re-drive is awaiting its
+/// ACK, and settles silently; an unpushed twin keeps today's sliding-window +
+/// absolute-cap behaviour.
+#[test]
+fn test_cleanup_outbox_drops_relay_pushed_entry_past_its_window_silently() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| events_handle.lock().unwrap().push(event));
+
+    let now = Utc::now();
+    let first = now - ChronoDuration::days(7) - ChronoDuration::minutes(1);
+    let pushed = outbox_entry_at(first, now, true);
+    let unpushed = outbox_entry_at(first, now, false);
+    let young_pushed = outbox_entry_at(now - ChronoDuration::days(6), now, true);
+    let (pushed_id, unpushed_id, young_id) = (
+        pushed.message.id.clone(),
+        unpushed.message.id.clone(),
+        young_pushed.message.id.clone(),
+    );
+    protocol.outbox.insert(pushed_id.clone(), pushed);
+    protocol.outbox.insert(unpushed_id.clone(), unpushed);
+    protocol.outbox.insert(young_id.clone(), young_pushed);
+    // A carrier edge re-drove both and they are awaiting ACKs: the pushed
+    // entry's window is a hard stop regardless; the unpushed one is skipped
+    // while it waits, as before.
+    for id in [&pushed_id, &unpushed_id] {
+        assert!(protocol.outbox[id].message.requires_ack);
+        protocol
+            .ack_manager
+            .register_pending_ack(id.clone(), None)
+            .unwrap();
+    }
+
+    protocol.cleanup_outbox();
+
+    assert!(!protocol.outbox.contains_key(&pushed_id));
+    assert!(
+        !protocol.ack_manager.is_waiting_for_ack(&pushed_id),
+        "the drop tears down the pending ACK with the entry"
+    );
+    assert!(
+        protocol.outbox.contains_key(&unpushed_id),
+        "an unpushed entry is still bounded only by the sliding window and the 4x cap"
+    );
+    assert!(protocol.outbox.contains_key(&young_id));
+    assert!(
+        !events.lock().unwrap().iter().any(|e| matches!(
+            e,
+            Event::MessageFailed { .. } | Event::MessageUndeliverable { .. }
+        )),
+        "the push may have delivered it, so nothing app-facing is emitted"
+    );
+}
+
+/// At restore, a relay-pushed entry past its window is dropped (record and
+/// all) instead of having its lapsed clock refreshed; an unpushed entry of
+/// the same age is still refreshed, as before.
+#[test]
+fn test_restore_outbox_does_not_regrant_a_relay_pushed_entry() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let stale = Utc::now() - ChronoDuration::days(8);
+    let pushed = outbox_entry_at(stale, stale, true);
+    let unpushed = outbox_entry_at(stale, stale, false);
+    let (pushed_id, unpushed_id) = (pushed.message.id.clone(), unpushed.message.id.clone());
+    store_outbox_entry(&storage, &pushed);
+    store_outbox_entry(&storage, &unpushed);
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| events_handle.lock().unwrap().push(event));
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+
+    assert!(!protocol.outbox.contains_key(&pushed_id));
+    let keys = storage.list_keys(storage_keys::OUTBOX).unwrap();
+    assert!(
+        !keys.iter().any(|k| *k == pushed_id.as_str()),
+        "the dropped record must not come back on the next launch"
+    );
+    let restored = protocol
+        .outbox
+        .get(&unpushed_id)
+        .expect("an unpushed entry inside the absolute cap is restored");
+    assert!(
+        restored.last_sent_at > stale,
+        "and its carrier-relative clock is refreshed"
+    );
+
+    let transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport));
+    protocol.start().unwrap();
+    assert!(
+        !events.lock().unwrap().iter().any(|e| matches!(
+            e,
+            Event::MessageFailed { message_id, .. } if *message_id == pushed_id.as_str()
+        )),
+        "a relay-pushed drop settles nothing at restore either"
+    );
+}
+
+/// A replay of a message first seen three days ago (seen set restored from
+/// the previous launch) is recognised as a duplicate — not processed — and
+/// re-ACKed, which is what settles the sender's parked entry.
+#[test]
+fn test_replay_seen_three_days_ago_is_a_duplicate_and_is_reacked() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+
+    let message = signed_frame(&id("alice"), "user123", "Hello");
+    let three_days_ago = Utc::now() - ChronoDuration::days(3);
+    assert_eq!(
+        protocol.deduplicator.import_seen(
+            vec![offline_protocol_reliability::SeenId {
+                id: message.id.as_str(),
+                seen_at_ms: three_days_ago.timestamp_millis(),
+            }],
+            Utc::now(),
+        ),
+        1,
+        "a three-day-old id is inside the default retention"
+    );
+    mock_transport.queue_message(message.clone());
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport.clone()));
+    protocol.start().unwrap();
+
+    assert!(
+        protocol.receive_message().is_none(),
+        "the replay must not be processed again"
+    );
+    let acks = mock_transport
+        .sent_messages()
+        .iter()
+        .filter(|sent| sent.metadata.get(ACK_FOR_KEY) == Some(&message.id.as_str()))
+        .count();
+    assert_eq!(acks, 1, "the duplicate must be re-ACKed");
+}
+
+/// An acknowledgement owed while no carrier is up (a push-injected frame
+/// arriving before the relay socket authenticates) is held and goes out on
+/// the carrier edge, still from the local id.
+#[test]
+fn test_ack_without_a_route_is_held_and_sent_when_the_carrier_comes_up() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let internet = MockTransport::new(TransportType::Internet);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet.clone()));
+    protocol.start().unwrap();
+    // The relay socket is not authenticated yet (the bridge has not reported
+    // the carrier up), which the core sees as a disconnected transport.
+    internet.set_status(TransportStatus::Disconnected);
+
+    let message = signed_frame(&id("alice"), "user123", "Hello");
+    internet.queue_message(message.clone());
+    assert!(protocol.receive_message().is_some());
+    let acks_for = |transport: &MockTransport| {
+        transport
+            .sent_messages()
+            .into_iter()
+            .filter(|sent| sent.metadata.get(ACK_FOR_KEY) == Some(&message.id.as_str()))
+            .collect::<Vec<_>>()
+    };
+    assert!(acks_for(&internet).is_empty(), "nothing can carry it yet");
+    assert_eq!(
+        protocol.unrouted_acks.len(),
+        1,
+        "so it is held, not dropped"
+    );
+
+    internet.set_status(TransportStatus::Available);
+    protocol.flush_outbox_all();
+
+    let sent = acks_for(&internet);
+    assert_eq!(sent.len(), 1, "the held ACK goes out on the carrier edge");
+    assert_eq!(sent[0].sender.as_str(), "user123");
+    assert_eq!(sent[0].recipient.as_str(), id("alice"));
+    assert!(protocol.unrouted_acks.is_empty());
+}
+
+/// A held ACK is not sent to a peer blocked while it waited: the receive
+/// path never ACKs a blocked sender, and the hold must not undo that.
+#[test]
+fn test_held_ack_is_not_sent_to_a_peer_blocked_meanwhile() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let internet = MockTransport::new(TransportType::Internet);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet.clone()));
+    protocol.start().unwrap();
+    internet.set_status(TransportStatus::Disconnected);
+
+    let message = signed_frame(&id("alice"), "user123", "Hello");
+    internet.queue_message(message.clone());
+    assert!(protocol.receive_message().is_some());
+    assert_eq!(protocol.unrouted_acks.len(), 1);
+
+    protocol.block_user(&id("alice")).unwrap();
+    internet.set_status(TransportStatus::Available);
+    protocol.flush_outbox_all();
+
+    assert!(
+        !internet
+            .sent_messages()
+            .iter()
+            .any(|sent| sent.metadata.get(ACK_FOR_KEY) == Some(&message.id.as_str())),
+        "a blocked peer must not get the held ACK"
+    );
+    assert!(
+        protocol.unrouted_acks.is_empty(),
+        "and it is not kept either"
+    );
+}
+
+/// Every replay of one message owes the same ACK, so the hold keeps one.
+#[test]
+fn test_unrouted_ack_hold_keeps_one_ack_per_message() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.start().unwrap();
+
+    let message = signed_frame(&id("alice"), "user123", "Hello");
+    for _ in 0..3 {
+        protocol
+            .send_delivery_ack(&message, TransportType::Internet)
+            .unwrap();
+    }
+    assert_eq!(protocol.unrouted_acks.len(), 1);
+}
+
+/// The hold is bounded by count (oldest dropped) and by age.
+#[test]
+fn test_unrouted_ack_hold_is_bounded() {
+    use super::send::{MAX_UNROUTED_ACKS, UNROUTED_ACK_TTL};
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.start().unwrap();
+
+    let mut first_id = None;
+    for _ in 0..=MAX_UNROUTED_ACKS {
+        let message = signed_frame(&id("alice"), "user123", "Hello");
+        first_id.get_or_insert(message.id.clone());
+        protocol
+            .send_delivery_ack(&message, TransportType::Internet)
+            .unwrap();
+    }
+    assert_eq!(protocol.unrouted_acks.len(), MAX_UNROUTED_ACKS);
+    let first_id = first_id.unwrap().as_str();
+    assert!(
+        !protocol
+            .unrouted_acks
+            .iter()
+            .any(|(ack, _, _)| ack.metadata.get(ACK_FOR_KEY) == Some(&first_id)),
+        "the oldest is the one dropped"
+    );
+
+    // Past the TTL a held ACK is dropped on the next edge rather than sent.
+    for held in protocol.unrouted_acks.iter_mut() {
+        held.2 = Instant::now()
+            .checked_sub(UNROUTED_ACK_TTL + Duration::from_secs(1))
+            .unwrap();
+    }
+    let internet = MockTransport::new(TransportType::Internet);
+    internet.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(internet.clone()));
+    protocol.flush_outbox_all();
+    assert!(protocol.unrouted_acks.is_empty());
+    assert!(internet.sent_messages().is_empty());
+}

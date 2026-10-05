@@ -3538,8 +3538,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         try {
             val json = JSONObject(configJson)
             val dedupConfig = DedupConfig(
-                maxTrackedMessages = json.optLong("maxTrackedMessages", 2000).toULong(),
-                retentionTimeSecs = json.optLong("retentionTimeSecs", 86400).toULong()
+                maxTrackedMessages = json.optLong("maxTrackedMessages", 5000).toULong(),
+                retentionTimeSecs = json.optLong("retentionTimeSecs", 604800).toULong()
             )
             
             protocol?.updateDedupConfig(dedupConfig)

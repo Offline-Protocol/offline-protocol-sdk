@@ -9,11 +9,16 @@ application hands it over until it reaches a terminal state.
 state**: delivered, or failed. There is no third outcome and no indefinite
 pending state. Settling a message retires it from everything that could send
 it again, so no retry, flush or acknowledgement timeout reports it a second
-time. See [Giving a message up](#giving-a-message-up).
+time. See [Giving a message up](#giving-a-message-up). One exception: a direct
+message the relay has pushed settles with no event when its redelivery window
+closes, because the push may have delivered it. Its last event is the
+`MessageSent` the push produced. See [Parking](#parking).
 
 **S2. Expiry is terminal, including across restarts.** A restart may refresh a
 relative delivery window, but an absolute cap bounds the total lifetime, or an
 application used briefly once per window would re-grant a fresh window forever.
+A relay-pushed entry has a tighter, fixed bound of its own, which nothing
+refreshes.
 
 **S3. A resend within a process lifetime is re-sealed, never replayed.** The
 ciphertext is regenerated against the recipient's current session; the message
@@ -178,11 +183,28 @@ with two differences, both because the push may have delivered it: only a plain
 direct message parks (a connection request keeps its typed tracking and a
 Welcome its lifecycle, both awaiting the answer a delivered push produces), and
 **no `MessageUndeliverable` is emitted**, on the push or on any later probe of
-that frame. The relay remembers what it has pushed for a day and answers a
-repeat with `DeliveryError` rather than a second notification, which reaches
-the core as an ordinary unreachable verdict. The outbox entry therefore carries
-a persisted `relay_pushed` mark, and a verdict for a marked entry re-parks it
-silently. Without the mark the silence would last exactly one probe interval.
+that frame. The relay remembers what it has pushed for 7 days (a day on older
+relays) and answers a repeat with `DeliveryError` rather than a second
+notification, which reaches the core as an ordinary unreachable verdict. The
+outbox entry therefore carries a persisted `relay_pushed` mark, and a verdict
+for a marked entry re-parks it silently. Without the mark the silence would
+last exactly one probe interval.
+
+**A pushed entry lives at most 7 days from its first send**
+(`REDELIVERY_WINDOW_MS`), and is then dropped with no event. The window is
+fixed: the probe's sends do not slide it, an in-flight acknowledgement does not
+hold it open, and a restart does not refresh it. Three windows have to agree
+for a re-send to be harmless: the relay's push claim (past it, a re-send is a
+second visible notification), the relay's mailbox retention, and the
+recipient's deduplicator (past it, a re-send is a replay the recipient no
+longer recognises, so it reaches a ratchet whose generation is spent, fails to
+decrypt, and is never acknowledged, which brings it back on every reconnect).
+All three are 7 days, and so is this one. It is a constant rather than the
+configured outbox lifetime because the relay's windows do not move with an
+application's configuration. Without it, the sliding lifetime and the restore
+refresh kept a pushed entry alive out to the absolute cap, and every lapse of
+the relay's push claim inside that span was another notification for an old
+message.
 
 A parked message is probed periodically with a backoff that widens from 15
 seconds toward 10 minutes. When the peer returns, parked messages re-enter the
@@ -291,7 +313,8 @@ On restore:
 1. Lifetime drops an entry, with a terminal failure event, only when it is past
    **both** windows: the carrier-relative lifetime *and* the absolute cap.
    Capacity overflow and unreadable records drop entries too, on their own
-   rules.
+   rules. A relay-pushed entry past its fixed redelivery window is dropped
+   whatever its other windows say, and with no event (see [Parking](#parking)).
 2. An entry that survives and is past its carrier-relative window gets that
    window refreshed, because a restart means a fresh delivery opportunity.
    Entries still inside their window keep their original stamp.

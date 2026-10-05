@@ -85,6 +85,24 @@ frame asked for an acknowledgement and the sender is not blocked. A duplicate of
 a group message that is **still pending** in the buffer resolves to `Deferred`
 instead, because the original has not been delivered either.
 
+**The duplicate re-acknowledgement is what settles a sender whose first
+answer was lost**, so it works only while the identifier is remembered. The
+deduplicator keeps identifiers for 7 days by default, persisted across
+restarts: the sender's redelivery window (`REDELIVERY_WINDOW_MS`), the longest a
+sender re-sends one identifier. With a shorter window a late re-send is not a
+duplicate. It reaches the ratchet, fails to decrypt because that generation is
+spent, and is never acknowledged, so the sender re-sends it on every reconnect.
+
+**An acknowledgement nothing can carry is held, not dropped.** It is owed from
+the moment the frame is accepted, and the usual reason no route takes it is a
+carrier that is not up yet: a push-injected frame acknowledged before the relay
+socket has authenticated. Held acknowledgements are re-routed, through the same
+route ladder, whenever a carrier comes up (start, and the internet, gateway or
+Nostr link connecting), ahead of the outbox, because they are what stop peers
+re-sending to this device. At most 500 are held, oldest dropped first, each for
+at most 10 minutes. Losing one is recoverable: the sender re-sends, and the
+duplicate is re-acknowledged. The hold is in memory only.
+
 These four are the observable dispositions, not a mirror of any one type. The
 implementation's decrypt-result type also has four cases, but they are not the
 same four: it splits a delivered message out as its own case and does not model

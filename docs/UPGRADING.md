@@ -699,7 +699,8 @@ Sizing the window for your deployment stays your call.
 
 **What to do:** grep your config for `maxTrackedMessages: 0` /
 `retentionTimeSecs: 0` (and the snake_case forms) and pick real values. Defaults
-are `2000` and `86400` since `v0.26.0` (they were `1000` and `3600` before, see
+are `5000` and `604800` from `0.28.0`, `2000` and `86400` in `v0.26.0` and
+`v0.27.0`, and `1000` and `3600` before that (see
 [§21](#21-delivery-state-survives-a-restart-and-two-defaults-grow-v0260)).
 
 ---
@@ -2118,6 +2119,14 @@ values; one that omits them gets the larger windows. Memory is unchanged: the
 pending queue is still bounded by the per-peer and global count and byte caps,
 and the seen set by its count, so a longer window lets entries linger within
 those caps rather than raising them.
+
+From `0.28.0` the dedup defaults grow again, to `maxTrackedMessages: 5000` and
+`retentionTimeSecs: 604800` (7 days), and both React Native fallbacks follow.
+Seven days is how long a sender may re-send one message id, and a re-send the
+deduplicator has forgotten fails to decrypt and is never acknowledged, so the
+sender keeps re-sending it. **If your config sets `retentionTimeSecs: 86400`**
+(the `docs/mesh.md` example used to), delete it or raise it to at least
+`604800`; otherwise you keep the one-day window and the repeated re-sends.
 
 **Two things are persisted that were not.** The inbound pending-decryption
 queue (`pending_decrypt_entries`) and the deduplicator's seen set

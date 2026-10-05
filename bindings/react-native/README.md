@@ -605,8 +605,8 @@ interface ReliabilityConfig {
     pendingMessageMaxLifetimeMs?: number; // default: 604800000
   };
   dedup?: {
-    maxTrackedMessages?: number; // default: 2000, must be > 0
-    retentionTimeSecs?: number;  // default: 86400, must be > 0
+    maxTrackedMessages?: number; // default: 5000, must be > 0
+    retentionTimeSecs?: number;  // default: 604800 (7 days), must be > 0
   };
 }
 ```
