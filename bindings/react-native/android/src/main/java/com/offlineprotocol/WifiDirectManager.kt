@@ -217,6 +217,10 @@ class WifiDirectManager(
     // State tracking. Volatile: written on the transport thread, read by the
     // socket thread that decides whether a client reconnects.
     @Volatile private var isGroupOwner = false
+    // Whether the core was last told the stream layer is up. Wi-Fi P2P going
+    // off reports it down; coming back on has to report it up again, or the
+    // core keeps the slot down while streams prove peers over it.
+    @Volatile private var layerUp = false
     @Volatile private var groupOwnerAddress: String? = null
     // The client's next reconnect delay; see [RECONNECT_INITIAL_DELAY_MS].
     private val reconnectDelayMs = AtomicLong(RECONNECT_INITIAL_DELAY_MS)
@@ -371,6 +375,7 @@ class WifiDirectManager(
         updateState(TransportState.RUNNING)
 
         // Notify protocol
+        layerUp = true
         try {
             protocol.wifiDirectStatusChanged(true)
         } catch (e: Exception) {
@@ -453,6 +458,7 @@ class WifiDirectManager(
         channel = null
 
         // Notify protocol
+        layerUp = false
         try {
             protocol.wifiDirectStatusChanged(false)
         } catch (e: Exception) {
@@ -615,11 +621,30 @@ class WifiDirectManager(
                 // across the flip would keep delivering, and every body
                 // re-adds a neighbour the flip just cleared.
                 closeAllConnections()
+                layerUp = false
                 try {
                     protocol.wifiDirectStatusChanged(false)
                 } catch (e: Exception) {
                     Log.e(TAG, "Error notifying protocol", e)
                 }
+            }
+        } else if (enabled && state == TransportState.RUNNING) {
+            // Wi-Fi P2P came back (Wi-Fi turned on, or the app started with it
+            // off). Nothing else undoes the branch above: the core kept the
+            // slot down, discovery had stopped, and the framework had dropped
+            // every local service and service request with the P2P state.
+            // Posted for the same reason as above; the flag makes a broadcast
+            // that repeats the current state a no-op.
+            transportHandler.post {
+                if (state != TransportState.RUNNING || layerUp) return@post
+                layerUp = true
+                try {
+                    protocol.wifiDirectStatusChanged(true)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error notifying protocol", e)
+                }
+                startPeerDiscovery()
+                resumeGroupFormationAfterP2pReturned()
             }
         }
     }
@@ -754,12 +779,22 @@ class WifiDirectManager(
                 }
             },
         )
-        // A TXT query for the one instance name every device of this protocol
-        // publishes. A query by service type alone asks only for the PTR
-        // record, whose answer reaches the service listener above but never
-        // the TXT listener, and the TXT record is where the address and the
-        // group name are.
-        p2p.addServiceRequest(
+        addServiceRequest()
+        publishAdvert(null)
+        transportHandler.removeCallbacks(formationTick)
+        transportHandler.post(formationTick)
+        emitDiagnostic("info", "Wi-Fi Direct group formation started")
+    }
+
+    /**
+     * A TXT query for the one instance name every device of this protocol
+     * publishes. A query by service type alone asks only for the PTR record,
+     * whose answer reaches the service listener but never the TXT listener, and
+     * the TXT record is where the address and the group name are.
+     */
+    @SuppressLint("MissingPermission")
+    private fun addServiceRequest() {
+        wifiP2pManager?.addServiceRequest(
             channel,
             WifiP2pDnsSdServiceRequest.newInstance(
                 WifiDirectGroupFormation.INSTANCE_NAME,
@@ -767,10 +802,15 @@ class WifiDirectManager(
             ),
             quietListener("add service request"),
         )
-        publishAdvert(null)
-        transportHandler.removeCallbacks(formationTick)
-        transportHandler.post(formationTick)
-        emitDiagnostic("info", "Wi-Fi Direct group formation started")
+    }
+
+    /** The framework drops local services and service requests with P2P. */
+    private fun resumeGroupFormationAfterP2pReturned() {
+        if (!formGroups || !formationSupported) return
+        addServiceRequest()
+        advertPublished = false
+        nextServiceDiscoveryAtMs = 0L
+        emitDiagnostic("info", "Wi-Fi Direct group formation resumed")
     }
 
     @SuppressLint("MissingPermission")
@@ -795,6 +835,9 @@ class WifiDirectManager(
     @SuppressLint("MissingPermission")
     private fun formationStep() {
         val p2p = wifiP2pManager ?: return
+        // Nothing to form over while Wi-Fi P2P is off: every call would fail
+        // BUSY, and a join attempted then is refused with no group to find.
+        if (!layerUp) return
         val now = SystemClock.elapsedRealtime()
         adverts.values.removeAll { now - it.seenAtMs > ADVERT_TTL_MS }
         val address = localAddressOrNull() ?: return
@@ -821,7 +864,17 @@ class WifiDirectManager(
         val settled = inGroup && (!isGroupOwner || ownerClients > 0)
         if (!settled && now >= nextServiceDiscoveryAtMs) {
             nextServiceDiscoveryAtMs = now + SERVICE_DISCOVERY_PERIOD_MS
-            p2p.discoverServices(channel, quietListener("discover services"))
+            p2p.discoverServices(channel, object : WifiP2pManager.ActionListener {
+                override fun onSuccess() {}
+                override fun onFailure(reason: Int) {
+                    // The request was lost (P2P went off and on between our
+                    // broadcasts, say): register it again for the next round.
+                    if (reason == WifiP2pManager.NO_SERVICE_REQUESTS) addServiceRequest()
+                    emitDiagnostic("debug", "Wi-Fi Direct discover services failed", mapOf(
+                        "reason" to reasonToString(reason)
+                    ))
+                }
+            })
         }
         if (now < nextFormationAtMs) return
         val action = WifiDirectGroupFormation.decide(
@@ -1235,6 +1288,7 @@ class WifiDirectManager(
             WifiP2pManager.P2P_UNSUPPORTED -> "P2P_UNSUPPORTED"
             WifiP2pManager.BUSY -> "BUSY"
             WifiP2pManager.ERROR -> "ERROR"
+            WifiP2pManager.NO_SERVICE_REQUESTS -> "NO_SERVICE_REQUESTS"
             else -> "UNKNOWN ($reason)"
         }
     }

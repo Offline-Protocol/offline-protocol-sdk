@@ -23,7 +23,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   address, and the others join it with a passphrase derived from the app id.
   No system dialog appears on either phone, which a `WifiP2pManager.connect`
   invitation would show. Two phones (Android 13 and 15) went from launch to a
-  proved stream in 26 to 55 seconds over five clean starts. An owner whose
+  proved stream in 26 to 96 seconds over six clean starts, and re-formed the
+  group 19 seconds after one of them turned Wi-Fi off and on. An owner whose
   group stays empty for 45 seconds dissolves it, because a group owner answers
   no service discovery query and would otherwise be invisible to the peer it
   was made for. Off by default; without it a group is formed in the system's
@@ -704,6 +705,14 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   link is usable and, to `None`, when the last one is not, once per edge: a
   layer going down with several links switches once, and links proved while
   the layer is down switch when it comes up.
+- **Android Wi-Fi Direct comes back when Wi-Fi does.** Turning Wi-Fi P2P off
+  reported the slot down to the core; turning it back on reported nothing,
+  restarted no discovery, and (with group formation on) left the framework's
+  dropped service request and record unregistered, so every later discovery
+  failed with `NO_SERVICE_REQUESTS`. An app started with Wi-Fi off never got
+  Wi-Fi Direct at all. The manager now reports the slot up again when P2P
+  returns, restarts discovery and re-registers what formation needs, and
+  re-registers the request on that error too.
 - **Android rejoins a Wi-Fi Direct group after the app restarts.** The group
   belongs to the system and outlives the process, but since Android 10 the
   connection broadcast is not sticky, so a manager that started inside an
