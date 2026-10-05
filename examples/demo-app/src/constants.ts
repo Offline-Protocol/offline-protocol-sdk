@@ -11,6 +11,15 @@ export const QUICK_MESSAGES = [
   {text: 'Emergency - need help!', emoji: '🚨', priority: 'critical' as const},
 ];
 
+import {Platform} from 'react-native';
+
+// One identity per install. The SDK keeps a profile's keys in the platform
+// keystore, so the same profile is the same address on every launch. The demo
+// used to mint a new profile at each start, which made every launch a new
+// person to its peers (contacts and sessions gone) and left another keystore
+// namespace behind each time.
+export const PROFILE = 'offline-demo';
+
 export const PRESENCE_BROADCAST_INTERVAL_MS = 15 * 1000;
 
 export const TYPING_INDICATOR_TIMEOUT_MS = 10 * 1000;
@@ -25,6 +34,10 @@ export const PROTOCOL_CONFIG = {
   // only sends once the end-to-end encrypted session has been established.
   transports: {
     ble: {enabled: true},
+    // Android only. `autoAccept` lets the SDK form the Wi-Fi Direct group
+    // itself (Android 10+); below that, pair the phones in the system's
+    // Wi-Fi Direct settings (see README).
+    wifiDirect: {enabled: Platform.OS === 'android', autoAccept: true},
   },
   encryption: {
     enabled: true,

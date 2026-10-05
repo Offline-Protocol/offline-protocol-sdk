@@ -192,7 +192,7 @@ export function PeopleScreen({onOpenChat}: PeopleScreenProps) {
         <Text style={styles.emptyEmoji}>📡</Text>
         <Text style={styles.emptyTitle}>Searching for peers...</Text>
         <Text style={styles.emptySubtitle}>
-          Make sure Bluetooth is enabled on nearby devices running the Offline Demo app.
+          Make sure nearby devices running the Offline Demo app have Bluetooth on, or share a Wi-Fi Direct group with this one (Android).
         </Text>
       </View>
     );

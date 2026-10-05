@@ -6,6 +6,7 @@ import React, {
   useRef,
   useEffect,
 } from 'react';
+import {Alert} from 'react-native';
 import {
   OfflineProtocol,
   MeshServices,
@@ -17,6 +18,7 @@ import {
   TYPING_INDICATOR_TIMEOUT_MS,
   NEARBY_THRESHOLD_MS,
   PROTOCOL_CONFIG,
+  PROFILE,
   TELEMETRY_API_KEY,
   TELEMETRY_APP_ID,
   APP_VERSION,
@@ -48,7 +50,7 @@ interface ProtocolContextValue {
   telemetryEnabled: boolean;
 
   // Actions
-  initialize: (userId: string, userName: string) => Promise<void>;
+  initialize: (userName: string) => Promise<void>;
   sendMessage: (recipientId: string, content: string, priority?: 'medium' | 'critical') => Promise<void>;
   sendConnectionRequest: (peerId: string) => Promise<void>;
   acceptConnectionRequest: (peerId: string) => Promise<void>;
@@ -121,6 +123,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   const neighborsRef = useRef<Map<string, Neighbor>>(neighbors);
   const userNameRef = useRef(userName);
   const userIdRef = useRef(userId);
+  const clockWarningShownRef = useRef(false);
   const blockedUsersRef = useRef<Set<string>>(new Set());
   // Peers with an established MLS session. autoKeyExchange establishes these
   // under the hood on discovery, independent of the app-level accept — so when a
@@ -180,8 +183,14 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     const eventType = event.type;
 
     switch (eventType) {
-      case 'transport_switched': {
-        setCurrentTransport(event.to ?? null);
+      // The pill shows what DORS routes over. `transport_switched` also fires
+      // when a transport's layer comes up, before it carries anything (the
+      // Wi-Fi Direct layer reports up at start with no group), so the pill
+      // follows DORS's own selection instead.
+      case 'dors_transport_selected':
+      case 'dors_transport_switched': {
+        const to = event.transport ?? event.to;
+        if (to) {setCurrentTransport(to);}
         break;
       }
       case 'neighbor_discovered': {
@@ -808,6 +817,22 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         break;
       }
 
+      case 'security_warning': {
+        // The one warning a user can act on: this device refused a peer's key
+        // package by its own clock. Past a 30-day gap neither side can set up
+        // encryption, and requests and messages wait with no other sign of
+        // why; under that the peer can still start the session.
+        const code = event.reason_code || event.reasonCode;
+        if (code === 'KEY_PACKAGE_OUTSIDE_VALIDITY_WINDOW' && !clockWarningShownRef.current) {
+          clockWarningShownRef.current = true;
+          Alert.alert(
+            'Check date and time',
+            "A nearby device's clock does not match this one, which can stop the two from setting up encryption. Turn on automatic date and time, or set it correctly, on both devices.",
+          );
+        }
+        break;
+      }
+
       case 'message_deferred': {
         const msgId = event.message_id || event.messageId;
         if (!msgId) {break;}
@@ -838,13 +863,12 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
   // ─── Initialize Protocol ─────────────────────────────────
 
-  const initialize = useCallback(async (uid: string, uname: string) => {
-    setUserId(uid);
+  const initialize = useCallback(async (uname: string) => {
     setUserName(uname);
 
     const config = {
       ...PROTOCOL_CONFIG,
-      profile: uid,
+      profile: PROFILE,
     };
 
     const proto = new OfflineProtocol(config);
@@ -856,6 +880,29 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
     // Start protocol
     await proto.start();
+
+    // This device's identity is the address derived from its key, and it is
+    // what every event names as sender, recipient and group member. The
+    // profile is only the keystore namespace. Using the profile here showed
+    // the wrong id in the header, listed this device twice in group rosters
+    // and misattributed its own group messages.
+    const address = await proto.localAddress();
+    if (address) {
+      userIdRef.current = address;
+      setUserId(address);
+    }
+
+    // Sessions outlive a restart now that the identity does, and a restored
+    // session raises no secure_session_established. Seed the set from the
+    // SDK, or a contact accepted after a restart is never marked as having a
+    // session, gets no presence, and reads as offline beside a live link.
+    try {
+      for (const peer of await proto.mlsListSessions()) {
+        sessionPeersRef.current.add(peer);
+      }
+    } catch (err) {
+      console.warn('[ProtocolContext] mlsListSessions failed:', err);
+    }
     setIsStarted(true);
 
     // Initialize mesh services
@@ -917,18 +964,14 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
     const interval = setInterval(() => {
       const now = Date.now();
-      setNeighbors(prev => {
-        let changed = false;
-        const next = new Map(prev);
-        for (const [peerId, neighbor] of next) {
-          if (now - neighbor.discoveredAt > NEARBY_THRESHOLD_MS * 2) {
-            next.delete(peerId);
-            changed = true;
-          }
-        }
-        return changed ? next : prev;
-      });
-
+      // Neighbours are not aged out here. The SDK announces a peer when its
+      // link comes up and reports neighbor_lost when the link ends, and it
+      // does not re-announce a peer while the link holds: a quiet Bluetooth
+      // or Wi-Fi Direct neighbour stays connected without new events. Aging
+      // the list on a timer hid live peers a minute after they appeared, so
+      // a connection request could not be sent to the phone in your hand.
+      // A Bluetooth loss is reported once reconnect attempts run out, which
+      // takes a few minutes.
       setContacts(prev => {
         let changed = false;
         const next = new Map(prev);

@@ -67,3 +67,21 @@ emulator have no working Bluetooth stack.
 
 Grant Bluetooth and (on Android) nearby-devices/location permissions when
 prompted, or discovery silently returns nothing.
+
+The address under your name in the header is this device's identity. It is
+the same on every launch, so contacts and encrypted sessions survive a restart.
+
+### Wi-Fi Direct (Android)
+
+Wi-Fi Direct is on by default on Android and works with Bluetooth off. On
+Android 10 and later the SDK forms the group itself (`autoAccept: true` in
+`src/constants.ts`): start the app on both phones and they find each other
+within about a minute, with no dialog to accept. On older phones, pair them
+once in the system settings (**Wi-Fi > Wi-Fi Direct**, or **Wi-Fi > Advanced >
+Wi-Fi Direct** on some phones). Allow **Nearby devices** (Android 13+) or
+**Location** (Android 12 and lower) when asked, or the transport stays off.
+
+If a connection request stays pending, check the date and time on both phones.
+Phones that have not been online often have the wrong date, and two devices
+whose clocks are far enough apart cannot set up encryption. The app shows a
+"Check date and time" alert when it sees this.

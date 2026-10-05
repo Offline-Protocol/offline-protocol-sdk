@@ -7,9 +7,11 @@ import {
   StyleSheet,
   Alert,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
 import {SafeAreaView} from 'react-native-safe-area-context';
-import {generateUserId, generateUserName, requestBluetoothPermissions, ensureBluetoothEnabled, showPermissionDeniedAlert} from '../utils';
+import {generateUserName, requestMeshPermissions, ensureBluetoothEnabled, showPermissionDeniedAlert} from '../utils';
+import {PROTOCOL_CONFIG} from '../constants';
 import {useProtocol} from '../context/ProtocolContext';
 
 interface OnboardingScreenProps {
@@ -29,16 +31,20 @@ export function OnboardingScreen({onComplete}: OnboardingScreenProps) {
 
     setIsLoading(true);
     try {
-      // Request Bluetooth permissions
-      const permResult = await requestBluetoothPermissions();
+      // Request Bluetooth (and, on Android, Wi-Fi Direct) permissions
+      const permResult = await requestMeshPermissions();
       if (!permResult.granted) {
         showPermissionDeniedAlert(permResult);
         setIsLoading(false);
         return;
       }
 
-      // Ensure Bluetooth is enabled
-      const btEnabled = await ensureBluetoothEnabled();
+      // Bluetooth is required only when it is the one transport. With Wi-Fi
+      // Direct on, the app works with Bluetooth off, which is how a Wi-Fi
+      // Direct link is tested on its own.
+      const wifiDirectOn =
+        Platform.OS === 'android' && PROTOCOL_CONFIG.transports.wifiDirect.enabled;
+      const btEnabled = wifiDirectOn || (await ensureBluetoothEnabled());
       if (!btEnabled) {
         Alert.alert(
           'Bluetooth Required',
@@ -49,8 +55,7 @@ export function OnboardingScreen({onComplete}: OnboardingScreenProps) {
       }
 
       // Initialize protocol
-      const userId = generateUserId();
-      await initialize(userId, name.trim());
+      await initialize(name.trim());
       onComplete();
     } catch (error) {
       console.error('Failed to start protocol:', error);

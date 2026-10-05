@@ -5,18 +5,6 @@ const {OfflineProtocolModule} = NativeModules;
 
 // ─── User ID & Name ──────────────────────────────────────────
 
-let cachedUserId: string | null = null;
-
-export function generateUserId(): string {
-  if (cachedUserId) {
-    return cachedUserId;
-  }
-  const timestamp = Date.now().toString(36);
-  const random = Math.random().toString(36).substring(2, 8);
-  cachedUserId = `user_${timestamp}_${random}`;
-  return cachedUserId;
-}
-
 export function generateUserName(): string {
   const adjectives = [
     'Swift', 'Bright', 'Clever', 'Quiet', 'Bold', 'Gentle', 'Wise', 'Kind',
@@ -142,7 +130,12 @@ const PERMISSION_LABELS: Record<string, string> = {
   [PermissionsAndroid.PERMISSIONS.ACCESS_COARSE_LOCATION]: 'Location',
 };
 
-export async function requestBluetoothPermissions(): Promise<PermissionResult> {
+/**
+ * Requests what the mesh needs. Bluetooth decides the result. The Wi-Fi Direct
+ * permissions are asked for on Android but are optional: denying them leaves
+ * Bluetooth working and the Wi-Fi Direct transport off.
+ */
+export async function requestMeshPermissions(): Promise<PermissionResult> {
   if (Platform.OS === 'ios') {
     return {granted: true, deniedPermissions: [], hasNeverAskAgain: false};
   }
@@ -167,7 +160,17 @@ export async function requestBluetoothPermissions(): Promise<PermissionResult> {
       );
     }
 
-    const results = await PermissionsAndroid.requestMultiple(permissions);
+    // Wi-Fi Direct: NEARBY_WIFI_DEVICES on Android 13+ (the SDK declares it
+    // neverForLocation), fine location below that, where peer discovery
+    // needs it. Not required, so not added to `permissions`.
+    const optional: Permission[] =
+      androidVersion >= 33
+        ? [PermissionsAndroid.PERMISSIONS.NEARBY_WIFI_DEVICES]
+        : androidVersion >= 31
+          ? [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION]
+          : [];
+
+    const results = await PermissionsAndroid.requestMultiple([...permissions, ...optional]);
     const deniedPermissions: string[] = [];
     let allGranted = true;
     let hasNeverAskAgain = false;
