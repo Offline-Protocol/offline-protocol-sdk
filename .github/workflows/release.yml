@@ -713,10 +713,10 @@ jobs:
         env:
           VERSION: ${{ needs.version-gate.outputs.VERSION }}
         run: |
-          PUBLISHED="bindings/kotlin/offline-protocol-android/build/maven/com/offlineprotocol/offline-protocol-android/$VERSION"
+          PUBLISHED="bindings/kotlin/offline-protocol-android/build/maven/com/offlineprotocol/offline-protocol-sdk/$VERSION"
           python3 -B scripts/check_android_aar.py \
-            "$PUBLISHED/offline-protocol-android-$VERSION.aar" \
-            --sources-jar "$PUBLISHED/offline-protocol-android-$VERSION-sources.jar" \
+            "$PUBLISHED/offline-protocol-sdk-$VERSION.aar" \
+            --sources-jar "$PUBLISHED/offline-protocol-sdk-$VERSION-sources.jar" \
             --require-natives
 
       - name: Build a minified application against the library
@@ -1693,7 +1693,7 @@ jobs:
   # scripts/publish-swift-package.sh here, taken from the release's tag.
   # ---------------------------------------------------------------------------
 
-  # com.offlineprotocol:offline-protocol-android, signed here with gpg from the
+  # com.offlineprotocol:offline-protocol-sdk, signed here with gpg from the
   # Maven repository the `android-library` job built and tested. The key never
   # enters a Gradle build.
   publish-maven:

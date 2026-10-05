@@ -285,7 +285,7 @@ afterEvaluate {
                 artifact(emptyJavadocJar)
 
                 groupId = "com.offlineprotocol"
-                artifactId = "offline-protocol-android"
+                artifactId = "offline-protocol-sdk"
                 version = libraryVersion.get()
 
                 pom {

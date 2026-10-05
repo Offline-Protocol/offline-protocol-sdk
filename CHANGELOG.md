@@ -267,7 +267,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   where they are: the transport managers, the storage providers and the
   generated bindings, less the five files that need React. The Swift package
   is `OfflineProtocolSDK`, assembled by `scripts/assemble-swift-package.sh`.
-  The Android library is `com.offlineprotocol:offline-protocol-android`,
+  The Android library is `com.offlineprotocol:offline-protocol-sdk`,
   built by the Gradle build in `bindings/kotlin`. CI builds and tests both
   on every pull request, and builds an application against each. A release
   publishes them (below). What is public in them is what the React Native
@@ -287,7 +287,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   (`offline-protocol-X.Y.Z-swift-package.tar.gz`), whose manifest names that
   archive by url and checksum. Then, each behind a repository variable, the
   library is signed and uploaded to Maven Central as
-  `com.offlineprotocol:offline-protocol-android`, and the wheels go to PyPI by
+  `com.offlineprotocol:offline-protocol-sdk`, and the wheels go to PyPI by
   trusted publishing; a dry run with Maven Central on uploads a deployment
   the Portal validates and then drops. The Swift package is pulled rather
   than pushed: `Offline-Protocol/offline-protocol-swift` has a workflow that

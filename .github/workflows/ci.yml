@@ -1110,10 +1110,10 @@ jobs:
 
       - name: Check what is inside the AAR and the sources jar
         run: |
-          PUBLISHED=bindings/kotlin/offline-protocol-android/build/maven/com/offlineprotocol/offline-protocol-android/0.0.0
+          PUBLISHED=bindings/kotlin/offline-protocol-android/build/maven/com/offlineprotocol/offline-protocol-sdk/0.0.0
           python3 -B scripts/check_android_aar.py \
-            "$PUBLISHED/offline-protocol-android-0.0.0.aar" \
-            --sources-jar "$PUBLISHED/offline-protocol-android-0.0.0-sources.jar"
+            "$PUBLISHED/offline-protocol-sdk-0.0.0.aar" \
+            --sources-jar "$PUBLISHED/offline-protocol-sdk-0.0.0-sources.jar"
 
       # One dependency line and nothing else, resolved from the repository
       # the step above wrote, in a release build that minifies. R8 stops on a

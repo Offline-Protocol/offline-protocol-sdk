@@ -46,7 +46,7 @@ API="${CENTRAL_API:-https://central.sonatype.com/api/v1/publisher}"
 REPOSITORY="${CENTRAL_REPOSITORY:-https://repo1.maven.org/maven2}"
 POLL_SECONDS="${POLL_SECONDS:-15}"
 POLLS="${POLLS:-120}"
-POM="$REPOSITORY/com/offlineprotocol/offline-protocol-android/$VERSION/offline-protocol-android-$VERSION.pom"
+POM="$REPOSITORY/com/offlineprotocol/offline-protocol-sdk/$VERSION/offline-protocol-sdk-$VERSION.pom"
 
 case "$MODE" in
   publish) PUBLISHING_TYPE=AUTOMATIC ;;
@@ -55,7 +55,7 @@ case "$MODE" in
 esac
 
 if [ "$MODE" = publish ] && curl -sSfI "$POM" >/dev/null 2>&1; then
-  echo "::notice title=Already on Maven Central::offline-protocol-android $VERSION is already on Maven Central, and a version there is permanent. Nothing uploaded."
+  echo "::notice title=Already on Maven Central::offline-protocol-sdk $VERSION is already on Maven Central, and a version there is permanent. Nothing uploaded."
   exit 0
 fi
 
@@ -70,7 +70,7 @@ trap 'rm -f "$RESPONSE"' EXIT
 # --fail-with-body keeps the Portal's explanation on a refusal.
 if ! curl -sS --fail-with-body -X POST -H "$AUTH" \
   -F "bundle=@$BUNDLE;type=application/octet-stream" \
-  "$API/upload?publishingType=$PUBLISHING_TYPE&name=offline-protocol-android-$VERSION" >"$RESPONSE"; then
+  "$API/upload?publishingType=$PUBLISHING_TYPE&name=offline-protocol-sdk-$VERSION" >"$RESPONSE"; then
   echo "The Portal refused the upload:" >&2
   cat "$RESPONSE" >&2
   echo >&2
@@ -101,7 +101,7 @@ for poll in $(seq 1 "$POLLS"); do
     VALIDATED)
       if [ "$MODE" = rehearse ]; then
         drop
-        echo "Rehearsed: Maven Central validated offline-protocol-android $VERSION, and the deployment was dropped."
+        echo "Rehearsed: Maven Central validated offline-protocol-sdk $VERSION, and the deployment was dropped."
         exit 0
       fi
       ;;
@@ -109,7 +109,7 @@ for poll in $(seq 1 "$POLLS"); do
       [ "$MODE" = publish ] || die "a rehearsal deployment is $STATE: it was uploaded as $PUBLISHING_TYPE and should not publish"
       # Validated and released. Central takes a while longer to make it
       # readable; nothing after this point can stop it.
-      echo "offline-protocol-android $VERSION is $STATE on Maven Central."
+      echo "offline-protocol-sdk $VERSION is $STATE on Maven Central."
       exit 0
       ;;
     PENDING | VALIDATING) ;;

@@ -250,7 +250,7 @@ One number identifies a release across every channel: the `vX.Y.Z` git tag, the
 `@offline-protocol/mesh-sdk` npm package, the `offline-protocol*` crates on
 crates.io, the GitHub release assets (the Python wheels among them), the Swift
 package's `X.Y.Z` tag in `Offline-Protocol/offline-protocol-swift`,
-`com.offlineprotocol:offline-protocol-android` on Maven Central, and
+`com.offlineprotocol:offline-protocol-sdk` on Maven Central, and
 `offline-protocol-sdk` on PyPI. Pushing the tag is what publishes, so
 everything below happens on a `chore/release-X.Y.Z` branch that merges first.
 The last three are switched on one by one, and the Swift package is pulled
