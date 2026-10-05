@@ -19,6 +19,7 @@ CHECKER = REPO / "scripts" / "check_android_aar.py"
 MANIFEST = """<manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.offlineprotocol">
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"/>
     <application>
         <service android:name="com.offlineprotocol.MeshForegroundService"/>
     </application>
@@ -169,7 +170,8 @@ class CheckTests(unittest.TestCase):
 
     def test_a_required_entry_in_a_comment_is_missing(self):
         for name in ("com.offlineprotocol.MeshForegroundService",
-                     "android.permission.BLUETOOTH_CONNECT"):
+                     "android.permission.BLUETOOTH_CONNECT",
+                     "android.permission.NEARBY_WIFI_DEVICES"):
             manifest = re.sub(rf'(<[^<]*"{re.escape(name)}"[^>]*>)', r"<!-- \1 -->", MANIFEST)
             self.assertIn("<!--", manifest)
             problems = check(aar(manifest=manifest), require_natives=False)

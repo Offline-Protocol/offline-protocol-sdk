@@ -51,6 +51,8 @@ FORBIDDEN_IN_MANIFEST = (
 REQUIRED_IN_MANIFEST = (
     ("service", "com.offlineprotocol.MeshForegroundService"),
     ("uses-permission", "android.permission.BLUETOOTH_CONNECT"),
+    # Without it Wi-Fi Direct reports itself unavailable on Android 13+.
+    ("uses-permission", "android.permission.NEARBY_WIFI_DEVICES"),
 )
 
 # The rules an application's R8 needs, or its release build loses the FFI, or

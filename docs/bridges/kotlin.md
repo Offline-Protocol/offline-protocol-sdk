@@ -137,7 +137,9 @@ so the two-dialler tie that the lower-address rule settles cannot occur. A
 client whose stream ends while the group is up reconnects on a doubling
 delay, always to the owner the group has at that moment: on a group switch
 the new owner's first dial can lose to the old stream still closing, and the
-redial is then the only one left. The manager does not form a group; it joins one the system formed.
+redial is then the only one left. The manager does not form a group; it joins one the system formed,
+including one that formed before it started: since Android 10 the connection broadcast is not sticky,
+so the manager asks for the group once it is running.
 
 `PeerStreamSocketsTest` and `PeerStreamFramingTest` pin it, the latter
 replaying the chapter's vectors. The group handling itself is not covered in

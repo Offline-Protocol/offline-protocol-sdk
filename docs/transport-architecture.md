@@ -173,8 +173,9 @@ transport.
   and `PeerStreamSockets` for everything the chapter asks of that socket.
   The manager does not form a group itself: one formed from the system's
   Wi-Fi Direct settings (or by another app) is joined when
-  `WIFI_P2P_CONNECTION_CHANGED_ACTION` reports it, and a client reconnects
-  to its group owner while the group lasts.
+  `WIFI_P2P_CONNECTION_CHANGED_ACTION` reports it, or at start when it
+  already exists (the broadcast is not sticky since Android 10), and a client
+  reconnects to its group owner while the group lasts.
 - iOS: Network framework TCP streams, on the LAN or over AWDL, with
   `PeerStreamReader` cutting frames and `PeerStreamSession` for the
   per-stream rules. It advertises and browses `_offlineprotocol._tcp` with

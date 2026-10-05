@@ -112,7 +112,8 @@ transports: {
 
 ### 4.2 Wi‑Fi Direct (Android)
 
-- Permissions: `NEARBY_WIFI_DEVICES` (Android 13+), `ACCESS_FINE_LOCATION`, `CHANGE_WIFI_STATE`.
+- Permissions: the SDK declares `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE` and `NEARBY_WIFI_DEVICES` (with `neverForLocation`). Request `NEARBY_WIFI_DEVICES` at runtime on Android 13+, and `ACCESS_FINE_LOCATION` on Android 12 and lower, where peer discovery needs it.
+- `wifiDirect: { enabled: true }` starts the transport in `start()`.
 - Config: `wifiDirect: { enabled: true, autoAccept: true, groupOwnerIntent: 10 }`.
 
 ### 4.3 Internet

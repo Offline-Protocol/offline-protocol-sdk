@@ -16304,6 +16304,97 @@ mod tests {
         }
     }
 
+    /// The Android Wi-Fi Direct send callback is registered for the slot, not
+    /// for a manager that does not exist yet.
+    ///
+    /// `wireTransportCallbacks` runs at `create`, and the module builds its
+    /// Wi-Fi Direct manager only later, inside `enableTransport`. Gated on
+    /// `wifiDirectManager?.let`, the registration never happened in any app,
+    /// and every body and every acknowledgement on the transport waited for the
+    /// manager's 2s fallback poll: a median of about three seconds per delivery
+    /// between two phones, against under a tenth of a second with the callback.
+    /// Nothing failed, it was only slow, which is why only this catches it. The
+    /// callback resolves the manager when it fires, so a manager that
+    /// `enableTransport` replaces needs no second registration, and the field
+    /// it reads from the core's thread is volatile.
+    #[test]
+    fn react_native_android_wifi_direct_callback_does_not_wait_for_a_manager() {
+        let code = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+        );
+        for (what, pinned) in [
+            (
+                "the registration, gated on the slot",
+                "if (currentConfig?.wifiDirectEnabled == true) { try { \
+                 proto.setWifiDirectTransportCallback(object : \
+                 uniffi.offline_protocol.WifiDirectTransportCallback { override fun \
+                 onMessagesAvailable() { wifiDirectManager?.onMessagesAvailable() } })",
+            ),
+            (
+                "the field the callback reads",
+                "@Volatile private var wifiDirectManager: WifiDirectManager? = null",
+            ),
+        ] {
+            assert!(
+                code.contains(pinned),
+                "OfflineProtocolModule.kt: {what}. A Wi-Fi Direct callback that waits for a \
+                 manager is never registered, because the manager is built after create, and \
+                 the transport falls back to its 2s poll. Expected to find:\n  {pinned}"
+            );
+        }
+        assert!(
+            !code.contains(
+                "wifiDirectManager?.let { manager -> try { proto.setWifiDirectTransportCallback"
+            ),
+            "OfflineProtocolModule.kt registers the Wi-Fi Direct callback only when a manager \
+             already exists, which at create time it never does"
+        );
+    }
+
+    /// The Android Wi-Fi Direct manager joins a group that formed before it
+    /// started.
+    ///
+    /// Since Android 10 `WIFI_P2P_CONNECTION_CHANGED_ACTION` is not sticky, so a
+    /// receiver registered at start hears nothing about a group that already
+    /// exists, and the group belongs to the system, not the process. An app
+    /// restarted while still grouped neither listened as owner nor dialled as
+    /// client, and stayed unreachable until someone tore the group down in the
+    /// system settings. Seen on two phones (Android 13 and 15) after every app
+    /// restart. The manager asks once, after it is running.
+    #[test]
+    fn react_native_android_wifi_direct_joins_a_group_formed_before_start() {
+        let code =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        for (what, pinned) in [
+            (
+                "startUnsafe asks, once it is running",
+                "transportHandler.post(messagePollingRunnable) adoptExistingGroup()",
+            ),
+            (
+                "the question and what an answer does",
+                "private fun adoptExistingGroup() { \
+                 wifiP2pManager?.requestConnectionInfo(channel) { info -> if \
+                 (info?.groupFormed == true && state == TransportState.RUNNING) {",
+            ),
+        ] {
+            assert!(
+                code.contains(pinned),
+                "WifiDirectManager.kt: {what}. Without it an app restarted inside a Wi-Fi \
+                 Direct group never joins it. Expected to find:\n  {pinned}"
+            );
+        }
+        let adopt = code
+            .split("private fun adoptExistingGroup()")
+            .nth(1)
+            .and_then(|rest| rest.split("private fun ").next())
+            .expect("adoptExistingGroup exists");
+        assert!(
+            adopt.contains("handleConnectionChanged(true)"),
+            "adoptExistingGroup must hand a formed group to handleConnectionChanged, the one \
+             path that listens as owner and dials as client"
+        );
+    }
+
     /// No Android transport callback from Rust may wait on a confinement thread.
     ///
     /// **Android only, and deliberately so** — the title names the platform
