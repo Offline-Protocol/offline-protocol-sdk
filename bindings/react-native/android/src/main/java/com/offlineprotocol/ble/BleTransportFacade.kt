@@ -14,6 +14,7 @@ import android.os.ParcelUuid
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.offlineprotocol.BleAppTag
+import com.offlineprotocol.BleDensityPolicy
 import com.offlineprotocol.BleDiscoveryBootstrapPolicy
 import com.offlineprotocol.TransportException
 import com.offlineprotocol.TransportManager
@@ -737,6 +738,14 @@ class BleTransportFacade(
     private val globalConnectionAttempts = Collections.synchronizedList(mutableListOf<Long>())
     /** Current estimated visible peer count */
     @Volatile private var estimatedVisiblePeerCount: Int = 0
+    /** Last time each mesh candidate (an address the discovery gate admitted) was seen */
+    private val recentMeshCandidates = ConcurrentHashMap<String, Long>()
+    /**
+     * Mesh peers in range, for the dense-mesh filters. [estimatedVisiblePeerCount]
+     * counts every advert in range and stays the measure of how busy the air is
+     * for probing unknown devices; it is not a count of mesh peers.
+     */
+    @Volatile private var estimatedMeshPeerCount: Int = 0
     /** Last time we updated the peer count estimate */
     @Volatile private var lastPeerCountUpdate: Long = 0L
     @Volatile private var lastMeshAdvertisement: MeshAdvertisementData? = null
@@ -1403,6 +1412,8 @@ class BleTransportFacade(
         verifiedNonMeshDevices.clear()
         unknownBootstrapAttempts.clear()
         recentAdvertisementHashes.clear()
+        recentMeshCandidates.clear()
+        estimatedMeshPeerCount = 0
         scanRestartCount = 0
         lastAdapterReset = 0L
         adapterWasOff = false
@@ -1675,6 +1686,59 @@ class BleTransportFacade(
         }, delay)
     }
     
+    /**
+     * Bluetooth went off under a running transport: report every identified
+     * peer lost, then drop the link state, as iOS's dropLinksAfterRadioLoss
+     * does. Android delivers no disconnect callback for most of those links,
+     * and each BluetoothGatt still holds a client registration the stack has
+     * forgotten. Left in place, the dead links counted against the connection
+     * cap, kept their peers mapped to addresses they no longer use, and leaked
+     * one registration per link on every toggle (one phone held five).
+     * Peers that come back are found and verified again from scratch.
+     *
+     * Runs once per outage, on the BLE thread, where both adapter-off checks
+     * in [startScanning] run.
+     */
+    private fun dropLinksAfterRadioLoss() {
+        val peerIds = connections.deviceIds()
+        for (peerId in peerIds) {
+            try {
+                protocol.blePeerLost(peerId)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error notifying peer lost", e)
+            }
+            meshController.registerDisconnection(peerId)
+        }
+        connections.forEachGatt { gatt ->
+            try {
+                gatt.close()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error closing GATT client", e)
+            }
+        }
+        connections.clear()
+        lastSeenRssi.clear()
+        pendingInbound.clear()
+        outboundQueue.clear()
+        peerMaxPayloads.clear()
+        peripheralMaxPayloads.clear()
+        centralPayloadByDevice.clear()
+        peripheralPayloadByDevice.clear()
+        writeInFlight.clear()
+        centralClient.clearAll()
+        lastSeenMeshAdvertisements.clear()
+        // A peer probed while its radio was coming back serves no mesh
+        // service yet; cached as non-mesh, it was skipped for five minutes.
+        verifiedNonMeshDevices.clear()
+        unknownBootstrapAttempts.clear()
+        recentAdvertisementHashes.clear()
+        recentMeshCandidates.clear()
+        estimatedMeshPeerCount = 0
+        refreshSelfMetrics()
+        Log.i(TAG, "Bluetooth went off: dropped ${peerIds.size} peer link(s)")
+        emitDiagnostic("info", "Dropped Bluetooth links after the radio went off", mapOf("peers" to peerIds.size))
+    }
+
     private fun startScanning(reason: String = "manual") {
         if (isScanning) {
             if (logThrottler.shouldLog("scan_already_running")) {
@@ -1691,6 +1755,7 @@ class BleTransportFacade(
         // below for the genuine race (the adapter can still go off between this
         // check and the call).
         if (bluetoothAdapter?.isEnabled != true) {
+            if (!adapterWasOff) dropLinksAfterRadioLoss()
             adapterWasOff = true
             scheduleBleRecovery()
             reportBleAvailability(false, "adapter_off")
@@ -1828,6 +1893,7 @@ class BleTransportFacade(
                 // a BLE-thread `check`, a throwing diagnostic emitter — still
                 // fails loud instead of being reported as an adapter-off.
                 scanCallback = null
+                if (!adapterWasOff) dropLinksAfterRadioLoss()
                 adapterWasOff = true
                 scheduleBleRecovery()
                 reportBleAvailability(false, "adapter_off_race")
@@ -2184,17 +2250,25 @@ class BleTransportFacade(
         if (!shouldProcessDiscoveredDevice(address, scanRecord, rssi, isConnectable, now)) {
             return
         }
-        
+
+        // Counted after the gate, which is what makes this a mesh candidate
+        // rather than any Bluetooth device in range, and above the two filters
+        // below, which shed work and must not hide the peers they skip.
+        estimatedMeshPeerCount = maxOf(
+            BleDensityPolicy.recordAndCount(recentMeshCandidates, address, now, ADAPTIVE_PEER_COUNT_WINDOW_MS),
+            lastSeenMeshAdvertisements.size,
+        )
+
         // Adaptive scanning: early RSSI filtering in dense networks
         if (shouldFilterByRssi(rssi)) {
             if (logThrottler.shouldLog("adaptive_rssi_filter", intervalMs = 10000)) {
-                Log.d(TAG, "Adaptive: filtering weak signal (${rssi}dBm) in dense network ($estimatedVisiblePeerCount peers)")
+                Log.d(TAG, "Adaptive: filtering weak signal (${rssi}dBm) in dense network ($estimatedMeshPeerCount peers)")
             }
             return
         }
         
         // Adaptive scanning: probabilistic filtering in very dense networks
-        if (shouldProbabilisticallySkip(address)) {
+        if (shouldProbabilisticallySkip(address, now)) {
             return // Silently skip to reduce log spam in dense networks
         }
         
@@ -2207,7 +2281,7 @@ class BleTransportFacade(
             discoveryLogTimestamps[address] = now
             val hasServiceUuid = serviceUuids?.any { it.uuid == SERVICE_UUID } == true
             val hasServiceData = serviceData != null
-            Log.d(TAG, "Discovered device $address RSSI=$rssi (density: $estimatedVisiblePeerCount, hasServiceUuid: $hasServiceUuid, hasServiceData: $hasServiceData)")
+            Log.d(TAG, "Discovered device $address RSSI=$rssi (density: $estimatedVisiblePeerCount, mesh: $estimatedMeshPeerCount, hasServiceUuid: $hasServiceUuid, hasServiceData: $hasServiceData)")
             emitDiagnostic(
                 "info",
                 "Discovered BLE device",
@@ -2216,6 +2290,7 @@ class BleTransportFacade(
                     "rssi" to rssi,
                     "connectable" to isConnectable,
                     "visiblePeers" to estimatedVisiblePeerCount,
+                    "meshPeers" to estimatedMeshPeerCount,
                     "hasServiceUuid" to hasServiceUuid,
                     "hasServiceData" to hasServiceData,
                     "serviceUuids" to (serviceUuids?.map { it.uuid.toString() } ?: emptyList())
@@ -3735,8 +3810,8 @@ class BleTransportFacade(
         
         // In dense networks, apply stricter RSSI filtering
         val threshold = when {
-            estimatedVisiblePeerCount > ADAPTIVE_HIGH_DENSITY_THRESHOLD -> -70
-            estimatedVisiblePeerCount > ADAPTIVE_LOW_DENSITY_THRESHOLD -> ADAPTIVE_MIN_RSSI
+            estimatedMeshPeerCount > ADAPTIVE_HIGH_DENSITY_THRESHOLD -> -70
+            estimatedMeshPeerCount > ADAPTIVE_LOW_DENSITY_THRESHOLD -> ADAPTIVE_MIN_RSSI
             else -> return false // Sparse network - accept all signals
         }
         return rssi < threshold
@@ -3778,7 +3853,7 @@ class BleTransportFacade(
         }
 
         // In dense networks, apply global rate limiting
-        if (estimatedVisiblePeerCount > ADAPTIVE_LOW_DENSITY_THRESHOLD) {
+        if (estimatedMeshPeerCount > ADAPTIVE_LOW_DENSITY_THRESHOLD) {
             if (globalAttemptCount >= ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE) {
                 if (logThrottler.shouldLog("adaptive_rate_limit", intervalMs = 5000)) {
                     Log.d(TAG, "Adaptive: rate limiting connections ($globalAttemptCount/$ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE in last minute)")
@@ -3796,23 +3871,15 @@ class BleTransportFacade(
         globalConnectionAttempts.add(now)
     }
     
-    /** Returns true if we should apply probabilistic filtering based on network density. */
-    private fun shouldProbabilisticallySkip(address: String): Boolean {
-        if (estimatedVisiblePeerCount <= ADAPTIVE_LOW_DENSITY_THRESHOLD) {
-            return false
-        }
-        
-        // Calculate skip probability based on density
-        val density = (estimatedVisiblePeerCount - ADAPTIVE_LOW_DENSITY_THRESHOLD).toDouble()
-        val range = (ADAPTIVE_HIGH_DENSITY_THRESHOLD - ADAPTIVE_LOW_DENSITY_THRESHOLD).toDouble()
-        val skipProbability = minOf(0.8, density / range * 0.8)
-        
-        // Use address hash for deterministic selection
-        val hash = address.hashCode()
-        val normalizedHash = (kotlin.math.abs(hash) % 1000) / 1000.0
-        
-        return normalizedHash < skipProbability
-    }
+    /** Returns true if a dense mesh should pass over [address] for now; see [BleDensityPolicy]. */
+    private fun shouldProbabilisticallySkip(address: String, now: Long): Boolean =
+        BleDensityPolicy.shouldSkip(
+            address = address,
+            meshPeerCount = estimatedMeshPeerCount,
+            now = now,
+            lowThreshold = ADAPTIVE_LOW_DENSITY_THRESHOLD,
+            highThreshold = ADAPTIVE_HIGH_DENSITY_THRESHOLD,
+        )
 
     private fun addressForNodeHash(nodeHash: Long): String? {
         return lastSeenMeshAdvertisements.entries.firstOrNull {

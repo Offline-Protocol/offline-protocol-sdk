@@ -381,6 +381,12 @@ public class BleManager: NSObject, TransportManager {
     private var globalConnectionAttempts: [Date] = []
     /// Current estimated visible peer count
     private var estimatedVisiblePeerCount: Int = 0
+    /// Last time each mesh candidate (a peripheral the discovery gate admitted) was seen
+    private var recentMeshCandidates: [String: Date] = [:]
+    /// Mesh peers in range, for the dense-mesh filters. `estimatedVisiblePeerCount`
+    /// counts every discovery in range and stays the measure of how busy the
+    /// air is for probing unknown peripherals; it is not a count of mesh peers.
+    private var estimatedMeshPeerCount: Int = 0
     /// Last time we updated the peer count estimate
     private var lastPeerCountUpdate: Date?
     private let SCAN_HEARTBEAT_INTERVAL: TimeInterval = 10.0
@@ -810,6 +816,8 @@ public class BleManager: NSObject, TransportManager {
         unknownBootstrapAttempts.removeAll()
         verifiedNonMeshDevices.removeAll()
         recentAdvertisementHashes.removeAll()
+        recentMeshCandidates.removeAll()
+        estimatedMeshPeerCount = 0
         notifyLock.lock()
         subscribedCentralsById.removeAll()
         notifyLock.unlock()
@@ -2390,10 +2398,10 @@ public class BleManager: NSObject, TransportManager {
         
         // In dense networks, apply stricter RSSI filtering
         let threshold: Int16
-        if estimatedVisiblePeerCount > ADAPTIVE_HIGH_DENSITY_THRESHOLD {
+        if estimatedMeshPeerCount > ADAPTIVE_HIGH_DENSITY_THRESHOLD {
             // Very dense - only consider strong signals
             threshold = -70
-        } else if estimatedVisiblePeerCount > ADAPTIVE_LOW_DENSITY_THRESHOLD {
+        } else if estimatedMeshPeerCount > ADAPTIVE_LOW_DENSITY_THRESHOLD {
             // Moderately dense - standard threshold
             threshold = ADAPTIVE_MIN_RSSI
         } else {
@@ -2435,7 +2443,7 @@ public class BleManager: NSObject, TransportManager {
         }
         
         // In dense networks, apply global rate limiting
-        if estimatedVisiblePeerCount > ADAPTIVE_LOW_DENSITY_THRESHOLD {
+        if estimatedMeshPeerCount > ADAPTIVE_LOW_DENSITY_THRESHOLD {
             let maxAttempts = ADAPTIVE_MAX_CONNECTIONS_PER_MINUTE
             if globalConnectionAttempts.count >= maxAttempts {
                 if logThrottler.shouldLog(key: "adaptive_rate_limit", interval: 5) {
@@ -2454,25 +2462,15 @@ public class BleManager: NSObject, TransportManager {
         globalConnectionAttempts.append(now)
     }
     
-    /// Returns true if we should apply probabilistic filtering based on network density.
-    /// Uses deterministic pseudo-randomness based on peripheral ID to ensure consistency.
-    private func shouldProbabilisticallySkip(_ peripheral: UUID) -> Bool {
-        guard estimatedVisiblePeerCount > ADAPTIVE_LOW_DENSITY_THRESHOLD else {
-            return false
-        }
-        
-        // Calculate skip probability based on density
-        // At 50+ peers, skip ~80% of evaluations
-        // At 10-50 peers, scale linearly
-        let density = Double(estimatedVisiblePeerCount - ADAPTIVE_LOW_DENSITY_THRESHOLD)
-        let range = Double(ADAPTIVE_HIGH_DENSITY_THRESHOLD - ADAPTIVE_LOW_DENSITY_THRESHOLD)
-        let skipProbability = min(0.8, density / range * 0.8)
-        
-        // Use peripheral UUID hash for deterministic selection
-        let hash = peripheral.hashValue
-        let normalizedHash = Double(abs(hash) % 1000) / 1000.0
-        
-        return normalizedHash < skipProbability
+    /// Returns true if a dense mesh should pass over `peripheral` for now; see `BleDensityPolicy`.
+    private func shouldProbabilisticallySkip(_ peripheral: UUID, now: Date) -> Bool {
+        BleDensityPolicy.shouldSkip(
+            id: peripheral.uuidString,
+            meshPeerCount: estimatedMeshPeerCount,
+            now: now,
+            lowThreshold: ADAPTIVE_LOW_DENSITY_THRESHOLD,
+            highThreshold: ADAPTIVE_HIGH_DENSITY_THRESHOLD
+        )
     }
     
     // MARK: - Smart Filtering for iOS ↔ Android Interoperability
@@ -3048,11 +3046,10 @@ extension BleManager: CBCentralManagerDelegate {
         // This is the observation the restoration age-out is built on: "this
         // app was scanning, and it saw this peripheral." Both filters below
         // are load shedding — they drop work, not observations — and
-        // `shouldProbabilisticallySkip` keys on `peripheral.hashValue`, which
-        // Swift seeds once per process. Recording after them would therefore
-        // hide a FIXED subset of the visible peers, up to 80% of them in a
-        // scan that reads as dense, for the whole life of the process, while
-        // their neighbours moved the age-out cutoff forward every second.
+        // `shouldProbabilisticallySkip` passes over up to 80% of the visible
+        // peers for a minute at a time in a scan that reads as dense.
+        // Recording after them would therefore hide those peers while their
+        // neighbours moved the age-out cutoff forward every second.
         // Those peers would read as "went quiet while we were watching" at the
         // next restoration and lose the pending connect that is the only way
         // iOS wakes this app when one of them reappears — although they had
@@ -3065,16 +3062,24 @@ extension BleManager: CBCentralManagerDelegate {
         // would spend the 200-entry cap on passing headphones.
         peripheralRestorationPolicy.recordSeen(uuid: peripheral.identifier, at: now, source: .advertisement)
 
+        // Mesh density is counted here too, for the same reasons: after the
+        // gate, so it counts mesh candidates and not every Bluetooth device in
+        // range, and above the filters it drives.
+        estimatedMeshPeerCount = max(
+            BleDensityPolicy.recordAndCount(&recentMeshCandidates, id: peripheral.identifier.uuidString, now: now, window: ADAPTIVE_PEER_COUNT_WINDOW),
+            lastSeenMeshAdvertisements.count
+        )
+
         // Adaptive scanning: early RSSI filtering in dense networks
         if shouldFilterByRssi(rssiValue) {
             if logThrottler.shouldLog(key: "adaptive_rssi_filter", interval: 10) {
-                print("[BleManager] Adaptive: filtering weak signal (\(rssiValue)dBm) in dense network (\(estimatedVisiblePeerCount) peers)")
+                print("[BleManager] Adaptive: filtering weak signal (\(rssiValue)dBm) in dense network (\(estimatedMeshPeerCount) peers)")
             }
             return
         }
         
         // Adaptive scanning: probabilistic filtering in very dense networks
-        if shouldProbabilisticallySkip(peripheral.identifier) {
+        if shouldProbabilisticallySkip(peripheral.identifier, now: now) {
             return // Silently skip to reduce log spam in dense networks
         }
         

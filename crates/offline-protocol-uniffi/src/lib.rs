@@ -14074,11 +14074,11 @@ mod tests {
         // A sighting recorded after a filter inherits that filter's semantics,
         // and neither filter below the `shouldProcess` gate is about whether
         // the peripheral was observed: both are load shedding, dropping work
-        // rather than observations. `shouldProbabilisticallySkip` keys on
-        // `peripheral.hashValue`, which Swift seeds once per process, so a
-        // sighting recorded after it would miss a FIXED subset of the visible
-        // peers for the whole life of the process, while their neighbours moved
-        // the cutoff forward every second. Those peers read as "went quiet
+        // rather than observations. `shouldProbabilisticallySkip` passes over
+        // up to 80% of the visible peers for a minute at a time (before
+        // BleDensityPolicy it was a FIXED subset for the life of the process),
+        // so a sighting recorded after it would miss those peers while their
+        // neighbours moved the cutoff forward every second. Those peers read as "went quiet
         // while we were watching" at the next restoration and lose the pending
         // connect that is the only way iOS wakes this app when they reappear,
         // although they were advertising throughout. Same class as anchoring to
@@ -14099,7 +14099,7 @@ mod tests {
         );
         for filter in [
             "if shouldFilterByRssi(rssiValue) {",
-            "if shouldProbabilisticallySkip(peripheral.identifier) {",
+            "if shouldProbabilisticallySkip(peripheral.identifier, now: now) {",
         ] {
             let filter_at = discover_body
                 .find(filter)
@@ -14108,8 +14108,8 @@ mod tests {
                 sighting_at < filter_at,
                 "ORDERING INVARIANT: the `.advertisement` sighting must be recorded BEFORE \
                  `{filter}`. That filter sheds load, it does not decide whether the peripheral \
-                 was seen, and the probabilistic one is keyed on a per-process hash seed — so \
-                 recording after it silently hides a fixed subset of peers that were \
+                 was seen, and the probabilistic one passes over up to 80% of the peers for a \
+                 minute at a time, so recording after it silently hides peers that were \
                  advertising the whole time and cancels their pending connects at the next \
                  restoration"
             );

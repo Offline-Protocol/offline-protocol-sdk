@@ -790,6 +790,25 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   slice is held to 14.0, the oldest system that simulator has. The SDK's own
   Rust code is compiled for the pod's target as well, where it was compiled
   for the Rust target's floor of iOS 10.
+- **Two phones in a room full of other Bluetooth devices find each other.**
+  The dense-mesh filters on iOS and Android counted every advert in range,
+  televisions, earbuds and watches included, as mesh density, and in a
+  "dense" mesh they passed over up to 80% of the peers, chosen by a hash of
+  the peer's address alone. On two Android phones a metre apart in a house,
+  the estimate read 32, and each passed the other over on every advert for
+  the fifteen minutes they were watched. Density now counts the distinct
+  mesh candidates seen in the last five seconds, so a few phones never read
+  as dense, and a peer passed over in a crowded mesh is reconsidered after a
+  minute. Both platforms make the same choice for the same peer.
+- **Android: Bluetooth switched off and on drops its dead links.** Android
+  delivers no disconnect for most links when the adapter goes off, so the
+  dead links stayed: they counted against the connection cap, kept peers
+  mapped to addresses they no longer use, and each held a GATT client
+  registration (one phone held five stale ones after a session of toggles,
+  against a stack limit of about thirty). A peer probed while its
+  radio was coming back was also cached as "not a mesh device" for five
+  minutes. The transport now reports each peer lost and clears the link
+  state when it sees the adapter off, as iOS already did.
 
 ### Changed
 

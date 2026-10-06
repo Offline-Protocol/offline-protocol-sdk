@@ -74,6 +74,9 @@ class MeshConnectionRegistry {
 
     fun hasDeviceForAddress(address: String): Boolean = addressToDevice.containsKey(address)
 
+    /** Every peer identified on some link, once each. */
+    fun deviceIds(): Set<String> = addressToDevice.values.toSet()
+
     fun discoveredPeerCount(): Int = addressToDevice.size
 
     fun setPendingRole(address: String, role: MeshRole) {
