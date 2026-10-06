@@ -14263,6 +14263,68 @@ mod tests {
         );
     }
 
+    /// A peer whose links all closed cleanly stayed a Bluetooth neighbour until
+    /// the central reconnect backoff gave up, about two minutes, and a peer
+    /// reached only through our GATT server stayed one indefinitely (#513).
+    /// The facade now reports it lost once no link to it has been up for
+    /// `PEER_LOST_GRACE_MS`. `BleTransportFacade` has no test harness, so this
+    /// pins the wiring: both disconnect paths start the grace, the report
+    /// re-checks for an established link first, and both teardowns cancel
+    /// whatever is pending so a stopped transport reports nothing.
+    #[test]
+    fn react_native_android_ble_bounds_how_long_a_peer_with_no_link_stays_a_neighbor() {
+        let facade = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+        let central = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/CentralGattClient.kt",
+        );
+        let section = |source: &str, start: &str| -> String {
+            let from = source
+                .find(start)
+                .unwrap_or_else(|| panic!("missing {start}"));
+            let rest = &source[from + start.len()..];
+            let end = rest.find("\n    private fun ").unwrap_or(rest.len());
+            rest[..end].to_string()
+        };
+
+        assert!(
+            facade.contains("private const val PEER_LOST_GRACE_MS = 15_000L"),
+            "the grace is 15 s: long enough for one reconnect to land"
+        );
+        assert!(
+            section(&facade, "private fun handleCentralDisconnectedOnBleThread(")
+                .contains("schedulePeerLostGrace("),
+            "a clean server-side disconnect must start the grace, or a server-only peer is never \
+             reported lost"
+        );
+        assert!(
+            section(&central, "private fun handleDisconnected(")
+                .contains("host.onPeerLinkDropped("),
+            "a client link that drops into the reconnect backoff must start the grace"
+        );
+        let schedule = section(&facade, "private fun schedulePeerLostGrace(");
+        let check = schedule
+            .rfind("connections.hasEstablishedLink(peerId)")
+            .expect("the report must re-check for a link that came back");
+        let report = schedule
+            .find("reportPeerLostAfterGrace(peerId)")
+            .expect("the grace must end in a report");
+        assert!(
+            check < report,
+            "re-check for a link before reporting the peer lost"
+        );
+        for teardown in [
+            "private fun stopUnsafe(",
+            "private fun dropLinksAfterRadioLoss(",
+        ] {
+            assert!(
+                section(&facade, teardown).contains("cancelAllPeerLostGrace()"),
+                "{teardown} must cancel pending peer-lost reports"
+            );
+        }
+    }
+
     /// Android hears Bluetooth go off and come back from the adapter's state
     /// broadcast, not only from a failed scan start. Polled once a minute, the
     /// transport missed a Bluetooth stack crash entirely (the stack restarts

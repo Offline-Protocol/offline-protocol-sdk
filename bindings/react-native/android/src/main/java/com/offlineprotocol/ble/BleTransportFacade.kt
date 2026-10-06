@@ -300,6 +300,14 @@ class BleTransportFacade(
          *  device. Reconnect backoff on disconnect is owned by
          *  [CentralGattClient] and lives there too. */
         private const val MIN_RECONNECT_INTERVAL_MS = 5_000L
+        /** How long a peer with no link left stays a neighbour before it is
+         *  reported lost, while reconnects carry on behind it. Links that close
+         *  cleanly (status 0 or 19) used to keep the peer until the central
+         *  reconnect backoff gave up, about two minutes, and a server-only peer
+         *  indefinitely: a phone whose Bluetooth went off was still listed
+         *  "nearby" after 69 seconds (#513). Long enough for one reconnect
+         *  attempt to land, so a short blip reports nothing. */
+        private const val PEER_LOST_GRACE_MS = 15_000L
         
         // Adaptive Scan Configuration
         /** Minimum RSSI to consider for connection (filter weak signals early) - matches iOS */
@@ -542,7 +550,13 @@ class BleTransportFacade(
                     // Already on the BLE thread — handleDeviceIdRead runs on the
                     // BLE thread, so no hop is needed.
                     if (shuttingDown) return
+                    cancelPeerLostGrace(deviceId)
                     flushPeerMtu(address, deviceId)
+                }
+
+                override fun onPeerLinkDropped(peerId: String) {
+                    if (shuttingDown) return
+                    schedulePeerLostGrace(peerId)
                 }
 
                 override fun onPeerGivenUp(address: String, peerId: String) {
@@ -562,6 +576,7 @@ class BleTransportFacade(
                     // scope here. A surviving link self-heals: its next inbound
                     // fragment re-stages the MTU via onPeripheralMtuNegotiated.
                     if (shuttingDown) return
+                    cancelPeerLostGrace(peerId)
                     dropStagedPeerMtu(address, peerId)
                 }
 
@@ -650,6 +665,9 @@ class BleTransportFacade(
     // link's teardown. BLE-thread only.
     private val centralPayloadByDevice = HashMap<String, Int>()
     private val peripheralPayloadByDevice = HashMap<String, Int>()
+    // Pending peer-lost reports, one per peer whose last link went down
+    // ([PEER_LOST_GRACE_MS]). BLE-thread only.
+    private val peerLostGrace = HashMap<String, Runnable>()
     private val discoveryLogTimestamps = ConcurrentHashMap<String, Long>()
     @Volatile private var lastDiscoveryAt: Long = 0L
 
@@ -1400,6 +1418,7 @@ class BleTransportFacade(
             }
         }
         connections.clear()
+        cancelAllPeerLostGrace()
         lastSeenRssi.clear()
         pendingInbound.clear()
         outboundQueue.clear()
@@ -1825,6 +1844,7 @@ class BleTransportFacade(
             }
         }
         connections.clear()
+        cancelAllPeerLostGrace()
         lastSeenRssi.clear()
         pendingInbound.clear()
         outboundQueue.clear()
@@ -4246,6 +4266,71 @@ class BleTransportFacade(
         }
     }
 
+    /**
+     * Reports [peerId] lost [PEER_LOST_GRACE_MS] from now unless a link to it
+     * is up again by then. Does nothing while a link is up, or while a report
+     * is already pending, so the deadline runs from the first link to drop
+     * with nothing left. BLE-thread only.
+     */
+    private fun schedulePeerLostGrace(peerId: String) {
+        assertOnBleThread("schedulePeerLostGrace")
+        if (peerLostGrace.containsKey(peerId) || connections.hasEstablishedLink(peerId)) return
+        val report = Runnable {
+            peerLostGrace.remove(peerId)
+            if (shuttingDown || state != TransportState.RUNNING) return@Runnable
+            if (connections.hasEstablishedLink(peerId)) return@Runnable
+            reportPeerLostAfterGrace(peerId)
+        }
+        peerLostGrace[peerId] = report
+        bleHandler.postDelayed(report, PEER_LOST_GRACE_MS)
+    }
+
+    private fun cancelPeerLostGrace(peerId: String) {
+        peerLostGrace.remove(peerId)?.let { bleHandler.removeCallbacks(it) }
+    }
+
+    private fun cancelAllPeerLostGrace() {
+        for (report in peerLostGrace.values) bleHandler.removeCallbacks(report)
+        peerLostGrace.clear()
+    }
+
+    /**
+     * The teardown a non-clean disconnect does at once, for a peer whose grace
+     * ran out with no link up. Drops every address mapped to it, so a central
+     * reconnect still backing off finds nothing to redial and the peer comes
+     * back through discovery, as after any other loss.
+     */
+    private fun reportPeerLostAfterGrace(peerId: String) {
+        val addresses = connections.addressesForDevice(peerId)
+        if (addresses.isEmpty()) return
+        Log.i(TAG, "No link to $peerId for ${PEER_LOST_GRACE_MS} ms, reporting it lost")
+        emitDiagnostic("info", "Peer lost after its links closed", mapOf(
+            "peerId" to peerId,
+            "graceMs" to PEER_LOST_GRACE_MS,
+        ))
+        try {
+            protocol.blePeerLost(peerId)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error notifying peer lost", e)
+            emitDiagnostic("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+        }
+        for (address in addresses) {
+            dropStagedPeerMtu(address, peerId)
+            lastSeenRssi.remove(address)
+            centralClient.clearResolutionAttempt(address)
+            pendingInbound.removeAll(address)
+            connections.removeIdentifiersForAddress(address)
+        }
+        outboundQueue.removeAll(peerId)
+        meshController.registerDisconnection(peerId)
+        refreshSelfMetrics()
+        connections.removeConnectionRole(peerId)
+        if (state == TransportState.RUNNING) {
+            refreshAdvertising("membership_change")
+        }
+        maybeHandleRebalance("disconnect")
+    }
+
     private fun handleCentralConnectedOnBleThread(device: BluetoothDevice) {
         val observation = lastSeenMeshAdvertisements[device.address]
         val decision = meshController.shouldAcceptInboundConnection(
@@ -4273,6 +4358,8 @@ class BleTransportFacade(
         }
         connections.trackServerConnection(device.address)
         connections.setPendingRole(device.address, role)
+        // A known peer back on a link before its grace ran out was never lost.
+        connections.deviceIdForAddress(device.address)?.let { cancelPeerLostGrace(it) }
         Log.i(TAG, "GATT server: Device connected: ${device.address} (role=$role)")
         emitDiagnostic("info", "Device connected to GATT server", mapOf("address" to device.address))
     }
@@ -4322,6 +4409,12 @@ class BleTransportFacade(
         // restoring it from any min() demotion the notify link imposed. On a
         // non-clean disconnect the teardown below calls blePeerLost (drops
         // peer_mtus wholesale) + dropStagedPeerMtu, so we defer to that path.
+        if (isCleanDisconnect) {
+            // Kept as a neighbour for now, on the expectation above that it
+            // returns. Bounded, so a peer that switched Bluetooth off is
+            // reported lost once no link to it is left.
+            connections.deviceIdForAddress(address)?.let { schedulePeerLostGrace(it) }
+        }
         if (isCleanDisconnect && peripheralMaxPayloads.remove(address) != null) {
             connections.deviceIdForAddress(address)?.let { peerId ->
                 // Drop the per-device peripheral slot too, or the recompute would

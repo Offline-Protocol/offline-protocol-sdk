@@ -148,6 +148,13 @@ internal class CentralGattClient(
          *  belongs to the live link and must survive. */
         fun onStaleAddressDropped(address: String)
 
+        /** Notify the facade that the client link to [peerId] dropped and
+         *  the reconnect backoff below has taken it on. The backoff runs to
+         *  about two minutes before it gives up, so the facade bounds how
+         *  long a peer with no link left stays a neighbour. Called on the
+         *  BLE thread. */
+        fun onPeerLinkDropped(peerId: String) {}
+
         /** Entry point used by the retry-on-disconnect path to re-attempt
          *  connecting to a known address. Facade enforces the per-device
          *  RSSI / capacity / cooldown gating inside connectToDevice. */
@@ -889,6 +896,7 @@ internal class CentralGattClient(
         // Reset here (not on deviceId read) so a rebound link that races a
         // subsequent disconnect still benefits.
         connectionRetryCount.remove(address)
+        host.connections.markClientEstablished(address)
         linkReady.remove(address)
         // A new connection chooses its service instance afresh.
         clearServiceInstanceSelection(address)
@@ -974,6 +982,14 @@ internal class CentralGattClient(
                     bleHandler.post { finalizeGivenUpPeer(address, peerId) }
                 }
                 return
+            }
+
+            // The backoff can take two minutes to give up, and the peer is
+            // reported lost only then. The facade bounds that instead.
+            host.connections.deviceIdForAddress(address)?.let { peerId ->
+                bleHandler.post {
+                    if (!host.isShuttingDown()) host.onPeerLinkDropped(peerId)
+                }
             }
 
             // Exponential backoff: 5s, 10s, 20s, 40s, 60s (capped)

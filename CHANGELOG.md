@@ -31,6 +31,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   flake (about 2% of runs) went from 4 failures in 200 runs to none. The
   worst-case cost is unchanged: still at most one fan-out per device, inside
   the same per-second budgets.
+- **Android reports a Bluetooth peer lost once no link to it is left**
+  ([#513](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/513)).
+  When the other phone switched Bluetooth off, its links closed cleanly, and
+  this phone kept it a neighbour until the reconnect backoff gave up (over a
+  minute in the device test, about two in the worst case) or, for a peer
+  reached only through this phone's GATT server, until the transport stopped.
+  `neighbor_lost` now fires 15 seconds after the last link to the peer goes
+  down, unless one comes back first. Reconnects continue, and a peer that
+  returns is announced again as it would be after any loss. A dial still in
+  flight does not count as a link.
 
 ## [0.28.0] — 2026-10-06
 

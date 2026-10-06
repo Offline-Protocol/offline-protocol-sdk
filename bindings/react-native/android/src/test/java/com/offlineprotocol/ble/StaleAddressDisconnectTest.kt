@@ -11,6 +11,7 @@ import com.offlineprotocol.mesh.MeshController
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -107,8 +108,42 @@ class StaleAddressDisconnectTest {
         assertNull(host.connections.addressForDevice("peerB"))
     }
 
+    @Test
+    fun `a link that drops with nothing left reaches the facade at once, not after the backoff`() {
+        // The backoff takes about two minutes to give up, and a peer whose
+        // Bluetooth went off stayed a neighbour all that time (#513). The
+        // facade bounds it, so it must hear of the drop when it happens.
+        val dropped = gatt(old)
+        host.connections.registerGatt(old, dropped)
+        host.connections.markClientEstablished(old)
+        host.connections.setDeviceIdentifier(old, "peerD")
+
+        client.callback.onConnectionStateChange(dropped, 0, BluetoothProfile.STATE_DISCONNECTED)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(listOf("peerD"), host.linkDropped)
+        assertEquals("the backoff still carries on behind it", emptyList<String>(), host.givenUp)
+        assertFalse(host.connections.hasEstablishedLink("peerD"))
+    }
+
+    @Test
+    fun `a dial still in flight is not a link`() {
+        // A dial to a phone whose Bluetooth is off lasts as long as the
+        // stack's connect timeout; counting it would defer the loss that long.
+        host.connections.setDeviceIdentifier(old, "peerE")
+        host.connections.registerGatt(old, gatt(old))
+        assertFalse(host.connections.hasEstablishedLink("peerE"))
+
+        host.connections.markClientEstablished(old)
+        assertTrue(host.connections.hasEstablishedLink("peerE"))
+
+        host.connections.removeGatt(old)
+        assertFalse(host.connections.hasEstablishedLink("peerE"))
+    }
+
     private class FakeHost : CentralGattClient.Host {
         val givenUp = mutableListOf<String>()
+        val linkDropped = mutableListOf<String>()
         val dialed = mutableListOf<String>()
         val staleDropped = mutableListOf<String>()
 
@@ -138,6 +173,7 @@ class StaleAddressDisconnectTest {
         override fun onDeviceIdResolved(address: String, deviceId: String) {}
         override fun onPeerGivenUp(address: String, peerId: String) { givenUp += peerId }
         override fun onStaleAddressDropped(address: String) { staleDropped += address }
+        override fun onPeerLinkDropped(peerId: String) { linkDropped += peerId }
         override fun connectToDevice(device: BluetoothDevice) { dialed += device.address }
     }
 }

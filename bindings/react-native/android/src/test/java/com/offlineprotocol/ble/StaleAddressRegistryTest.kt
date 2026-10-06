@@ -47,4 +47,19 @@ class StaleAddressRegistryTest {
         registry.clear()
         assertTrue(registry.deviceIds().isEmpty())
     }
+
+    @Test
+    fun `an established link at any of a peer's addresses keeps it live`() {
+        // deviceToAddress holds only the address that resolved last, so a
+        // check through it misses a link from the peer's other address.
+        val registry = MeshConnectionRegistry()
+        registry.setDeviceIdentifier("server-side", "peerA")
+        registry.trackServerConnection("server-side")
+        registry.setDeviceIdentifier("client-side", "peerA")
+
+        assertTrue(registry.hasEstablishedLink("peerA"))
+        registry.untrackServerConnection("server-side")
+        assertFalse(registry.hasEstablishedLink("peerA"))
+        assertEquals(setOf("server-side", "client-side"), registry.addressesForDevice("peerA").toSet())
+    }
 }

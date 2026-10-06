@@ -26,6 +26,10 @@ class MeshConnectionRegistry {
     private val pendingRoles = ConcurrentHashMap<String, MeshRole>()
     private val connectionRoles = ConcurrentHashMap<String, MeshRole>()
     private val serverConnections = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+    // Client links whose connect completed. [gattClients] also holds dials
+    // still in flight, and a dial to a peer whose Bluetooth is off lasts as
+    // long as the stack's connect timeout, so it cannot count as a link.
+    private val establishedClients = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
 
     fun registerGatt(address: String, gatt: BluetoothGatt) {
         gattClients[address] = gatt
@@ -33,7 +37,15 @@ class MeshConnectionRegistry {
 
     fun getGatt(address: String): BluetoothGatt? = gattClients[address]
 
-    fun removeGatt(address: String): BluetoothGatt? = gattClients.remove(address)
+    fun removeGatt(address: String): BluetoothGatt? {
+        establishedClients.remove(address)
+        return gattClients.remove(address)
+    }
+
+    /** Records that the client link to [address] finished connecting. */
+    fun markClientEstablished(address: String) {
+        if (gattClients.containsKey(address)) establishedClients.add(address)
+    }
 
     fun forEachGatt(action: (BluetoothGatt) -> Unit) {
         gattClients.values.forEach(action)
@@ -64,6 +76,24 @@ class MeshConnectionRegistry {
         return address != excluding &&
             (gattClients.containsKey(address) || serverConnections.contains(address))
     }
+
+    /**
+     * True when some link to [deviceId] is up: a central that connected to our
+     * server, or a client link of ours whose connect completed, at ANY address
+     * mapped to the peer. A dial still in flight does not count.
+     *
+     * Unlike [hasOtherLiveLink] this walks every address, because
+     * [deviceToAddress] keeps only the address that resolved last, and a peer
+     * can hold links from two addresses at once (one per direction).
+     */
+    fun hasEstablishedLink(deviceId: String): Boolean =
+        addressToDevice.any { (address, id) ->
+            id == deviceId && (establishedClients.contains(address) || serverConnections.contains(address))
+        }
+
+    /** Every address currently mapped to [deviceId]. */
+    fun addressesForDevice(deviceId: String): List<String> =
+        addressToDevice.filterValues { it == deviceId }.keys.toList()
 
     fun removeIdentifiersForDevice(deviceId: String) {
         val address = deviceToAddress.remove(deviceId)
@@ -118,5 +148,6 @@ class MeshConnectionRegistry {
         pendingRoles.clear()
         connectionRoles.clear()
         serverConnections.clear()
+        establishedClients.clear()
     }
 }
