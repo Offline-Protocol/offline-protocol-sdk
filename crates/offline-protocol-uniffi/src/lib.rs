@@ -14394,6 +14394,18 @@ mod tests {
              fragmenting send falls back to the 185-byte floor"
         );
 
+        // The server refuses a hello shorter than any assertion before the
+        // verifier sees it. That floor is the codec's, written again in Kotlin.
+        let server = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/PeripheralGattServer.kt",
+        );
+        let floor = offline_protocol_sealed::IDENTITY_ASSERTION_MIN_LEN;
+        assert!(
+            server.contains(&format!("const val MIN_HELLO_WRITE_BYTES = {floor}")),
+            "PeripheralGattServer.kt MIN_HELLO_WRITE_BYTES must equal IDENTITY_ASSERTION_MIN_LEN \
+             ({floor})"
+        );
+
         // A hello maps the peer at its central-role address, where we hold no
         // client link. The drain must count the peer's subscription to our
         // server as a connection and must not dial an address connected to

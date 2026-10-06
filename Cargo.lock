@@ -2497,6 +2497,7 @@ dependencies = [
  "offline-protocol-core",
  "offline-protocol-mls",
  "offline-protocol-router",
+ "offline-protocol-sealed",
  "offline-protocol-services",
  "offline-protocol-telemetry-wire",
  "offline-protocol-transport",
