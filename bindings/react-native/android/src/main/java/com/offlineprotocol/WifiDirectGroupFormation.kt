@@ -13,44 +13,50 @@ import java.security.MessageDigest
  * that shows the other phone a system "Invitation to connect" dialog, which a
  * phone in a pocket never answers. Since Android 10 a group can instead be
  * created with a chosen network name and passphrase, and joined by anyone who
- * presents the same two, with no prompt on either side. Both are derived here:
- * the name from the owner's address, the passphrase from the application id
- * and the name, so a device of another application never computes it and a
- * device of this one never needs it sent.
+ * presents the same two, with no prompt on either side. Both are derived here
+ * from the application id alone, so every device of an application can join
+ * its group without having heard who owns it, and a device of another
+ * application never computes them.
  *
  * The passphrase keeps other applications' devices out of the group; it is not
  * what protects the traffic. Every stream still proves its peer with the
  * identity preamble before it carries anything, and every message is end to
- * end encrypted above it, so a device that joined the group with a leaked
- * passphrase reaches a listener that refuses it at the first frame.
+ * end encrypted above it.
  *
- * ## Who owns the group
+ * ## Why the name is the application's and not the owner's
  *
- * Each device advertises a DNS-SD record over Wi-Fi P2P service discovery:
- * the `_offlineprotocol._tcp` record the stream chapter
- * (`docs/spec/stream-framing.md`) fixes, `txtvers=1` and `addr=`, plus
- * [KEY_APP] to keep applications apart and,
- * while it owns a group, [KEY_NETWORK] with the group's name. The rules,
- * applied by every device to the same records, converge on one owner:
+ * Discovery is asymmetric on real phones. A device that is a group owner, or
+ * is in the middle of joining one, answers no Wi-Fi P2P service discovery
+ * query, and two phones in range often hear each other's record minutes
+ * apart. An earlier version named the group after its owner's address, so a
+ * joiner could not join until it had heard the owner; on two phones that
+ * stalled formation for minutes, and once for good. A name every device can
+ * derive needs nothing heard from the owner.
  *
- * 1. A device in no group joins the owner with the lowest address it can see.
- * 2. With no owner in sight, the device with the lowest address among the
- *    peers it can see creates a group, and every other device joins the group
- *    that one will create, by the name derived from its address. The joiner
- *    does not wait for the owner's updated record: on two phones a group
- *    owner answered no service discovery query at all (it listens on its
- *    operating channel, not the social ones the queries go out on), so a
- *    record saying "I own DIRECT-op-…" never arrived. A join that runs ahead
- *    of the group fails and is retried on the manager's backoff.
- * 3. An owner with no clients that sees an owner with a lower address leaves
- *    its own group and joins that one, so two groups that formed at once
- *    merge, when the other owner's record is heard at all.
- * 4. A device that is a client, or an owner with clients, does nothing.
+ * ## Who creates the group
+ *
+ * Each device advertises the stream chapter's `_offlineprotocol._tcp` record
+ * (`docs/spec/stream-framing.md`, `txtvers=1` and `addr=`) plus [KEY_APP], and
+ * a device in no group decides from what it has heard:
+ *
+ * 1. Nothing heard and no group owner nearby: wait.
+ * 2. The lowest address among the peers it has heard: create the group, unless
+ *    a group owner is nearby, in which case join first (it may be ours).
+ * 3. Otherwise join, and take over creating after [TAKEOVER_FAILED_JOINS]
+ *    joins found no group: the lower peer may never have heard this one.
+ * 4. Only a group owner nearby, no record heard: join, but only as a probe at
+ *    most once a minute ([Local.ownerProbeDue]). A Wi-Fi Direct television is a
+ *    group owner too, and a device that joins on every step answers no
+ *    discovery query for most of its time: on two phones next to two
+ *    televisions, both did that and neither heard the other for minutes.
+ *
+ * A device in a group does nothing here; the manager dissolves a group it
+ * owns that stays empty, and the device then joins before it may create
+ * again ([Local.joinFirst]), so two groups that formed at once merge.
  *
  * A record proves nothing about its advertiser (the stream chapter's rule), and
- * none is needed here: the worst a forged record can do is name a group that
- * will not accept this device's passphrase, or keep this device waiting for an
- * owner that never appears, and the manager's retry backoff bounds both.
+ * none is needed: the worst a forged record does is make this device create or
+ * join a group, which a forger cannot enter without the passphrase.
  */
 internal object WifiDirectGroupFormation {
     const val SERVICE_TYPE = "_offlineprotocol._tcp"
@@ -60,17 +66,17 @@ internal object WifiDirectGroupFormation {
     const val KEY_ADDRESS = "addr"
     /** A tag of the application id; devices of other applications are ignored. */
     const val KEY_APP = "app"
-    /** Present only while the advertiser owns a group: that group's network name. */
-    const val KEY_NETWORK = "net"
     /** Present on service instances (the DNS-SD mapping chapter); never a peer. */
     const val KEY_SERVICE_ID = "sid"
 
-    /** A peer's record as last seen. [ownerNetwork] is null unless it owns a group. */
+    /** How many joins that found no group before a non-lowest device creates. */
+    const val TAKEOVER_FAILED_JOINS = 3
+
+    /** A peer's record as last seen. */
     data class Advert(
         val device: String,
         val address: String,
         val app: String,
-        val ownerNetwork: String?,
         val seenAtMs: Long,
     )
 
@@ -79,46 +85,45 @@ internal object WifiDirectGroupFormation {
         val address: String,
         val app: String,
         val inGroup: Boolean,
-        val isOwner: Boolean,
-        val clients: Int,
+        /** Consecutive join attempts that ended without a group. */
+        val failedJoins: Int = 0,
+        /** Any Wi-Fi Direct group owner in the peer list, of any application. */
+        val ownerNearby: Boolean = false,
+        /** Whether a probe join toward an owner nobody vouched for is due. */
+        val ownerProbeDue: Boolean = true,
+        /**
+         * Join before creating, whatever else holds. Set after this device
+         * dissolved an empty group: the other device may own one under the
+         * same name, and creating again at once is how two empty groups
+         * formed and dissolved in step on two phones.
+         */
+        val joinFirst: Boolean = false,
     )
 
-    sealed interface Action {
-        /** Nothing to do now. */
-        object Wait : Action
-        /** Create a group under [networkName] with this device as its owner. */
-        object Create : Action
-        /** Join [owner]'s group, named [network]. */
-        data class Join(val network: String, val owner: Advert) : Action
-        /** Leave this device's empty group and join [owner]'s, named [network]. */
-        data class Move(val network: String, val owner: Advert) : Action
-    }
+    enum class Action { Wait, Create, Join }
 
     fun decide(local: Local, adverts: Collection<Advert>): Action {
+        if (local.inGroup) return Action.Wait
         val peers = adverts.filter { it.app == local.app && it.address != local.address }
-        val owners = peers.filter { it.ownerNetwork != null }
-        if (local.inGroup) {
-            if (!local.isOwner || local.clients > 0) return Action.Wait
-            val lower = owners.filter { it.address < local.address }.minByOrNull { it.address }
-                ?: return Action.Wait
-            return Action.Move(lower.ownerNetwork!!, lower)
+        if (peers.isEmpty()) {
+            return if (local.ownerNearby && local.ownerProbeDue) Action.Join else Action.Wait
         }
-        owners.minByOrNull { it.address }?.let { return Action.Join(it.ownerNetwork!!, it) }
-        val lowest = peers.minByOrNull { it.address } ?: return Action.Wait
-        return if (local.address < lowest.address) {
-            Action.Create
-        } else {
-            Action.Join(networkName(lowest.address), lowest)
+        val lowest = peers.minOf { it.address }
+        return when {
+            local.joinFirst -> Action.Join
+            local.address < lowest ->
+                if (local.ownerNearby && local.failedJoins == 0) Action.Join else Action.Create
+            local.failedJoins >= TAKEOVER_FAILED_JOINS -> Action.Create
+            else -> Action.Join
         }
     }
 
     /** The record this device advertises, in the order the chapter requires. */
-    fun txtRecord(address: String, appTag: String, ownerNetwork: String?): LinkedHashMap<String, String> {
+    fun txtRecord(address: String, appTag: String): LinkedHashMap<String, String> {
         val txt = LinkedHashMap<String, String>()
         txt[KEY_VERSION] = "1"
         txt[KEY_ADDRESS] = address
         txt[KEY_APP] = appTag
-        if (ownerNetwork != null) txt[KEY_NETWORK] = ownerNetwork
         return txt
     }
 
@@ -131,20 +136,19 @@ internal object WifiDirectGroupFormation {
         if (txt.containsKey(KEY_SERVICE_ID)) return null
         val address = txt[KEY_ADDRESS]?.takeIf { it.isNotEmpty() } ?: return null
         val app = txt[KEY_APP] ?: return null
-        val network = txt[KEY_NETWORK]?.takeIf { isValidNetworkName(it) }
-        return Advert(device, address, app, network, nowMs)
+        return Advert(device, address, app, nowMs)
     }
 
     /** Eight hex digits of the application id: enough to keep applications apart. */
     fun appTag(appId: String): String = hex(sha256("offline-protocol/wifi-direct/app|$appId"), 4)
 
     /**
-     * The group's network name, from its owner's address. Android requires
-     * `DIRECT-` and two characters at the front; the result is 18 bytes, under
-     * the 32 a network name may hold.
+     * The application's group name. Android requires `DIRECT-` and two
+     * characters at the front; the result is 18 bytes, under the 32 a network
+     * name may hold.
      */
-    fun networkName(ownerAddress: String): String =
-        "DIRECT-op-" + hex(sha256("offline-protocol/wifi-direct/net|$ownerAddress"), 4)
+    fun networkName(appId: String): String =
+        "DIRECT-op-" + hex(sha256("offline-protocol/wifi-direct/net|$appId"), 4)
 
     /** The group's passphrase: 32 hex digits, inside WPA2's 8 to 63. */
     fun passphrase(appId: String, network: String): String =

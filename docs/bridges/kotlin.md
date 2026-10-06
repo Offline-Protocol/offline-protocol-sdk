@@ -140,13 +140,18 @@ the new owner's first dial can lose to the old stream still closing, and the
 redial is then the only one left. The manager joins a group the system formed, including one that
 formed before it started: since Android 10 the connection broadcast is not sticky, so the manager asks
 for the group once it is running. With `formGroups` (`wifiDirect.autoAccept`, Android 10 and later)
-it also forms one: `WifiDirectGroupFormation` holds the rules (who creates, who joins, the derived
-network name and passphrase) and `WifiDirectGroupFormationTest` pins them. Two behaviours of the
-radio shaped them and are worth knowing before changing them. A DNS-SD query by service type alone
-returns only the PTR record, so the TXT record that carries the address arrives only for a query that
-names the instance. And a group owner answers no service discovery query, so a joiner targets the
-name the lowest peer will create rather than waiting to hear the owner's record, and an owner whose
-group stays empty dissolves it so it can be found again.
+it also forms one: `WifiDirectGroupFormation` holds the rules (who creates, who joins, the network
+name and passphrase, both derived from the application id) and `WifiDirectGroupFormationTest` pins
+them. Three behaviours of the radio shaped them and are worth knowing before changing them. A DNS-SD
+query by service type alone returns only the PTR record, so the TXT record that carries the address
+arrives only for a query that names the instance. A device that owns a group, or is in the middle of
+joining one, answers no service discovery query, so two phones often hear each other minutes apart or
+not at all; that is why the group is named after the application and not its owner (a joiner needs
+nothing from the owner), why a join attempt is cancelled after eight seconds (the joiner is
+discoverable again), why a device that hears a lower peer creates the group itself after three joins
+found none, and why a device that heard no record still joins when it sees a group owner. And two
+groups can form at once, so an owner whose group stays empty for a randomised 30 to 60 seconds
+dissolves it and joins before creating again.
 
 `PeerStreamSocketsTest` and `PeerStreamFramingTest` pin it, the latter
 replaying the chapter's vectors. The group handling itself is not covered in

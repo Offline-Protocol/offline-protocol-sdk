@@ -18,18 +18,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 - **Android forms its Wi-Fi Direct group itself.** With
   `wifiDirect: { enabled: true, autoAccept: true }` on Android 10 and later,
   devices of the same app find each other over Wi-Fi P2P service discovery
-  (`_offlineprotocol._tcp`, the stream chapter's record plus `app` and `net`
-  entries), the lowest address creates a group under a name derived from its
-  address, and the others join it with a passphrase derived from the app id.
-  No system dialog appears on either phone, which a `WifiP2pManager.connect`
-  invitation would show. Two phones (Android 13 and 15) went from launch to a
-  proved stream in 26 to 96 seconds over six clean starts, and re-formed the
-  group 19 seconds after one of them turned Wi-Fi off and on. An owner whose
-  group stays empty for 45 seconds dissolves it, because a group owner answers
-  no service discovery query and would otherwise be invisible to the peer it
-  was made for. Off by default; without it a group is formed in the system's
-  Wi-Fi Direct settings, as before, and that group is never dissolved.
-  `groupOwnerIntent` is not used. Groups of three or more devices are untested.
+  (`_offlineprotocol._tcp`, the stream chapter's record plus an `app` entry),
+  and join one group whose name and passphrase are derived from the app id:
+  the lowest address creates it and the others join. No system dialog appears
+  on either phone, which a `WifiP2pManager.connect` invitation would show.
+  Discovery between phones is asymmetric (a device that owns or is joining a
+  group answers no discovery query), so nothing depends on hearing the owner:
+  a device that heard a lower peer creates the group itself after three joins
+  found none, a device that heard nothing still joins when it sees a group
+  owner, and an owner whose group stays empty for 30 to 60 seconds dissolves
+  it so two groups that formed at once merge. Two phones (Android 13 and 15)
+  next to two Wi-Fi Direct televisions formed the group in all eight clean
+  starts, in 18 to 225 seconds (median about a minute). Off by default; without it a
+  group is formed in the system's Wi-Fi Direct settings, as before, and that
+  group is never dissolved. `groupOwnerIntent` is not used. Groups of three or
+  more devices are untested.
 
 - **Python has a gateway-daemon client.** `GatewayManager`, as
   `ProtocolManager.gateway` when `reticulum_enabled=True`, speaks the

@@ -113,19 +113,32 @@ class WifiDirectManager(
         // failure up to the ceiling, so a forged or stale record cannot keep
         // the radio busy. A record not heard again within the TTL is dropped.
         private const val FORMATION_TICK_MS = 10_000L
-        private const val FORMATION_RETRY_MS = 20_000L
+        private const val FORMATION_RETRY_MS = 30_000L
         private const val FORMATION_MAX_BACKOFF_MS = 120_000L
         private const val ADVERT_TTL_MS = 180_000L
         // How often service discovery is asked again while there is anything
         // to find. Each call cancels and re-queues the supplicant's query and
         // restarts its search, so it is not asked on every step.
         private const val SERVICE_DISCOVERY_PERIOD_MS = 15_000L
-        // How long a group this manager formed may stay without clients. An
-        // owner answers no service discovery query, so an empty group is
-        // invisible to the peer it was made for (after either side restarts,
-        // say); dissolving it makes the owner discoverable again, and the next
-        // round forms the group with whoever is there.
-        private const val OWNER_IDLE_MS = 45_000L
+        // How long a group this manager formed may stay without clients,
+        // randomised up to twice this per group so that two owners that
+        // formed at once do not dissolve in step. Dissolved, the owner joins
+        // first, so two groups merge; and an owner answers no service
+        // discovery query, so an empty group also hides it from new peers.
+        private const val OWNER_IDLE_MS = 30_000L
+        // How long one join attempt may run before it is cancelled. A device
+        // that is joining answers no service discovery query, so a join left
+        // running hides the joiner from the very peer that has to hear it
+        // before it creates the group: on two phones that kept a pair apart
+        // for minutes. Cancelled, the joiner is discoverable again until the
+        // next attempt.
+        // Fifteen and not less: a join that has no fresh scan result scans for
+        // about six seconds before it associates, and the supplicant retries a
+        // rejected association; an eight-second window cut that retry off.
+        private const val JOIN_WINDOW_MS = 15_000L
+        // How often a device that has heard no record probes a nearby group
+        // owner by joining; see WifiDirectGroupFormation rule 4.
+        private const val OWNER_PROBE_PERIOD_MS = 60_000L
     }
 
     /**
@@ -211,8 +224,16 @@ class WifiDirectManager(
     // which is the only kind of group formation ever dissolves.
     private var ownsFormationGroup = false
     private var ownerIdleSinceMs = 0L
-    private var advertNetwork: String? = null
+    private var failedJoins = 0
+    // Any Wi-Fi Direct group owner in the peer list. An owner answers no
+    // service discovery query, so this is how a device that heard no record
+    // still learns there is a group it might join.
+    private var ownerNearby = false
+    private var ownerIdleLimitMs = OWNER_IDLE_MS
+    private var lastJoinAtMs = 0L
+    private var joinFirstRemaining = 0
     private val appTag: String by lazy { WifiDirectGroupFormation.appTag(appId) }
+    private val appNetwork: String by lazy { WifiDirectGroupFormation.networkName(appId) }
     
     // State tracking. Volatile: written on the transport thread, read by the
     // socket thread that decides whether a client reconnects.
@@ -656,6 +677,8 @@ class WifiDirectManager(
         wifiP2pManager?.requestPeers(channel) { peers ->
             val deviceList = peers?.deviceList ?: return@requestPeers
 
+            ownerNearby = deviceList.any { it.isGroupOwner }
+
             // Update discovered peers
             val currentPeers = mutableSetOf<String>()
             for (device in deviceList) {
@@ -686,7 +709,11 @@ class WifiDirectManager(
             "connected" to connected
         ))
         inGroup = connected
-        if (connected) formationBackoffMs = FORMATION_RETRY_MS
+        if (connected) {
+            formationBackoffMs = FORMATION_RETRY_MS
+            failedJoins = 0
+            joinFirstRemaining = 0
+        }
 
         if (connected && hasRequiredPermissions()) {
             wifiP2pManager?.requestConnectionInfo(channel) { info ->
@@ -726,7 +753,6 @@ class WifiDirectManager(
             createdNetwork = null
             ownsFormationGroup = false
             ownerIdleSinceMs = 0L
-            if (formGroups) publishAdvert(null)
             // Posted: this is the broadcast receiver's onReceive, and ending
             // an announced stream is an FFI call. Same reasoning as the post
             // in [handleWifiP2pStateChanged].
@@ -770,17 +796,13 @@ class WifiDirectManager(
                 val advert = WifiDirectGroupFormation.parse(
                     device.deviceAddress, txt, SystemClock.elapsedRealtime()
                 ) ?: return@setDnsSdResponseListeners
-                val previous = adverts.put(device.deviceAddress, advert)
-                if (previous == null || previous.ownerNetwork != advert.ownerNetwork) {
-                    emitDiagnostic("debug", "Wi-Fi Direct peer record", mapOf(
-                        "address" to advert.address,
-                        "owner" to (advert.ownerNetwork != null),
-                    ))
+                if (adverts.put(device.deviceAddress, advert) == null) {
+                    emitDiagnostic("debug", "Wi-Fi Direct peer record", mapOf("address" to advert.address))
                 }
             },
         )
         addServiceRequest()
-        publishAdvert(null)
+        publishAdvert()
         transportHandler.removeCallbacks(formationTick)
         transportHandler.post(formationTick)
         emitDiagnostic("info", "Wi-Fi Direct group formation started")
@@ -828,7 +850,8 @@ class WifiDirectManager(
         inGroup = false
         ownerClients = 0
         advertPublished = false
-        advertNetwork = null
+        failedJoins = 0
+        ownerNearby = false
     }
 
     /** One step: refresh what is known, and act on it if the backoff allows. */
@@ -842,15 +865,20 @@ class WifiDirectManager(
         adverts.values.removeAll { now - it.seenAtMs > ADVERT_TTL_MS }
         val address = localAddressOrNull() ?: return
 
-        if (!advertPublished) publishAdvert(advertNetwork)
+        if (!advertPublished) publishAdvert()
 
         if (inGroup && isGroupOwner && ownsFormationGroup && ownerClients == 0) {
             if (ownerIdleSinceMs == 0L) {
                 ownerIdleSinceMs = now
-            } else if (now - ownerIdleSinceMs > OWNER_IDLE_MS) {
+                ownerIdleLimitMs = OWNER_IDLE_MS + (Math.random() * OWNER_IDLE_MS).toLong()
+            } else if (now - ownerIdleSinceMs > ownerIdleLimitMs) {
                 ownerIdleSinceMs = 0L
-                emitDiagnostic("info", "Dissolving an empty Wi-Fi Direct group so peers can find this device")
+                emitDiagnostic("info", "Dissolving an empty Wi-Fi Direct group")
                 p2p.removeGroup(channel, quietListener("remove empty group"))
+                // Join before creating again: another owner's group may be up.
+                failedJoins = 0
+                joinFirstRemaining = 2
+                nextFormationAtMs = now + FORMATION_TICK_MS
                 return
             }
         } else {
@@ -878,22 +906,19 @@ class WifiDirectManager(
         }
         if (now < nextFormationAtMs) return
         val action = WifiDirectGroupFormation.decide(
-            WifiDirectGroupFormation.Local(address, appTag, inGroup, isGroupOwner, ownerClients),
+            WifiDirectGroupFormation.Local(
+                address, appTag, inGroup, failedJoins, ownerNearby,
+                ownerProbeDue = now - lastJoinAtMs >= OWNER_PROBE_PERIOD_MS,
+                joinFirst = joinFirstRemaining > 0,
+            ),
             adverts.values,
         )
         when (action) {
             WifiDirectGroupFormation.Action.Wait -> return
-            WifiDirectGroupFormation.Action.Create -> createGroup(WifiDirectGroupFormation.networkName(address))
-            is WifiDirectGroupFormation.Action.Join -> joinGroup(action.network)
-            is WifiDirectGroupFormation.Action.Move -> {
-                emitDiagnostic("info", "Leaving an empty Wi-Fi Direct group for a lower owner's")
-                p2p.removeGroup(channel, object : WifiP2pManager.ActionListener {
-                    override fun onSuccess() {
-                        createdNetwork = null
-                        joinGroup(action.network)
-                    }
-                    override fun onFailure(reason: Int) = formationFailed("remove group", reason)
-                })
+            WifiDirectGroupFormation.Action.Create -> createGroup(appNetwork)
+            WifiDirectGroupFormation.Action.Join -> {
+                lastJoinAtMs = now
+                joinGroup(appNetwork)
             }
         }
         nextFormationAtMs = now + formationBackoffMs
@@ -929,7 +954,15 @@ class WifiDirectManager(
         val ch = channel ?: return
         emitDiagnostic("info", "Joining a Wi-Fi Direct group", mapOf("network" to network))
         wifiP2pManager?.connect(ch, config, object : WifiP2pManager.ActionListener {
-            override fun onSuccess() {}
+            override fun onSuccess() {
+                transportHandler.postDelayed({
+                    if (state == TransportState.RUNNING && !inGroup) {
+                        failedJoins++
+                        if (joinFirstRemaining > 0) joinFirstRemaining--
+                        wifiP2pManager?.cancelConnect(channel, quietListener("cancel join"))
+                    }
+                }, JOIN_WINDOW_MS)
+            }
             override fun onFailure(reason: Int) = formationFailed("join group", reason)
         })
     }
@@ -944,10 +977,8 @@ class WifiDirectManager(
     }
 
     /**
-     * After any group change: count this owner's clients and say in the record
-     * whether this device owns a group others can join. Only a group whose name
-     * this device would derive is offered; a group formed from the system
-     * settings has a passphrase no joiner can compute.
+     * After any group change: count this owner's clients, and note whether the
+     * group is the application's, the only kind formation ever dissolves.
      */
     @SuppressLint("MissingPermission")
     private fun refreshGroupForFormation() {
@@ -955,33 +986,28 @@ class WifiDirectManager(
         if (!isGroupOwner) {
             ownerClients = 0
             ownsFormationGroup = false
-            publishAdvert(null)
             return
         }
         wifiP2pManager?.requestGroupInfo(channel) { group ->
             ownerClients = group?.clientList?.size ?: 0
-            val address = localAddressOrNull()
-            val ours = address?.let { WifiDirectGroupFormation.networkName(it) }
-            ownsFormationGroup = group?.networkName != null && group.networkName == ours
-            publishAdvert(group?.networkName?.takeIf { it == ours })
+            ownsFormationGroup = group?.networkName == appNetwork
         }
     }
 
     @SuppressLint("MissingPermission")
-    private fun publishAdvert(ownerNetwork: String?) {
+    private fun publishAdvert() {
         if (!formGroups || !formationSupported) return
         val p2p = wifiP2pManager ?: return
         val address = localAddressOrNull() ?: return
         val info = WifiP2pDnsSdServiceInfo.newInstance(
             WifiDirectGroupFormation.INSTANCE_NAME,
             WifiDirectGroupFormation.SERVICE_TYPE,
-            WifiDirectGroupFormation.txtRecord(address, appTag, ownerNetwork),
+            WifiDirectGroupFormation.txtRecord(address, appTag),
         )
-        advertNetwork = ownerNetwork
         val added = object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
                 advertPublished = true
-                emitDiagnostic("debug", "Wi-Fi Direct record published", mapOf("owner" to (ownerNetwork != null)))
+                emitDiagnostic("debug", "Wi-Fi Direct record published")
             }
             override fun onFailure(reason: Int) {
                 advertPublished = false
