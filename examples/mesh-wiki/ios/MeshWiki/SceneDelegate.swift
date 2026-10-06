@@ -24,7 +24,8 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     factory.startReactNative(
       withModuleName: "MeshWiki",
       in: window,
-      launchOptions: appDelegate.reactNativeLaunchOptions(
+      launchOptions: ReactNativeSceneLaunchOptions.merging(
+        appDelegate.launchOptions,
         sceneConnectionOptions: connectionOptions
       )
     )
