@@ -29,6 +29,7 @@ import com.offlineprotocol.mesh.MeshController
 import com.offlineprotocol.mesh.MeshController.ConnectionIntent
 import com.offlineprotocol.mesh.MeshController.MeshRole
 import uniffi.offline_protocol.OfflineProtocol
+import uniffi.offline_protocol.verifyIdentityAssertion
 import android.bluetooth.BluetoothStatusCodes
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
@@ -191,6 +192,7 @@ class BleTransportFacade(
         private val DEVICE_ID_CHAR_UUID = UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
         private val IDENTITY_CHAR_UUID = UUID.fromString("6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
         private val APP_TAG_CHAR_UUID = UUID.fromString("6E400005-B5A3-F393-E0A9-E50E24DCCA9E")
+        private val HELLO_CHAR_UUID = UUID.fromString("6E400006-B5A3-F393-E0A9-E50E24DCCA9E")
         private const val AD_TYPE_INCOMPLETE_128_BIT_SERVICE_UUIDS = 0x06
         private const val AD_TYPE_COMPLETE_128_BIT_SERVICE_UUIDS = 0x07
         private const val UUID_128_BIT_LENGTH_BYTES = 16
@@ -300,6 +302,14 @@ class BleTransportFacade(
          *  device. Reconnect backoff on disconnect is owned by
          *  [CentralGattClient] and lives there too. */
         private const val MIN_RECONNECT_INTERVAL_MS = 5_000L
+        /** How long a peer with no link left stays a neighbour before it is
+         *  reported lost, while reconnects carry on behind it. Links that close
+         *  cleanly (status 0 or 19) used to keep the peer until the central
+         *  reconnect backoff gave up, about two minutes, and a server-only peer
+         *  indefinitely: a phone whose Bluetooth went off was still listed
+         *  "nearby" after 69 seconds (#513). Long enough for one reconnect
+         *  attempt to land, so a short blip reports nothing. */
+        private const val PEER_LOST_GRACE_MS = 15_000L
         
         // Adaptive Scan Configuration
         /** Minimum RSSI to consider for connection (filter weak signals early) - matches iOS */
@@ -469,6 +479,7 @@ class BleTransportFacade(
             identityCharUuid = IDENTITY_CHAR_UUID,
             appTagCharUuid = APP_TAG_CHAR_UUID,
             appTag = appTag,
+            helloCharUuid = HELLO_CHAR_UUID,
             host = object : CentralGattClient.Host {
                 override val protocol: OfflineProtocol get() = this@BleTransportFacade.protocol
                 override val connections: MeshConnectionRegistry get() = this@BleTransportFacade.connections
@@ -542,8 +553,17 @@ class BleTransportFacade(
                     // Already on the BLE thread — handleDeviceIdRead runs on the
                     // BLE thread, so no hop is needed.
                     if (shuttingDown) return
+                    cancelPeerLostGrace(deviceId)
                     flushPeerMtu(address, deviceId)
                 }
+
+                override fun onPeerLinkDropped(peerId: String) {
+                    if (shuttingDown) return
+                    schedulePeerLostGrace(peerId)
+                }
+
+                // The same value the Identity characteristic serves.
+                override fun helloBytes(): ByteArray? = cachedSignedIdentity?.encode()
 
                 override fun onPeerGivenUp(address: String, peerId: String) {
                     // Called on the BLE thread from finalizeGivenUpPeer, which has
@@ -562,6 +582,7 @@ class BleTransportFacade(
                     // scope here. A surviving link self-heals: its next inbound
                     // fragment re-stages the MTU via onPeripheralMtuNegotiated.
                     if (shuttingDown) return
+                    cancelPeerLostGrace(peerId)
                     dropStagedPeerMtu(address, peerId)
                 }
 
@@ -650,6 +671,9 @@ class BleTransportFacade(
     // link's teardown. BLE-thread only.
     private val centralPayloadByDevice = HashMap<String, Int>()
     private val peripheralPayloadByDevice = HashMap<String, Int>()
+    // Pending peer-lost reports, one per peer whose last link went down
+    // ([PEER_LOST_GRACE_MS]). BLE-thread only.
+    private val peerLostGrace = HashMap<String, Runnable>()
     private val discoveryLogTimestamps = ConcurrentHashMap<String, Long>()
     @Volatile private var lastDiscoveryAt: Long = 0L
 
@@ -1400,6 +1424,7 @@ class BleTransportFacade(
             }
         }
         connections.clear()
+        cancelAllPeerLostGrace()
         lastSeenRssi.clear()
         pendingInbound.clear()
         outboundQueue.clear()
@@ -1578,6 +1603,7 @@ class BleTransportFacade(
                 deviceIdUuid = DEVICE_ID_CHAR_UUID,
                 identityUuid = IDENTITY_CHAR_UUID,
                 appTagUuid = APP_TAG_CHAR_UUID,
+                helloUuid = HELLO_CHAR_UUID,
             )
 
             Log.i(TAG, "GATT server setup initiated, waiting for service registration callback...")
@@ -1825,6 +1851,7 @@ class BleTransportFacade(
             }
         }
         connections.clear()
+        cancelAllPeerLostGrace()
         lastSeenRssi.clear()
         pendingInbound.clear()
         outboundQueue.clear()
@@ -3078,8 +3105,10 @@ class BleTransportFacade(
         // caller's thread until main has processed the eviction. Eviction is
         // not on the hot path so the latch hop is acceptable.
         runOnBleThreadSync {
-            val address = connections.addressForDevice(peerId)
-            if (address == null) {
+            // Every address the peer is mapped at, not just the one that
+            // resolved last: a peer can hold one link per direction.
+            val addresses = connections.addressesForDevice(peerId)
+            if (addresses.isEmpty()) {
                 if (logThrottler.shouldLog("mesh_evict_missing_$peerId")) {
                     Log.w(TAG, "Cannot evict $peerId: no known address")
                 }
@@ -3090,25 +3119,47 @@ class BleTransportFacade(
                 Log.i(TAG, "Evicting peer $peerId to reclaim capacity (reason=$reason)")
             }
 
-            connections.getGatt(address)?.let { gatt ->
-                try {
-                    gatt.disconnect()
-                    gatt.close()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Error while evicting $peerId", e)
+            for (address in addresses) {
+                connections.getGatt(address)?.let { gatt ->
+                    try {
+                        gatt.disconnect()
+                        gatt.close()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error while evicting $peerId", e)
+                    }
                 }
+                connections.removeGatt(address)
+                if (connections.hasServerConnection(address)) {
+                    // A hello maps a central at the address it connected from,
+                    // where the only link may be the one it opened to our
+                    // server (#512). Dropping the mapping without closing that
+                    // link would leave the central writing to an address this
+                    // side can no longer map, and the hello is written once
+                    // per link, so nothing would map it again: its frames
+                    // would be lost until the link dropped by itself.
+                    try {
+                        bluetoothAdapter?.getRemoteDevice(address)?.let {
+                            peripheralGattServer?.cancelConnection(it)
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error cancelling server link while evicting $peerId", e)
+                    }
+                    // Untracked now, not when onCentralDisconnected lands, so
+                    // the connection cap an inbound swap checks next sees the
+                    // slot it evicted for. That callback then finds no mapping.
+                    connections.untrackServerConnection(address)
+                }
+                centralClient.forgetLink(address)
+                lastSeenRssi.remove(address)
+                pendingInbound.removeAll(address)
+                // Facade-only staged drop; the Rust-side MTU entry is cleared
+                // by `protocol.blePeerLost` below via `on_peer_lost`.
+                dropStagedPeerMtu(address, peerId)
+                connections.removeIdentifiersForAddress(address)
             }
-
-            connections.removeGatt(address)
-            centralClient.forgetLink(address)
-            connections.removeIdentifiersForDevice(peerId)
+            cancelPeerLostGrace(peerId)
             connections.removeConnectionRole(peerId)
-            lastSeenRssi.remove(address)
-            pendingInbound.removeAll(address)
             outboundQueue.removeAll(peerId)
-            // Facade-only staged drop; the Rust-side MTU entry is cleared
-            // by `protocol.blePeerLost` below via `on_peer_lost`.
-            dropStagedPeerMtu(address, peerId)
             meshController.registerDisconnection(peerId)
             refreshSelfMetrics()
 
@@ -3203,11 +3254,20 @@ class BleTransportFacade(
                 val data = fragment.data.map { it.toByte() }.toByteArray()
 
                 val address = resolveTargetAddress(recipientId)
-                val hasConnection = address?.let { connections.getGatt(it) } != null
+                // A peer that subscribed on the link it opened to our server is
+                // reachable by notify, which [sendFragmentData] prefers. A hello
+                // maps such a peer at its central-role address, where we hold no
+                // client link; requiring one here would queue every fragment and
+                // dial that address, the dial the hello exists to remove (#512).
+                val hasConnection = address?.let { connections.getGatt(it) } != null ||
+                    subscribedNotifyAddressFor(recipientId) != null
                 if (!hasConnection) {
                     outboundQueue.enqueue(recipientId, data)
-                    // Proactively attempt reconnection if we know the address (once per peer per drain)
-                    if (address != null && reconnectAttempted.add(address)) {
+                    // Proactively attempt reconnection if we know the address (once per peer per drain).
+                    // Never toward a central connected to our server: that address need not
+                    // advertise, and the link it opened is the one its subscription will arrive on.
+                    if (address != null && !connections.hasServerConnection(address) &&
+                        reconnectAttempted.add(address)) {
                         bluetoothAdapter?.let { adapter ->
                             try {
                                 val device = adapter.getRemoteDevice(address)
@@ -4181,6 +4241,15 @@ class BleTransportFacade(
             }
         }
 
+        override fun onInboundHello(device: BluetoothDevice, bytes: ByteArray) {
+            if (shuttingDown) return
+            val address = device.address
+            bleHandler.post {
+                if (shuttingDown) return@post
+                handleInboundHelloOnBleThread(address, bytes)
+            }
+        }
+
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
             if (shuttingDown) return
             // Our peripheral notify to this central completed — release the
@@ -4246,6 +4315,143 @@ class BleTransportFacade(
         }
     }
 
+    /**
+     * Reports [peerId] lost [PEER_LOST_GRACE_MS] from now unless a link to it
+     * is up again by then. Does nothing while a link is up, or while a report
+     * is already pending, so the deadline runs from the first link to drop
+     * with nothing left. BLE-thread only.
+     */
+    private fun schedulePeerLostGrace(peerId: String) {
+        assertOnBleThread("schedulePeerLostGrace")
+        if (peerLostGrace.containsKey(peerId) || connections.hasEstablishedLink(peerId)) return
+        val report = Runnable {
+            peerLostGrace.remove(peerId)
+            if (shuttingDown || state != TransportState.RUNNING) return@Runnable
+            if (connections.hasEstablishedLink(peerId)) return@Runnable
+            reportPeerLostAfterGrace(peerId)
+        }
+        peerLostGrace[peerId] = report
+        bleHandler.postDelayed(report, PEER_LOST_GRACE_MS)
+    }
+
+    private fun cancelPeerLostGrace(peerId: String) {
+        peerLostGrace.remove(peerId)?.let { bleHandler.removeCallbacks(it) }
+    }
+
+    private fun cancelAllPeerLostGrace() {
+        for (report in peerLostGrace.values) bleHandler.removeCallbacks(report)
+        peerLostGrace.clear()
+    }
+
+    /**
+     * The teardown a non-clean disconnect does at once, for a peer whose grace
+     * ran out with no link up. Drops every address mapped to it, so a central
+     * reconnect still backing off finds nothing to redial and the peer comes
+     * back through discovery, as after any other loss.
+     */
+    private fun reportPeerLostAfterGrace(peerId: String) {
+        val addresses = connections.addressesForDevice(peerId)
+        if (addresses.isEmpty()) return
+        Log.i(TAG, "No link to $peerId for ${PEER_LOST_GRACE_MS} ms, reporting it lost")
+        emitDiagnostic("info", "Peer lost after its links closed", mapOf(
+            "peerId" to peerId,
+            "graceMs" to PEER_LOST_GRACE_MS,
+        ))
+        try {
+            protocol.blePeerLost(peerId)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error notifying peer lost", e)
+            emitDiagnostic("error", "Error notifying peer lost", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+        }
+        for (address in addresses) {
+            dropStagedPeerMtu(address, peerId)
+            lastSeenRssi.remove(address)
+            centralClient.clearResolutionAttempt(address)
+            pendingInbound.removeAll(address)
+            connections.removeIdentifiersForAddress(address)
+        }
+        outboundQueue.removeAll(peerId)
+        meshController.registerDisconnection(peerId)
+        refreshSelfMetrics()
+        connections.removeConnectionRole(peerId)
+        if (state == TransportState.RUNNING) {
+            refreshAdvertising("membership_change")
+        }
+        maybeHandleRebalance("disconnect")
+    }
+
+    /**
+     * Maps a central's address from the identity assertion it wrote to our
+     * Hello characteristic, so its writes are not queued behind a dial back
+     * to an address that does not advertise (#512).
+     *
+     * The assertion is checked by the one verifier, and only the address it
+     * derives is ever bound, exactly as on the central's Identity read
+     * (docs/spec/ble-framing.md, "The identity assertion"). A value that
+     * fails is ignored and the link resolves as before; so is one for a link
+     * already bound to another address, because a hello never rebinds a
+     * link. Like every assertion it is static, so a device that copied a
+     * peer's can label its own link with that peer's address and gain a
+     * link it cannot use (threat model R16).
+     *
+     * The peer is announced to the core only when no other link has
+     * announced it already; a second announce adds nothing but another
+     * `neighbor_discovered`. BLE-thread only.
+     */
+    private fun handleInboundHelloOnBleThread(address: String, bytes: ByteArray) {
+        assertOnBleThread("handleInboundHelloOnBleThread")
+        if (!connections.hasServerConnection(address)) return
+        val peerId = try {
+            verifyIdentityAssertion(bytes.map { it.toUByte() })
+        } catch (e: Exception) {
+            emitDiagnostic("warning", "BLE hello failed verification", mapOf(
+                "address" to address,
+                "reason" to (e.message ?: e.javaClass.simpleName),
+            ))
+            return
+        }
+        when (val bound = connections.deviceIdForAddress(address)) {
+            peerId -> {
+                cancelPeerLostGrace(peerId)
+                return
+            }
+            null -> Unit
+            else -> {
+                emitDiagnostic("warning", "BLE hello names a different peer than this link", mapOf(
+                    "address" to address,
+                    "bound" to bound,
+                    "hello" to peerId,
+                ))
+                return
+            }
+        }
+        val alreadyAnnounced = connections.addressesForDevice(peerId).isNotEmpty()
+        Log.i(TAG, "Hello from $address verified as $peerId")
+        connections.setDeviceIdentifier(address, peerId)
+        cancelPeerLostGrace(peerId)
+        val role = connections.consumePendingRole(address) ?: MeshRole.MEMBER
+        meshController.registerConnection(peerId, role)
+        connections.setConnectionRole(peerId, role)
+        meshController.markPeerActive(peerId)
+        meshController.markPeerActive(deviceId)
+        refreshSelfMetrics()
+        // The per-peer MTU goes in before the core hears of the peer, the
+        // invariant `CentralGattClient.announceVerifiedPeer` documents.
+        flushPeerMtu(address, peerId)
+        if (!alreadyAnnounced) {
+            try {
+                protocol.blePeerDiscovered(peerId, lastSeenRssi[address] ?: (-60).toShort())
+            } catch (e: Exception) {
+                Log.e(TAG, "Error notifying peer discovered", e)
+                emitDiagnostic("error", "Error notifying peer discovered", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+            }
+        }
+        centralClient.drainPendingInboundFor(address, peerId)
+        if (state == TransportState.RUNNING) {
+            refreshAdvertising("membership_change")
+        }
+    }
+
     private fun handleCentralConnectedOnBleThread(device: BluetoothDevice) {
         val observation = lastSeenMeshAdvertisements[device.address]
         val decision = meshController.shouldAcceptInboundConnection(
@@ -4273,6 +4479,8 @@ class BleTransportFacade(
         }
         connections.trackServerConnection(device.address)
         connections.setPendingRole(device.address, role)
+        // A known peer back on a link before its grace ran out was never lost.
+        connections.deviceIdForAddress(device.address)?.let { cancelPeerLostGrace(it) }
         Log.i(TAG, "GATT server: Device connected: ${device.address} (role=$role)")
         emitDiagnostic("info", "Device connected to GATT server", mapOf("address" to device.address))
     }
@@ -4322,6 +4530,12 @@ class BleTransportFacade(
         // restoring it from any min() demotion the notify link imposed. On a
         // non-clean disconnect the teardown below calls blePeerLost (drops
         // peer_mtus wholesale) + dropStagedPeerMtu, so we defer to that path.
+        if (isCleanDisconnect) {
+            // Kept as a neighbour for now, on the expectation above that it
+            // returns. Bounded, so a peer that switched Bluetooth off is
+            // reported lost once no link to it is left.
+            connections.deviceIdForAddress(address)?.let { schedulePeerLostGrace(it) }
+        }
         if (isCleanDisconnect && peripheralMaxPayloads.remove(address) != null) {
             connections.deviceIdForAddress(address)?.let { peerId ->
                 // Drop the per-device peripheral slot too, or the recompute would

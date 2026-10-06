@@ -54,7 +54,7 @@ them is a wire break rather than a refactor:
 ## The GATT contract
 
 A device offers one primary service for each application on it that runs this
-protocol, with three required characteristics and one optional one.
+protocol, with three required characteristics and two optional ones.
 
 | Role | UUID | Required |
 |------|------|----------|
@@ -63,6 +63,7 @@ protocol, with three required characteristics and one optional one.
 | Device id | `6E400003-B5A3-F393-E0A9-E50E24DCCA9E` | yes |
 | Identity | `6E400004-B5A3-F393-E0A9-E50E24DCCA9E` | yes |
 | App tag | `6E400005-B5A3-F393-E0A9-E50E24DCCA9E` | no |
+| Hello | `6E400006-B5A3-F393-E0A9-E50E24DCCA9E` | no |
 
 These are the Nordic UART Service UUIDs, adopted rather than minted. That was
 not a considered choice and it collides with any NUS peripheral in range, which
@@ -89,6 +90,38 @@ present it MUST be readable and carries eight bytes, the first eight of
 `SHA-256("offline-protocol-ble-app-tag-v1" || 0x00 || app_id)`, where `app_id`
 is the application id of [the wire format](wire-format.md) as UTF-8. It proves
 nothing, and is read only to choose between instances, below.
+
+**Hello** is written by a central to say who it is on the link it opened. It
+MAY be absent; when present it MUST be writable with response. The rest of
+the contract proves the peripheral to the central and nothing the other way,
+so a peripheral that receives Message writes from a central it cannot map has
+had only one way to learn who is writing: dial the central's address and run
+the read side itself. That address is the central-role one, which need not be
+the address the device advertises, so the dial can take tens of seconds, and
+every fragment the central wrote waits for it. The hello removes the dial:
+
+- A central that finds Hello on the instance it chose SHOULD write it once,
+  after its subscription to Message is acknowledged and before its first
+  Message write, as one write that fits the negotiated MTU. The value is the
+  identity assertion below, the same value the central serves on its own
+  Identity characteristic. A central that cannot fit it in one write, or has
+  no assertion yet, skips it; a refused write is not a reason to drop the
+  link.
+- A peripheral MUST refuse a prepared (long) write, a write at a non-zero
+  offset, and a value shorter than 96 or longer than 512 bytes, before
+  verifying anything.
+- It MUST verify the value with the one verifier, steps one to three below.
+  There is no Device id string to compare against in step four: the claim is
+  the derived address itself. It binds the writer's link to the **derived**
+  address only, and announces the peer to the core only if no other link has
+  announced it already.
+- A value that fails verification is ignored, and the link is resolved as it
+  would have been without one. So is a hello on a link already bound to a
+  different address: a hello never rebinds a link.
+
+The hello carries the same static assertion as Identity, with the same limits
+below: it proves possession of the key once, and a device that copied a
+peer's assertion can label its own link with that peer's address.
 
 ### Several instances behind one link
 

@@ -13429,6 +13429,20 @@ mod tests {
             .join(" ")
     }
 
+    /// Where the Kotlin declaration that `rest` starts inside ends: the next
+    /// function declared at any visibility. [`rn_source_code_only`] collapses
+    /// all whitespace to single spaces, so the markers are space-delimited; a
+    /// marker carrying a newline or indentation never matches, and a "body"
+    /// sliced on one runs to the end of the file, which passes any
+    /// containment check vacuously.
+    fn rn_kotlin_body_end(rest: &str) -> usize {
+        [" private fun ", " internal fun ", " override fun ", " fun "]
+            .iter()
+            .filter_map(|marker| rest.find(marker))
+            .min()
+            .unwrap_or(rest.len())
+    }
+
     /// The Python counterpart of [`rn_source_code_only`], for module
     /// constants: reads a file under `bindings/python` and returns a lookup
     /// from a constant's name to the value the file assigns it.
@@ -14263,6 +14277,179 @@ mod tests {
         );
     }
 
+    /// A peer whose links all closed cleanly stayed a Bluetooth neighbour until
+    /// the central reconnect backoff gave up, about two minutes, and a peer
+    /// reached only through our GATT server stayed one indefinitely (#513).
+    /// The facade now reports it lost once no link to it has been up for
+    /// `PEER_LOST_GRACE_MS`. `BleTransportFacade` has no test harness, so this
+    /// pins the wiring: both disconnect paths start the grace, the report
+    /// re-checks for an established link first, and both teardowns cancel
+    /// whatever is pending so a stopped transport reports nothing.
+    #[test]
+    fn react_native_android_ble_bounds_how_long_a_peer_with_no_link_stays_a_neighbor() {
+        let facade = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+        let central = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/CentralGattClient.kt",
+        );
+        let section = |source: &str, start: &str| -> String {
+            let from = source
+                .find(start)
+                .unwrap_or_else(|| panic!("missing {start}"));
+            let rest = &source[from + start.len()..];
+            rest[..rn_kotlin_body_end(rest)].to_string()
+        };
+
+        assert!(
+            facade.contains("private const val PEER_LOST_GRACE_MS = 15_000L"),
+            "the grace is 15 s: long enough for one reconnect to land"
+        );
+        assert!(
+            section(&facade, "private fun handleCentralDisconnectedOnBleThread(")
+                .contains("schedulePeerLostGrace("),
+            "a clean server-side disconnect must start the grace, or a server-only peer is never \
+             reported lost"
+        );
+        assert!(
+            section(&central, "private fun handleDisconnected(")
+                .contains("host.onPeerLinkDropped("),
+            "a client link that drops into the reconnect backoff must start the grace"
+        );
+        let schedule = section(&facade, "private fun schedulePeerLostGrace(");
+        let runnable = schedule
+            .find("Runnable {")
+            .expect("the report runs from a posted Runnable");
+        let check = runnable
+            + schedule[runnable..]
+                .find("connections.hasEstablishedLink(peerId)")
+                .expect("the report must re-check for a link that came back");
+        let report = schedule
+            .find("reportPeerLostAfterGrace(peerId)")
+            .expect("the grace must end in a report");
+        assert!(
+            check < report,
+            "re-check for a link before reporting the peer lost"
+        );
+        for teardown in [
+            "private fun stopUnsafe(",
+            "private fun dropLinksAfterRadioLoss(",
+        ] {
+            assert!(
+                section(&facade, teardown).contains("cancelAllPeerLostGrace()"),
+                "{teardown} must cancel pending peer-lost reports"
+            );
+        }
+    }
+
+    /// A central's writes reached our GATT server from an address nothing had
+    /// mapped, so the server queued them and dialled that address back to read
+    /// its identity, seconds to about 40 s per resolution (#512). An Android
+    /// central now writes its identity assertion to the Hello characteristic
+    /// before its first Message write, and the server binds the address it
+    /// proves. `BleTransportFacade` has no test harness, so this pins the
+    /// facade's side; `CentralGattClientHelloTest` covers the central's.
+    #[test]
+    fn react_native_android_ble_central_says_hello() {
+        use offline_protocol_transport::constants::BLE_HELLO_CHAR_UUID;
+
+        let facade = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+        assert!(
+            facade.contains(&format!(
+                "HELLO_CHAR_UUID = UUID.fromString(\"{BLE_HELLO_CHAR_UUID}\")"
+            )),
+            "BleTransportFacade.kt must declare the Hello characteristic as {BLE_HELLO_CHAR_UUID}"
+        );
+        assert!(
+            facade.contains("helloUuid = HELLO_CHAR_UUID")
+                && facade.contains("helloCharUuid = HELLO_CHAR_UUID"),
+            "the facade must serve Hello on its server and write it from its central"
+        );
+
+        let declaration = "private fun handleInboundHelloOnBleThread(";
+        let start = facade
+            .find(declaration)
+            .expect("the facade must handle an inbound hello")
+            + declaration.len();
+        let body = &facade[start..];
+        let body = &body[..rn_kotlin_body_end(body)];
+        let verify = body
+            .find("verifyIdentityAssertion(")
+            .expect("a hello is bound only through the one verifier");
+        let bind = body
+            .find("connections.setDeviceIdentifier(address, peerId)")
+            .expect("a verified hello binds the writer's address to the derived address");
+        let mtu = body
+            .find("flushPeerMtu(address, peerId)")
+            .expect("a verified hello flushes the per-peer MTU");
+        let announce = body
+            .find("protocol.blePeerDiscovered(peerId")
+            .expect("a verified hello announces a peer no other link announced");
+        assert!(verify < bind, "verify before binding");
+        assert!(
+            mtu < announce,
+            "the per-peer MTU must be on file before the core hears of the peer, or a \
+             fragmenting send falls back to the 185-byte floor"
+        );
+
+        // The server refuses a hello shorter than any assertion before the
+        // verifier sees it. That floor is the codec's, written again in Kotlin.
+        let server = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/PeripheralGattServer.kt",
+        );
+        let floor = offline_protocol_sealed::IDENTITY_ASSERTION_MIN_LEN;
+        assert!(
+            server.contains(&format!("const val MIN_HELLO_WRITE_BYTES = {floor}")),
+            "PeripheralGattServer.kt MIN_HELLO_WRITE_BYTES must equal IDENTITY_ASSERTION_MIN_LEN \
+             ({floor})"
+        );
+
+        // A hello maps the peer at its central-role address, where we hold no
+        // client link. The drain must count the peer's subscription to our
+        // server as a connection and must not dial an address connected to
+        // our server, or every send queues and dials the address the hello
+        // exists to spare.
+        let drain_decl = "private fun drainAndSendFragments(";
+        let drain_start = facade
+            .find(drain_decl)
+            .expect("the facade drains outbound fragments")
+            + drain_decl.len();
+        let drain = &facade[drain_start..];
+        let drain = &drain[..rn_kotlin_body_end(drain)];
+        assert!(
+            drain.contains(
+                "val hasConnection = address?.let { connections.getGatt(it) } != null || \
+                 subscribedNotifyAddressFor(recipientId) != null"
+            ),
+            "the drain must treat a notify-subscribed peer as connected"
+        );
+        assert!(
+            drain.contains("!connections.hasServerConnection(address)"),
+            "the drain must not dial a central connected to our server"
+        );
+
+        // A hello maps a peer whose only link may be the one it opened to our
+        // server. Eviction must reach every address the peer is mapped at and
+        // close that server link, or the central keeps writing to an address
+        // nothing maps any more and its frames are lost.
+        let evict_decl = "private fun evictPeer(";
+        let evict_start =
+            facade.find(evict_decl).expect("the facade evicts peers") + evict_decl.len();
+        let evict = &facade[evict_start..];
+        let evict = &evict[..rn_kotlin_body_end(evict)];
+        assert!(
+            evict.contains("connections.addressesForDevice(peerId)"),
+            "evictPeer must tear down every address mapped to the peer"
+        );
+        assert!(
+            evict.contains("peripheralGattServer?.cancelConnection(")
+                && evict.contains("connections.untrackServerConnection(address)"),
+            "evictPeer must close and untrack a server link the peer opened to us"
+        );
+    }
+
     /// Android hears Bluetooth go off and come back from the adapter's state
     /// broadcast, not only from a failed scan start. Polled once a minute, the
     /// transport missed a Bluetooth stack crash entirely (the stack restarts
@@ -14350,6 +14537,35 @@ mod tests {
                 "{body} must set `{latch}`"
             );
         }
+    }
+
+    /// Every event a native module hands to JavaScript carries a number, so the
+    /// TypeScript layer can report one lost in React Native (#514), where a
+    /// bridgeless emit fails without the module seeing it. The field name is
+    /// written in three languages; one that drifts makes `seq` undefined at JS,
+    /// which reads as "an old native module" and silently reports nothing.
+    #[test]
+    fn react_native_events_are_numbered_for_gap_detection() {
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+        );
+        let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        let ts = rn_source_code_only("src/index.ts");
+        assert!(
+            kotlin.contains("const val EVENT_SEQ_FIELD = \"seq\"")
+                && kotlin.contains("putInt(EVENT_SEQ_FIELD, eventSeq)")
+                && kotlin.contains("if (numbered) eventSeq += 1"),
+            "OfflineProtocolModule.kt must number every event on its event name as `seq`"
+        );
+        assert!(
+            swift.contains("static let eventSeqField = \"seq\"")
+                && swift.contains("numbered[Self.eventSeqField] = eventSeq"),
+            "OfflineProtocolModule.swift must number every event on its event name as `seq`"
+        );
+        assert!(
+            ts.contains("(data: { eventJson: string; seq?: number }) => { this.checkEventSequence(data.seq);"),
+            "index.ts must check each event's `seq` before handling it"
+        );
     }
 
     /// The buffered-inbound event set agrees across TypeScript, Kotlin and

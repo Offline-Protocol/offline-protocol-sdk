@@ -127,6 +127,9 @@ interface TransportManager {
 - Identity Characteristic: `6E400004-B5A3-F393-E0A9-E50E24DCCA9E`
 - App Tag Characteristic: `6E400005-B5A3-F393-E0A9-E50E24DCCA9E` (read only
   when a peer runs several apps on this SDK, to pick this app's instance)
+- Hello Characteristic: `6E400006-B5A3-F393-E0A9-E50E24DCCA9E` (written once
+  by a central with its identity assertion, so the peer maps the central's
+  address without dialling it back; optional, Android only so far)
 
 These, the fragment header and the reassembly rules are specified normatively
 in [Bluetooth LE framing](spec/ble-framing.md), which is the authority; this

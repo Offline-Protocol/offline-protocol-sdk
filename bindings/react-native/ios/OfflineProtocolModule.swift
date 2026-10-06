@@ -1100,9 +1100,29 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
             return false
         }
-        sendEvent(withName: eventName, body: body)
+        // Numbered under the lock and handed over inside it, so the numbers
+        // reach JS in the order they were given out. See `eventSeq`.
+        eventSeqLock.lock()
+        defer { eventSeqLock.unlock() }
+        if eventName == Events.onEvent, var numbered = body as? [String: Any] {
+            numbered[Self.eventSeqField] = eventSeq
+            eventSeq += 1
+            sendEvent(withName: eventName, body: numbered)
+        } else {
+            sendEvent(withName: eventName, body: body)
+        }
         return true
     }
+
+    /// The number the next event handed to JS on `Events.onEvent` carries, so
+    /// the TypeScript layer can see one go missing (#514). The same contract
+    /// as the Kotlin module's `eventSeq`: only events handed over are
+    /// numbered, a gap at JS means the event left this module and was lost in
+    /// React Native, and nothing is refetched.
+    private var eventSeq = 0
+    private let eventSeqLock = NSLock()
+    /// Field on every `Events.onEvent` payload carrying `eventSeq`.
+    static let eventSeqField = "seq"
     
     fileprivate func emitDiagnostic(level: String, message: String, context: [String: Any]? = nil) {
         guard canEmitToJs else { return }

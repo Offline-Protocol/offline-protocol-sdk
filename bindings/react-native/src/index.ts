@@ -416,6 +416,11 @@ async function applyPendingInterest(): Promise<void> {
 export class OfflineProtocol {
   private eventEmitter: NativeEventEmitter;
   private eventSubscription: EmitterSubscription | null = null;
+  /**
+   * The `seq` of the last event the native module handed over, or null before
+   * the first. See {@link checkEventSequence}.
+   */
+  private lastEventSeq: number | null = null;
   private eventListeners: Map<EventType | "all", Set<EventListener>> =
     new Map();
   /**
@@ -866,7 +871,8 @@ export class OfflineProtocol {
   private setupEventSubscription(): void {
     this.eventSubscription = this.eventEmitter.addListener(
       "OfflineProtocol_Event",
-      (data: { eventJson: string }) => {
+      (data: { eventJson: string; seq?: number }) => {
+        this.checkEventSequence(data.seq);
         try {
           const event = JSON.parse(data.eventJson) as ProtocolEvent;
           this.emitEvent(event);
@@ -875,6 +881,43 @@ export class OfflineProtocol {
         }
       }
     );
+  }
+
+  /**
+   * Reports events the native module handed over that never arrived here.
+   *
+   * Both native modules number every event they hand to JavaScript, under one
+   * lock, in the order they hand them over. A bridgeless emit that fails
+   * inside React Native returns normally, so the native side cannot see the
+   * loss; this is the one place that can (#514). A gap is surfaced as a
+   * `diagnostic` event at level `warning`, message `native_event_gap`, with
+   * the missing range, so a log of every event shows where one went missing.
+   * It is detection, not recovery: nothing is refetched.
+   *
+   * A native module older than this one sends no `seq`, and the first event
+   * after a JavaScript reload starts a fresh count against a module that kept
+   * counting, so neither is reported. A number lower than expected is a
+   * native module that was recreated under this instance and counts from
+   * zero again; the count restarts from it rather than reporting a negative
+   * gap.
+   */
+  private checkEventSequence(seq: number | undefined): void {
+    if (typeof seq !== "number") {
+      return;
+    }
+    const expected = this.lastEventSeq === null ? seq : this.lastEventSeq + 1;
+    this.lastEventSeq = seq;
+    if (seq <= expected) {
+      return;
+    }
+    const context = { expected, received: seq, missing: seq - expected };
+    console.warn("[OfflineProtocol] native events lost before JavaScript:", context);
+    this.emitEvent({
+      type: "diagnostic",
+      level: "warning",
+      message: "native_event_gap",
+      context,
+    } as ProtocolEvent);
   }
 
   /**

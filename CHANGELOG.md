@@ -11,6 +11,62 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+## [Unreleased]
+
+### Fixed
+
+- **A message carried through a dense cluster no longer dies inside it**
+  ([#510](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/510)).
+  A forwarder that received a second copy of a frame while its own forward
+  waited cancelled the forward, on the assumption that a neighbor's
+  transmission had covered the same ground. It had not: every carrier hands a
+  frame to a few chosen neighbors rather than broadcasting it. In a cluster
+  where everyone hears everyone, the one device beside the way out could
+  stand down after two copies reached it from neighbors that never chose that
+  way, and the frame died with its id suppressed on every member, so the
+  sender's retries could not rescue it. A copy now takes only the neighbor
+  that sent it off the forward's fan-out, and a forward is dropped only when
+  every neighbor it could go to has handed it a copy. The
+  `mesh_forwarding::everyone_hearing_everyone_does_not_multiply_the_traffic`
+  flake (about 2% of runs) went from 4 failures in 200 runs to none. The
+  worst-case cost is unchanged: still at most one fan-out per device, inside
+  the same per-second budgets.
+- **Android reports a Bluetooth peer lost once no link to it is left**
+  ([#513](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/513)).
+  When the other phone switched Bluetooth off, its links closed cleanly, and
+  this phone kept it a neighbour until the reconnect backoff gave up (over a
+  minute in the device test, about two in the worst case) or, for a peer
+  reached only through this phone's GATT server, until the transport stopped.
+  `neighbor_lost` now fires 15 seconds after the last link to the peer goes
+  down, unless one comes back first. Reconnect attempts continue during those
+  15 seconds; once the peer is reported lost it returns through discovery and
+  is announced again, as after any other loss. A dial still in flight does
+  not count as a link.
+- **Android Bluetooth messages no longer wait on a dial back to the sender**
+  ([#512](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/512)).
+  A peer's writes reach this phone's GATT server from the peer's central-role
+  address. When nothing had mapped that address yet, the server queued the
+  fragments and dialled the address to read the peer's identity, and since
+  that address does not advertise, the dial took from seconds to about 40 s
+  (11 s at p95 in a 30-round soak, 40 s after a Bluetooth toggle). An Android
+  central now writes its identity assertion to a new optional GATT
+  characteristic, Hello (`6E400006-…`), before its first message write, and
+  the server binds the address it proves with the same verifier the Identity
+  read uses. A peer without the characteristic, an iPhone among them, is
+  resolved as before. [BLE framing](docs/spec/ble-framing.md) specifies it.
+
+### Added
+
+- **An event lost between the native module and JavaScript is reported**
+  (refs [#514](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/514)).
+  Both native modules number every event they hand to JavaScript, and the SDK
+  emits a `diagnostic` event (`message: "native_event_gap"`, with the missing
+  range) when a number is skipped. A bridgeless React Native emit can fail
+  without the native side seeing it, and three device-test gaps (a receipt
+  with no `message_received`, a delivery with no `message_delivered`) could
+  not be placed in the core or the bridge. This does not recover a lost
+  event; it says which side lost it.
+
 ## [0.28.0] — 2026-10-06
 
 > **The peer-stream slot carries traffic on phones.** The mobile managers

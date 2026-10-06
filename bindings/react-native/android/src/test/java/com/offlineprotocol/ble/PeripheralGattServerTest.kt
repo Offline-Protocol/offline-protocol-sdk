@@ -3,6 +3,7 @@ package com.offlineprotocol.ble
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -162,5 +163,22 @@ class PeripheralGattServerTest {
         // byte-pattern constants that back [classifyCccdWrite].
         assertArrayEquals(byteArrayOf(0x01, 0x00), CCCD_ENABLE_NOTIFICATION_BYTES)
         assertArrayEquals(byteArrayOf(0x02, 0x00), CCCD_ENABLE_INDICATION_BYTES)
+    }
+
+    // --- acceptHelloWrite ---
+
+    @Test
+    fun `acceptHelloWrite takes one assertion-sized write at offset 0`() {
+        assertTrue(acceptHelloWrite(ByteArray(96), preparedWrite = false, offset = 0))
+        assertTrue(acceptHelloWrite(ByteArray(115), preparedWrite = false, offset = 0))
+        assertTrue(acceptHelloWrite(ByteArray(512), preparedWrite = false, offset = 0))
+    }
+
+    @Test
+    fun `acceptHelloWrite refuses what the verifier should never see`() {
+        assertFalse("shorter than any assertion", acceptHelloWrite(ByteArray(95), preparedWrite = false, offset = 0))
+        assertFalse("past one attribute value", acceptHelloWrite(ByteArray(513), preparedWrite = false, offset = 0))
+        assertFalse("a slice of a long write", acceptHelloWrite(ByteArray(96), preparedWrite = true, offset = 0))
+        assertFalse("not the start of the value", acceptHelloWrite(ByteArray(96), preparedWrite = false, offset = 1))
     }
 }
