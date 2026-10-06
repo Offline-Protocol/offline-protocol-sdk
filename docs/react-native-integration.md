@@ -214,7 +214,7 @@ if (state !== ProtocolState.Running) {
 }
 ```
 
-**`start()` only restores the transports it can see.** It re-enables the ones declared in the constructor config the instance still holds — BLE, and `transports.internet` / `nostr` / `reticulum` — and nothing else. Anything you enable out of band has to be re-issued by you: **Wi‑Fi Direct always**, because `start()` never starts it, and **the relay** whenever the `serverAddress` or `authToken` reaches the SDK through `enableTransport('internet', ...)` rather than through `transports.internet`. `Running` is not a claim that any particular transport is attached — `getActiveTransports()` is the read that answers that.
+**`start()` only restores the transports it can see.** It re-enables the ones declared in the constructor config the instance still holds — BLE, and `transports.internet` / `nostr` / `reticulum` / `wifiDirect` — and nothing else. Anything you enable out of band has to be re-issued by you: **Wi‑Fi Direct** when you turned it on with `enableTransport('wifiDirect')` rather than `transports.wifiDirect`, and **the relay** whenever the `serverAddress` or `authToken` reaches the SDK through `enableTransport('internet', ...)` rather than through `transports.internet`. `Running` is not a claim that any particular transport is attached — `getActiveTransports()` is the read that answers that.
 
 Two more things to know if you restart the SDK yourself:
 
@@ -260,7 +260,7 @@ registerMeshWakeTask(async () => {
 Three more things the task has to get right:
 
 - **Be idempotent.** The task is allowed to run while your app is in the foreground — the alternative is React Native crashing the process when the user opens the app mid-wake — so it can find a protocol already live. Return early instead of building a second one.
-- **Re-issue what `start()` does not restore.** Wi‑Fi Direct always, and the relay whenever its `serverAddress`/`authToken` arrive through `enableTransport('internet', ...)`. Same list as §6.2.
+- **Re-issue what `start()` does not restore.** Wi‑Fi Direct when it is not in `transports.wifiDirect`, and the relay whenever its `serverAddress`/`authToken` arrive through `enableTransport('internet', ...)`. Same list as §6.2.
 - **Resolve promptly.** The keep-alive holds the process; the task does not need to. Past its budget React Native terminates it.
 
 **If the wake does not land, the keep-alive stops itself.** A task that was never registered, failed to boot, threw, or simply declined all end the same way: a watchdog brings the service down rather than leave a "Mesh Active" notification over a mesh that is not running. Declining is a legitimate outcome — return early and the device goes back to the §6.2 behaviour.
