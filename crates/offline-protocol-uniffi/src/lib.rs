@@ -14393,6 +14393,30 @@ mod tests {
             "the per-peer MTU must be on file before the core hears of the peer, or a \
              fragmenting send falls back to the 185-byte floor"
         );
+
+        // A hello maps the peer at its central-role address, where we hold no
+        // client link. The drain must count the peer's subscription to our
+        // server as a connection and must not dial an address connected to
+        // our server, or every send queues and dials the address the hello
+        // exists to spare.
+        let drain_decl = "private fun drainAndSendFragments(";
+        let drain_start = facade
+            .find(drain_decl)
+            .expect("the facade drains outbound fragments")
+            + drain_decl.len();
+        let drain = &facade[drain_start..];
+        let drain = &drain[..rn_kotlin_body_end(drain)];
+        assert!(
+            drain.contains(
+                "val hasConnection = address?.let { connections.getGatt(it) } != null || \
+                 subscribedNotifyAddressFor(recipientId) != null"
+            ),
+            "the drain must treat a notify-subscribed peer as connected"
+        );
+        assert!(
+            drain.contains("!connections.hasServerConnection(address)"),
+            "the drain must not dial a central connected to our server"
+        );
     }
 
     /// Android hears Bluetooth go off and come back from the adapter's state

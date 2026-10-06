@@ -37,6 +37,29 @@ class StaleAddressRegistryTest {
     }
 
     @Test
+    fun `a live link at an address that resolved earlier still counts`() {
+        // A hello maps the peer's central-role address last, so the peer's
+        // address is the one our client link may be giving up on. Its server
+        // link at the other address is live, and must keep it from being
+        // reported lost.
+        val registry = MeshConnectionRegistry()
+        registry.setDeviceIdentifier("client-side", "peerC")
+        registry.setDeviceIdentifier("server-side", "peerC")
+        registry.trackServerConnection("server-side")
+        registry.setDeviceIdentifier("client-side", "peerC")
+        assertEquals("client-side", registry.addressForDevice("peerC"))
+
+        assertTrue(registry.hasOtherLiveLink("peerC", excluding = "client-side"))
+
+        registry.removeIdentifiersForAddress("client-side")
+        assertEquals(
+            "the surviving address becomes the peer's address",
+            "server-side",
+            registry.addressForDevice("peerC"),
+        )
+    }
+
+    @Test
     fun `deviceIds lists each identified peer once`() {
         val registry = MeshConnectionRegistry()
         registry.setDeviceIdentifier("old", "peerA")

@@ -66,23 +66,40 @@ class MeshConnectionRegistry {
             // Only if it still points here: a peer that came back from a new
             // address (iOS rotates its random address across a Bluetooth
             // power-cycle) has already re-pointed it to the live link.
-            deviceToAddress.remove(deviceId, address)
+            if (deviceToAddress.remove(deviceId, address)) {
+                // A peer can hold one link per direction at two addresses. When
+                // the one dropped here was the last to resolve, the other still
+                // maps to the peer and becomes its address, or the peer would
+                // have none while a link to it is up.
+                addressToDevice.entries
+                    .firstOrNull { it.value == deviceId }
+                    ?.let { deviceToAddress.putIfAbsent(deviceId, it.key) }
+            }
         }
     }
 
-    /** True when [deviceId] is reachable over a live link at an address other than [excluding]. */
-    fun hasOtherLiveLink(deviceId: String, excluding: String): Boolean {
-        val address = deviceToAddress[deviceId] ?: return false
-        return address != excluding &&
-            (gattClients.containsKey(address) || serverConnections.contains(address))
-    }
+    /**
+     * True when [deviceId] is reachable over a live link at an address other
+     * than [excluding].
+     *
+     * Walks every address mapped to the peer, like [hasEstablishedLink]:
+     * [deviceToAddress] keeps only the address that resolved last, and a hello
+     * makes that the peer's central-role address. Read through it, a client
+     * link giving up at that address would miss the peer's live link at its
+     * other address and report a live peer lost.
+     */
+    fun hasOtherLiveLink(deviceId: String, excluding: String): Boolean =
+        addressToDevice.any { (address, id) ->
+            id == deviceId && address != excluding &&
+                (gattClients.containsKey(address) || serverConnections.contains(address))
+        }
 
     /**
      * True when some link to [deviceId] is up: a central that connected to our
      * server, or a client link of ours whose connect completed, at ANY address
      * mapped to the peer. A dial still in flight does not count.
      *
-     * Unlike [hasOtherLiveLink] this walks every address, because
+     * Like [hasOtherLiveLink] this walks every address, because
      * [deviceToAddress] keeps only the address that resolved last, and a peer
      * can hold links from two addresses at once (one per direction).
      */

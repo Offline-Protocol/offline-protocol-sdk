@@ -702,7 +702,10 @@ is challenged or timestamped. Anyone who has read a peer's assertion once can
 present it again and have their own link or stream labelled with that peer's
 address. On Bluetooth LE that takes radio range: A1's position with A2's
 capability, since reading the characteristic and presenting it again are both
-active. On a peer stream it
+active. A replayed Hello needs no advertising at all, only a connection to the
+victim's server, and because the latest link to resolve becomes the peer's
+address there, it also steers the victim's outbound frames for that peer onto
+the replayer's link until the real peer's next link resolves. On a peer stream it
 takes only the ability to open a connection to the receiver, which on a LAN
 or a routed mesh is A2.
 

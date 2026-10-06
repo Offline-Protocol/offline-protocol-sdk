@@ -3230,11 +3230,20 @@ class BleTransportFacade(
                 val data = fragment.data.map { it.toByte() }.toByteArray()
 
                 val address = resolveTargetAddress(recipientId)
-                val hasConnection = address?.let { connections.getGatt(it) } != null
+                // A peer that subscribed on the link it opened to our server is
+                // reachable by notify, which [sendFragmentData] prefers. A hello
+                // maps such a peer at its central-role address, where we hold no
+                // client link; requiring one here would queue every fragment and
+                // dial that address, the dial the hello exists to remove (#512).
+                val hasConnection = address?.let { connections.getGatt(it) } != null ||
+                    subscribedNotifyAddressFor(recipientId) != null
                 if (!hasConnection) {
                     outboundQueue.enqueue(recipientId, data)
-                    // Proactively attempt reconnection if we know the address (once per peer per drain)
-                    if (address != null && reconnectAttempted.add(address)) {
+                    // Proactively attempt reconnection if we know the address (once per peer per drain).
+                    // Never toward a central connected to our server: that address need not
+                    // advertise, and the link it opened is the one its subscription will arrive on.
+                    if (address != null && !connections.hasServerConnection(address) &&
+                        reconnectAttempted.add(address)) {
                         bluetoothAdapter?.let { adapter ->
                             try {
                                 val device = adapter.getRemoteDevice(address)
