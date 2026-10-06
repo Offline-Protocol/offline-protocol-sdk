@@ -46,10 +46,11 @@ breaks two things, both narrow: the `offline-protocol-transport` crate drops
 `WIFI_DIRECT_MAX_PAYLOAD_SIZE`, and Python's `BlePeripheral` drops its
 `identity_json` argument
 ([§25](#25-behaviour-that-changes-without-a-compile-error-v0270)). `v0.28.0`
-breaks two things, both narrow: iOS's peer-stream slot moves from
-MultipeerConnectivity to Network framework, so an iPhone on `v0.28` does not
-see one on `v0.27` or earlier over that slot, and Python's `InternetManager`
-requires `app_id=`
+breaks two builds, both narrow: Python's `InternetManager` requires `app_id=`,
+and an exhaustive TypeScript `switch` over `SecurityWarningCode` needs a case
+for the new member. It also breaks one thing at run time: iOS's peer-stream
+slot moves from MultipeerConnectivity to Network framework, so an iPhone on
+`v0.28` does not see one on `v0.27` or earlier over that slot
 ([§26](#26-behaviour-that-changes-without-a-compile-error-v0280)).
 
 Otherwise, where a later section documents an
@@ -2454,8 +2455,9 @@ when a peer's key package is not valid at this device's time, whether it was
 refused on arrival or on the first send after a restart. Phones that have
 never been online often have the wrong date, and past a 30-day gap no session
 forms between them. A package whose window has already closed is discarded
-like any expired package; one whose window has not started yet is kept. Show the user a prompt to check the date and time. The
-TypeScript `SecurityWarningCode` union gains the member.
+like any expired package; one whose window has not started yet is kept.
+Show the user a prompt to check the date and time. The TypeScript
+`SecurityWarningCode` union gains the member.
 
 **`neighbor_lost` means nothing nearby reaches the peer.** It fires once, when
 the last Bluetooth LE or Wi-Fi Direct link to the peer ends. Before, one

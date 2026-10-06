@@ -13,6 +13,39 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ## [0.28.0] — 2026-10-06
 
+> **The peer-stream slot carries traffic on phones.** The mobile managers
+> exchange the identity preamble and announce a peer only under the address
+> it proved. iOS runs the slot on Network framework, over the local network
+> or AWDL, and finds a Python host on the same LAN. Android forms its Wi-Fi
+> Direct group itself with `autoAccept: true`, with no system dialog, and
+> `wifiDirect: { enabled: true }` now starts the transport from `start()` on
+> both platforms.
+>
+> **Bluetooth LE holds up where it used to give out.** Two phones in a room
+> full of other Bluetooth devices find each other, an iPhone's Bluetooth
+> power-cycle no longer strands either end, and Android notices Bluetooth
+> switched off or a stack crash and relinks. `neighbor_lost` fires once, and
+> only when nothing nearby reaches the peer.
+>
+> **The SDK ships outside React Native.** A release now builds, tests and
+> publishes a Swift package, an Android library
+> (`com.offlineprotocol:offline-protocol-sdk`) and Python wheels tagged for
+> their platform. A host with no platform keystore can use the built-in file
+> stores, sealed under a store key, and a Python host can front one engine
+> for several local applications through the local API.
+>
+> **Sessions form where they used to stall.** A lost first key package is
+> pushed again, and a key package this device's clock refuses is reported as
+> `KEY_PACKAGE_OUTSIDE_VALIDITY_WINDOW` instead of leaving messages queued
+> with nothing to say why.
+>
+> **Breaking, narrowly:** Python's `InternetManager` requires `app_id=`, and
+> an exhaustive TypeScript `switch` over `SecurityWarningCode` needs the new
+> member. At run time, an iPhone on 0.28 does not see one on 0.27 or earlier
+> over the peer-stream slot.
+> [§26](docs/UPGRADING.md#26-behaviour-that-changes-without-a-compile-error-v0280)
+> lists these and the other changes that compile fine and behave differently.
+
 ### Added
 
 - **Android forms its Wi-Fi Direct group itself.** With
