@@ -41046,6 +41046,36 @@ fn an_unanswered_confirmation_probe_supersedes_the_last_one() {
     assert!(!alice.outbox.contains_key(&orphan));
     assert!(!alice.retry_queue.contains(&orphan.as_str()));
     assert!(!alice.ack_manager.is_waiting_for_ack(&orphan));
+
+    // A full ACK tracker fails the send after the probe entered the outbox,
+    // so no id comes back to supersede next time. The failed send clears it.
+    for _ in 0..100_000 {
+        if alice
+            .ack_manager
+            .register_pending_ack_with_priority(MessageId::new(), None, MessagePriority::High)
+            .is_err()
+        {
+            break;
+        }
+    }
+    let probes_to_bob = |alice: &OfflineProtocol| {
+        alice
+            .outbox
+            .values()
+            .filter(|e| OfflineProtocol::is_confirmation_probe(&e.message))
+            .count()
+    };
+    alice.send_session_confirmation_probe(&id("bob").to_string(), "test");
+    alice.send_session_confirmation_probe(&id("bob").to_string(), "test");
+    assert_eq!(
+        probes_to_bob(&alice),
+        0,
+        "a probe whose send failed is not left queued"
+    );
+
+    // The sender stamps the cadence, so the next scan does not supersede a
+    // fast-path probe before its ACK can arrive.
+    assert!(alice.confirmation_probe_due_at[&id("bob").to_string()] > Utc::now());
 }
 
 /// A probe persisted before a restart is not in

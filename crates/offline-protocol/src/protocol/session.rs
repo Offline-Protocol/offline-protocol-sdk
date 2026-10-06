@@ -530,6 +530,15 @@ impl OfflineProtocol {
         if let Some(previous) = self.confirmation_probe_outstanding.remove(peer_id) {
             self.forget_outbound_message(&previous);
         }
+        // The sender owns the cadence, so a fast-path probe is not superseded
+        // by the next scan before its ACK can arrive, and a relay verdict for
+        // it can back the schedule off (`note_confirmation_probe_unreachable`
+        // only escalates a peer that has a due time). Stamped before the send
+        // so a verdict delivered during it is not overwritten.
+        self.confirmation_probe_due_at.insert(
+            peer_id.to_string(),
+            Utc::now() + ChronoDuration::seconds(CONFIRMATION_PROBE_INTERVAL_SECS),
+        );
         match self.send_internal_message(
             peer_id,
             internal_prefixes::SESSION_CONFIRM_PROBE.to_string(),
@@ -546,6 +555,22 @@ impl OfflineProtocol {
                 );
             }
             Err(err) => {
+                // The send can fail after the probe entered the outbox (a
+                // full ACK tracker refuses it), and then no id comes back to
+                // track. Any probe still queued for this peer is such an
+                // orphan, since the tracked one was withdrawn above.
+                let orphans: Vec<_> = self
+                    .outbox
+                    .values()
+                    .filter(|entry| {
+                        entry.message.recipient.as_str() == peer_id
+                            && Self::is_confirmation_probe(&entry.message)
+                    })
+                    .map(|entry| entry.message.id.clone())
+                    .collect();
+                for orphan in orphans {
+                    self.forget_outbound_message(&orphan);
+                }
                 warn!(
                     event = "session_confirmation_probe_failed",
                     session_or_group_id = %peer_id,
@@ -642,10 +667,6 @@ impl OfflineProtocol {
                 continue;
             }
             self.send_session_confirmation_probe(&peer_id, source_event);
-            self.confirmation_probe_due_at.insert(
-                peer_id,
-                now + ChronoDuration::seconds(CONFIRMATION_PROBE_INTERVAL_SECS),
-            );
         }
     }
 

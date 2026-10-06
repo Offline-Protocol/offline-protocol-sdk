@@ -3943,6 +3943,7 @@ impl OfflineProtocol {
         // `PruneAllowance::pool`.
         let mut budget = allowance.counting();
         let mut prune_bound_reached = false;
+        let mut legacy_probes_dropped = 0usize;
         for message_id in message_ids.into_iter().take(OUTBOX_RESTORE_KEY_CAP) {
             if budget.is_spent() {
                 prune_bound_reached = true;
@@ -4008,10 +4009,17 @@ impl OfflineProtocol {
             if Self::is_confirmation_probe(&entry.message) {
                 budget.claim();
                 self.delete_outbox_key(&message_id);
+                legacy_probes_dropped += 1;
                 continue;
             }
 
             restored.push(entry);
+        }
+        if legacy_probes_dropped > 0 {
+            warn!(
+                count = legacy_probes_dropped,
+                "Dropped persisted confirmation probes written by an older build"
+            );
         }
 
         // Drop entries past the absolute lifetime cap before anything else:
