@@ -1,0 +1,3 @@
+// Optional local signing override (copy to DevelopmentTeam.xcconfig, gitignored).
+// Set your Apple Team ID from Xcode → OfflineDemo → Signing & Capabilities → Team.
+DEVELOPMENT_TEAM = YOUR_TEAM_ID_HERE

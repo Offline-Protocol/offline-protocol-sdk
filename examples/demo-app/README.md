@@ -52,7 +52,9 @@ This example ships both an `ios/` and an `android/` project.
 `DEVELOPMENT_TEAM` is intentionally blank in the committed Xcode project. Open
 `ios/OfflineDemo.xcodeproj`, select the target, and set your own team under
 **Signing & Capabilities** before running on a physical device. The Simulator
-needs no team.
+needs no team. Optionally, copy `ios/DevelopmentTeam.xcconfig.example` to
+`ios/DevelopmentTeam.xcconfig` and set your team ID if you use a local xcconfig
+workflow (that file is gitignored).
 
 ## iOS development (simulator vs physical device)
 

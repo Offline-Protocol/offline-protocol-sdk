@@ -24,7 +24,9 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     factory.startReactNative(
       withModuleName: "OfflineProtocolExample",
       in: window,
-      launchOptions: appDelegate.launchOptions
+      launchOptions: appDelegate.reactNativeLaunchOptions(
+        sceneConnectionOptions: connectionOptions
+      )
     )
   }
 }
