@@ -11,6 +11,8 @@
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
 		761780ED2CA45674006654EE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EC2CA45674006654EE /* AppDelegate.swift */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
+		9B1C2D3E4F5011228394A5B7 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B1C2D3E4F5011228394A5B6 /* SceneDelegate.swift */; };
+		7E8F9A0B1C2D3E4F5061728C /* ReactNativeSceneLaunchOptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E8F9A0B1C2D3E4F5061728B /* ReactNativeSceneLaunchOptions.swift */; };
 		CF91EE88E87D637E5CF013BC /* libPods-OfflineProtocolExample.a in Frameworks */ = {isa = PBXBuildFile; fileRef = ADD34094B13BB66AFA6B2B9F /* libPods-OfflineProtocolExample.a */; };
 /* End PBXBuildFile section */
 
@@ -22,6 +24,8 @@
 		13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = PrivacyInfo.xcprivacy; path = OfflineProtocolExample/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = OfflineProtocolExample/AppDelegate.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = OfflineProtocolExample/LaunchScreen.storyboard; sourceTree = "<group>"; };
+		9B1C2D3E4F5011228394A5B6 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SceneDelegate.swift; path = OfflineProtocolExample/SceneDelegate.swift; sourceTree = "<group>"; };
+		7E8F9A0B1C2D3E4F5061728B /* ReactNativeSceneLaunchOptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ReactNativeSceneLaunchOptions.swift; path = ../../shared/ios/ReactNativeSceneLaunchOptions.swift; sourceTree = "<group>"; };
 		ADD34094B13BB66AFA6B2B9F /* libPods-OfflineProtocolExample.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-OfflineProtocolExample.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		DF196923822DDC30DE44E8BA /* Pods-OfflineProtocolExample.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-OfflineProtocolExample.release.xcconfig"; path = "Target Support Files/Pods-OfflineProtocolExample/Pods-OfflineProtocolExample.release.xcconfig"; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
@@ -44,6 +48,8 @@
 			children = (
 				13B07FB51A68108700A75B9A /* Images.xcassets */,
 				761780EC2CA45674006654EE /* AppDelegate.swift */,
+				9B1C2D3E4F5011228394A5B6 /* SceneDelegate.swift */,
+				7E8F9A0B1C2D3E4F5061728B /* ReactNativeSceneLaunchOptions.swift */,
 				13B07FB61A68108700A75B9A /* Info.plist */,
 				81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */,
 				13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */,
@@ -248,6 +254,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				761780ED2CA45674006654EE /* AppDelegate.swift in Sources */,
+				9B1C2D3E4F5011228394A5B7 /* SceneDelegate.swift in Sources */,
+				7E8F9A0B1C2D3E4F5061728C /* ReactNativeSceneLaunchOptions.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

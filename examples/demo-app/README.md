@@ -52,7 +52,24 @@ This example ships both an `ios/` and an `android/` project.
 `DEVELOPMENT_TEAM` is intentionally blank in the committed Xcode project. Open
 `ios/OfflineDemo.xcodeproj`, select the target, and set your own team under
 **Signing & Capabilities** before running on a physical device. The Simulator
-needs no team.
+needs no team. The repo also ships `ios/DevelopmentTeam.xcconfig.example` as an
+optional template for a **local** xcconfig (copy to `ios/DevelopmentTeam.xcconfig`,
+gitignored). The Xcode target does **not** include that file; copying it alone
+does not configure signing — set your team in **Signing & Capabilities**, or wire
+the xcconfig into the project yourself if you prefer that workflow.
+
+## iOS development (simulator vs physical device)
+
+The app uses **UIScene** lifecycle (required on iOS 26+). In **Debug**:
+
+- **Simulator** loads JavaScript from **Metro** (`npm start` in this directory).
+  Use `npx react-native run-ios` as usual.
+- **Physical device** loads the **embedded** `main.jsbundle` that Xcode produces
+  during the build. Metro is not required to open the app, but **after you change
+  any JS/TS you must rebuild and reinstall** (run `npx react-native run-ios
+  --device "Your iPhone"` again) to pick up those changes.
+
+Release builds always use the embedded bundle.
 
 ## How to test peer-to-peer
 
@@ -65,5 +82,5 @@ emulator have no working Bluetooth stack.
 4. Send a connection request, accept it on the other device
 5. Open **Chats** and send a message — it is MLS-encrypted automatically
 
-Grant Bluetooth and (on Android) nearby-devices/location permissions when
-prompted, or discovery silently returns nothing.
+For Android, grant location and nearby-device permissions when prompted so BLE
+discovery can run.
