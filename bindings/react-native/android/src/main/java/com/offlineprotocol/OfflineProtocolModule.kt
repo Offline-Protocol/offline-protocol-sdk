@@ -951,14 +951,19 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         // Numbered under the lock and handed over inside it, so the numbers
         // reach JS in the order they were given out whichever thread drove
         // the core. See [eventSeq].
+        // A number is spent only on an emit that returned: one that threw
+        // handed nothing over, and the one-shot hold redelivers it later, so
+        // consuming its number would report a gap for an event never lost.
         return synchronized(eventSeqLock) {
-            if (eventName == EVENT_NAME && params is WritableMap) {
-                params.putInt(EVENT_SEQ_FIELD, eventSeq++)
+            val numbered = eventName == EVENT_NAME && params is WritableMap
+            if (numbered) {
+                (params as WritableMap).putInt(EVENT_SEQ_FIELD, eventSeq)
             }
             try {
                 reactApplicationContext
                     .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
                     .emit(eventName, params)
+                if (numbered) eventSeq += 1
                 true
             } catch (e: Exception) {
                 android.util.Log.w(NAME, "Event emit failed for $eventName", e)

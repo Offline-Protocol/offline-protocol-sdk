@@ -14534,7 +14534,8 @@ mod tests {
         let ts = rn_source_code_only("src/index.ts");
         assert!(
             kotlin.contains("const val EVENT_SEQ_FIELD = \"seq\"")
-                && kotlin.contains("params.putInt(EVENT_SEQ_FIELD, eventSeq++)"),
+                && kotlin.contains("putInt(EVENT_SEQ_FIELD, eventSeq)")
+                && kotlin.contains("if (numbered) eventSeq += 1"),
             "OfflineProtocolModule.kt must number every event on its event name as `seq`"
         );
         assert!(

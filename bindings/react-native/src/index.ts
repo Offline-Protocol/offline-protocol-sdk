@@ -896,7 +896,10 @@ export class OfflineProtocol {
    *
    * A native module older than this one sends no `seq`, and the first event
    * after a JavaScript reload starts a fresh count against a module that kept
-   * counting, so neither is reported.
+   * counting, so neither is reported. A number lower than expected is a
+   * native module that was recreated under this instance and counts from
+   * zero again; the count restarts from it rather than reporting a negative
+   * gap.
    */
   private checkEventSequence(seq: number | undefined): void {
     if (typeof seq !== "number") {
@@ -904,7 +907,7 @@ export class OfflineProtocol {
     }
     const expected = this.lastEventSeq === null ? seq : this.lastEventSeq + 1;
     this.lastEventSeq = seq;
-    if (seq === expected) {
+    if (seq <= expected) {
       return;
     }
     const context = { expected, received: seq, missing: seq - expected };
