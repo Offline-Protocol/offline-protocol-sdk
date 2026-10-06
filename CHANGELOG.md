@@ -38,9 +38,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   minute in the device test, about two in the worst case) or, for a peer
   reached only through this phone's GATT server, until the transport stopped.
   `neighbor_lost` now fires 15 seconds after the last link to the peer goes
-  down, unless one comes back first. Reconnects continue, and a peer that
-  returns is announced again as it would be after any loss. A dial still in
-  flight does not count as a link.
+  down, unless one comes back first. Reconnect attempts continue during those
+  15 seconds; once the peer is reported lost it returns through discovery and
+  is announced again, as after any other loss. A dial still in flight does
+  not count as a link.
 - **Android Bluetooth messages no longer wait on a dial back to the sender**
   ([#512](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/512)).
   A peer's writes reach this phone's GATT server from the peer's central-role

@@ -585,10 +585,11 @@ fn the_only_device_that_can_reach_the_recipient_does_not_stand_down() {
     //       \_____________/
     //
     // Both bob and carol take a copy. Whichever transmits first hands it to the
-    // other, and standing down on a duplicate is normally right — a neighbor
-    // covered the same ground. But carol holds the only link to dave. If carol
-    // drops her copy because bob's arrived, dave never hears it, and the id is
-    // suppressed so the sender's retries cannot rescue it either.
+    // other, and that copy proves only that its sender holds the frame. Carol
+    // holds the only link to dave. If carol dropped her copy because bob's
+    // arrived, dave would never hear it, and the id would be suppressed so the
+    // sender's retries could not rescue it either. A copy takes only its
+    // sender off carol's fan-out.
     let mut net = Neighborhood::new(&["alice", "bob", "carol", "dave"]);
     net.link("alice", "bob");
     net.link("alice", "carol");

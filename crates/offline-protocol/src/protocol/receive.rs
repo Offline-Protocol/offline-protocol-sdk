@@ -428,8 +428,9 @@ impl OfflineProtocol {
         // Route learning is skipped along with the rest, which is deliberate:
         // the copy teaches nothing the first one did not, and the table is not
         // what forwarding decisions are made from. A duplicate we still hold a
-        // pending copy of is *not* absorbed here — standing down for a neighbor
-        // needs the neighbor set — so that case still takes the full path.
+        // pending copy of is *not* absorbed here: it narrows that forward's
+        // fan-out, which `admit` records, so that case still takes the full
+        // path.
         if self
             .mesh_relay
             .absorb_settled_duplicate(&message.id.as_str())
