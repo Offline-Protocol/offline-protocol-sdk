@@ -18073,6 +18073,30 @@ mod tests {
             ),
             "WifiDirectManager.kt must keep redialling after it asks to leave a dead owner's group"
         );
+        // A join by credentials is never named. The supplicant takes the
+        // address as the owner's BSSID (its P2P interface address), and every
+        // address an application sees is a device address, so a named join
+        // matched no network: for five minutes after leaving a dead owner,
+        // every join failed, merges included.
+        assert!(
+            !kotlin.contains("setDeviceAddress("),
+            "WifiDirectManager.kt must not name the owner of a join by credentials"
+        );
+        // A connection does not start the join counters over; the group-info
+        // callback does, once the owner is known. A reset on connection ran
+        // before a capture by a remembered dead owner was counted, so the
+        // count never reached the takeover.
+        assert!(
+            kotlin.contains(
+                "inGroup = connected if (connected) { \
+                 transportHandler.removeCallbacks(joinWindowTimeout) \
+                 formationBackoffMs = FORMATION_RETRY_MS }"
+            ) && kotlin.contains(
+                "failedJoins = WifiDirectGroupFormation.failedJoinsAfterGroupJoined(failedJoins, leftOwner)"
+            ),
+            "WifiDirectManager.kt must settle the join counters in refreshGroupForFormation, \
+             not on CONNECTION_CHANGED"
+        );
         for call in ["host.peerStreamConnected(", "host.peerStreamReceived("] {
             assert_eq!(
                 swift.matches(call).count(),

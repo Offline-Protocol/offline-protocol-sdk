@@ -75,19 +75,31 @@ import java.security.MessageDigest
  * a television at the edge of range does not re-arm the fast probe each time
  * it flickers back in ([ownersNewlySeen]).
  *
- * ## An owner that was left is not joined again
+ * ## An owner that was left is never stayed with
  *
- * Every group of an application has the same name, so a join by name alone
- * lands on whichever owner of that name the supplicant finds. When a client
- * leaves a group whose owner proved nothing (its application died; the group
- * outlives the process), the owner it left is the one it would find: the
- * device rejoined it ten seconds later and was held again, for the session.
- * So the owner left is remembered for [DEAD_OWNER_TTL_MS], dropped from the
- * owners nearby, and while it is remembered every join names its target
- * ([joinTarget]); with no other owner in sight the join counts as one that
- * found no group, so the takeover still makes this device create. The memory
- * outlasts the 30 to 60 s an owner whose application comes back takes to
- * dissolve its empty group.
+ * Every group of an application has the same name, so a join by name lands on
+ * whichever owner of that name the supplicant picks (by signal), and the one
+ * in sight after a client leaves a group whose owner proved nothing (its
+ * application died; the group can outlive the process) is usually the owner
+ * just left: the device rejoined it ten seconds later and was held again.
+ *
+ * A join cannot be steered away from it. `WifiP2pConfig.Builder.setDeviceAddress`
+ * on a join by credentials becomes the supplicant's `go_bssid`, which must
+ * equal the owner's BSSID, its P2P *interface* address; the peer list and the
+ * group report the *device* address, and no application API exposes an
+ * owner's interface address before joining it. A join named that way matches
+ * no network and fails, every time.
+ *
+ * So the owner left is remembered for [DEAD_OWNER_TTL_MS] by device address
+ * and handled after the fact: it does not count as an owner nearby (no probe
+ * goes toward it), a join that lands in its group leaves at once and counts
+ * as a join that found no group ([joinedLeftOwner],
+ * [failedJoinsAfterGroupJoined]), so a device that heard a peer still takes
+ * over and creates after [TAKEOVER_FAILED_JOINS], and its record heard again
+ * forgives it. Which owner a join lands on beside a dead one stays the
+ * supplicant's choice: the merge there is bounded by the takeover, not
+ * guaranteed. The memory outlasts the 30 to 60 s an owner whose application
+ * comes back takes to dissolve its empty group.
  */
 internal object WifiDirectGroupFormation {
     const val SERVICE_TYPE = "_offlineprotocol._tcp"
@@ -146,26 +158,21 @@ internal object WifiDirectGroupFormation {
 
     enum class Action { Wait, Create, Join }
 
-    /** Which owner a join goes to. */
-    sealed class JoinTarget {
-        /** Whichever owner of the application's name the supplicant finds. */
-        object AnyOwner : JoinTarget()
-        /** This owner only, by its device address. */
-        data class Owner(val device: String) : JoinTarget()
-        /** None: every owner nearby is one this device left. */
-        object Nobody : JoinTarget()
-    }
+    /**
+     * Whether the group this client just joined is the application's and
+     * owned by a device it left for proving nothing, whose memory is live.
+     */
+    fun joinedLeftOwner(applicationGroup: Boolean, owner: String?, avoided: Set<String>): Boolean =
+        applicationGroup && owner != null && owner in avoided
 
     /**
-     * The target of a join, given the owners in the peer list and the owners
-     * this device left whose memory is still live. An untargeted join is
-     * only safe while nothing is avoided: it would find the owner just left.
+     * The failed-join count after joining a group. A group owned by a device
+     * this one left is a join that found no group: it counts toward the
+     * takeover rather than starting it over, or every capture by the dead
+     * owner zeroes the count and the device never creates.
      */
-    fun joinTarget(nearbyOwners: Set<String>, avoided: Set<String>): JoinTarget {
-        if (avoided.isEmpty()) return JoinTarget.AnyOwner
-        val candidate = (nearbyOwners - avoided).minOrNull() ?: return JoinTarget.Nobody
-        return JoinTarget.Owner(candidate)
-    }
+    fun failedJoinsAfterGroupJoined(previous: Int, leftOwner: Boolean): Int =
+        if (leftOwner) previous + 1 else 0
 
     /**
      * The owners in [owners] not seen within [OWNER_MEMORY_MS] before

@@ -229,34 +229,36 @@ class WifiDirectGroupFormationTest {
     // --- An owner that was left ---------------------------------------------------
 
     @Test
-    fun `a join goes to any owner while none is avoided`() {
-        assertEquals(
-            WifiDirectGroupFormation.JoinTarget.AnyOwner,
-            WifiDirectGroupFormation.joinTarget(setOf("aa:01"), avoided = emptySet()),
-        )
+    fun `a join that lands on an owner this device left is recognised`() {
+        // Every group of an application has one name, so a join by name landed
+        // on the owner just left, ten seconds after leaving it.
+        assertTrue(WifiDirectGroupFormation.joinedLeftOwner(true, "aa:01", avoided = setOf("aa:01")))
+        assertFalse(WifiDirectGroupFormation.joinedLeftOwner(true, "aa:02", avoided = setOf("aa:01")))
+        assertFalse(WifiDirectGroupFormation.joinedLeftOwner(true, null, avoided = setOf("aa:01")))
+        // A group paired in the system settings is never left.
+        assertFalse(WifiDirectGroupFormation.joinedLeftOwner(false, "aa:01", avoided = setOf("aa:01")))
     }
 
     @Test
-    fun `a device that left a dead owner never joins it again`() {
-        // Every group of an application has one name, so a join by name alone
-        // landed on the owner just left, ten seconds after leaving it.
-        assertEquals(
-            WifiDirectGroupFormation.JoinTarget.Nobody,
-            WifiDirectGroupFormation.joinTarget(setOf("aa:01"), avoided = setOf("aa:01")),
-        )
-        assertEquals(
-            WifiDirectGroupFormation.JoinTarget.Owner("aa:02"),
-            WifiDirectGroupFormation.joinTarget(setOf("aa:01", "aa:02"), avoided = setOf("aa:01")),
-        )
+    fun `captures by a dead owner add up to the takeover`() {
+        // A join cannot be steered away from the dead owner (the supplicant
+        // pins a named join to an interface address no application sees), so
+        // each capture is left at once and counted. Resetting the count on
+        // joining, as any other group does, never reached the takeover.
+        var failed = 0
+        repeat(WifiDirectGroupFormation.TAKEOVER_FAILED_JOINS) {
+            failed = WifiDirectGroupFormation.failedJoinsAfterGroupJoined(failed, leftOwner = true)
+        }
+        assertEquals(WifiDirectGroupFormation.TAKEOVER_FAILED_JOINS, failed)
+        // decide() does not count the dead owner as nearby, so the device that
+        // heard a peer creates.
+        assertEquals(Action.Create, decide(local("off1b", failedJoins = failed), "off1a"))
+        // Any other group starts the count over.
+        assertEquals(0, WifiDirectGroupFormation.failedJoinsAfterGroupJoined(failed, leftOwner = false))
     }
 
     @Test
-    fun `with only a dead owner in sight, the device that heard a peer still takes over`() {
-        // The manager counts a Nobody join as one that found no group, and
-        // decide() sees no owner nearby, so the takeover arrives.
-        val heard = local("off1b", failedJoins = WifiDirectGroupFormation.TAKEOVER_FAILED_JOINS)
-        assertEquals(Action.Create, decide(heard, "off1a"))
-        // And a device that heard nobody does not probe it.
+    fun `a device that heard nobody does not probe an owner it left`() {
         assertEquals(Action.Wait, decide(local("off1b", ownerNearby = false)))
     }
 
