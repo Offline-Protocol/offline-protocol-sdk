@@ -387,7 +387,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   relay that pushes to offline users, or any mesh-only link, never did. An
   account with ten such contacts stacked about two probes a second, and once
   the outbox hit its 500-entry cap, eviction failed the user's own messages
-  with `Outbox capacity exceeded`. Seen on a device test between a Samsung and
+  with `Outbox capacity exceeded`. Seen on a device test between an Android and
   an iPhone, offline over BLE. Each new probe now supersedes the last, quietly
   and without counting against the carrier, so a peer holds one probe in the
   outbox and is still probed on the same cadence.
