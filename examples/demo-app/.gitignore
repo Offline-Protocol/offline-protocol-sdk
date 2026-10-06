@@ -12,6 +12,7 @@ node_modules/
 ios/Pods/
 ios/build/
 ios/.xcode.env.local
+ios/DevelopmentTeam.xcconfig
 *.xcworkspace/xcuserdata/
 *.xcodeproj/xcuserdata/
 

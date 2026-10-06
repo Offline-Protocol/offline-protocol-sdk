@@ -10,6 +10,8 @@
 		0C80B921A6F3F58F76C31292 /* libPods-NostrExample.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 5DCACB8F33CDC322A6C60F78 /* libPods-NostrExample.a */; };
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
 		761780ED2CA45674006654EE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EC2CA45674006654EE /* AppDelegate.swift */; };
+		9C2D3E4F5011228394A5B6C8 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C2D3E4F5011228394A5B6C7 /* SceneDelegate.swift */; };
+		7E8F9A0B1C2D3E4F5061728E /* ReactNativeSceneLaunchOptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E8F9A0B1C2D3E4F5061728D /* ReactNativeSceneLaunchOptions.swift */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
 		A6527776531B6CBC53134632 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
@@ -23,6 +25,8 @@
 		5709B34CF0A7D63546082F79 /* Pods-NostrExample.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-NostrExample.release.xcconfig"; path = "Target Support Files/Pods-NostrExample/Pods-NostrExample.release.xcconfig"; sourceTree = "<group>"; };
 		5DCACB8F33CDC322A6C60F78 /* libPods-NostrExample.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-NostrExample.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = NostrExample/AppDelegate.swift; sourceTree = "<group>"; };
+		9C2D3E4F5011228394A5B6C7 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SceneDelegate.swift; path = NostrExample/SceneDelegate.swift; sourceTree = "<group>"; };
+		7E8F9A0B1C2D3E4F5061728D /* ReactNativeSceneLaunchOptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = ReactNativeSceneLaunchOptions.swift; path = ../../shared/ios/ReactNativeSceneLaunchOptions.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = NostrExample/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
@@ -44,6 +48,8 @@
 			children = (
 				13B07FB51A68108700A75B9A /* Images.xcassets */,
 				761780EC2CA45674006654EE /* AppDelegate.swift */,
+				9C2D3E4F5011228394A5B6C7 /* SceneDelegate.swift */,
+				7E8F9A0B1C2D3E4F5061728D /* ReactNativeSceneLaunchOptions.swift */,
 				13B07FB61A68108700A75B9A /* Info.plist */,
 				81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */,
 				13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */,
@@ -247,6 +253,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				761780ED2CA45674006654EE /* AppDelegate.swift in Sources */,
+				9C2D3E4F5011228394A5B6C8 /* SceneDelegate.swift in Sources */,
+				7E8F9A0B1C2D3E4F5061728E /* ReactNativeSceneLaunchOptions.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -1,0 +1,4 @@
+// Optional template only — not referenced by the OfflineDemo Xcode target.
+// Copy to DevelopmentTeam.xcconfig (gitignored) if you wire xcconfig into the
+// project yourself; otherwise set Team under Signing & Capabilities in Xcode.
+DEVELOPMENT_TEAM = YOUR_TEAM_ID_HERE
