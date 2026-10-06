@@ -32,8 +32,8 @@ BUNDLE="$2"
 VERSION="$3"
 : "${SIGNING_KEY:?SIGNING_KEY must hold the armored private signing key}"
 
-COORDINATE="com/offlineprotocol/offline-protocol-android"
-ARTIFACT="offline-protocol-android-$VERSION"
+COORDINATE="com/offlineprotocol/offline-protocol-sdk"
+ARTIFACT="offline-protocol-sdk-$VERSION"
 SOURCE="$REPOSITORY/$COORDINATE/$VERSION"
 
 [ -d "$SOURCE" ] || die "no $VERSION in the repository: $SOURCE"

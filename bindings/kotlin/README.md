@@ -12,7 +12,7 @@ What lives here is the build, and what exists only for the library.
 | `offline-protocol-android/` | The library. Its build file points the source sets at the module's directories and leaves out the three files that need React |
 | `consumer-check/` | A separate build: an application that depends on the published library by its coordinates, declares nothing else, and minifies |
 
-Coordinates: `com.offlineprotocol:offline-protocol-android`.
+Coordinates: `com.offlineprotocol:offline-protocol-sdk`.
 
 ## What the library reads, and what it writes again
 
@@ -59,10 +59,10 @@ gradle -PVERSION_NAME=0.0.0 \
   :offline-protocol-android:publishAllPublicationsToStagingRepository
 
 # What is inside the AAR and the sources jar.
-PUBLISHED=offline-protocol-android/build/maven/com/offlineprotocol/offline-protocol-android/0.0.0
+PUBLISHED=offline-protocol-android/build/maven/com/offlineprotocol/offline-protocol-sdk/0.0.0
 python3 ../../scripts/check_android_aar.py \
-  $PUBLISHED/offline-protocol-android-0.0.0.aar \
-  --sources-jar $PUBLISHED/offline-protocol-android-0.0.0-sources.jar
+  $PUBLISHED/offline-protocol-sdk-0.0.0.aar \
+  --sources-jar $PUBLISHED/offline-protocol-sdk-0.0.0-sources.jar
 
 # The library from an application's side: a release build, minified.
 gradle -p consumer-check -PVERSION_NAME=0.0.0 :app:assembleRelease

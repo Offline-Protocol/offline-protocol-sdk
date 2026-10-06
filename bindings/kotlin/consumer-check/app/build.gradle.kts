@@ -45,5 +45,5 @@ dependencies {
     // The one line the README gives an application. Nothing else is declared
     // here, JNA included: if this stops compiling, the library's public API
     // has started to need something its metadata does not bring.
-    implementation("com.offlineprotocol:offline-protocol-android:${libraryVersion.get()}")
+    implementation("com.offlineprotocol:offline-protocol-sdk:${libraryVersion.get()}")
 }

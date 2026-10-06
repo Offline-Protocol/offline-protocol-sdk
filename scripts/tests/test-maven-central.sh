@@ -27,8 +27,8 @@ fail() {
 }
 
 VERSION="1.2.3-rc.1"
-COORDINATE="com/offlineprotocol/offline-protocol-android"
-ARTIFACT="offline-protocol-android-$VERSION"
+COORDINATE="com/offlineprotocol/offline-protocol-sdk"
+ARTIFACT="offline-protocol-sdk-$VERSION"
 
 # A Maven repository the way Gradle writes one: checksums of every kind and a
 # maven-metadata.xml.
@@ -143,7 +143,7 @@ case "$url" in
     read -r -a states <<<"$FAKE_STATES"
     state="${states[$((count - 1))]:-${states[-1]}}"
     if [ "$state" = FAILED ]; then
-      printf '{"deploymentState":"FAILED","errors":{"pkg:maven/com.offlineprotocol/offline-protocol-android":["Invalid signature"]}}'
+      printf '{"deploymentState":"FAILED","errors":{"pkg:maven/com.offlineprotocol/offline-protocol-sdk":["Invalid signature"]}}'
     else
       printf '{"deploymentState":"%s"}' "$state"
     fi
