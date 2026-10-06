@@ -2565,13 +2565,19 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                         ?: throw IllegalStateException("Failed to create WiFi Direct manager")
                     // `autoAccept` is the documented switch for forming groups
                     // without the system settings; see WifiDirectGroupFormation.
-                    manager.formGroups = config?.takeIf { it.hasKey("autoAccept") && !it.isNull("autoAccept") }
-                        ?.getBoolean("autoAccept") ?: false
+                    // Read before the stop, applied after it: stop() undoes the
+                    // run that is ending, and a config that does not name the
+                    // key (the guide's enableTransport('wifiDirect') after a
+                    // permission grant) keeps the current setting.
+                    val autoAccept = config?.takeIf { it.hasKey("autoAccept") && !it.isNull("autoAccept") }
+                        ?.getBoolean("autoAccept")
                     
                     // Stop the manager first if it's running (to ensure clean restart)
                     if (manager.state == TransportState.RUNNING) {
                         manager.stop()
                     }
+                    manager.formGroups =
+                        WifiDirectGroupFormation.formGroupsAfterEnable(manager.formGroups, autoAccept)
                     
                     manager.start()
                     emitDiagnostic("info", "WiFi Direct transport enabled")

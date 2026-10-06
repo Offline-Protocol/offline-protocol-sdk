@@ -15,13 +15,15 @@ import java.security.MessageDigest
  * created with a chosen network name and passphrase, and joined by anyone who
  * presents the same two, with no prompt on either side. Both are derived here
  * from the application id alone, so every device of an application can join
- * its group without having heard who owns it, and a device of another
- * application never computes them.
+ * its group without having heard who owns it.
  *
- * The passphrase keeps other applications' devices out of the group; it is not
- * what protects the traffic. Every stream still proves its peer with the
- * identity preamble before it carries anything, and every message is end to
- * end encrypted above it.
+ * The passphrase is not a secret. The application id ships inside every copy
+ * of the application, so anyone who knows it computes the passphrase, and can
+ * join the group or run one under its name (threat model R22). What the
+ * passphrase does is keep honest devices of other applications out of each
+ * other's groups. It is not what protects the traffic: every stream still
+ * proves its peer with the identity preamble before it carries anything, and
+ * every message is end to end encrypted above it.
  *
  * ## Why the name is the application's and not the owner's
  *
@@ -55,8 +57,20 @@ import java.security.MessageDigest
  * again ([Local.joinFirst]), so two groups that formed at once merge.
  *
  * A record proves nothing about its advertiser (the stream chapter's rule), and
- * none is needed: the worst a forged record does is make this device create or
- * join a group, which a forger cannot enter without the passphrase.
+ * none is needed: the worst a forged record does is steer whether this device
+ * creates or joins, and the worst a group run by a forger does is carry no
+ * traffic, since every stream over it still proves its peer (threat model R22).
+ *
+ * ## Quiet surroundings cost little
+ *
+ * A device alone keeps looking, but less often the longer it hears nothing:
+ * service discovery backs off from [DISCOVERY_PERIOD_MS] to
+ * [DISCOVERY_MAX_PERIOD_MS] ([discoveryPeriodMs]), and a probe toward an owner
+ * nobody vouched for backs off from [PROBE_PERIOD_MS] to [PROBE_MAX_PERIOD_MS]
+ * ([probePeriodMs]). A Wi-Fi Direct printer or television is an owner whose
+ * group a probe never joins; without the backoff a device next to one probed
+ * it every minute for as long as the application was open. Both start over
+ * when something new appears: a record, a new owner, or a new device.
  */
 internal object WifiDirectGroupFormation {
     const val SERVICE_TYPE = "_offlineprotocol._tcp"
@@ -71,6 +85,15 @@ internal object WifiDirectGroupFormation {
 
     /** How many joins that found no group before a non-lowest device creates. */
     const val TAKEOVER_FAILED_JOINS = 3
+
+    /** Service discovery period while records keep arriving. */
+    const val DISCOVERY_PERIOD_MS = 15_000L
+    /** Service discovery period after a long run of rounds that heard nothing. */
+    const val DISCOVERY_MAX_PERIOD_MS = 60_000L
+    /** Probe period toward an owner nobody vouched for, before any probe failed. */
+    const val PROBE_PERIOD_MS = 60_000L
+    /** Probe period after a long run of probes that found no group. */
+    const val PROBE_MAX_PERIOD_MS = 240_000L
 
     /** A peer's record as last seen. */
     data class Advert(
@@ -116,6 +139,32 @@ internal object WifiDirectGroupFormation {
             local.failedJoins >= TAKEOVER_FAILED_JOINS -> Action.Create
             else -> Action.Join
         }
+    }
+
+    /** The discovery period after [quietRounds] rounds in a row that heard no record. */
+    fun discoveryPeriodMs(quietRounds: Int): Long =
+        doubled(DISCOVERY_PERIOD_MS, quietRounds, DISCOVERY_MAX_PERIOD_MS)
+
+    /** The probe period after [failedProbes] probes in a row that found no group. */
+    fun probePeriodMs(failedProbes: Int): Long =
+        doubled(PROBE_PERIOD_MS, failedProbes, PROBE_MAX_PERIOD_MS)
+
+    /**
+     * Whether formation is on after an enable. A configuration that does not
+     * name `autoAccept` keeps the current setting: the integration guide's
+     * `enableTransport('wifiDirect')` after a permission grant passes none, and
+     * reading that as "off" turned formation off for the rest of the session.
+     */
+    fun formGroupsAfterEnable(current: Boolean, configured: Boolean?): Boolean =
+        configured ?: current
+
+    private fun doubled(base: Long, times: Int, ceiling: Long): Long {
+        var period = base
+        repeat(times.coerceAtLeast(0)) {
+            if (period >= ceiling) return ceiling
+            period *= 2
+        }
+        return minOf(period, ceiling)
     }
 
     /** The record this device advertises, in the order the chapter requires. */

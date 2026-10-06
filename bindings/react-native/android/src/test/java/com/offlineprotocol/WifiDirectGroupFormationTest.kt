@@ -189,4 +189,35 @@ class WifiDirectGroupFormationTest {
             WifiDirectGroupFormation.passphrase("com.other.app", name),
         )
     }
+
+    // --- Quiet surroundings ------------------------------------------------------
+
+    @Test
+    fun `discovery backs off while nothing is heard, to a ceiling`() {
+        assertEquals(15_000L, WifiDirectGroupFormation.discoveryPeriodMs(0))
+        assertEquals(30_000L, WifiDirectGroupFormation.discoveryPeriodMs(1))
+        assertEquals(60_000L, WifiDirectGroupFormation.discoveryPeriodMs(2))
+        assertEquals(60_000L, WifiDirectGroupFormation.discoveryPeriodMs(50))
+    }
+
+    @Test
+    fun `probes toward an owner nobody vouched for back off, to a ceiling`() {
+        // A printer or television owns a group no probe ever joins.
+        assertEquals(60_000L, WifiDirectGroupFormation.probePeriodMs(0))
+        assertEquals(120_000L, WifiDirectGroupFormation.probePeriodMs(1))
+        assertEquals(240_000L, WifiDirectGroupFormation.probePeriodMs(2))
+        assertEquals(240_000L, WifiDirectGroupFormation.probePeriodMs(1_000))
+        assertEquals(60_000L, WifiDirectGroupFormation.probePeriodMs(-1))
+    }
+
+    // --- The switch ----------------------------------------------------------------
+
+    @Test
+    fun `an enable that does not name autoAccept keeps the current setting`() {
+        // enableTransport('wifiDirect') after a permission grant passes no config.
+        assertTrue(WifiDirectGroupFormation.formGroupsAfterEnable(current = true, configured = null))
+        assertEquals(false, WifiDirectGroupFormation.formGroupsAfterEnable(current = false, configured = null))
+        assertEquals(false, WifiDirectGroupFormation.formGroupsAfterEnable(current = true, configured = false))
+        assertTrue(WifiDirectGroupFormation.formGroupsAfterEnable(current = false, configured = true))
+    }
 }
