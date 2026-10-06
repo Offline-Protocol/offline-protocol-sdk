@@ -106,4 +106,28 @@ class StaleAddressRegistryTest {
         assertFalse(registry.hasEstablishedLink("peerA"))
         assertEquals(setOf("server-side", "client-side"), registry.addressesForDevice("peerA").toSet())
     }
+
+    @Test
+    fun `a hello-mapped link that closes gives the peer back its live address`() {
+        // We hold a client link to peerA at its advertising address. Its
+        // central then opened a link to our server from its central-role
+        // address and wrote a hello, which made that address peerA's
+        // send address. When that link closes, sending must go back to the
+        // client link rather than to an address that does not advertise.
+        val registry = MeshConnectionRegistry()
+        registry.setDeviceIdentifier("advertising", "peerA")
+        registry.trackServerConnection("central-role")
+        registry.setDeviceIdentifier("central-role", "peerA")
+        assertEquals("central-role", registry.addressForDevice("peerA"))
+
+        registry.untrackServerConnection("central-role")
+        // A live link at the advertising address. The registry's client map
+        // needs a BluetoothGatt; a server link counts the same for liveness.
+        registry.trackServerConnection("advertising")
+        assertTrue(registry.hasOtherLiveLink("peerA", excluding = "central-role"))
+        registry.removeIdentifiersForAddress("central-role")
+
+        assertEquals("advertising", registry.addressForDevice("peerA"))
+        assertEquals(null, registry.deviceIdForAddress("central-role"))
+    }
 }

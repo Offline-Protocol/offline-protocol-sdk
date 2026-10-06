@@ -14450,6 +14450,39 @@ mod tests {
         );
     }
 
+    /// A hello makes the central-role address a peer's send address. When the
+    /// link from that address closes cleanly while the peer is still up on
+    /// another link, the address must be dropped so sending goes back to the
+    /// live link. Kept, every fragment queued and the drain dialled an address
+    /// that does not advertise, while our own link to the peer sat idle.
+    #[test]
+    fn react_native_android_clean_drop_of_a_hello_mapped_link_repoints_the_peer() {
+        let facade = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+        let decl = "private fun handleCentralDisconnectedOnBleThread(";
+        let start = facade
+            .find(decl)
+            .expect("the facade handles a server-side disconnect")
+            + decl.len();
+        let body = &facade[start..];
+        let body = &body[..rn_kotlin_body_end(body)];
+        let rule = body
+            .find("if (isCleanDisconnect && connections.getGatt(address) == null) {")
+            .expect("a clean server-side disconnect must check for a client link at the address");
+        let rest = &body[rule..];
+        let live = rest
+            .find("connections.hasOtherLiveLink(peerId, address)")
+            .expect("the peer must still be up elsewhere before its address is dropped");
+        let drop = rest
+            .find("connections.removeIdentifiersForAddress(address)")
+            .expect("the dead central-role address must be dropped");
+        assert!(
+            live < drop,
+            "check the live link before dropping the address"
+        );
+    }
+
     /// Android hears Bluetooth go off and come back from the adapter's state
     /// broadcast, not only from a failed scan start. Polled once a minute, the
     /// transport missed a Bluetooth stack crash entirely (the stack restarts

@@ -163,6 +163,37 @@ class CentralGattClientHelloTest {
         assertEquals(1, host.drains)
     }
 
+    @Test
+    fun `a link reopened at the same address keeps its own hello`() {
+        // Link one sends its hello and closes before the callback. Link two
+        // opens at the same address within the watchdog window and sends its
+        // own. Neither link one's watchdog nor a late callback from link one
+        // may mark link two ready while its hello is still in flight: the
+        // drain would then write Message fragments beside the handshake.
+        val first = link(withHello = true)
+        cccdAcked(first)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(2))
+        client.callback.onConnectionStateChange(first.gatt, 19, android.bluetooth.BluetoothProfile.STATE_DISCONNECTED)
+        idle()
+        host.drains = 0
+
+        val second = link(withHello = true)
+        cccdAcked(second)
+        assertEquals("link two sent its own hello", listOf(helloUuid), second.shadow.writes.map { it.first })
+
+        client.callback.onCharacteristicWrite(first.gatt, first.hello!!, BluetoothGatt.GATT_SUCCESS)
+        idle()
+        assertEquals("a late callback from link one", 0, host.drains)
+
+        // Past link one's watchdog (3 s after its hello), short of link two's.
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1500))
+        assertEquals("link one's watchdog", 0, host.drains)
+
+        client.callback.onCharacteristicWrite(second.gatt, second.hello!!, BluetoothGatt.GATT_SUCCESS)
+        idle()
+        assertEquals("link two's own callback", 1, host.drains)
+    }
+
     private class FakeHost(private val hello: ByteArray?) : CentralGattClient.Host {
         var drains = 0
         override val protocol: OfflineProtocol
