@@ -150,7 +150,7 @@ claim by whoever answered on the segment, never a discovery, and the bridge
 never registers it with the engine. Registrations that do not fit the record
 (a service id over 200 bytes, a capability key DNS-SD cannot carry, a record
 over 1300 bytes) are kept on the mesh and not published, with a warning. The
-mapping is [docs/spec/dns-sd-mapping.md](../../docs/spec/dns-sd-mapping.md).
+mapping is [docs/spec/dns-sd-mapping.md](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/spec/dns-sd-mapping.md).
 
 ## Architecture
 
@@ -177,8 +177,8 @@ offline_protocol_sdk/
 |-----------|---------|-----------|-------|
 | Internet/WebSocket | `websockets` | All | Primary transport for desktop |
 | BLE | `bleak` | All | Central (scanner) role only; peripheral/GATT server requires `bless` |
-| Peer stream (the `wifi_direct` slot) | `asyncio` sockets; `zeroconf` for LAN discovery (optional extra `lan`) | All | `PeerStreamManager`: TCP streams to configured `host:port` peers or hosts found over DNS-SD, each proved by the identity-assertion preamble ([spec](../../docs/spec/stream-framing.md)). Start it after `ProtocolManager.start()`; binds every interface unless `listen_host` narrows it |
-| Reticulum (a gateway daemon) | `asyncio` sockets | All | `GatewayManager` as `pm.gateway` when `reticulum_enabled=True`: the [gateway-daemon contract](../../docs/spec/gateway-contract.md) over TCP to a daemon on local IP (`configure(daemon_address="localhost:4242")`, then `await pm.gateway.start()` after `pm.start()`). Attaches with a signed address declaration, settles each send on the gateway's verdict, watches presence. What answers is a daemon built to the contract; this package ships the device half. Apps driving the slot themselves replace the callback via `protocol.set_reticulum_transport_callback(...)` |
+| Peer stream (the `wifi_direct` slot) | `asyncio` sockets; `zeroconf` for LAN discovery (optional extra `lan`) | All | `PeerStreamManager`: TCP streams to configured `host:port` peers or hosts found over DNS-SD, each proved by the identity-assertion preamble ([spec](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/spec/stream-framing.md)). Start it after `ProtocolManager.start()`; binds every interface unless `listen_host` narrows it |
+| Reticulum (a gateway daemon) | `asyncio` sockets | All | `GatewayManager` as `pm.gateway` when `reticulum_enabled=True`: the [gateway-daemon contract](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/spec/gateway-contract.md) over TCP to a daemon on local IP (`configure(daemon_address="localhost:4242")`, then `await pm.gateway.start()` after `pm.start()`). Attaches with a signed address declaration, settles each send on the gateway's verdict, watches presence. What answers is a daemon built to the contract; this package ships the device half. Apps driving the slot themselves replace the callback via `protocol.set_reticulum_transport_callback(...)` |
 | Nostr | Built-in | All | Handled in Rust core (BIP-340 signing); `ProtocolManager` wires a stub callback when `nostr_enabled=True` — apps driving Nostr themselves replace it via `protocol.set_nostr_transport_callback(...)` |
 
 ### Secure Storage
@@ -208,7 +208,7 @@ kwallet) for any deployment where that matters, supply your own
 
 One process can own the engine and serve several local applications at once,
 over JSON-RPC 2.0 on a WebSocket. The contract is
-[the local API chapter](../../docs/spec/local-api.md); the reference server
+[the local API chapter](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/spec/local-api.md); the reference server
 ships in this package as `offline_protocol_sdk.local_api` and as the
 `offline-protocol-service` command:
 
@@ -242,14 +242,14 @@ holds for an application whose client is away, and what it never puts on the
 wire, is the chapter's. `--policy policy.json` adds the optional rules
 (`spaces`, `denied`); `--tcp PORT --token-file PATH` serves loopback TCP with
 a per-launch token instead of the socket. See
-[the bridge contract](../../docs/bridges/local-api.md) for what the server
+[the bridge contract](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/bridges/local-api.md) for what the server
 owes.
 
-The guide is [docs/local-api.md](../../docs/local-api.md). Two clients ship
+The guide is [docs/local-api.md](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/local-api.md). Two clients ship
 as examples and are run by the test suite against an in-process server:
-[`examples/local_api_client.py`](examples/local_api_client.py) (this package's
+[`examples/local_api_client.py`](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/bindings/python/examples/local_api_client.py) (this package's
 `websockets` dependency, Unix socket or TCP) and
-[`examples/local-api/client.mjs`](../../examples/local-api/client.mjs) at the
+[`examples/local-api/client.mjs`](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/examples/local-api/client.mjs) at the
 repository root (Node 22 or later, no dependencies, TCP with the token).
 
 ### Headless hosts: the built-in file stores
@@ -335,7 +335,7 @@ await pm.start()
   `subprocess` or the `spawn` method instead.
 
 What the stores guarantee, and what a copied directory reveals, is in the
-[MLS integration guide](../../docs/mls-integration.md#built-in-file-stores).
+[MLS integration guide](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/mls-integration.md#built-in-file-stores).
 
 Restartable message-plane state is kept separately by `AppStateStorage`, outside
 the credential store. The built-in stores derive an opaque account namespace
@@ -435,7 +435,7 @@ pm.disable_telemetry()        # final flush, then stop; stop() does this too
 
 `flush_telemetry`, `end_telemetry_session`, `set_telemetry_enabled` and
 `notify_app_state` complete the surface. What leaves the device, when, and how
-to switch it off are in [docs/telemetry.md](../../docs/telemetry.md).
+to switch it off are in [docs/telemetry.md](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/telemetry.md).
 
 ## Running the Example
 
