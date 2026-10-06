@@ -718,6 +718,13 @@ pub struct OfflineProtocol {
     /// carrier. Capacity eviction then failed real messages.
     confirmation_probe_outstanding: HashMap<String, MessageId>,
 
+    /// The probe each pending peer's current one superseded. A relay verdict
+    /// finds its peer through the outbox entry, which the supersede removed,
+    /// so a verdict slower than `CONFIRMATION_PROBE_INTERVAL_SECS` would
+    /// otherwise be dropped and never back the schedule off, leaving the
+    /// peer probed every 5s against a relay that has said it is not there.
+    confirmation_probe_superseded: HashMap<String, MessageId>,
+
     /// Token bucket that caps how fast the RETRY/PROBE path
     /// (`process_retry_queue`) re-sends, so a large backlog of resends to
     /// unreachable peers cannot burst past the relay's per-connection rate limit
@@ -1186,6 +1193,7 @@ impl OfflineProtocol {
             confirmation_probe_due_at: HashMap::new(),
             confirmation_probe_unreachable_parks: HashMap::new(),
             confirmation_probe_outstanding: HashMap::new(),
+            confirmation_probe_superseded: HashMap::new(),
             retry_drain_tokens: 0.0,
             retry_drain_last: None,
             rekey_due_at: HashMap::new(),

@@ -41015,6 +41015,37 @@ fn an_unanswered_confirmation_probe_supersedes_the_last_one() {
         "a superseded probe is withdrawn silently"
     );
 
+    // A relay verdict slower than the probe interval names a probe already
+    // superseded. It still backs the schedule off, once per probe, for
+    // either verdict.
+    let bob = id("bob").to_string();
+    for verdict in ["recipient_unreachable: User is offline", "relay_pushed"] {
+        alice.send_session_confirmation_probe(&bob, "test");
+        let late = alice.confirmation_probe_superseded[&bob].clone();
+        let parks = alice
+            .confirmation_probe_unreachable_parks
+            .get(&bob)
+            .copied()
+            .unwrap_or(0);
+        for _ in 0..2 {
+            alice
+                .on_transport_send_failed(&late.as_str(), Some(verdict.to_string()))
+                .unwrap();
+        }
+        assert_eq!(
+            alice
+                .confirmation_probe_unreachable_parks
+                .get(&bob)
+                .copied(),
+            Some(parks + 1),
+            "a late {verdict} verdict escalates once"
+        );
+        assert!(
+            alice.confirmation_probe_due_at[&bob]
+                > Utc::now() + ChronoDuration::seconds(CONFIRMATION_PROBE_INTERVAL_SECS)
+        );
+    }
+
     // A probe whose send failed waits in the retry queue; the next probe
     // takes it out of there too.
     handle.set_fail_next_sends(1);

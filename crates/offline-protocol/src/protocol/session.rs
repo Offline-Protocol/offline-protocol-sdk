@@ -16,7 +16,7 @@ use crate::mls_observability::MlsOperationContext;
 use crate::protocol::reachability::{Claim, FactSource};
 use crate::{Error, EstablishmentState, Event, Result, SessionStateError};
 use chrono::{Duration as ChronoDuration, Utc};
-use offline_protocol_core::{Message, MessagePriority};
+use offline_protocol_core::{Message, MessageId, MessagePriority};
 use offline_protocol_mls::{MlsManager, WelcomeMessage};
 use offline_protocol_transport::TransportType;
 use std::collections::HashSet;
@@ -454,6 +454,24 @@ impl OfflineProtocol {
         if let Some(probe) = self.confirmation_probe_outstanding.remove(peer_id) {
             self.forget_outbound_message(&probe);
         }
+        self.confirmation_probe_superseded.remove(peer_id);
+    }
+
+    /// Backs the probe schedule off for a relay verdict on a probe that has
+    /// since been superseded (`confirmation_probe_superseded`). Consumed, so
+    /// one probe's verdict escalates once, as it did while the probe was
+    /// still queued. A no-op for any other id.
+    pub(super) fn note_superseded_probe_verdict(&mut self, message_id: &MessageId) {
+        let Some(peer) = self
+            .confirmation_probe_superseded
+            .iter()
+            .find(|(_, probe)| *probe == message_id)
+            .map(|(peer, _)| peer.clone())
+        else {
+            return;
+        };
+        self.confirmation_probe_superseded.remove(&peer);
+        self.note_confirmation_probe_unreachable(&peer);
     }
 
     /// Fold a relay "recipient unreachable" verdict into the session-confirmation
@@ -524,11 +542,13 @@ impl OfflineProtocol {
         // delivery failure is recorded against the carrier. Before the send,
         // not after: if the send errors the peer has no probe in flight
         // until the next scan, but a new probe can never evict a message at
-        // outbox capacity to make room beside the one it replaces. A relay
-        // verdict that arrives for a superseded probe finds no entry and is
-        // dropped; the current probe's own verdict backs the schedule off.
+        // outbox capacity to make room beside the one it replaces. The
+        // superseded id is kept so a relay verdict that arrives for it late
+        // still backs the schedule off (`note_superseded_probe_verdict`).
         if let Some(previous) = self.confirmation_probe_outstanding.remove(peer_id) {
             self.forget_outbound_message(&previous);
+            self.confirmation_probe_superseded
+                .insert(peer_id.to_string(), previous);
         }
         // The sender owns the cadence, so a fast-path probe is not superseded
         // by the next scan before its ACK can arrive, and a relay verdict for
@@ -593,7 +613,6 @@ impl OfflineProtocol {
         // Fast path: nothing pending → skip entirely (no storage I/O)
         let has_pending_work = !self.pending_encrypted_messages.is_empty()
             || !self.confirmation_probe_due_at.is_empty()
-            || !self.confirmation_probe_outstanding.is_empty()
             || !self.confirmation_retry_due_at.is_empty();
 
         if !has_pending_work {
@@ -641,6 +660,8 @@ impl OfflineProtocol {
         self.confirmation_probe_due_at
             .retain(|peer, _| pending_set.contains(peer));
         self.confirmation_probe_unreachable_parks
+            .retain(|peer, _| pending_set.contains(peer));
+        self.confirmation_probe_superseded
             .retain(|peer, _| pending_set.contains(peer));
         // Not a plain `retain`: a probe whose peer left the pending set
         // without passing through `clear_confirmation_recovery_tracking`
