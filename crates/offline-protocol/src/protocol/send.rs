@@ -3277,10 +3277,26 @@ impl OfflineProtocol {
         // nothing, and keeping it would only grow the map.
         self.custody_receipts.remove(message_id);
         if let Some(entry) = self.outbox.remove(message_id) {
-            self.clear_outbox_entry_from_storage(message_id);
+            if !Self::is_confirmation_probe(&entry.message) {
+                self.clear_outbox_entry_from_storage(message_id);
+            }
             return Some(entry);
         }
         self.media_outbox.remove(message_id)
+    }
+
+    /// Takes `message_id` out of the three places that can send it again:
+    /// the retry queue, the pending-ACK tracker and the outbox. One without
+    /// the others resurrects it (see [`Self::retire_undeliverable_message`]).
+    /// No failure is recorded against the carrier: that is the give-up
+    /// path's, and a message withdrawn for being superseded did not fail.
+    pub(super) fn forget_outbound_message(
+        &mut self,
+        message_id: &MessageId,
+    ) -> Option<OutboxEntry> {
+        self.retry_queue.remove(&message_id.as_str());
+        self.ack_manager.remove_ack(message_id);
+        self.remove_outbox_entry(message_id)
     }
 
     /// Takes a message this device has given up on out of everything that
@@ -3307,10 +3323,8 @@ impl OfflineProtocol {
         message_id: &MessageId,
         media_reason: &str,
     ) -> Option<OutboxEntry> {
-        self.retry_queue.remove(&message_id.as_str());
-        self.ack_manager.remove_ack(message_id);
         self.handle_outbound_media_chunk_failed(message_id, media_reason);
-        let entry = self.remove_outbox_entry(message_id);
+        let entry = self.forget_outbound_message(message_id);
         if let Some(transport) = entry.as_ref().and_then(|entry| entry.last_transport) {
             self.transport_manager.record_delivery_failure(transport);
         }
@@ -3532,6 +3546,17 @@ impl OfflineProtocol {
 
     pub(super) fn is_media_outbox_message(message: &Message) -> bool {
         message.content_type == ContentType::FileChunk
+    }
+
+    /// A session confirmation probe lives in memory only. It carries no user
+    /// data, and a restarted process does not know which probe was the last,
+    /// so a restored one could never be superseded; the next scan asks the
+    /// same question. Persisting it cost a secure-storage write per probe and
+    /// a delete per supersede, under the protocol lock.
+    pub(super) fn is_confirmation_probe(message: &Message) -> bool {
+        message
+            .content
+            .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
     }
 
     // ========================================================================
@@ -4111,10 +4136,12 @@ impl OfflineProtocol {
             None => match self.media_outbox.get(&parsed_id) {
                 Some(entry) => (entry, true),
                 None => {
-                    debug!(
-                        message_id = %message_id,
-                        "Unreachable verdict for message without outbox entry, dropping"
-                    );
+                    if !self.note_superseded_probe_verdict(&parsed_id, carrier) {
+                        debug!(
+                            message_id = %message_id,
+                            "Unreachable verdict for message without outbox entry, dropping"
+                        );
+                    }
                     return;
                 }
             },
@@ -4270,6 +4297,7 @@ impl OfflineProtocol {
             return;
         };
         if !self.is_parkable_plain_dm(&parsed_id) {
+            self.note_superseded_probe_verdict(&parsed_id, carrier);
             return;
         }
         let Some(entry) = self.outbox.get_mut(&parsed_id) else {

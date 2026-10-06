@@ -15,6 +15,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **Confirmation probes no longer crowd real messages out of the outbox.** A
+  session the peer never confirms is probed every five seconds, and each probe
+  used to enter the outbox with its own retry ladder on top of the unanswered
+  ones before it. Only a relay verdict backed that off, so a mesh-only link
+  never did. An account with ten such contacts stacked about two probes a
+  second, and once the outbox hit its 500-entry cap, eviction failed the user's
+  own messages with `Outbox capacity exceeded`. Seen on a device test between
+  an Android and an iPhone, offline over BLE. Each new probe now supersedes
+  the last, quietly and without counting against the carrier, whether the
+  periodic scan or the Welcome fast path sent it. Probes are no longer written
+  to storage, and those an older build wrote are dropped at restore. A peer
+  holds one probe in the outbox and is still probed on the same cadence.
+
 - **A message carried through a dense cluster no longer dies inside it**
   ([#510](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/510)).
   A forwarder that received a second copy of a frame while its own forward
@@ -488,6 +501,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   unchanged. TypeScript's
   `SecurityWarningCode` union gains the code, so an exhaustive `switch` over it
   needs a new arm.
+
 - **An old message no longer comes back as a push notification, again and
   again.** A direct message the relay had pushed stayed in the outbox well past
   a week, because each probe re-send refreshed its lifetime and so did each

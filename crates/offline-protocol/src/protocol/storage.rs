@@ -882,6 +882,16 @@ const _: () = assert!(
      underflows to zero and it can never prune at all"
 );
 
+// The outbox walk charges a legacy confirmation probe's delete to its pool
+// (`restore_outbox`). A build that stacked probes could leave a full outbox
+// of them, and if the pool is smaller than that the walk breaks on probes and
+// leaves real messages unrestored until a later launch.
+const _: () = assert!(
+    MAX_RESTORE_PRUNE_DELETES >= MAX_OUTBOX_ENTRIES,
+    "an outbox full of legacy confirmation probes must clear in one launch, \
+     or the walk breaks on them and defers restoring real messages"
+);
+
 /// A pool of durable restore-path deletes, drawn on by one or more walks.
 ///
 /// The unit the [`MAX_RESTORE_PRUNE_DELETES`] bound is actually about. A pool
@@ -3800,7 +3810,9 @@ impl OfflineProtocol {
         let Some(storage) = &self.protocol_state_storage else {
             return;
         };
-        if Self::is_media_outbox_message(&entry.message) {
+        if Self::is_media_outbox_message(&entry.message)
+            || Self::is_confirmation_probe(&entry.message)
+        {
             return;
         }
         match serde_json::to_vec(entry) {
@@ -3941,6 +3953,7 @@ impl OfflineProtocol {
         // `PruneAllowance::pool`.
         let mut budget = allowance.counting();
         let mut prune_bound_reached = false;
+        let mut legacy_probes_dropped = 0usize;
         for message_id in message_ids.into_iter().take(OUTBOX_RESTORE_KEY_CAP) {
             if budget.is_spent() {
                 prune_bound_reached = true;
@@ -3997,7 +4010,28 @@ impl OfflineProtocol {
                 continue;
             }
 
+            // Probes are no longer persisted (`is_confirmation_probe`); drop
+            // any an older build wrote. Charged to the pool like any delete:
+            // the first launch after upgrading from the build that stacked
+            // them can spend most of it here, deferring the expiry and
+            // capacity prunes below to the next launch. That is the bound
+            // working, not a reason to make this delete unbudgeted.
+            if Self::is_confirmation_probe(&entry.message) {
+                budget.claim();
+                self.delete_outbox_key(&message_id);
+                legacy_probes_dropped += 1;
+                continue;
+            }
+
             restored.push(entry);
+        }
+        if legacy_probes_dropped > 0 {
+            info!(
+                event = "outbox_entry_dropped",
+                repair_action = "legacy_confirmation_probe",
+                count = legacy_probes_dropped,
+                "outbox_entry_dropped"
+            );
         }
 
         // Drop entries past the absolute lifetime cap before anything else:

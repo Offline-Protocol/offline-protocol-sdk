@@ -92,7 +92,12 @@ doing.
 the outbox together.** Capacity eviction, lifetime expiry, retry exhaustion and
 an acknowledgement timeout that finds no outbox entry all go through one
 function (`retire_undeliverable_message`) for that reason, and the event each
-one owes the application is emitted by the path itself.
+one owes the application is emitted by the path itself. A session confirmation
+probe leaves through the same three-way teardown (`forget_outbound_message`)
+when it is superseded by a newer one or withdrawn (its session confirmed or torn
+down, or its send failed after it was queued), without the delivery failure a
+give-up records against the carrier: it did not fail, it was replaced or is no
+longer needed.
 
 Removing the outbox entry alone is not enough, because the retry and flush paths
 re-create a missing entry before they resend, with fresh timestamps. An id left

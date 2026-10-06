@@ -709,6 +709,25 @@ pub struct OfflineProtocol {
     /// flap the connection. Reset on a reachability edge (`on_peer_presence`).
     confirmation_probe_unreachable_parks: HashMap<String, u32>,
 
+    /// The confirmation probe each pending peer last sent. At most one probe
+    /// per peer lives in the outbox: a new one supersedes the last. Stacking a
+    /// fresh probe (new id, full retry ladder) every
+    /// `CONFIRMATION_PROBE_INTERVAL_SECS` on top of the unanswered ones filled
+    /// the outbox whenever no relay verdict (`unreachable` or
+    /// `relay_pushed`) arrived to back the schedule off, as on a mesh-only
+    /// carrier. Capacity eviction then failed real messages.
+    confirmation_probe_outstanding: HashMap<String, MessageId>,
+
+    /// The probe each pending peer's current one superseded. A relay verdict
+    /// finds its peer through the outbox entry, which the supersede removed,
+    /// so a verdict slower than `CONFIRMATION_PROBE_INTERVAL_SECS` would
+    /// otherwise be dropped and never back the schedule off, leaving the
+    /// peer probed every 5s against a relay that has said it is not there.
+    /// One id per peer, so this covers a verdict up to two intervals late;
+    /// one later than that is dropped, and the next probe's verdict backs
+    /// the schedule off instead.
+    confirmation_probe_superseded: HashMap<String, MessageId>,
+
     /// Token bucket that caps how fast the RETRY/PROBE path
     /// (`process_retry_queue`) re-sends, so a large backlog of resends to
     /// unreachable peers cannot burst past the relay's per-connection rate limit
@@ -1176,6 +1195,8 @@ impl OfflineProtocol {
             confirmation_retry_due_at: HashMap::new(),
             confirmation_probe_due_at: HashMap::new(),
             confirmation_probe_unreachable_parks: HashMap::new(),
+            confirmation_probe_outstanding: HashMap::new(),
+            confirmation_probe_superseded: HashMap::new(),
             retry_drain_tokens: 0.0,
             retry_drain_last: None,
             rekey_due_at: HashMap::new(),

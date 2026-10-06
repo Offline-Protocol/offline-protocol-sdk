@@ -16,7 +16,7 @@ use crate::mls_observability::MlsOperationContext;
 use crate::protocol::reachability::{Claim, FactSource};
 use crate::{Error, EstablishmentState, Event, Result, SessionStateError};
 use chrono::{Duration as ChronoDuration, Utc};
-use offline_protocol_core::{Message, MessagePriority};
+use offline_protocol_core::{Message, MessageId, MessagePriority};
 use offline_protocol_mls::{MlsManager, WelcomeMessage};
 use offline_protocol_transport::TransportType;
 use std::collections::HashSet;
@@ -449,6 +449,45 @@ impl OfflineProtocol {
         self.confirmation_retry_due_at.remove(peer_id);
         self.confirmation_probe_due_at.remove(peer_id);
         self.confirmation_probe_unreachable_parks.remove(peer_id);
+        // Withdrawn with the tracking: once the map forgets it, no later
+        // probe can supersede it, and it would keep its full retry ladder.
+        if let Some(probe) = self.confirmation_probe_outstanding.remove(peer_id) {
+            self.forget_outbound_message(&probe);
+        }
+        self.confirmation_probe_superseded.remove(peer_id);
+    }
+
+    /// Applies a relay verdict on a probe that has since been superseded
+    /// (`confirmation_probe_superseded`) the way the verdict handlers apply
+    /// one on a queued probe: the reachability fact, then the probe back-off.
+    /// Consumed, so one probe's verdict escalates once, as it did while the
+    /// probe was still queued. A no-op for any other id; returns whether
+    /// the verdict was applied.
+    pub(super) fn note_superseded_probe_verdict(
+        &mut self,
+        message_id: &MessageId,
+        carrier: Option<TransportType>,
+    ) -> bool {
+        let Some(peer) = self
+            .confirmation_probe_superseded
+            .iter()
+            .find(|(_, probe)| *probe == message_id)
+            .map(|(peer, _)| peer.clone())
+        else {
+            return false;
+        };
+        self.confirmation_probe_superseded.remove(&peer);
+        if let Some(carrier) = carrier {
+            self.reachability.record(
+                &peer,
+                carrier,
+                Claim::Unreachable,
+                FactSource::GatewayVerdict,
+                Instant::now(),
+            );
+        }
+        self.note_confirmation_probe_unreachable(&peer);
+        true
     }
 
     /// Fold a relay "recipient unreachable" verdict into the session-confirmation
@@ -457,7 +496,7 @@ impl OfflineProtocol {
     /// [`Self::apply_recipient_unreachable_failure`]). Without this, a peer that
     /// established an MLS session then vanished before confirming is re-probed
     /// every `CONFIRMATION_PROBE_INTERVAL_SECS` (5s) indefinitely, because
-    /// `kick_pending_session_reconciliation` re-arms it every scan and
+    /// `send_session_confirmation_probe` re-arms it on every probe and
     /// `on_transport_send_failed` otherwise never consults this scheduler. A
     /// handful of such peers pushes aggregate relay traffic past the
     /// per-connection rate limit, which disconnects the socket on a loop.
@@ -512,12 +551,44 @@ impl OfflineProtocol {
     }
 
     pub(super) fn send_session_confirmation_probe(&mut self, peer_id: &str, source_event: &str) {
+        // Superseded, not failed: the new probe asks the same question, so
+        // the old one's retry ladder would only stack onto it. Here rather
+        // than in the scan because the Welcome fast path sends one too, and
+        // a probe it replaced would keep its full ladder. Silent, and no
+        // delivery failure is recorded against the carrier. Before the send,
+        // not after: if the send errors the peer has no probe in flight
+        // until the next scan, but a new probe can never evict a message at
+        // outbox capacity to make room beside the one it replaces. The
+        // superseded id is kept so a relay verdict that arrives for it late
+        // still backs the schedule off (`note_superseded_probe_verdict`).
+        if let Some(previous) = self.confirmation_probe_outstanding.remove(peer_id) {
+            self.forget_outbound_message(&previous);
+            self.confirmation_probe_superseded
+                .insert(peer_id.to_string(), previous);
+        }
+        // The sender owns the cadence, so a fast-path probe is not superseded
+        // by the next scan before its ACK can arrive, and a relay verdict for
+        // it can back the schedule off (`note_confirmation_probe_unreachable`
+        // only escalates a peer that has a due time). Stamped before the send
+        // so a verdict delivered during it is not overwritten.
+        //
+        // A later due time is kept: the scan only sends once the due time has
+        // passed, but the fast path can fire while the schedule is backed off,
+        // and resetting it would undo the ladder a relay verdict built.
+        let next = Utc::now() + ChronoDuration::seconds(CONFIRMATION_PROBE_INTERVAL_SECS);
+        let due_at = self
+            .confirmation_probe_due_at
+            .entry(peer_id.to_string())
+            .or_insert(next);
+        *due_at = (*due_at).max(next);
         match self.send_internal_message(
             peer_id,
             internal_prefixes::SESSION_CONFIRM_PROBE.to_string(),
             MessagePriority::High,
         ) {
-            Ok(_) => {
+            Ok(message_id) => {
+                self.confirmation_probe_outstanding
+                    .insert(peer_id.to_string(), message_id);
                 info!(
                     event = "session_confirmation_probe_sent",
                     session_or_group_id = %peer_id,
@@ -526,6 +597,22 @@ impl OfflineProtocol {
                 );
             }
             Err(err) => {
+                // The send can fail after the probe entered the outbox (a
+                // full ACK tracker refuses it), and then no id comes back to
+                // track. Any probe still queued for this peer is such an
+                // orphan, since the tracked one was withdrawn above.
+                let orphans: Vec<_> = self
+                    .outbox
+                    .values()
+                    .filter(|entry| {
+                        entry.message.recipient.as_str() == peer_id
+                            && Self::is_confirmation_probe(&entry.message)
+                    })
+                    .map(|entry| entry.message.id.clone())
+                    .collect();
+                for orphan in orphans {
+                    self.forget_outbound_message(&orphan);
+                }
                 warn!(
                     event = "session_confirmation_probe_failed",
                     session_or_group_id = %peer_id,
@@ -596,6 +683,22 @@ impl OfflineProtocol {
             .retain(|peer, _| pending_set.contains(peer));
         self.confirmation_probe_unreachable_parks
             .retain(|peer, _| pending_set.contains(peer));
+        self.confirmation_probe_superseded
+            .retain(|peer, _| pending_set.contains(peer));
+        // Not a plain `retain`: a probe whose peer left the pending set
+        // without passing through `clear_confirmation_recovery_tracking`
+        // would be forgotten while still queued.
+        let settled: Vec<String> = self
+            .confirmation_probe_outstanding
+            .keys()
+            .filter(|peer| !pending_set.contains(*peer))
+            .cloned()
+            .collect();
+        for peer in settled {
+            if let Some(probe) = self.confirmation_probe_outstanding.remove(&peer) {
+                self.forget_outbound_message(&probe);
+            }
+        }
 
         for peer_id in pending_peers {
             let due_at = self
@@ -606,12 +709,7 @@ impl OfflineProtocol {
             if due_at > now {
                 continue;
             }
-
             self.send_session_confirmation_probe(&peer_id, source_event);
-            self.confirmation_probe_due_at.insert(
-                peer_id,
-                now + ChronoDuration::seconds(CONFIRMATION_PROBE_INTERVAL_SECS),
-            );
         }
     }
 

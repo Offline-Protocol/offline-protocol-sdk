@@ -40904,6 +40904,351 @@ fn test_confirmation_probe_unreachable_escalation() {
     );
 }
 
+/// Alice holds a session bob never confirms, running over a BLE mock. The
+/// fixture for the confirmation-probe supersede tests below.
+fn unconfirmed_probe_target() -> (OfflineProtocol, MockTransport) {
+    let mut alice_config = create_test_config_for_user("alice");
+    alice_config.encryption.enabled = true;
+    let mut alice = OfflineProtocol::new(alice_config).unwrap();
+    let mut bob = OfflineProtocol::new(create_test_config_for_user("bob")).unwrap();
+    alice
+        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+    bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+
+    let bob_key_package = {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.get_or_create_key_package().unwrap()
+    };
+    {
+        let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        manager
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
+            .unwrap();
+        manager.create_session(&id("bob")).unwrap();
+    }
+    alice
+        .ensure_session_state_entry(&id("bob"), "test_setup")
+        .unwrap();
+
+    let transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    let handle = transport.clone();
+    alice
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport));
+    alice.start().unwrap();
+    handle.clear_sent_messages();
+    (alice, handle)
+}
+
+fn sent_confirmation_probes(handle: &MockTransport) -> Vec<MessageId> {
+    handle
+        .sent_messages()
+        .into_iter()
+        .filter(|m| {
+            m.content
+                .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
+        })
+        .map(|m| m.id)
+        .collect()
+}
+
+/// A peer whose session never confirms, and that no `unreachable` verdict
+/// backs off (a relay that pushes to offline users, or a mesh-only link),
+/// holds one probe in the outbox, however many intervals pass. Each due scan
+/// still probes, so a lost probe is replaced on the next one, but the new
+/// probe supersedes the last instead of stacking a fresh retry ladder on it:
+/// stacking filled the outbox at one probe per such peer per 5s, and capacity
+/// eviction failed real messages.
+#[test]
+fn an_unanswered_confirmation_probe_supersedes_the_last_one() {
+    let (mut alice, handle) = unconfirmed_probe_target();
+    let bob = id("bob").to_string();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    alice.on_event(move |event| events_handle.lock().unwrap().push(event));
+
+    // The scan and the Welcome fast path (`on_transport_send_confirmed`)
+    // both probe, interleaved: either may supersede the other's probe.
+    for round in 0..6 {
+        if round % 2 == 0 {
+            alice
+                .confirmation_probe_due_at
+                .insert(bob.clone(), Utc::now() - ChronoDuration::seconds(1));
+            alice.kick_pending_session_reconciliation("test");
+        } else {
+            alice.send_session_confirmation_probe(&bob, "transport_confirmed");
+        }
+    }
+    let sent = sent_confirmation_probes(&handle);
+    assert_eq!(sent.len(), 6, "every due scan and fast path still probes");
+
+    let outstanding: Vec<_> = alice.outbox.keys().filter(|id| sent.contains(id)).collect();
+    assert_eq!(
+        outstanding,
+        vec![sent.last().unwrap()],
+        "only the latest probe waits in the outbox; each superseded the last"
+    );
+    for superseded in &sent[..sent.len() - 1] {
+        assert!(
+            !alice.retry_queue.contains(&superseded.as_str()),
+            "a superseded probe keeps no retry ladder"
+        );
+        assert!(
+            !alice.ack_manager.is_waiting_for_ack(superseded),
+            "a superseded probe's ACK timeout would re-queue it"
+        );
+    }
+    assert_eq!(
+        alice
+            .transport_manager
+            .observed_failure_count(TransportType::BLE),
+        0,
+        "superseding is not a delivery failure against the carrier"
+    );
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MessageFailed { .. })),
+        "a superseded probe is withdrawn silently"
+    );
+
+    // The sender stamps the cadence, so the next scan does not supersede a
+    // fast-path probe before its ACK can arrive.
+    assert!(alice.confirmation_probe_due_at[&bob] > Utc::now());
+
+    // A probe whose send failed waits in the retry queue; the next probe
+    // takes it out of there too.
+    handle.set_fail_next_sends(1);
+    alice.send_session_confirmation_probe(&bob, "test");
+    let deferred = alice.confirmation_probe_outstanding[&bob].clone();
+    assert!(alice.retry_queue.contains(&deferred.as_str()));
+    alice.send_session_confirmation_probe(&bob, "test");
+    assert!(!alice.retry_queue.contains(&deferred.as_str()));
+    assert!(!alice.outbox.contains_key(&deferred));
+}
+
+/// A relay verdict slower than the probe interval names a probe already
+/// superseded. It still records the fact and backs the schedule off, once per
+/// probe, for either verdict. One id per peer is kept, so a verdict two
+/// intervals late finds nothing and changes nothing.
+#[test]
+fn a_late_verdict_on_a_superseded_probe_still_backs_off() {
+    let (mut alice, _handle) = unconfirmed_probe_target();
+    let bob = id("bob").to_string();
+
+    // Two intervals late: the oldest of three probes is no longer remembered.
+    alice.send_session_confirmation_probe(&bob, "test");
+    let too_late = alice.confirmation_probe_outstanding[&bob].clone();
+    alice.send_session_confirmation_probe(&bob, "test");
+    alice.send_session_confirmation_probe(&bob, "test");
+    assert!(!alice.note_superseded_probe_verdict(&too_late, Some(TransportType::Internet)));
+    assert_eq!(
+        alice
+            .reachability
+            .claim_for(&bob, TransportType::Internet, std::time::Instant::now()),
+        None,
+        "a verdict past the remembered probe records nothing"
+    );
+    assert!(!alice
+        .confirmation_probe_unreachable_parks
+        .contains_key(&bob));
+
+    for verdict in ["recipient_unreachable: User is offline", "relay_pushed"] {
+        alice.send_session_confirmation_probe(&bob, "test");
+        let late = alice.confirmation_probe_superseded[&bob].clone();
+        let parks = alice
+            .confirmation_probe_unreachable_parks
+            .get(&bob)
+            .copied()
+            .unwrap_or(0);
+        for _ in 0..2 {
+            alice
+                .on_transport_send_failed_via(
+                    &late.as_str(),
+                    Some(verdict.to_string()),
+                    Some(TransportType::Internet),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            alice
+                .reachability
+                .claim_for(&bob, TransportType::Internet, std::time::Instant::now()),
+            Some(crate::protocol::reachability::Claim::Unreachable),
+            "a late {verdict} verdict is recorded as a fact too"
+        );
+        assert_eq!(
+            alice
+                .confirmation_probe_unreachable_parks
+                .get(&bob)
+                .copied(),
+            Some(parks + 1),
+            "a late {verdict} verdict escalates once"
+        );
+        assert!(
+            alice.confirmation_probe_due_at[&bob]
+                > Utc::now() + ChronoDuration::seconds(CONFIRMATION_PROBE_INTERVAL_SECS)
+        );
+        // A fast-path probe while backed off keeps the back-off.
+        let backed_off = alice.confirmation_probe_due_at[&bob];
+        alice.send_session_confirmation_probe(&bob, "transport_confirmed");
+        assert_eq!(alice.confirmation_probe_due_at[&bob], backed_off);
+    }
+}
+
+/// A probe the tracking no longer names could never be superseded and would
+/// keep its full retry ladder, so it is withdrawn whenever the tracking lets
+/// go of it: the session confirms, the session is deleted under the engine,
+/// or the send fails after the probe was queued.
+#[test]
+fn a_confirmation_probe_is_withdrawn_when_nothing_could_supersede_it() {
+    let (mut alice, handle) = unconfirmed_probe_target();
+    let bob = id("bob").to_string();
+
+    // Confirming the session withdraws the last probe.
+    alice.send_session_confirmation_probe(&bob, "test");
+    let last = alice.confirmation_probe_outstanding[&bob].clone();
+    alice.clear_confirmation_recovery_tracking(&bob);
+    assert!(!alice.outbox.contains_key(&last));
+    assert!(!alice.retry_queue.contains(&last.as_str()));
+    assert!(!alice.ack_manager.is_waiting_for_ack(&last));
+
+    // A peer that leaves the pending set without that call (its session
+    // deleted under the engine) has its probe withdrawn by the next scan,
+    // and the superseded id it kept for a late verdict is pruned too.
+    alice.send_session_confirmation_probe(&bob, "test");
+    alice.send_session_confirmation_probe(&bob, "test");
+    assert!(alice.confirmation_probe_superseded.contains_key(&bob));
+    let orphan = sent_confirmation_probes(&handle).last().unwrap().clone();
+    assert!(alice.outbox.contains_key(&orphan));
+    {
+        let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.delete_session(&id("bob")).unwrap();
+    }
+    alice.kick_pending_session_reconciliation("test");
+    assert!(!alice.outbox.contains_key(&orphan));
+    assert!(!alice.retry_queue.contains(&orphan.as_str()));
+    assert!(!alice.ack_manager.is_waiting_for_ack(&orphan));
+    assert!(!alice.confirmation_probe_outstanding.contains_key(&bob));
+    assert!(!alice.confirmation_probe_superseded.contains_key(&bob));
+
+    // A full ACK tracker fails the send after the probe entered the outbox,
+    // so no id comes back to supersede next time. The failed send clears it.
+    for _ in 0..100_000 {
+        if alice
+            .ack_manager
+            .register_pending_ack_with_priority(MessageId::new(), None, MessagePriority::High)
+            .is_err()
+        {
+            break;
+        }
+    }
+    alice.send_session_confirmation_probe(&bob, "test");
+    alice.send_session_confirmation_probe(&bob, "test");
+    assert_eq!(
+        alice
+            .outbox
+            .values()
+            .filter(|e| OfflineProtocol::is_confirmation_probe(&e.message))
+            .count(),
+        0,
+        "a probe whose send failed is not left queued"
+    );
+}
+
+/// A probe persisted before a restart is not in
+/// `confirmation_probe_outstanding`, so no later probe could supersede it.
+/// Restore drops it: it carries no user data, and the next scan asks again.
+#[test]
+fn a_persisted_confirmation_probe_is_not_restored() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let entry = |message: Message| OutboxEntry {
+        message,
+        attempt_count: 1,
+        first_sent_at: chrono::Utc::now(),
+        last_sent_at: chrono::Utc::now(),
+        last_transport: None,
+        reseal: None,
+        relay_pushed: false,
+    };
+    let probe = test_message("bob", internal_prefixes::SESSION_CONFIRM_PROBE);
+    let real = test_message("bob", "hello");
+    let real_id = real.id.clone();
+    store_outbox_entry(&storage, &entry(probe));
+    store_outbox_entry(&storage, &entry(real));
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+
+    let restored: Vec<_> = protocol.outbox_messages().map(|m| m.id.clone()).collect();
+    assert_eq!(restored, vec![real_id.clone()]);
+    assert_eq!(
+        storage.list_keys(storage_keys::OUTBOX).unwrap(),
+        vec![real_id.as_str().to_string()],
+        "the probe's record is deleted, not left to be restored next launch"
+    );
+
+    // Nor is a probe written in the first place.
+    let probe = test_message("bob", internal_prefixes::SESSION_CONFIRM_PROBE);
+    protocol.persist_outbox_entry(&entry(probe));
+    assert_eq!(storage.list_keys(storage_keys::OUTBOX).unwrap().len(), 1);
+}
+
+/// The first launch after upgrading from the build that stacked probes can
+/// find an outbox full of them. Their deletes are charged to the walk's pool,
+/// so the pool has to cover a full outbox, or the walk breaks on probes and a
+/// real message behind them waits for a later launch to be restored.
+#[test]
+fn an_outbox_full_of_legacy_probes_clears_in_one_launch() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let entry = |message: Message| OutboxEntry {
+        message,
+        attempt_count: 1,
+        first_sent_at: chrono::Utc::now(),
+        last_sent_at: chrono::Utc::now(),
+        last_transport: None,
+        reseal: None,
+        relay_pushed: false,
+    };
+    for _ in 0..crate::constants::MAX_OUTBOX_ENTRIES {
+        store_outbox_entry(
+            &storage,
+            &entry(test_message(
+                "bob",
+                internal_prefixes::SESSION_CONFIRM_PROBE,
+            )),
+        );
+    }
+    let real = test_message("bob", "hello");
+    let real_id = real.id.clone();
+    store_outbox_entry(&storage, &entry(real));
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+
+    let restored: Vec<_> = protocol.outbox_messages().map(|m| m.id.clone()).collect();
+    assert_eq!(
+        restored,
+        vec![real_id.clone()],
+        "the real message is restored"
+    );
+    assert_eq!(
+        storage.list_keys(storage_keys::OUTBOX).unwrap(),
+        vec![real_id.as_str().to_string()],
+        "every legacy probe is deleted in the same launch"
+    );
+}
+
 /// Pins component (D) of the flap fix: the opt-in edge-driven parking gate.
 /// With `edge_driven_unreachable_dm` on, a durably-unreachable DM keeps being
 /// timed-probed up to `DM_UNREACHABLE_PROBE_LIMIT` times, then stops (rests in

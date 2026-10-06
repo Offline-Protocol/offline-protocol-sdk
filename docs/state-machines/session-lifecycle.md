@@ -93,6 +93,37 @@ re-enters the desync path. Repeating the reset flag would tear down a
 replacement session whose Welcome is in flight, so it belongs with the
 split-session work rather than here.
 
+### An unconfirmed session holds one probe
+
+An unconfirmed session is probed on a fixed cadence, and **a peer holds at most
+one probe in the outbox**: each new probe supersedes the last rather than
+stacking its own retry ladder on top. The cadence only backs off on a relay
+verdict (`unreachable` or `relay_pushed`), which a mesh-only carrier never
+produces, so stacked probes once filled the outbox and capacity eviction failed
+real messages.
+
+The supersede lives in the one function that sends a probe, because two paths
+call it: the periodic scan and the fast path taken when the transport confirms
+a Welcome went out. A supersede in the scan alone left the fast path's probe
+with its full ladder. The same function sets the next due time, so the scan
+does not supersede a fast-path probe before its acknowledgement can arrive.
+
+Superseding is not a delivery failure and is not counted against the carrier.
+It does not discard the relay's answer either: a verdict finds its peer through
+the outbox entry, so the superseded id is remembered, and a verdict slower than
+one probe interval (but faster than two) still backs the cadence off. Dropping
+it left a peer the relay had refused probed every five seconds, which is the
+rate that flaps the relay connection. Only the last superseded id is kept: a
+verdict that misses two intervals finds neither, and the cadence backs off on
+the next probe's verdict instead. Relay verdicts arrive well inside one.
+
+A probe is not persisted, and one an older build persisted is dropped at
+restore: the new process does not know which probe was the last, so a restored
+one could never be superseded, and the next scan asks the same question. For
+the same reason a probe is withdrawn with the rest of the confirmation tracking
+when the session confirms or is torn down: a probe the tracking no longer names
+could never be superseded, and would keep its ladder.
+
 ### Both-create convergence
 
 Both peers can create a session simultaneously. The tiebreaker orders the two

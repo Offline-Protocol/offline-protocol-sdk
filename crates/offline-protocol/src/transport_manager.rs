@@ -1506,6 +1506,13 @@ impl TransportManager {
         stats.record_failure();
     }
 
+    #[cfg(test)]
+    pub(crate) fn observed_failure_count(&self, transport_type: TransportType) -> u32 {
+        self.observations
+            .get(&transport_type)
+            .map_or(0, |stats| stats.failure_count)
+    }
+
     /// Updates the DORS selector configuration at runtime, preserving
     /// accumulated state (transport history, retry counts, signal tracking).
     pub fn update_selector_config(&mut self, config: DorsConfig) {
