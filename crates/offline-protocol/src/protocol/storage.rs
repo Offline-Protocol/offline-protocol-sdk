@@ -2,8 +2,8 @@
 
 use super::state_crypto::{StateRecordCipher, SEALED_RECORD_OVERHEAD, STATE_RECORD_KEY_BYTES};
 use super::{
-    internal_prefixes, lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol,
-    OutboxEntry, PeerCapabilities, PendingDecryptRecord, PendingMessage, PendingMessageRecord,
+    lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
+    PeerCapabilities, PendingDecryptRecord, PendingMessage, PendingMessageRecord,
     ReceivedKeyPackage, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
     DATA_CUSTODY_V1, DATA_GROUP_BLOB_V1, DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1,
     DATA_SYNC_V1, DATA_TOMBSTONE_V1, MAX_BLOCKED_USERS, MAX_KEY_PACKAGE_SENT_TO,
@@ -3800,7 +3800,9 @@ impl OfflineProtocol {
         let Some(storage) = &self.protocol_state_storage else {
             return;
         };
-        if Self::is_media_outbox_message(&entry.message) {
+        if Self::is_media_outbox_message(&entry.message)
+            || Self::is_confirmation_probe(&entry.message)
+        {
             return;
         }
         match serde_json::to_vec(entry) {
@@ -3997,15 +3999,13 @@ impl OfflineProtocol {
                 continue;
             }
 
-            // A confirmation probe carries no user data, and the one sent
-            // before the restart is not in `confirmation_probe_outstanding`,
-            // so the next probe could not supersede it and it would keep a
-            // full retry ladder. The next scan asks the same question.
-            if entry
-                .message
-                .content
-                .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
-            {
+            // Probes are no longer persisted (`is_confirmation_probe`); drop
+            // any an older build wrote. Charged to the pool like any delete:
+            // the first launch after upgrading from the build that stacked
+            // them can spend most of it here, deferring the expiry and
+            // capacity prunes below to the next launch. That is the bound
+            // working, not a reason to make this delete unbudgeted.
+            if Self::is_confirmation_probe(&entry.message) {
                 budget.claim();
                 self.delete_outbox_key(&message_id);
                 continue;

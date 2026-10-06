@@ -41022,6 +41022,20 @@ fn an_unanswered_confirmation_probe_supersedes_the_last_one() {
     assert!(!alice.outbox.contains_key(&last));
     assert!(!alice.retry_queue.contains(&last.as_str()));
     assert!(!alice.ack_manager.is_waiting_for_ack(&last));
+
+    // A peer that leaves the pending set without that call (its session
+    // deleted under the engine) has its probe withdrawn by the next scan.
+    alice.send_session_confirmation_probe(&id("bob").to_string(), "test");
+    let orphan = probes(&handle).last().unwrap().clone();
+    assert!(alice.outbox.contains_key(&orphan));
+    {
+        let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.delete_session(&id("bob")).unwrap();
+    }
+    alice.kick_pending_session_reconciliation("test");
+    assert!(!alice.outbox.contains_key(&orphan));
+    assert!(!alice.retry_queue.contains(&orphan.as_str()));
+    assert!(!alice.ack_manager.is_waiting_for_ack(&orphan));
 }
 
 /// A probe persisted before a restart is not in
@@ -41057,6 +41071,11 @@ fn a_persisted_confirmation_probe_is_not_restored() {
         vec![real_id.as_str().to_string()],
         "the probe's record is deleted, not left to be restored next launch"
     );
+
+    // Nor is a probe written in the first place.
+    let probe = test_message("bob", internal_prefixes::SESSION_CONFIRM_PROBE);
+    protocol.persist_outbox_entry(&entry(probe));
+    assert_eq!(storage.list_keys(storage_keys::OUTBOX).unwrap().len(), 1);
 }
 
 /// Pins component (D) of the flap fix: the opt-in edge-driven parking gate.

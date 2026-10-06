@@ -566,6 +566,7 @@ impl OfflineProtocol {
         // Fast path: nothing pending → skip entirely (no storage I/O)
         let has_pending_work = !self.pending_encrypted_messages.is_empty()
             || !self.confirmation_probe_due_at.is_empty()
+            || !self.confirmation_probe_outstanding.is_empty()
             || !self.confirmation_retry_due_at.is_empty();
 
         if !has_pending_work {

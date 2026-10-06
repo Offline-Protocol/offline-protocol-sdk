@@ -3277,7 +3277,9 @@ impl OfflineProtocol {
         // nothing, and keeping it would only grow the map.
         self.custody_receipts.remove(message_id);
         if let Some(entry) = self.outbox.remove(message_id) {
-            self.clear_outbox_entry_from_storage(message_id);
+            if !Self::is_confirmation_probe(&entry.message) {
+                self.clear_outbox_entry_from_storage(message_id);
+            }
             return Some(entry);
         }
         self.media_outbox.remove(message_id)
@@ -3544,6 +3546,17 @@ impl OfflineProtocol {
 
     pub(super) fn is_media_outbox_message(message: &Message) -> bool {
         message.content_type == ContentType::FileChunk
+    }
+
+    /// A session confirmation probe lives in memory only. It carries no user
+    /// data, and a restarted process does not know which probe was the last,
+    /// so a restored one could never be superseded; the next scan asks the
+    /// same question. Persisting it cost a secure-storage write per probe and
+    /// a delete per supersede, under the protocol lock.
+    pub(super) fn is_confirmation_probe(message: &Message) -> bool {
+        message
+            .content
+            .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
     }
 
     // ========================================================================
