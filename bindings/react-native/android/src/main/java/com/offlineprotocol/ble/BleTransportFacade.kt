@@ -3105,8 +3105,10 @@ class BleTransportFacade(
         // caller's thread until main has processed the eviction. Eviction is
         // not on the hot path so the latch hop is acceptable.
         runOnBleThreadSync {
-            val address = connections.addressForDevice(peerId)
-            if (address == null) {
+            // Every address the peer is mapped at, not just the one that
+            // resolved last: a peer can hold one link per direction.
+            val addresses = connections.addressesForDevice(peerId)
+            if (addresses.isEmpty()) {
                 if (logThrottler.shouldLog("mesh_evict_missing_$peerId")) {
                     Log.w(TAG, "Cannot evict $peerId: no known address")
                 }
@@ -3117,25 +3119,47 @@ class BleTransportFacade(
                 Log.i(TAG, "Evicting peer $peerId to reclaim capacity (reason=$reason)")
             }
 
-            connections.getGatt(address)?.let { gatt ->
-                try {
-                    gatt.disconnect()
-                    gatt.close()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Error while evicting $peerId", e)
+            for (address in addresses) {
+                connections.getGatt(address)?.let { gatt ->
+                    try {
+                        gatt.disconnect()
+                        gatt.close()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error while evicting $peerId", e)
+                    }
                 }
+                connections.removeGatt(address)
+                if (connections.hasServerConnection(address)) {
+                    // A hello maps a central at the address it connected from,
+                    // where the only link may be the one it opened to our
+                    // server (#512). Dropping the mapping without closing that
+                    // link would leave the central writing to an address this
+                    // side can no longer map, and the hello is written once
+                    // per link, so nothing would map it again: its frames
+                    // would be lost until the link dropped by itself.
+                    try {
+                        bluetoothAdapter?.getRemoteDevice(address)?.let {
+                            peripheralGattServer?.cancelConnection(it)
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error cancelling server link while evicting $peerId", e)
+                    }
+                    // Untracked now, not when onCentralDisconnected lands, so
+                    // the connection cap an inbound swap checks next sees the
+                    // slot it evicted for. That callback then finds no mapping.
+                    connections.untrackServerConnection(address)
+                }
+                centralClient.forgetLink(address)
+                lastSeenRssi.remove(address)
+                pendingInbound.removeAll(address)
+                // Facade-only staged drop; the Rust-side MTU entry is cleared
+                // by `protocol.blePeerLost` below via `on_peer_lost`.
+                dropStagedPeerMtu(address, peerId)
+                connections.removeIdentifiersForAddress(address)
             }
-
-            connections.removeGatt(address)
-            centralClient.forgetLink(address)
-            connections.removeIdentifiersForDevice(peerId)
+            cancelPeerLostGrace(peerId)
             connections.removeConnectionRole(peerId)
-            lastSeenRssi.remove(address)
-            pendingInbound.removeAll(address)
             outboundQueue.removeAll(peerId)
-            // Facade-only staged drop; the Rust-side MTU entry is cleared
-            // by `protocol.blePeerLost` below via `on_peer_lost`.
-            dropStagedPeerMtu(address, peerId)
             meshController.registerDisconnection(peerId)
             refreshSelfMetrics()
 

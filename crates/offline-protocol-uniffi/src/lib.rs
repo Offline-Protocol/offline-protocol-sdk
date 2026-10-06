@@ -14429,6 +14429,25 @@ mod tests {
             drain.contains("!connections.hasServerConnection(address)"),
             "the drain must not dial a central connected to our server"
         );
+
+        // A hello maps a peer whose only link may be the one it opened to our
+        // server. Eviction must reach every address the peer is mapped at and
+        // close that server link, or the central keeps writing to an address
+        // nothing maps any more and its frames are lost.
+        let evict_decl = "private fun evictPeer(";
+        let evict_start =
+            facade.find(evict_decl).expect("the facade evicts peers") + evict_decl.len();
+        let evict = &facade[evict_start..];
+        let evict = &evict[..rn_kotlin_body_end(evict)];
+        assert!(
+            evict.contains("connections.addressesForDevice(peerId)"),
+            "evictPeer must tear down every address mapped to the peer"
+        );
+        assert!(
+            evict.contains("peripheralGattServer?.cancelConnection(")
+                && evict.contains("connections.untrackServerConnection(address)"),
+            "evictPeer must close and untrack a server link the peer opened to us"
+        );
     }
 
     /// Android hears Bluetooth go off and come back from the adapter's state

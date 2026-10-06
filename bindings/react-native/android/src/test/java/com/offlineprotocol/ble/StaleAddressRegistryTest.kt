@@ -60,6 +60,27 @@ class StaleAddressRegistryTest {
     }
 
     @Test
+    fun `removing every address of a two-address peer leaves nothing mapped`() {
+        // What eviction does: a peer known at its client-side address and at
+        // the server-side address a hello mapped must lose both, or the one
+        // left behind keeps a link the core was told is gone.
+        val registry = MeshConnectionRegistry()
+        registry.setDeviceIdentifier("client-side", "peerE")
+        registry.setDeviceIdentifier("server-side", "peerE")
+        registry.trackServerConnection("server-side")
+
+        for (address in registry.addressesForDevice("peerE")) {
+            registry.untrackServerConnection(address)
+            registry.removeIdentifiersForAddress(address)
+        }
+
+        assertEquals(emptyList<String>(), registry.addressesForDevice("peerE"))
+        assertEquals(null, registry.addressForDevice("peerE"))
+        assertEquals(0, registry.serverConnectionCount())
+        assertTrue(!registry.hasEstablishedLink("peerE"))
+    }
+
+    @Test
     fun `deviceIds lists each identified peer once`() {
         val registry = MeshConnectionRegistry()
         registry.setDeviceIdentifier("old", "peerA")

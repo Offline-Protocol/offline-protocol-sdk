@@ -112,13 +112,6 @@ class MeshConnectionRegistry {
     fun addressesForDevice(deviceId: String): List<String> =
         addressToDevice.filterValues { it == deviceId }.keys.toList()
 
-    fun removeIdentifiersForDevice(deviceId: String) {
-        val address = deviceToAddress.remove(deviceId)
-        if (address != null) {
-            addressToDevice.remove(address)
-        }
-    }
-
     fun hasDeviceForAddress(address: String): Boolean = addressToDevice.containsKey(address)
 
     /** Every peer identified on some link, once each. */
