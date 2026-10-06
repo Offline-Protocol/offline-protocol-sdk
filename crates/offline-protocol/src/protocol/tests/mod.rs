@@ -40965,6 +40965,10 @@ fn an_unanswered_confirmation_probe_supersedes_the_last_one() {
         );
     };
 
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    alice.on_event(move |event| events_handle.lock().unwrap().push(event));
+
     // The scan and the Welcome fast path (`on_transport_send_confirmed`)
     // both probe, interleaved: either may supersede the other's probe.
     handle.clear_sent_messages();
@@ -40995,6 +40999,29 @@ fn an_unanswered_confirmation_probe_supersedes_the_last_one() {
             "a superseded probe's ACK timeout would re-queue it"
         );
     }
+    assert_eq!(
+        alice
+            .transport_manager
+            .observed_failure_count(TransportType::BLE),
+        0,
+        "superseding is not a delivery failure against the carrier"
+    );
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MessageFailed { .. })),
+        "a superseded probe is withdrawn silently"
+    );
+
+    // Confirming the session withdraws the last probe too: with the
+    // tracking gone, nothing could ever supersede it.
+    let last = sent.last().unwrap().clone();
+    alice.clear_confirmation_recovery_tracking(&id("bob").to_string());
+    assert!(!alice.outbox.contains_key(&last));
+    assert!(!alice.retry_queue.contains(&last.as_str()));
+    assert!(!alice.ack_manager.is_waiting_for_ack(&last));
 }
 
 /// A probe persisted before a restart is not in

@@ -449,7 +449,11 @@ impl OfflineProtocol {
         self.confirmation_retry_due_at.remove(peer_id);
         self.confirmation_probe_due_at.remove(peer_id);
         self.confirmation_probe_unreachable_parks.remove(peer_id);
-        self.confirmation_probe_outstanding.remove(peer_id);
+        // Withdrawn with the tracking: once the map forgets it, no later
+        // probe can supersede it, and it would keep its full retry ladder.
+        if let Some(probe) = self.confirmation_probe_outstanding.remove(peer_id) {
+            self.forget_outbound_message(&probe);
+        }
     }
 
     /// Fold a relay "recipient unreachable" verdict into the session-confirmation
@@ -517,7 +521,10 @@ impl OfflineProtocol {
         // the old one's retry ladder would only stack onto it. Here rather
         // than in the scan because the Welcome fast path sends one too, and
         // a probe it replaced would keep its full ladder. Silent, and no
-        // delivery failure is recorded against the carrier.
+        // delivery failure is recorded against the carrier. Before the send,
+        // not after: if the send errors the peer has no probe in flight
+        // until the next scan, but a new probe can never evict a message at
+        // outbox capacity to make room beside the one it replaces.
         if let Some(previous) = self.confirmation_probe_outstanding.remove(peer_id) {
             self.forget_outbound_message(&previous);
         }
@@ -607,8 +614,20 @@ impl OfflineProtocol {
             .retain(|peer, _| pending_set.contains(peer));
         self.confirmation_probe_unreachable_parks
             .retain(|peer, _| pending_set.contains(peer));
-        self.confirmation_probe_outstanding
-            .retain(|peer, _| pending_set.contains(peer));
+        // Not a plain `retain`: a probe whose peer left the pending set
+        // without passing through `clear_confirmation_recovery_tracking`
+        // would be forgotten while still queued.
+        let settled: Vec<String> = self
+            .confirmation_probe_outstanding
+            .keys()
+            .filter(|peer| !pending_set.contains(*peer))
+            .cloned()
+            .collect();
+        for peer in settled {
+            if let Some(probe) = self.confirmation_probe_outstanding.remove(&peer) {
+                self.forget_outbound_message(&probe);
+            }
+        }
 
         for peer_id in pending_peers {
             let due_at = self

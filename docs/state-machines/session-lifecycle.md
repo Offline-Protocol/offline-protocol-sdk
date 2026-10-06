@@ -108,7 +108,10 @@ a Welcome went out. A supersede in the scan alone left the fast path's probe
 with its full ladder. Superseding is not a delivery failure and is not counted
 against the carrier. A probe is not restored after a restart either: the new
 process does not know which probe was the last, so a restored one could never
-be superseded, and the next scan asks the same question.
+be superseded, and the next scan asks the same question. For the same reason
+a probe is withdrawn with the rest of the confirmation tracking when the
+session confirms or is torn down: a probe the tracking no longer names could
+never be superseded, and would keep its ladder.
 
 ### Both-create convergence
 
