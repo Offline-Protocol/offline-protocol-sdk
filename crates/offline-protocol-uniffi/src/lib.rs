@@ -13429,6 +13429,20 @@ mod tests {
             .join(" ")
     }
 
+    /// Where the Kotlin declaration that `rest` starts inside ends: the next
+    /// function declared at any visibility. [`rn_source_code_only`] collapses
+    /// all whitespace to single spaces, so the markers are space-delimited; a
+    /// marker carrying a newline or indentation never matches, and a "body"
+    /// sliced on one runs to the end of the file, which passes any
+    /// containment check vacuously.
+    fn rn_kotlin_body_end(rest: &str) -> usize {
+        [" private fun ", " internal fun ", " override fun ", " fun "]
+            .iter()
+            .filter_map(|marker| rest.find(marker))
+            .min()
+            .unwrap_or(rest.len())
+    }
+
     /// The Python counterpart of [`rn_source_code_only`], for module
     /// constants: reads a file under `bindings/python` and returns a lookup
     /// from a constant's name to the value the file assigns it.
@@ -14284,8 +14298,7 @@ mod tests {
                 .find(start)
                 .unwrap_or_else(|| panic!("missing {start}"));
             let rest = &source[from + start.len()..];
-            let end = rest.find("\n    private fun ").unwrap_or(rest.len());
-            rest[..end].to_string()
+            rest[..rn_kotlin_body_end(rest)].to_string()
         };
 
         assert!(
@@ -14304,9 +14317,13 @@ mod tests {
             "a client link that drops into the reconnect backoff must start the grace"
         );
         let schedule = section(&facade, "private fun schedulePeerLostGrace(");
-        let check = schedule
-            .rfind("connections.hasEstablishedLink(peerId)")
-            .expect("the report must re-check for a link that came back");
+        let runnable = schedule
+            .find("Runnable {")
+            .expect("the report runs from a posted Runnable");
+        let check = runnable
+            + schedule[runnable..]
+                .find("connections.hasEstablishedLink(peerId)")
+                .expect("the report must re-check for a link that came back");
         let report = schedule
             .find("reportPeerLostAfterGrace(peerId)")
             .expect("the grace must end in a report");
@@ -14351,11 +14368,13 @@ mod tests {
             "the facade must serve Hello on its server and write it from its central"
         );
 
+        let declaration = "private fun handleInboundHelloOnBleThread(";
         let start = facade
-            .find("private fun handleInboundHelloOnBleThread(")
-            .expect("the facade must handle an inbound hello");
+            .find(declaration)
+            .expect("the facade must handle an inbound hello")
+            + declaration.len();
         let body = &facade[start..];
-        let body = &body[..body.find("\n    private fun ").unwrap_or(body.len())];
+        let body = &body[..rn_kotlin_body_end(body)];
         let verify = body
             .find("verifyIdentityAssertion(")
             .expect("a hello is bound only through the one verifier");
