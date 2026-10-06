@@ -51,6 +51,18 @@ FORBIDDEN_IN_MANIFEST = (
 REQUIRED_IN_MANIFEST = (
     ("service", "com.offlineprotocol.MeshForegroundService"),
     ("uses-permission", "android.permission.BLUETOOTH_CONNECT"),
+    # Without it Wi-Fi Direct reports itself unavailable on Android 13+.
+    ("uses-permission", "android.permission.NEARBY_WIFI_DEVICES"),
+)
+
+# A flag a required permission must carry. The library merges it into every
+# application that adds it, and the Wi-Fi Direct manager relies on it: on
+# Android 13+ it checks NEARBY_WIFI_DEVICES alone, which is only enough while
+# the declaration asserts neverForLocation. Without the flag the system asks
+# for a location grant the manager never checks, and peer discovery fails
+# with a bare ERROR instead of the transport reporting itself unavailable.
+REQUIRED_PERMISSION_FLAGS = (
+    ("android.permission.NEARBY_WIFI_DEVICES", "neverForLocation"),
 )
 
 # The rules an application's R8 needs, or its release build loses the FFI, or
@@ -89,6 +101,20 @@ def declared(manifest, tag, package):
             name = match.group(1)
             names.add(package + name if name.startswith(".") else name)
     return names
+
+
+def permission_flags(manifest, permission):
+    """The `android:usesPermissionFlags` of every <uses-permission> that
+    declares `permission`, comments removed, one set per declaration."""
+    manifest = re.sub(r"<!--.*?-->", "", manifest, flags=re.S)
+    found = []
+    for element in re.findall(r"<uses-permission\b[^>]*>", manifest):
+        match = ANDROID_NAME.search(element)
+        if not match or match.group(1) != permission:
+            continue
+        flags = re.search(r"""android:usesPermissionFlags\s*=\s*["']([^"']*)["']""", element)
+        found.append(set(flags.group(1).split("|")) if flags else set())
+    return found
 
 
 def rules_in(text):
@@ -173,6 +199,12 @@ def check(aar_bytes, require_natives):
         for tag, name in REQUIRED_IN_MANIFEST:
             if name not in declared(manifest, tag, package):
                 problems.append(f"the manifest does not declare {name}")
+        for name, flag in REQUIRED_PERMISSION_FLAGS:
+            for flags in permission_flags(manifest, name):
+                if flag not in flags:
+                    problems.append(
+                        f"the manifest declares {name} without usesPermissionFlags {flag}"
+                    )
 
     # Held to always, not only for a release: the build packs them into every
     # AAR, so one without them is a build that stopped doing it.

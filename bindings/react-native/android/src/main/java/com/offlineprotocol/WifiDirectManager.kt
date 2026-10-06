@@ -53,7 +53,8 @@ import java.util.concurrent.atomic.AtomicLong
  * What this manager does not do: form a group. Nothing here calls
  * `WifiP2pManager.connect`, so a group comes from the system's Wi-Fi Direct
  * settings or from another app, and this manager joins the socket layer when
- * `WIFI_P2P_CONNECTION_CHANGED_ACTION` says one exists.
+ * `WIFI_P2P_CONNECTION_CHANGED_ACTION` says one exists, or at start when one
+ * already does (see [adoptExistingGroup]).
  */
 class WifiDirectManager(
     private val context: Context,
@@ -326,7 +327,30 @@ class WifiDirectManager(
         // Start message polling
         transportHandler.post(messagePollingRunnable)
 
+        adoptExistingGroup()
+
         emitDiagnostic("info", "WiFi Direct transport started")
+    }
+
+    /**
+     * Joins the socket layer to a group that formed before this start.
+     *
+     * Since Android 10 `WIFI_P2P_CONNECTION_CHANGED_ACTION` is not sticky, so
+     * the receiver registered above hears nothing about a group that already
+     * exists. Without this, an app restarted while its device was still
+     * grouped (the group belongs to the system, not the process) neither
+     * listened for its peer as owner nor dialled its owner as client, and
+     * stayed unreachable until someone tore the group down by hand. The
+     * answer arrives on the transport looper, like every other P2P callback.
+     */
+    @SuppressLint("MissingPermission")
+    private fun adoptExistingGroup() {
+        wifiP2pManager?.requestConnectionInfo(channel) { info ->
+            if (info?.groupFormed == true && state == TransportState.RUNNING) {
+                emitDiagnostic("info", "Joining a group formed before start")
+                handleConnectionChanged(true)
+            }
+        }
     }
 
     override fun stop() {
@@ -452,11 +476,12 @@ class WifiDirectManager(
     // MARK: - Permission Helpers
 
     private fun hasRequiredPermissions(): Boolean {
+        // On 13+ the module's manifest declares NEARBY_WIFI_DEVICES with
+        // neverForLocation, which is what lets every P2P call run without a
+        // location grant there; demanding one anyway made an app ask for
+        // location it does not use, or lose the transport without it.
         val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            listOf(
-                Manifest.permission.NEARBY_WIFI_DEVICES,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            )
+            listOf(Manifest.permission.NEARBY_WIFI_DEVICES)
         } else {
             listOf(
                 Manifest.permission.ACCESS_FINE_LOCATION,

@@ -750,11 +750,11 @@ public class BleManager: NSObject, TransportManager {
     }
     
     /// Bluetooth powered off or reset: report every identified peer lost, then
-    /// drop the link state. No disconnect callback arrives for these links, and
-    /// `bleStatusChanged(false)` clears only the Rust transport's peer map, so
-    /// without this a peer that does not come back stays a neighbor in the core
-    /// and never produces `neighbor_lost`. Peers that do come back are announced
-    /// again on the verified path. Not folded into `clearLinkState()`: `stop()`
+    /// drop the link state. No disconnect callback arrives for these links.
+    /// `bleStatusChanged(false)` also ends the core's Bluetooth peers, and the
+    /// core reports each peer lost once whichever of the two reaches it first,
+    /// so the per-peer reports here are not doubled. Peers that do come back
+    /// are announced again on the verified path. Not folded into `clearLinkState()`: `stop()`
     /// reaches that from `deinit`, where `notifyBlePeerLost`'s `[weak self]`
     /// capture is a hard abort. The second manager's callback finds the
     /// registry already empty, so each peer is reported once.

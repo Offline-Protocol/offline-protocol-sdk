@@ -644,6 +644,59 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   dropped, and the core's acknowledgement and retry cover it. A client also
   opened another socket to its group owner on every group change; it now
   keeps one and reconnects it while the group lasts.
+- **Android Wi-Fi Direct sends at once, not on a two-second poll.** The
+  module registered the transport's send callback at `create` only if a
+  Wi-Fi Direct manager already existed, and the manager is built later, by
+  `enableTransport`, so it never was. Every message and every acknowledgement
+  waited for the manager's 2s fallback poll: on two phones a delivery took a
+  median of about three seconds (0.3 to 8), against about 85 ms with the
+  callback. It is now registered whenever the config enables the slot.
+- **A neighbour is reported lost once, and only when nothing reaches it.**
+  Android reports a Bluetooth peer lost once per stale address it gives up
+  on, so one departure arrived as two `neighbor_lost`. And a peer that left
+  the Wi-Fi Direct group but was still linked over Bluetooth LE (or the
+  reverse) was reported lost and cleared from core discovery tracking, so an
+  app dropped a neighbour it could still reach. `neighbor_lost` now fires
+  when the last mesh link to a peer ends. Bluetooth reported unavailable
+  (the radio switched off, or the transport stopped) ends every Bluetooth
+  link at once, since Android delivers no per-link disconnect then. The
+  Wi-Fi Direct layer going down does the same for its links: iOS takes it
+  down when the app backgrounds, before the OS ends the streams, and each
+  stream's own late end is no longer a second report.
+- **`transport_switched` to Wi-Fi Direct means a peer is connected.** It
+  fired when the stream layer came up, which a platform manager does at start
+  with or without a peer, saying "Connected to WiFi Direct peer group" while
+  every send went over Bluetooth LE. It now fires when the first Wi-Fi Direct
+  link is usable and, to `None`, when the last one is not, once per edge: a
+  layer going down with several links switches once, and links proved while
+  the layer is down switch when it comes up.
+- **Android rejoins a Wi-Fi Direct group after the app restarts.** The group
+  belongs to the system and outlives the process, but since Android 10 the
+  connection broadcast is not sticky, so a manager that started inside an
+  existing group never heard of it: no listener as owner, no dial as client,
+  and the peer stayed unreachable until someone removed the group in the
+  system settings. The manager now asks for the group once it is running and
+  joins it.
+- **React Native starts the peer-stream slot when the config enables it.**
+  `start()` brought up internet, Nostr and Reticulum from their config
+  sections but not `transports.wifiDirect`, so `wifiDirect: { enabled: true }`,
+  the documented way to turn it on, left it off for the whole session with
+  nothing logged. It is now enabled after the core starts, and a failure is
+  logged rather than thrown, as for the other transports. On iOS this starts
+  the Network framework peer stream, so an app that set `enabled: true` there
+  now gets the Local Network prompt on first start.
+- **The Android module declares the Wi-Fi Direct permissions.** It declared
+  the Bluetooth ones but not `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE` or
+  `NEARBY_WIFI_DEVICES`, so an app that followed the guide reported "WiFi P2P
+  is not available on this device" on Android 13 and later. They are declared
+  now, `NEARBY_WIFI_DEVICES` with `neverForLocation`, and on Android 13 and
+  later the transport no longer requires a location grant. Android 12 and
+  lower still gate peer discovery on `ACCESS_FINE_LOCATION`, which the app
+  declares and requests. The `neverForLocation` flag merges into every app
+  that adds the library, including one that declares the permission itself
+  without it; an app that derives location from Wi-Fi replaces the
+  declaration with `tools:node="replace"`, and the README says how. The
+  library's release check now refuses an AAR whose declaration lost the flag.
 - **The Bluetooth LE centrals use the strict verifier.** iOS and Android
   checked a peer's identity with the permissive `verifySignature`, which
   accepts some forged assertions the strict check refuses. They now call

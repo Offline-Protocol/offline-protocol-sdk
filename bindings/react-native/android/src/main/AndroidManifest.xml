@@ -17,6 +17,21 @@
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     
+    <!-- Wi-Fi Direct, the peer-stream slot on Android. WifiP2pManager needs
+         ACCESS_WIFI_STATE and CHANGE_WIFI_STATE (install-time) on every
+         version, and NEARBY_WIFI_DEVICES (runtime) on Android 13+. The
+         manager never derives location from Wi-Fi, so it asserts
+         neverForLocation and needs no location grant on 13+. Android 12 and
+         lower gate peer discovery on ACCESS_FINE_LOCATION, which the app
+         declares and requests, as it does for BLE on 11 and lower. Without
+         these the manager reported "WiFi P2P is not available on this device"
+         on a phone that has it. The stream itself is a TCP socket. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- BLE feature requirement (not required to allow installation on devices without BLE) -->
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 
