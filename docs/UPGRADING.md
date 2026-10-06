@@ -2466,7 +2466,14 @@ still linked over the other was reported lost. An app that removed a peer on
 `neighbor_lost` now keeps a reachable one; one that counted the events now
 sees one per departure. Bluetooth switched off, on this phone or by a stack
 restart, ends every Bluetooth link at once, so it then fires for each peer
-nothing else reaches; Android used to report none of them.
+nothing else reaches; Android used to report none of them. On Android it fires
+15 seconds after the last link closes, unless one comes back first, rather
+than when the reconnect backoff gives up (a minute or more).
+
+**React Native: a new `diagnostic` message.** `diagnostic` events with
+`message: "native_event_gap"` report an event the native module sent that
+never reached JavaScript. An app that treats every diagnostic as an error will
+now see these; the event itself is not recovered.
 
 **`transport_switched` to Wi-Fi Direct follows a peer, not the layer.** It
 fires when the first Wi-Fi Direct link proves and, to `None`, when the last
