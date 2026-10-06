@@ -226,6 +226,58 @@ class WifiDirectGroupFormationTest {
         assertEquals(60_000L, WifiDirectGroupFormation.probePeriodMs(-1))
     }
 
+    // --- An owner that was left ---------------------------------------------------
+
+    @Test
+    fun `a join goes to any owner while none is avoided`() {
+        assertEquals(
+            WifiDirectGroupFormation.JoinTarget.AnyOwner,
+            WifiDirectGroupFormation.joinTarget(setOf("aa:01"), avoided = emptySet()),
+        )
+    }
+
+    @Test
+    fun `a device that left a dead owner never joins it again`() {
+        // Every group of an application has one name, so a join by name alone
+        // landed on the owner just left, ten seconds after leaving it.
+        assertEquals(
+            WifiDirectGroupFormation.JoinTarget.Nobody,
+            WifiDirectGroupFormation.joinTarget(setOf("aa:01"), avoided = setOf("aa:01")),
+        )
+        assertEquals(
+            WifiDirectGroupFormation.JoinTarget.Owner("aa:02"),
+            WifiDirectGroupFormation.joinTarget(setOf("aa:01", "aa:02"), avoided = setOf("aa:01")),
+        )
+    }
+
+    @Test
+    fun `with only a dead owner in sight, the device that heard a peer still takes over`() {
+        // The manager counts a Nobody join as one that found no group, and
+        // decide() sees no owner nearby, so the takeover arrives.
+        val heard = local("off1b", failedJoins = WifiDirectGroupFormation.TAKEOVER_FAILED_JOINS)
+        assertEquals(Action.Create, decide(heard, "off1a"))
+        // And a device that heard nobody does not probe it.
+        assertEquals(Action.Wait, decide(local("off1b", ownerNearby = false)))
+    }
+
+    @Test
+    fun `an owner counts as new only after it was out of sight a while`() {
+        // A television at the edge of range flickers in and out of the peer
+        // list; each return re-armed the fast probe.
+        val m = WifiDirectGroupFormation.OWNER_MEMORY_MS
+        val seen = mapOf("tv" to 1_000L)
+        assertEquals(emptySet<String>(), WifiDirectGroupFormation.ownersNewlySeen(setOf("tv"), seen, 1_000L + m - 1))
+        assertEquals(setOf("tv"), WifiDirectGroupFormation.ownersNewlySeen(setOf("tv"), seen, 1_000L + m))
+        assertEquals(setOf("new"), WifiDirectGroupFormation.ownersNewlySeen(setOf("tv", "new"), seen, 2_000L))
+    }
+
+    @Test
+    fun `a dead owner is avoided for longer than a revived owner takes to dissolve`() {
+        // An owner whose application comes back dissolves its empty group in
+        // 30 to 60 s; avoiding it no longer than that would rejoin it.
+        assertTrue(WifiDirectGroupFormation.DEAD_OWNER_TTL_MS > 2 * 30_000L)
+    }
+
     // --- The switch ----------------------------------------------------------------
 
     @Test

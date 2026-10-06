@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.net.MacAddress
 import android.net.wifi.WifiManager
 import android.net.wifi.p2p.*
 import android.os.Build
@@ -233,10 +234,6 @@ class WifiDirectManager(
     private var nextPublishAtMs = 0L
     private var ownerIdleSinceMs = 0L
     private var failedJoins = 0
-    // Any Wi-Fi Direct group owner in the peer list. An owner answers no
-    // service discovery query, so this is how a device that heard no record
-    // still learns there is a group it might join.
-    private var ownerNearby = false
     private var ownerIdleLimitMs = OWNER_IDLE_MS
     private var lastJoinAtMs = 0L
     private var joinFirstRemaining = 0
@@ -249,11 +246,24 @@ class WifiDirectManager(
     private var quietDiscoveryRounds = 0
     private var heardSinceLastDiscovery = true
     // Probe backoff: probes in a row toward an owner nobody vouched for that
-    // found no group, whether the join in flight is one, and the owners seen
-    // last, so a new owner starts the backoff over.
+    // found no group, and whether the join in flight is one. When each owner
+    // was last in the peer list, so only an owner new or long gone starts the
+    // backoff over (WifiDirectGroupFormation.ownersNewlySeen).
     private var failedProbes = 0
     private var joinIsProbe = false
+    private val ownerLastSeenMs = HashMap<String, Long>()
+    // Every Wi-Fi Direct group owner in the peer list, of any application.
+    // An owner answers no service discovery query, so this is how a device
+    // that heard no record still learns there is a group it might join.
     private var nearbyOwners: Set<String> = emptySet()
+    // Owners this device left because they proved nothing, by device address,
+    // with when. Avoided until WifiDirectGroupFormation.DEAD_OWNER_TTL_MS: a
+    // join by the application's name would otherwise land on the owner just
+    // left. Kept across stop(): it is a fact about the radio, not this run.
+    private val deadOwners = HashMap<String, Long>()
+    // The device address of the owner of the application's group this device
+    // is a client of, so a leave knows whom to avoid.
+    private var appGroupOwnerDevice: String? = null
     private val appTag: String by lazy { WifiDirectGroupFormation.appTag(appId) }
     private val appNetwork: String by lazy { WifiDirectGroupFormation.networkName(appId) }
     
@@ -700,10 +710,19 @@ class WifiDirectManager(
             val deviceList = peers?.deviceList ?: return@requestPeers
 
             val owners = deviceList.filter { it.isGroupOwner }.map { it.deviceAddress }.toSet()
-            ownerNearby = owners.isNotEmpty()
             // A new owner may be this application's group: probe it at once.
-            if ((owners - nearbyOwners).isNotEmpty()) failedProbes = 0
+            // Not one that only flickered out of the list and back.
+            val now = SystemClock.elapsedRealtime()
+            if (WifiDirectGroupFormation.ownersNewlySeen(owners - deadOwners.keys, ownerLastSeenMs, now).isNotEmpty()) {
+                failedProbes = 0
+            }
+            owners.forEach { ownerLastSeenMs[it] = now }
+            ownerLastSeenMs.values.removeAll { now - it >= WifiDirectGroupFormation.OWNER_MEMORY_MS }
             nearbyOwners = owners
+            // A client leaving changes the peer list, and may not change the
+            // connection: recount, or an owner whose last client left stays
+            // "settled" and never dissolves its empty group.
+            if (inGroup && isGroupOwner) refreshGroupForFormation()
 
             // Update discovered peers
             val currentPeers = mutableSetOf<String>()
@@ -785,6 +804,7 @@ class WifiDirectManager(
             createdNetwork = null
             ownsFormationGroup = false
             inAppGroup = false
+            appGroupOwnerDevice = null
             unprovedAtCeiling.set(0)
             ownerIdleSinceMs = 0L
             // Posted: this is the broadcast receiver's onReceive, and ending
@@ -845,6 +865,10 @@ class WifiDirectManager(
         quietDiscoveryRounds = 0
         addServiceRequest()
         publishAdvert()
+        // The first step runs at once and the publish above has not answered
+        // yet: without this it publishes again, and the two clear-and-add
+        // chains interleave.
+        nextPublishAtMs = SystemClock.elapsedRealtime() + FORMATION_RETRY_MS
         transportHandler.removeCallbacks(formationTick)
         transportHandler.post(formationTick)
         emitDiagnostic("info", "Wi-Fi Direct group formation started")
@@ -905,6 +929,7 @@ class WifiDirectManager(
         createdNetwork = null
         ownsFormationGroup = false
         inAppGroup = false
+        appGroupOwnerDevice = null
         unprovedAtCeiling.set(0)
         ownerIdleSinceMs = 0L
         adverts.clear()
@@ -918,8 +943,8 @@ class WifiDirectManager(
         failedProbes = 0
         quietDiscoveryRounds = 0
         heardSinceLastDiscovery = true
-        ownerNearby = false
         nearbyOwners = emptySet()
+        ownerLastSeenMs.clear()
     }
 
     /** One step: refresh what is known, and act on it if the backoff allows. */
@@ -931,6 +956,7 @@ class WifiDirectManager(
         if (!layerUp) return
         val now = SystemClock.elapsedRealtime()
         adverts.values.removeAll { now - it.seenAtMs > ADVERT_TTL_MS }
+        deadOwners.values.removeAll { now - it >= WifiDirectGroupFormation.DEAD_OWNER_TTL_MS }
         val address = localAddressOrNull() ?: return
 
         // Paced like a formation retry: a framework that keeps refusing the
@@ -982,9 +1008,12 @@ class WifiDirectManager(
             })
         }
         if (now < nextFormationAtMs) return
+        // An owner this device left is not "an owner nearby": probing it is
+        // how the device was captured again.
+        val liveOwners = nearbyOwners - deadOwners.keys
         val action = WifiDirectGroupFormation.decide(
             WifiDirectGroupFormation.Local(
-                address, appTag, inGroup, failedJoins, ownerNearby,
+                address, appTag, inGroup, failedJoins, liveOwners.isNotEmpty(),
                 ownerProbeDue = now - lastJoinAtMs >=
                     WifiDirectGroupFormation.probePeriodMs(failedProbes),
                 joinFirst = joinFirstRemaining > 0,
@@ -999,21 +1028,40 @@ class WifiDirectManager(
                 // A join with no record of this application heard is a probe
                 // toward an owner nobody vouched for (rule 4).
                 joinIsProbe = adverts.values.none { it.app == appTag && it.address != address }
-                joinGroup(appNetwork)
+                when (val target = WifiDirectGroupFormation.joinTarget(nearbyOwners, deadOwners.keys)) {
+                    WifiDirectGroupFormation.JoinTarget.AnyOwner -> joinGroup(appNetwork, null)
+                    is WifiDirectGroupFormation.JoinTarget.Owner -> joinGroup(appNetwork, target.device)
+                    WifiDirectGroupFormation.JoinTarget.Nobody -> {
+                        // Only owners this device left are in sight: this join
+                        // would find no group but theirs. Counted as one that
+                        // found none, so the takeover still comes.
+                        joinFoundNoGroup()
+                        emitDiagnostic("debug", "Wi-Fi Direct join skipped: only owners left for proving nothing are nearby")
+                    }
+                }
             }
         }
         nextFormationAtMs = now + formationBackoffMs
     }
 
-    /** The application's group, for creating it and for joining it alike. */
-    private fun formationConfig(network: String): WifiP2pConfig? {
+    /**
+     * The application's group, for creating it and for joining it alike. A
+     * [target] names the one owner a join may land on; the network name and
+     * passphrase keep the config on the join-by-credentials path, so naming a
+     * device shows no invitation (that is a config with no network name).
+     */
+    private fun formationConfig(network: String, target: String? = null): WifiP2pConfig? {
         // In-function, like the callers', so lint's NewApi check sees it.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
-        return WifiP2pConfig.Builder()
+        val builder = WifiP2pConfig.Builder()
             .setNetworkName(network)
             .setPassphrase(WifiDirectGroupFormation.passphrase(appId, network))
             .enablePersistentMode(false)
-            .build()
+        if (target != null) {
+            val mac = try { MacAddress.fromString(target) } catch (_: IllegalArgumentException) { return null }
+            builder.setDeviceAddress(mac)
+        }
+        return builder.build()
     }
 
     @SuppressLint("MissingPermission")
@@ -1032,11 +1080,14 @@ class WifiDirectManager(
     }
 
     @SuppressLint("MissingPermission")
-    private fun joinGroup(network: String) {
+    private fun joinGroup(network: String, target: String?) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
-        val config = formationConfig(network) ?: return
+        val config = formationConfig(network, target) ?: return
         val ch = channel ?: return
-        emitDiagnostic("info", "Joining a Wi-Fi Direct group", mapOf("network" to network))
+        emitDiagnostic("info", "Joining a Wi-Fi Direct group", mapOf(
+            "network" to network,
+            "owner" to (target ?: "any"),
+        ))
         wifiP2pManager?.connect(ch, config, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
                 transportHandler.removeCallbacks(joinWindowTimeout)
@@ -1103,25 +1154,42 @@ class WifiDirectManager(
             } else {
                 ownerClients = 0
                 ownsFormationGroup = false
+                appGroupOwnerDevice = if (inAppGroup) group?.owner?.deviceAddress else null
             }
         }
     }
 
     /**
      * Leaves an application's group whose owner keeps proving nothing, so
-     * formation decides again. Runs on the transport thread; re-reads
-     * everything, because the group can change between the socket thread's
-     * decision and here.
+     * formation decides again, and remembers the owner so no join lands on it
+     * again (see [WifiDirectGroupFormation.joinTarget]). Runs on the transport
+     * thread; re-reads everything, because the group can change between the
+     * socket thread's decision and here.
+     *
+     * Not join-first: the only owner of the application's name in sight is
+     * usually the one just left. If the removal fails the client is still in
+     * the group, the redial goes on, and its next unproved dial asks again.
      */
     @SuppressLint("MissingPermission")
     private fun leaveDeadApplicationGroup() {
         if (state != TransportState.RUNNING || !formationRegistered) return
         if (!inGroup || isGroupOwner || !inAppGroup) return
-        emitDiagnostic("info", "Leaving a Wi-Fi Direct group whose owner proves nothing")
-        wifiP2pManager?.removeGroup(channel, quietListener("leave dead group"))
+        val now = SystemClock.elapsedRealtime()
+        val owner = appGroupOwnerDevice
+        if (owner != null) deadOwners[owner] = now
+        emitDiagnostic("info", "Leaving a Wi-Fi Direct group whose owner proves nothing", mapOf(
+            "owner" to (owner ?: "unknown"),
+        ))
+        wifiP2pManager?.removeGroup(channel, object : WifiP2pManager.ActionListener {
+            override fun onSuccess() {}
+            override fun onFailure(reason: Int) {
+                emitDiagnostic("warning", "Wi-Fi Direct leave of a dead group failed; retried on the next dial", mapOf(
+                    "reason" to reasonToString(reason),
+                ))
+            }
+        })
         failedJoins = 0
-        joinFirstRemaining = 2
-        nextFormationAtMs = SystemClock.elapsedRealtime() + FORMATION_TICK_MS
+        nextFormationAtMs = now + FORMATION_TICK_MS
     }
 
     @SuppressLint("MissingPermission")
@@ -1290,10 +1358,13 @@ class WifiDirectManager(
                 maxDelayMs = RECONNECT_MAX_DELAY_MS,
             )
         }
+        // The redial below goes on after a leave is asked for: the leave can
+        // fail (BUSY during a group transition), and a client in a group with
+        // no redial posted has nothing left that would ever fire. A leave that
+        // succeeds ends the group, resets the count, and the redial finds no
+        // owner to dial.
         if (!isGroupOwner && GroupOwnerRedial.shouldLeave(unproved, applicationGroup = inAppGroup)) {
-            unprovedAtCeiling.set(0)
             transportHandler.post { leaveDeadApplicationGroup() }
-            return
         }
         val plan = GroupOwnerRedial.next(
             ended = ended,

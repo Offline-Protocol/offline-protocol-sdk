@@ -930,10 +930,13 @@ frames, which any relay on any carrier can already do. What it costs is
 availability on this carrier: a squatting owner can hold an application's
 devices in a group that delivers nothing. A client leaves a group under the
 application's name after three dials at the top of its redial ladder prove
-no peer (about three minutes), and forms again, so the squatter costs each
-device a few minutes per capture rather than the session; Bluetooth carries
-the traffic meanwhile. The same rule covers an owner whose application died,
-since the group outlives the process. Formation is opt-in and Android-only.
+no peer (about three minutes), and avoids that owner's device address for
+five minutes, joining only a named other owner meanwhile, so the squatter
+costs each device a few minutes per capture rather than the session;
+Bluetooth carries the traffic meanwhile. The bound is per device address: a
+squatter that changes its address captures the device again, a few minutes
+per change. The same rule covers an owner whose application died, since the
+group outlives the process. Formation is opt-in and Android-only.
 
 ## Network egress
 

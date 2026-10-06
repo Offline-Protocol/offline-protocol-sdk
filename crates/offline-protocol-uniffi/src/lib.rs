@@ -18060,6 +18060,19 @@ mod tests {
                  {needed}"
             );
         }
+        // Asking to leave a dead owner's group does not end the redial. The
+        // leave's removeGroup can fail (BUSY in a group transition), and a
+        // client still in the group with no redial posted had nothing left
+        // that would ever fire: no stream, no leave retry, no formation.
+        assert!(
+            kotlin.contains(
+                "if (!isGroupOwner && GroupOwnerRedial.shouldLeave(unproved, \
+                 applicationGroup = inAppGroup)) { \
+                 transportHandler.post { leaveDeadApplicationGroup() } } \
+                 val plan = GroupOwnerRedial.next("
+            ),
+            "WifiDirectManager.kt must keep redialling after it asks to leave a dead owner's group"
+        );
         for call in ["host.peerStreamConnected(", "host.peerStreamReceived("] {
             assert_eq!(
                 swift.matches(call).count(),

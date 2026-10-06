@@ -165,7 +165,15 @@ answers no discovery query, and every device that probes it joins a group that c
 never runs formation again because it is in a group. Two rules close that: a group under the
 application's name that this device owns is removed by `stop()` even when it was adopted at start
 rather than created by the run, and a client of such a group leaves it after three dials at the top of
-the redial ladder prove nothing (`GroupOwnerRedial.shouldLeave`) and joins before creating again. A
+the redial ladder prove nothing (`GroupOwnerRedial.shouldLeave`). Leaving is not enough on its own:
+every group of the application has one name, so a join by name lands on whichever owner of it the
+supplicant finds, and the one in sight is the owner just left. The first version rejoined it ten
+seconds later, every time. So the owner left is avoided for five minutes (longer than an owner whose
+application comes back takes to dissolve its empty group), it no longer counts as an owner nearby,
+and while it is avoided a join names its owner by device address (`WifiDirectGroupFormation.joinTarget`;
+the network name and passphrase keep it a join by credentials, with no invitation). With no other
+owner in sight the join counts as one that found no group, so the takeover makes the device create.
+The redial goes on after a leave is asked for, so a leave the framework refuses is asked again. A
 group paired in the system settings is never removed or left.
 
 `formGroups` is set while stopped; `stop()` undoes what the run did (the service request, the

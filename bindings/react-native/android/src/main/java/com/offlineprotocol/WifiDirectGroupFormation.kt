@@ -70,7 +70,24 @@ import java.security.MessageDigest
  * ([probePeriodMs]). A Wi-Fi Direct printer or television is an owner whose
  * group a probe never joins; without the backoff a device next to one probed
  * it every minute for as long as the application was open. Both start over
- * when something new appears: a record, a new owner, or a new device.
+ * when something new appears: a record, a new owner, or a new device. An
+ * owner counts as new only after [OWNER_MEMORY_MS] out of the peer list, so
+ * a television at the edge of range does not re-arm the fast probe each time
+ * it flickers back in ([ownersNewlySeen]).
+ *
+ * ## An owner that was left is not joined again
+ *
+ * Every group of an application has the same name, so a join by name alone
+ * lands on whichever owner of that name the supplicant finds. When a client
+ * leaves a group whose owner proved nothing (its application died; the group
+ * outlives the process), the owner it left is the one it would find: the
+ * device rejoined it ten seconds later and was held again, for the session.
+ * So the owner left is remembered for [DEAD_OWNER_TTL_MS], dropped from the
+ * owners nearby, and while it is remembered every join names its target
+ * ([joinTarget]); with no other owner in sight the join counts as one that
+ * found no group, so the takeover still makes this device create. The memory
+ * outlasts the 30 to 60 s an owner whose application comes back takes to
+ * dissolve its empty group.
  */
 internal object WifiDirectGroupFormation {
     const val SERVICE_TYPE = "_offlineprotocol._tcp"
@@ -94,6 +111,10 @@ internal object WifiDirectGroupFormation {
     const val PROBE_PERIOD_MS = 60_000L
     /** Probe period after a long run of probes that found no group. */
     const val PROBE_MAX_PERIOD_MS = 240_000L
+    /** How long an owner left for proving nothing is avoided. */
+    const val DEAD_OWNER_TTL_MS = 300_000L
+    /** How long an owner must be out of the peer list to count as new again. */
+    const val OWNER_MEMORY_MS = 300_000L
 
     /** A peer's record as last seen. */
     data class Advert(
@@ -124,6 +145,37 @@ internal object WifiDirectGroupFormation {
     )
 
     enum class Action { Wait, Create, Join }
+
+    /** Which owner a join goes to. */
+    sealed class JoinTarget {
+        /** Whichever owner of the application's name the supplicant finds. */
+        object AnyOwner : JoinTarget()
+        /** This owner only, by its device address. */
+        data class Owner(val device: String) : JoinTarget()
+        /** None: every owner nearby is one this device left. */
+        object Nobody : JoinTarget()
+    }
+
+    /**
+     * The target of a join, given the owners in the peer list and the owners
+     * this device left whose memory is still live. An untargeted join is
+     * only safe while nothing is avoided: it would find the owner just left.
+     */
+    fun joinTarget(nearbyOwners: Set<String>, avoided: Set<String>): JoinTarget {
+        if (avoided.isEmpty()) return JoinTarget.AnyOwner
+        val candidate = (nearbyOwners - avoided).minOrNull() ?: return JoinTarget.Nobody
+        return JoinTarget.Owner(candidate)
+    }
+
+    /**
+     * The owners in [owners] not seen within [OWNER_MEMORY_MS] before
+     * [nowMs], by [lastSeenMs]. A probe backoff starts over only for these.
+     */
+    fun ownersNewlySeen(owners: Set<String>, lastSeenMs: Map<String, Long>, nowMs: Long): Set<String> =
+        owners.filterTo(HashSet()) { owner ->
+            val seen = lastSeenMs[owner]
+            seen == null || nowMs - seen >= OWNER_MEMORY_MS
+        }
 
     fun decide(local: Local, adverts: Collection<Advert>): Action {
         if (local.inGroup) return Action.Wait

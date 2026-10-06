@@ -29,11 +29,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   once a minute, and an owner whose group stays empty for 30 to 60 seconds
   dissolves it so two groups that formed at once merge. A client whose owner
   proves nothing for three dials at the top of its redial ladder (an owner
-  whose app died: the group outlives the process) leaves the group and forms
-  again, and `stop()` removes an app-named group this device owns even when it
-  was adopted at start. A device alone backs
-  off: discovery from 15 to 60 seconds, the owner probe from one to four
-  minutes. Two phones (Android 13 and 15) next to two Wi-Fi Direct televisions
+  whose app died: the group outlives the process) leaves the group and avoids
+  that owner for five minutes: every group of an app has one name, so a join
+  by name alone would land on the owner just left, and while one is avoided
+  joins name their owner. With no other owner in sight the device forms the
+  group with its peers instead. `stop()` removes an app-named group this
+  device owns even when it was adopted at start. A device alone backs off:
+  discovery from 15 to 60 seconds, the owner probe from one to four minutes. Two phones (Android 13 and 15) next to two Wi-Fi Direct televisions
   formed the group in all eight clean starts, in 18 to 225 seconds (median
   about a minute). Off by default; without it a group is formed in the
   system's Wi-Fi Direct settings, as before, and that group is never
