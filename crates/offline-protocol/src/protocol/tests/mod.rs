@@ -41015,9 +41015,19 @@ fn an_unanswered_confirmation_probe_supersedes_the_last_one() {
         "a superseded probe is withdrawn silently"
     );
 
+    // A probe whose send failed waits in the retry queue; the next probe
+    // takes it out of there too.
+    handle.set_fail_next_sends(1);
+    alice.send_session_confirmation_probe(&id("bob").to_string(), "test");
+    let deferred = alice.confirmation_probe_outstanding[&id("bob").to_string()].clone();
+    assert!(alice.retry_queue.contains(&deferred.as_str()));
+    alice.send_session_confirmation_probe(&id("bob").to_string(), "test");
+    assert!(!alice.retry_queue.contains(&deferred.as_str()));
+    assert!(!alice.outbox.contains_key(&deferred));
+
     // Confirming the session withdraws the last probe too: with the
     // tracking gone, nothing could ever supersede it.
-    let last = sent.last().unwrap().clone();
+    let last = alice.confirmation_probe_outstanding[&id("bob").to_string()].clone();
     alice.clear_confirmation_recovery_tracking(&id("bob").to_string());
     assert!(!alice.outbox.contains_key(&last));
     assert!(!alice.retry_queue.contains(&last.as_str()));

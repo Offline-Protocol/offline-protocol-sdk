@@ -524,7 +524,9 @@ impl OfflineProtocol {
         // delivery failure is recorded against the carrier. Before the send,
         // not after: if the send errors the peer has no probe in flight
         // until the next scan, but a new probe can never evict a message at
-        // outbox capacity to make room beside the one it replaces.
+        // outbox capacity to make room beside the one it replaces. A relay
+        // verdict that arrives for a superseded probe finds no entry and is
+        // dropped; the current probe's own verdict backs the schedule off.
         if let Some(previous) = self.confirmation_probe_outstanding.remove(peer_id) {
             self.forget_outbound_message(&previous);
         }

@@ -98,9 +98,9 @@ split-session work rather than here.
 An unconfirmed session is probed on a fixed cadence, and **a peer holds at most
 one probe in the outbox**: each new probe supersedes the last rather than
 stacking its own retry ladder on top. The cadence only backs off on a relay
-`unreachable` verdict, which a relay that pushes to offline users or a mesh-only
-link never produces, so stacked probes once filled the outbox and capacity
-eviction failed real messages.
+verdict (`unreachable` or `relay_pushed`), which a mesh-only carrier never
+produces, so stacked probes once filled the outbox and capacity eviction failed
+real messages.
 
 The supersede lives in the one function that sends a probe, because two paths
 call it: the periodic scan and the fast path taken when the transport confirms

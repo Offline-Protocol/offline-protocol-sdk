@@ -713,8 +713,8 @@ pub struct OfflineProtocol {
     /// per peer lives in the outbox: a new one supersedes the last. Stacking a
     /// fresh probe (new id, full retry ladder) every
     /// `CONFIRMATION_PROBE_INTERVAL_SECS` on top of the unanswered ones filled
-    /// the outbox whenever no `unreachable` verdict arrived to back the
-    /// schedule off: a relay that pushes to offline users, or a mesh-only
+    /// the outbox whenever no relay verdict (`unreachable` or
+    /// `relay_pushed`) arrived to back the schedule off, as on a mesh-only
     /// carrier. Capacity eviction then failed real messages.
     confirmation_probe_outstanding: HashMap<String, MessageId>,
 
