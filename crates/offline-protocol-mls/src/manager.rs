@@ -673,9 +673,7 @@ impl MlsManager {
         offline_protocol_core::validate_id_chars(user_id, "User ID")
             .map_err(|e| MlsError::InvalidUserId(e.to_string()))?;
 
-        let key_package_in = KeyPackageIn::tls_deserialize_exact(key_package_data)
-            .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?;
-        let key_package = self.validate_peer_key_package(key_package_in)?;
+        let key_package = self.validate_peer_key_package(key_package_data)?;
 
         Self::verify_credential_identity(&key_package, user_id)?;
         Self::verify_address_binding(&key_package, user_id)?;
@@ -696,11 +694,8 @@ impl MlsManager {
             .load(key_type, user_id)?
             .ok_or_else(|| MlsError::NoKeyPackage(user_id.to_string()))?;
 
-        let key_package_in = KeyPackageIn::tls_deserialize_exact(&data)
-            .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?;
-
         // Validate using the crypto backend
-        let key_package = self.validate_peer_key_package(key_package_in)?;
+        let key_package = self.validate_peer_key_package(&data)?;
 
         // Defense in depth: entries written to storage out-of-band must not
         // come back attributed to the wrong user. Both checks run again here
@@ -720,15 +715,76 @@ impl MlsManager {
     /// package refused for its validity window comes back as
     /// [`MlsError::KeyPackageOutsideValidityWindow`] on every route that
     /// admits one (import, the cache read, adding a group member) rather than
-    /// as free text on some of them. The window is the only refusal whose
-    /// usual cause is a clock, and the caller reports it as such.
-    fn validate_peer_key_package(&self, key_package_in: KeyPackageIn) -> Result<KeyPackage> {
-        key_package_in
+    /// as free text on some of them, so the engine can report it. The window
+    /// is the only refusal whose usual cause is a clock.
+    ///
+    /// Takes the bytes rather than a parsed package because `validate`
+    /// consumes the package, and which end of the window refused it is read
+    /// back from the bytes only on that failure, so the accepting path pays
+    /// nothing for it.
+    fn validate_peer_key_package(&self, key_package_data: &[u8]) -> Result<KeyPackage> {
+        KeyPackageIn::tls_deserialize_exact(key_package_data)
+            .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?
             .validate(self.provider.crypto(), ProtocolVersion::Mls10)
             .map_err(|e| match e {
-                KeyPackageVerifyError::InvalidLifetime => MlsError::KeyPackageOutsideValidityWindow,
+                KeyPackageVerifyError::InvalidLifetime => {
+                    MlsError::KeyPackageOutsideValidityWindow {
+                        expired: Self::window_has_closed(key_package_data),
+                    }
+                }
                 other => MlsError::InvalidKeyPackage(other.to_string()),
             })
+    }
+
+    /// Whether a package OpenMLS refused for its lifetime was refused because
+    /// the window has already closed, rather than because it has not opened.
+    ///
+    /// OpenMLS exposes no lifetime on an unvalidated `KeyPackageIn` outside
+    /// its `test-utils` feature, so the window is read from its serde form: the
+    /// leaf node's `Lifetime` is the only `{not_before, not_after}` object in a
+    /// key package. Read through OpenMLS's own types rather than by walking the
+    /// TLS encoding by hand, which would be a second key package codec. If the
+    /// shape ever changes the answer is `false`, the refusal is reported as a
+    /// clock and the package is kept, which is how this refusal was handled
+    /// before the two ends were told apart; the tests on both ends pin it.
+    ///
+    /// OpenMLS admits `not_before < now < not_after`, so a refused package
+    /// whose `not_after` is at or before `now` closed, and any other did not
+    /// start. A clock before the epoch reads as "not started", which is right:
+    /// that clock is behind.
+    fn window_has_closed(key_package_data: &[u8]) -> bool {
+        fn find_lifetime(value: &serde_json::Value) -> Option<u64> {
+            match value {
+                serde_json::Value::Object(map) => {
+                    if map
+                        .get("not_before")
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some()
+                    {
+                        if let Some(not_after) =
+                            map.get("not_after").and_then(serde_json::Value::as_u64)
+                        {
+                            return Some(not_after);
+                        }
+                    }
+                    map.values().find_map(find_lifetime)
+                }
+                serde_json::Value::Array(items) => items.iter().find_map(find_lifetime),
+                _ => None,
+            }
+        }
+
+        let Some(not_after) = KeyPackageIn::tls_deserialize_exact(key_package_data)
+            .ok()
+            .and_then(|package| serde_json::to_value(&package).ok())
+            .and_then(|value| find_lifetime(&value))
+        else {
+            return false;
+        };
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|now| now.as_secs() >= not_after)
+            .unwrap_or(false)
     }
 
     /// Requires a key package's validity window to be no wider than this
@@ -1117,10 +1173,7 @@ impl MlsManager {
         invitee_user_id: &str,
         member_key_package: &[u8],
     ) -> Result<(WelcomeMessage, EncryptedMessage)> {
-        let key_package = self.validate_peer_key_package(
-            KeyPackageIn::tls_deserialize_exact(member_key_package)
-                .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?,
-        )?;
+        let key_package = self.validate_peer_key_package(member_key_package)?;
 
         Self::verify_credential_identity(&key_package, invitee_user_id)?;
         Self::verify_address_binding(&key_package, invitee_user_id)?;
@@ -4954,7 +5007,10 @@ mod tests {
             .import_key_package(&peer, &bytes)
             .expect_err("a window that starts in a year is not valid now");
         assert!(
-            matches!(err, MlsError::KeyPackageOutsideValidityWindow),
+            matches!(
+                err,
+                MlsError::KeyPackageOutsideValidityWindow { expired: false }
+            ),
             "refused for the wrong reason: {err:?}"
         );
     }
@@ -4974,7 +5030,10 @@ mod tests {
             .import_key_package(&peer, &bytes)
             .expect_err("a window that closed a month ago is not valid now");
         assert!(
-            matches!(err, MlsError::KeyPackageOutsideValidityWindow),
+            matches!(
+                err,
+                MlsError::KeyPackageOutsideValidityWindow { expired: true }
+            ),
             "refused for the wrong reason: {err:?}"
         );
     }

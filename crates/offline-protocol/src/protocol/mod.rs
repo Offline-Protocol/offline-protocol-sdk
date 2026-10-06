@@ -2971,33 +2971,7 @@ impl OfflineProtocol {
                 self.pending_key_packages.remove(peer_id);
                 self.delete_peer_key_package_from_storage(peer_id);
             } else {
-                let imported = {
-                    let manager = mls
-                        .read()
-                        .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-                    manager.import_key_package(peer_id, &received_pkg.key_package_data)
-                };
-                if let Err(offline_protocol_mls::MlsError::KeyPackageOutsideValidityWindow) =
-                    &imported
-                {
-                    // The usual cause is a clock, on one side or the other, and
-                    // it blocks every session with this peer for as long as the
-                    // clocks disagree. Logged and reported, because this was a
-                    // debug line and nothing else.
-                    warn!(
-                        peer_id = %peer_id,
-                        "Peer key package is outside its validity window by this \
-                         device's clock; this device cannot start a session with the \
-                         peer until the clocks agree"
-                    );
-                    self.warn_control_gate_rejection(
-                        peer_id,
-                        crate::events::SecurityWarningCode::KeyPackageOutsideValidityWindow,
-                        "The peer's key package is not valid at this device's time. \
-                         Check this device's date and time, then the peer's.",
-                    );
-                }
-                imported?;
+                self.import_pending_key_package(&mls, peer_id, &received_pkg.key_package_data)?;
 
                 // Create session and get welcome message
                 let welcome = {
@@ -3055,6 +3029,69 @@ impl OfflineProtocol {
 
         // No key package available (memory nor storage) — return non-terminal state so caller can retry
         Err(Error::SessionNotReady(self.establishment_state(peer_id)?))
+    }
+
+    /// Imports `peer_id`'s pending key package into MLS, reporting a refusal
+    /// by this device's clock.
+    ///
+    /// The one place the engine admits a pending package, so that the refusal
+    /// is reported whichever route reached it: `establish_secure_session`,
+    /// taken when a package arrives, and the send path's
+    /// `ensure_session_establishment`, taken on the first send after a
+    /// restart or with `auto_key_exchange` off. Reported on only the first,
+    /// the restart case left a message queued "anyway" with nothing to say why,
+    /// which is the failure the code exists for. The throttle makes a second
+    /// route free: one event per peer either way.
+    ///
+    /// A window that has not started keeps the package, since it becomes valid
+    /// once the clocks agree. A window that has closed discards it, exactly as
+    /// an expired cached package is discarded, because it may be a package a
+    /// relay held for days rather than a clock, and kept it would fail every
+    /// attempt until its cached expiry. The next package the peer sends
+    /// replaces it.
+    pub(super) fn import_pending_key_package(
+        &mut self,
+        mls: &Arc<RwLock<MlsManager>>,
+        peer_id: &str,
+        key_package_data: &[u8],
+    ) -> Result<()> {
+        let imported = {
+            let manager = mls
+                .read()
+                .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
+            manager.import_key_package(peer_id, key_package_data)
+        };
+        if let Err(offline_protocol_mls::MlsError::KeyPackageOutsideValidityWindow { expired }) =
+            &imported
+        {
+            let reason = if *expired {
+                warn!(
+                    peer_id = %peer_id,
+                    "Peer key package's validity window has closed by this device's \
+                     clock; discarding it until the peer sends a fresh one"
+                );
+                self.pending_key_packages.remove(peer_id);
+                self.delete_peer_key_package_from_storage(peer_id);
+                "The peer's key package has expired by this device's clock. Either \
+                 this device's date is ahead, or the package is older than its 30-day \
+                 window; it is discarded and the next one the peer sends replaces it."
+            } else {
+                warn!(
+                    peer_id = %peer_id,
+                    "Peer key package's validity window has not started by this \
+                     device's clock; this device cannot start a session with the peer \
+                     until the clocks agree"
+                );
+                "The peer's key package is not valid yet at this device's time. \
+                 Check this device's date and time, then the peer's."
+            };
+            self.warn_control_gate_rejection(
+                peer_id,
+                crate::events::SecurityWarningCode::KeyPackageOutsideValidityWindow,
+                reason,
+            );
+        }
+        Ok(imported?)
     }
 
     /// Checks if a pending key package is available for a peer.

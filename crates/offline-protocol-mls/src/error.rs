@@ -87,8 +87,25 @@ pub enum MlsError {
     /// `KEY_PACKAGE_OUTSIDE_VALIDITY_WINDOW`; before that it was a debug line,
     /// and two phones a year apart sat on a pending connection request with
     /// nothing anywhere to say why.
-    #[error("Key package is outside its validity window by this device's clock")]
-    KeyPackageOutsideValidityWindow,
+    ///
+    /// `expired` says which end refused it, because the two have different
+    /// remedies. A window that has not started (`false`) is a clock, this
+    /// device's or the peer's, and the package becomes valid once the clocks
+    /// agree. A window that has closed (`true`) is this device's clock running
+    /// ahead *or* a package that is simply old: a relay can hold a package for
+    /// days, and the receiver's cached expiry is anchored to when the frame
+    /// arrived, not to when the package was minted. Blaming the clock for the
+    /// second, and keeping the package, would fail every attempt with a
+    /// correct clock until the cached expiry.
+    #[error(
+        "Key package is outside its validity window by this device's clock: {}",
+        if *.expired { "it has already closed" } else { "it has not started yet" }
+    )]
+    KeyPackageOutsideValidityWindow {
+        /// `true` when the window closed before this device's `now`, `false`
+        /// when it has not opened yet.
+        expired: bool,
+    },
 
     /// Failed to create a group.
     #[error("Group creation failed: {0}")]
@@ -524,7 +541,7 @@ impl MlsError {
             Self::CredentialCreation(_) => "MLS credential creation failed",
             Self::KeyPackageCreation(_) => "Key package creation failed",
             Self::InvalidKeyPackage(_) => "The peer's key package was malformed or unusable",
-            Self::KeyPackageOutsideValidityWindow => {
+            Self::KeyPackageOutsideValidityWindow { .. } => {
                 "The peer's key package is not valid at this device's time"
             }
             Self::GroupCreation(_) => "MLS group creation failed",

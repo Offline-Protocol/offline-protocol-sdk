@@ -397,8 +397,11 @@ a new binary. A key package's validity window is judged the same way and fails
 the same way: it runs from an hour before minting to 30 days after, so a device
 more than an hour behind its peer cannot start a session (the peer still can),
 and past 30 days neither side can and no session forms. The refusal is
-reported under `KEY_PACKAGE_OUTSIDE_VALIDITY_WINDOW`, once per peer, and the
-window itself is not relaxed. A leaf node is required to have a time source at pairing for this
+reported under `KEY_PACKAGE_OUTSIDE_VALIDITY_WINDOW`, once per peer, on every
+route that admits a pending package, and the window itself is not relaxed. A
+window that has already closed is not always a clock (a relay may have held the
+package for days), so that package is discarded and the peer's next one
+replaces it. A leaf node is required to have a time source at pairing for this
 among other reasons; see
 [leaf provisioning](../spec/leaf-provisioning.md).
 

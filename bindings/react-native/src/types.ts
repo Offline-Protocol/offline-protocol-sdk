@@ -2608,9 +2608,12 @@ export type SecurityWarningCode =
  * no encrypted session forms: messages and connection requests wait until
  * the clocks agree. This is what happens between phones that have not been
  * online to set their time. Many `peer_id`s is this device's clock; one is that
- * peer's. Reported once per peer, and `peer_id` is a claim, since the package
- * has not proved its sender when its window is checked. Show the user a
- * prompt to check the date and time.
+ * peer's. A window that has already closed may instead be an old package a
+ * relay held for days; that package is discarded and the next one the peer
+ * sends replaces it, and `reason` names both causes. Reported once per peer,
+ * whether the refusal came when the package arrived or on a later send, and
+ * `peer_id` is a claim, since the package has not proved its sender when its
+ * window is checked. Show the user a prompt to check the date and time.
  */
 export interface SecurityWarningEvent extends BaseEvent {
   type: 'security_warning';

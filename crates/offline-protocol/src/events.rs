@@ -346,9 +346,17 @@ pub enum SecurityWarningCode {
     /// been online are where this happens. Many different peers is this
     /// device's clock; one peer while others are fine is that peer's.
     ///
-    /// The package has not proved its sender when the window is checked, so
-    /// the peer named is a claim, and the event is reported at most once per
-    /// peer.
+    /// A window that has already closed is not always a clock: a relay can
+    /// hold a package for days, and the receiver anchors its cached expiry to
+    /// when the frame arrived. That package is discarded, as an expired one
+    /// is, and the `reason` says either cause; the next package the peer sends
+    /// replaces it. A window that has not started is kept, since it becomes
+    /// valid once the clocks agree.
+    ///
+    /// Raised on every route that admits a pending package: when it arrives,
+    /// and on the first send after a restart. The package has not proved its
+    /// sender when the window is checked, so the peer named is a claim, and
+    /// the event is reported at most once per peer.
     KeyPackageOutsideValidityWindow,
 }
 

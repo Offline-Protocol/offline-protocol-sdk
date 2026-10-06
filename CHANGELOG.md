@@ -354,9 +354,14 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   online (one set to 2024, the other to 2025) reproduced it. The refusal
   now raises a `security_warning` with the new code
   `KEY_PACKAGE_OUTSIDE_VALIDITY_WINDOW`, once per peer, and is logged at
-  `warn`; `MlsError::KeyPackageOutsideValidityWindow` replaces the
-  `InvalidKeyPackage` text for this one refusal on every route that admits a
-  peer's package. The window itself is unchanged. TypeScript's
+  `warn`, whether the package was refused on arrival or on the first send
+  after a restart. `MlsError::KeyPackageOutsideValidityWindow { expired }`
+  replaces the `InvalidKeyPackage` text for this one refusal on every route
+  that admits a peer's package. A package whose window has already closed is
+  discarded like any expired package, because it may be an old package a relay
+  held rather than a clock, and kept it failed every attempt until its cached
+  expiry; one whose window has not started is kept. The window itself is
+  unchanged. TypeScript's
   `SecurityWarningCode` union gains the code, so an exhaustive `switch` over it
   needs a new arm.
 - **An old message no longer comes back as a push notification, again and
