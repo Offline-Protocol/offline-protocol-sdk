@@ -386,6 +386,9 @@ public class BleManager: NSObject, TransportManager {
     /// Mesh peers in range, for the dense-mesh filters. `estimatedVisiblePeerCount`
     /// counts every discovery in range and stays the measure of how busy the
     /// air is for probing unknown peripherals; it is not a count of mesh peers.
+    /// Floored by the mesh adverts decoded in the last `MESH_OBSERVATION_TTL`
+    /// (two minutes), so a crowded mesh that went quiet for a moment still
+    /// reads as crowded.
     private var estimatedMeshPeerCount: Int = 0
     /// Last time we updated the peer count estimate
     private var lastPeerCountUpdate: Date?

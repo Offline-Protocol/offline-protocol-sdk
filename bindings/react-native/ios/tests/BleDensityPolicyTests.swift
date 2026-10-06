@@ -69,8 +69,10 @@ final class BleDensityPolicyTests: XCTestCase {
     }
 
     func testTheBucketMatchesAndroid() {
-        // BleDensityPolicyTest.kt pins the same values, so a mixed Android
-        // and iOS mesh agrees on what "dense" passes over.
+        // BleDensityPolicyTest.kt pins the same values. The two hashes are
+        // written by hand, and this keeps them to the same bits. It is not a
+        // runtime agreement: Android keys on the peer's MAC and iOS on its own
+        // CBPeripheral identifier, never the same string.
         XCTAssertEqual(BleDensityPolicy.bucket(id: "51:AC:A5:39:6C:00", slot: 7), 0.133, accuracy: 1e-9)
         XCTAssertEqual(BleDensityPolicy.bucket(id: "51:AC:A5:39:6C:00", slot: 0), 0.314, accuracy: 1e-9)
     }

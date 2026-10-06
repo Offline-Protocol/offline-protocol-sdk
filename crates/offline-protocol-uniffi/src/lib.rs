@@ -14313,6 +14313,43 @@ mod tests {
             .find("dropLinksAfterRadioLoss()")
             .expect("a radio loss must drop the dead links");
         assert!(lost < drop);
+
+        // The receiver outlives a pause. Rebuilding from it restarted the scan
+        // and GATT server and reported BLE available to a core the module had
+        // paused in the same step, so both arms defer to resume().
+        let handler_body = &kotlin[handler..];
+        // The source is read trimmed, so a body ends at the next declaration.
+        let handler_end = handler_body[1..]
+            .find("private fun ")
+            .map_or(handler_body.len(), |i| i + 1);
+        let handler_body = &handler_body[..handler_end];
+        assert!(
+            handler_body.contains("state != TransportState.RUNNING) return"),
+            "onAdapterStateChanged must ignore a transport that is not running"
+        );
+        assert!(
+            handler_body.contains("if (!paused) scheduleBleRecovery()"),
+            "a radio loss while paused must not arm the recovery that restarts the transport"
+        );
+        assert!(
+            handler_body.contains("if (paused) {"),
+            "Bluetooth back while paused must leave the rebuild to resume()"
+        );
+        for (body, latch) in [
+            ("private fun pauseUnsafe()", "paused = true"),
+            ("private fun resumeUnsafe()", "paused = false"),
+        ] {
+            let at = kotlin
+                .find(body)
+                .unwrap_or_else(|| panic!("{body} must exist"));
+            let end = kotlin[at + 1..]
+                .find("private fun ")
+                .map_or(kotlin.len() - at, |i| i + 1);
+            assert!(
+                kotlin[at..at + end].contains(latch),
+                "{body} must set `{latch}`"
+            );
+        }
     }
 
     /// The buffered-inbound event set agrees across TypeScript, Kotlin and

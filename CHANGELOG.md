@@ -797,9 +797,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   the peer's address alone. On two Android phones a metre apart in a house,
   the estimate read 32, and each passed the other over on every advert for
   the fifteen minutes they were watched. Density now counts the distinct
-  mesh candidates seen in the last five seconds, so a few phones never read
+  mesh candidates seen recently, so a few phones never read
   as dense, and a peer passed over in a crowded mesh is reconsidered after a
-  minute. Both platforms make the same choice for the same peer.
+  minute. Both platforms compute the pass-over the same way. A toggle
+  while the app is paused drops the dead links but leaves bringing
+  Bluetooth back to the resume.
 - **Android: Bluetooth switched off and on, or a Bluetooth stack crash, no
   longer strands the mesh.** The transport polled the adapter once a minute,
   so it noticed Bluetooth going off up to a minute late, came back on its

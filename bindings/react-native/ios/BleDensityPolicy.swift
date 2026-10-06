@@ -23,8 +23,11 @@ internal enum BleDensityPolicy {
     /// Records `id` as seen at `now` and returns how many distinct candidates
     /// `seen` holds from the last `window`, dropping older ones.
     static func recordAndCount(_ seen: inout [String: Date], id: String, now: Date, window: TimeInterval) -> Int {
+        // Pruned in place, as on Android: this runs on every discovery.
         seen[id] = now
-        seen = seen.filter { now.timeIntervalSince($0.value) <= window }
+        for (key, lastSeen) in seen where now.timeIntervalSince(lastSeen) > window {
+            seen.removeValue(forKey: key)
+        }
         return seen.count
     }
 

@@ -425,6 +425,12 @@ class BleTransportFacade(
     // Set only when scan startup observes the adapter off. Generic scan
     // failures must not rebuild the peripheral or churn a healthy advertiser.
     private var adapterWasOff = false
+    // Raised by [pauseUnsafe], lowered by [resumeUnsafe] and every session
+    // start/stop. BLE thread only. The adapter-state receiver stays registered
+    // across a pause, and without this a Bluetooth toggle in the background
+    // restarted the scan, rebuilt the GATT server and reported BLE available
+    // to a core the module had paused in the same step.
+    private var paused = false
     // Last availability state successfully delivered to the Rust core. Null
     // means this facade has not reported a state in its current session;
     // [stopUnsafe] clears it, because one facade instance is reused across
@@ -747,6 +753,9 @@ class BleTransportFacade(
      * Mesh peers in range, for the dense-mesh filters. [estimatedVisiblePeerCount]
      * counts every advert in range and stays the measure of how busy the air is
      * for probing unknown devices; it is not a count of mesh peers.
+     * Floored by the mesh adverts decoded in the last [MESH_OBSERVATION_TTL_MS]
+     * (two minutes), so a crowded mesh that went quiet for a moment still
+     * reads as crowded.
      */
     @Volatile private var estimatedMeshPeerCount: Int = 0
     /** Last time we updated the peer count estimate */
@@ -1236,6 +1245,7 @@ class BleTransportFacade(
         // early-returning; a fresh start must explicitly re-open the gate.
         shuttingDown = false
         adapterWasOff = false
+        paused = false
         
         // Check permissions with detailed logging
         Log.i(TAG, "Checking Bluetooth permissions (Android ${Build.VERSION.SDK_INT})...")
@@ -1422,6 +1432,7 @@ class BleTransportFacade(
         scanRestartCount = 0
         lastAdapterReset = 0L
         adapterWasOff = false
+        paused = false
         transportStartAt = 0L
         lastProactiveScanRefresh = 0L
         lastForcedBleRefresh = 0L
@@ -1465,6 +1476,7 @@ class BleTransportFacade(
     
     private fun pauseUnsafe() {
         // For Android background mode
+        paused = true
         stopScanning("pause")
         bleHandler.removeCallbacks(fragmentPollingRunnable)
         bleHandler.removeCallbacks(fragmentSweepRunnable)
@@ -1478,7 +1490,11 @@ class BleTransportFacade(
     
     private fun resumeUnsafe() {
         // Resume from background
+        paused = false
         if (state == TransportState.RUNNING) {
+            // A radio outage heard while paused left [adapterWasOff] raised;
+            // the scan start below re-arms the GATT and advertising repair
+            // through onScanStarted(adapterWasOff).
             startScanning("resume")
             bleHandler.post(fragmentPollingRunnable)
             bleHandler.postDelayed(fragmentSweepRunnable, FRAGMENT_SWEEP_INTERVAL_MS)
@@ -1740,7 +1756,10 @@ class BleTransportFacade(
     }
 
     private fun onAdapterStateChanged(adapterState: Int) {
-        if (shuttingDown) return
+        // RUNNING as well as the barrier: startUnsafe registers before its
+        // last diagnostic, and a throw there leaves the receiver live on a
+        // STOPPED transport.
+        if (shuttingDown || state != TransportState.RUNNING) return
         when (AdapterStateTransition.of(adapterState)) {
             AdapterStateTransition.RADIO_LOST -> {
                 if (!adapterWasOff) dropLinksAfterRadioLoss()
@@ -1749,10 +1768,19 @@ class BleTransportFacade(
                 // recovery starts a new one rather than finding one "running".
                 stopScanning("adapter_off", preserveRecoveryBackoff = true)
                 reportBleAvailability(false, "adapter_off")
-                if (state == TransportState.RUNNING) scheduleBleRecovery()
+                // TURNING_OFF then OFF arms this twice, climbing the ladder two
+                // rungs; RADIO_BACK resets it, so only an ON never heard pays.
+                // Paused: the links are dead either way, but bringing anything
+                // back is resume()'s call, not this receiver's.
+                if (!paused) scheduleBleRecovery()
             }
             AdapterStateTransition.RADIO_BACK -> {
-                if (!adapterWasOff || state != TransportState.RUNNING) return
+                if (!adapterWasOff) return
+                if (paused) {
+                    // Leave the rebuild to resume(), from the bottom rung.
+                    cancelBleRecovery()
+                    return
+                }
                 Log.i(TAG, "Bluetooth is back: rebuilding scan, GATT server and advertising")
                 emitDiagnostic("info", "Bluetooth is back, rebuilding the transport")
                 cancelBleRecovery()
@@ -1774,6 +1802,10 @@ class BleTransportFacade(
      *
      * Runs once per outage, on the BLE thread: from [adapterStateReceiver],
      * or from the adapter-off checks in [startScanning] if they see it first.
+     * GATT callbacks post to the BLE thread, so none runs concurrently with
+     * this; one posted before it and run after can still write a single entry
+     * back (a server connection, a staged MTU), which the peer's next
+     * disconnect or handshake overwrites.
      */
     private fun dropLinksAfterRadioLoss() {
         val peerIds = connections.deviceIds()
@@ -1811,8 +1843,11 @@ class BleTransportFacade(
         recentMeshCandidates.clear()
         estimatedMeshPeerCount = 0
         refreshSelfMetrics()
-        Log.i(TAG, "Bluetooth went off: dropped ${peerIds.size} peer link(s)")
-        emitDiagnostic("info", "Dropped Bluetooth links after the radio went off", mapOf("peers" to peerIds.size))
+        // start() with Bluetooth already off reaches here with nothing to drop.
+        if (peerIds.isNotEmpty()) {
+            Log.i(TAG, "Bluetooth went off: dropped ${peerIds.size} peer link(s)")
+            emitDiagnostic("info", "Dropped Bluetooth links after the radio went off", mapOf("peers" to peerIds.size))
+        }
     }
 
     private fun startScanning(reason: String = "manual") {

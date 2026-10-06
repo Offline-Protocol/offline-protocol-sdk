@@ -89,8 +89,10 @@ class BleDensityPolicyTest {
 
     @Test
     fun `the bucket matches the iOS hash`() {
-        // ios/tests/BleDensityPolicyTests.swift pins the same values, so a
-        // mixed Android and iOS mesh agrees on what "dense" passes over.
+        // ios/tests/BleDensityPolicyTests.swift pins the same values. The two
+        // hashes are written by hand, and this keeps them to the same bits.
+        // It is not a runtime agreement: Android keys on the peer's MAC and
+        // iOS on its own CBPeripheral identifier, never the same string.
         assertEquals(0.133, BleDensityPolicy.bucket("51:AC:A5:39:6C:00", 7), 1e-9)
         assertEquals(0.314, BleDensityPolicy.bucket("51:AC:A5:39:6C:00", 0), 1e-9)
     }
