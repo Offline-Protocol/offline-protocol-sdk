@@ -10,6 +10,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
   var window: UIWindow?
   var reactNativeDelegate: ReactNativeDelegate?
   var reactNativeFactory: RCTReactNativeFactory?
+  /// Stashed from `application(_:didFinishLaunchingWithOptions:)` for the scene.
+  private(set) var launchOptions: [UIApplication.LaunchOptionsKey: Any]?
 
   func application(
     _ application: UIApplication,
@@ -21,6 +23,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     reactNativeDelegate = delegate
     reactNativeFactory = factory
+    self.launchOptions = launchOptions
 
     return true
   }

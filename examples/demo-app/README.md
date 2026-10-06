@@ -54,6 +54,19 @@ This example ships both an `ios/` and an `android/` project.
 **Signing & Capabilities** before running on a physical device. The Simulator
 needs no team.
 
+## iOS development (simulator vs physical device)
+
+The app uses **UIScene** lifecycle (required on iOS 26+). In **Debug**:
+
+- **Simulator** loads JavaScript from **Metro** (`npm start` in this directory).
+  Use `npx react-native run-ios` as usual.
+- **Physical device** loads the **embedded** `main.jsbundle` that Xcode produces
+  during the build. Metro is not required to open the app, but **after you change
+  any JS/TS you must rebuild and reinstall** (run `npx react-native run-ios
+  --device "Your iPhone"` again) to pick up those changes.
+
+Release builds always use the embedded bundle.
+
 ## How to test peer-to-peer
 
 BLE discovery needs two real devices — the iOS Simulator and the Android
@@ -65,5 +78,5 @@ emulator have no working Bluetooth stack.
 4. Send a connection request, accept it on the other device
 5. Open **Chats** and send a message — it is MLS-encrypted automatically
 
-Grant Bluetooth and (on Android) nearby-devices/location permissions when
-prompted, or discovery silently returns nothing.
+For Android, grant location and nearby-device permissions when prompted so BLE
+discovery can run.

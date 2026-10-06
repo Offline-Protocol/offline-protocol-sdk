@@ -22,7 +22,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
     appDelegate.window = window
 
     factory.startReactNative(
-      withModuleName: "OfflineDemo",
+      withModuleName: "MeshWiki",
       in: window,
       launchOptions: appDelegate.launchOptions
     )
