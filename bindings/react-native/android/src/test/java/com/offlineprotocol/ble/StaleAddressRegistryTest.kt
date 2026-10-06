@@ -35,4 +35,16 @@ class StaleAddressRegistryTest {
         registry.removeIdentifiersForAddress("only")
         assertEquals(null, registry.addressForDevice("peerB"))
     }
+
+    @Test
+    fun `deviceIds lists each identified peer once`() {
+        val registry = MeshConnectionRegistry()
+        registry.setDeviceIdentifier("old", "peerA")
+        registry.setDeviceIdentifier("new", "peerA")
+        registry.setDeviceIdentifier("other", "peerB")
+
+        assertEquals(setOf("peerA", "peerB"), registry.deviceIds())
+        registry.clear()
+        assertTrue(registry.deviceIds().isEmpty())
+    }
 }

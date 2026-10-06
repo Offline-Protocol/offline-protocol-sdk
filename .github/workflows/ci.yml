@@ -845,7 +845,7 @@ jobs:
             ble/BleDiscoveryBootstrapPolicy.swift \
             PeripheralRestorationAgeOutPolicy.swift \
             BleMessageNotificationPolicy.swift \
-            BleAppTag.swift BleServiceInstanceSelection.swift \
+            BleAppTag.swift BleDensityPolicy.swift BleServiceInstanceSelection.swift \
             Generated/offline_protocol.swift ForcedPresenceCheckQueue.swift \
             AddressDeclarationPolicy.swift \
             GatewayAttachPolicy.swift GatewayVerdictTracker.swift \

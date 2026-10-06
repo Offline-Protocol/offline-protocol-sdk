@@ -14074,11 +14074,11 @@ mod tests {
         // A sighting recorded after a filter inherits that filter's semantics,
         // and neither filter below the `shouldProcess` gate is about whether
         // the peripheral was observed: both are load shedding, dropping work
-        // rather than observations. `shouldProbabilisticallySkip` keys on
-        // `peripheral.hashValue`, which Swift seeds once per process, so a
-        // sighting recorded after it would miss a FIXED subset of the visible
-        // peers for the whole life of the process, while their neighbours moved
-        // the cutoff forward every second. Those peers read as "went quiet
+        // rather than observations. `shouldProbabilisticallySkip` passes over
+        // up to 80% of the visible peers for a minute at a time (before
+        // BleDensityPolicy it was a FIXED subset for the life of the process),
+        // so a sighting recorded after it would miss those peers while their
+        // neighbours moved the cutoff forward every second. Those peers read as "went quiet
         // while we were watching" at the next restoration and lose the pending
         // connect that is the only way iOS wakes this app when they reappear,
         // although they were advertising throughout. Same class as anchoring to
@@ -14099,7 +14099,7 @@ mod tests {
         );
         for filter in [
             "if shouldFilterByRssi(rssiValue) {",
-            "if shouldProbabilisticallySkip(peripheral.identifier) {",
+            "if shouldProbabilisticallySkip(peripheral.identifier, now: now) {",
         ] {
             let filter_at = discover_body
                 .find(filter)
@@ -14108,8 +14108,8 @@ mod tests {
                 sighting_at < filter_at,
                 "ORDERING INVARIANT: the `.advertisement` sighting must be recorded BEFORE \
                  `{filter}`. That filter sheds load, it does not decide whether the peripheral \
-                 was seen, and the probabilistic one is keyed on a per-process hash seed — so \
-                 recording after it silently hides a fixed subset of peers that were \
+                 was seen, and the probabilistic one passes over up to 80% of the peers for a \
+                 minute at a time, so recording after it silently hides peers that were \
                  advertising the whole time and cancels their pending connects at the next \
                  restoration"
             );
@@ -14261,6 +14261,95 @@ mod tests {
             "the live-link check must come before blePeerLost, or a peer live at a new \
              address is reported lost"
         );
+    }
+
+    /// Android hears Bluetooth go off and come back from the adapter's state
+    /// broadcast, not only from a failed scan start. Polled once a minute, the
+    /// transport missed a Bluetooth stack crash entirely (the stack restarts
+    /// in under a second and takes the GATT server, advertiser and pending
+    /// connects with it), and the other phone could not reach this one until
+    /// the app restarted. `BleTransportFacade` has no test harness, so this
+    /// pins the wiring: registered once the transport runs, unregistered
+    /// behind the shutdown barrier, and the radio-lost arm drops the links.
+    #[test]
+    fn react_native_android_ble_listens_for_bluetooth_state_changes() {
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+        let start = kotlin
+            .find("private fun startUnsafe()")
+            .expect("BleTransportFacade.kt must start in startUnsafe");
+        let start_body = &kotlin[start..];
+        let running = start_body
+            .find("updateState(TransportState.RUNNING)")
+            .expect("startUnsafe must reach RUNNING");
+        let register = start_body
+            .find("registerAdapterStateReceiver()")
+            .expect("startUnsafe must listen for Bluetooth state changes");
+        assert!(
+            running < register,
+            "register once the transport runs, so a broadcast never meets a half-started one"
+        );
+
+        let stop = kotlin
+            .find("private fun stopUnsafe()")
+            .expect("BleTransportFacade.kt must stop in stopUnsafe");
+        let stop_body = &kotlin[stop..];
+        let barrier = stop_body
+            .find("shuttingDown = true")
+            .expect("stopUnsafe must raise the shutdown barrier");
+        let unregister = stop_body
+            .find("unregisterAdapterStateReceiver()")
+            .expect("stopUnsafe must stop listening for Bluetooth state changes");
+        assert!(barrier < unregister);
+
+        let handler = kotlin
+            .find("private fun onAdapterStateChanged(")
+            .expect("the receiver must hand off to onAdapterStateChanged");
+        let lost = kotlin[handler..]
+            .find("AdapterStateTransition.RADIO_LOST ->")
+            .expect("a radio loss must be handled");
+        let drop = kotlin[handler..]
+            .find("dropLinksAfterRadioLoss()")
+            .expect("a radio loss must drop the dead links");
+        assert!(lost < drop);
+
+        // The receiver outlives a pause. Rebuilding from it restarted the scan
+        // and GATT server and reported BLE available to a core the module had
+        // paused in the same step, so both arms defer to resume().
+        let handler_body = &kotlin[handler..];
+        // The source is read trimmed, so a body ends at the next declaration.
+        let handler_end = handler_body[1..]
+            .find("private fun ")
+            .map_or(handler_body.len(), |i| i + 1);
+        let handler_body = &handler_body[..handler_end];
+        assert!(
+            handler_body.contains("state != TransportState.RUNNING) return"),
+            "onAdapterStateChanged must ignore a transport that is not running"
+        );
+        assert!(
+            handler_body.contains("if (!paused) scheduleBleRecovery()"),
+            "a radio loss while paused must not arm the recovery that restarts the transport"
+        );
+        assert!(
+            handler_body.contains("if (paused) {"),
+            "Bluetooth back while paused must leave the rebuild to resume()"
+        );
+        for (body, latch) in [
+            ("private fun pauseUnsafe()", "paused = true"),
+            ("private fun resumeUnsafe()", "paused = false"),
+        ] {
+            let at = kotlin
+                .find(body)
+                .unwrap_or_else(|| panic!("{body} must exist"));
+            let end = kotlin[at + 1..]
+                .find("private fun ")
+                .map_or(kotlin.len() - at, |i| i + 1);
+            assert!(
+                kotlin[at..at + end].contains(latch),
+                "{body} must set `{latch}`"
+            );
+        }
     }
 
     /// The buffered-inbound event set agrees across TypeScript, Kotlin and
