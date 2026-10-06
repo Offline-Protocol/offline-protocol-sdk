@@ -111,9 +111,11 @@ does not supersede a fast-path probe before its acknowledgement can arrive.
 Superseding is not a delivery failure and is not counted against the carrier.
 It does not discard the relay's answer either: a verdict finds its peer through
 the outbox entry, so the superseded id is remembered, and a verdict slower than
-the probe interval still backs the cadence off. Dropping it left a peer the
-relay had refused probed every five seconds, which is the rate that flaps the
-relay connection.
+one probe interval (but faster than two) still backs the cadence off. Dropping
+it left a peer the relay had refused probed every five seconds, which is the
+rate that flaps the relay connection. Only the last superseded id is kept: a
+verdict that misses two intervals finds neither, and the cadence backs off on
+the next probe's verdict instead. Relay verdicts arrive well inside one.
 
 A probe is not persisted, and one an older build persisted is dropped at
 restore: the new process does not know which probe was the last, so a restored

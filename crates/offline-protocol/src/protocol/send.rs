@@ -4136,11 +4136,12 @@ impl OfflineProtocol {
             None => match self.media_outbox.get(&parsed_id) {
                 Some(entry) => (entry, true),
                 None => {
-                    debug!(
-                        message_id = %message_id,
-                        "Unreachable verdict for message without outbox entry, dropping"
-                    );
-                    self.note_superseded_probe_verdict(&parsed_id, carrier);
+                    if !self.note_superseded_probe_verdict(&parsed_id, carrier) {
+                        debug!(
+                            message_id = %message_id,
+                            "Unreachable verdict for message without outbox entry, dropping"
+                        );
+                    }
                     return;
                 }
             },

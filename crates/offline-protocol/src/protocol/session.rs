@@ -461,19 +461,20 @@ impl OfflineProtocol {
     /// (`confirmation_probe_superseded`) the way the verdict handlers apply
     /// one on a queued probe: the reachability fact, then the probe back-off.
     /// Consumed, so one probe's verdict escalates once, as it did while the
-    /// probe was still queued. A no-op for any other id.
+    /// probe was still queued. A no-op for any other id; returns whether
+    /// the verdict was applied.
     pub(super) fn note_superseded_probe_verdict(
         &mut self,
         message_id: &MessageId,
         carrier: Option<TransportType>,
-    ) {
+    ) -> bool {
         let Some(peer) = self
             .confirmation_probe_superseded
             .iter()
             .find(|(_, probe)| *probe == message_id)
             .map(|(peer, _)| peer.clone())
         else {
-            return;
+            return false;
         };
         self.confirmation_probe_superseded.remove(&peer);
         if let Some(carrier) = carrier {
@@ -486,6 +487,7 @@ impl OfflineProtocol {
             );
         }
         self.note_confirmation_probe_unreachable(&peer);
+        true
     }
 
     /// Fold a relay "recipient unreachable" verdict into the session-confirmation

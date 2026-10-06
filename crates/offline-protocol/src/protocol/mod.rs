@@ -723,6 +723,9 @@ pub struct OfflineProtocol {
     /// so a verdict slower than `CONFIRMATION_PROBE_INTERVAL_SECS` would
     /// otherwise be dropped and never back the schedule off, leaving the
     /// peer probed every 5s against a relay that has said it is not there.
+    /// One id per peer, so this covers a verdict up to two intervals late;
+    /// one later than that is dropped, and the next probe's verdict backs
+    /// the schedule off instead.
     confirmation_probe_superseded: HashMap<String, MessageId>,
 
     /// Token bucket that caps how fast the RETRY/PROBE path
