@@ -15,6 +15,41 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Android forms its Wi-Fi Direct group itself.** With
+  `wifiDirect: { enabled: true, autoAccept: true }` on Android 10 and later,
+  devices of the same app find each other over Wi-Fi P2P service discovery
+  (`_offlineprotocol._tcp`, the stream chapter's record plus an `app` entry),
+  and join one group whose name and passphrase are derived from the app id:
+  the lowest address creates it and the others join. No system dialog appears
+  on either phone, which a `WifiP2pManager.connect` invitation would show.
+  Discovery between phones is asymmetric (a device that owns or is joining a
+  group answers no discovery query), so nothing depends on hearing the owner:
+  a device that heard a lower peer creates the group itself after three joins
+  found none, a device that heard nothing probes a group owner it sees at most
+  once a minute, and an owner whose group stays empty for 30 to 60 seconds
+  dissolves it so two groups that formed at once merge. A client whose owner
+  proves nothing for three dials at the top of its redial ladder (an owner
+  whose app died: the group can outlive the process) leaves the group and
+  remembers that owner for five minutes. Every group of an app has one name,
+  so a join can land on the owner just left, and Android offers an app no way
+  to steer it elsewhere; a join that lands there leaves at once and counts as
+  one that found no group, so a device that heard a peer creates the group
+  itself after three. Which owner a join lands on beside a dead one stays the
+  system's choice, so the merge there is bounded, not guaranteed. `stop()`
+  removes an app-named group this device owns even when it was adopted at
+  start. A device alone backs off: discovery from 15 to 60 seconds, the owner
+  probe from one to four minutes. Two phones (Android 13 and 15) next to two
+  Wi-Fi Direct televisions formed the group in all eight clean starts, in 18 to 225 seconds (median
+  about a minute). Off by default; without it a group is formed in the
+  system's Wi-Fi Direct settings, as before, and that group is never
+  dissolved. **An app that already sets `autoAccept: true`**, as the
+  integration guide's example did while the option did nothing, starts forming
+  groups on upgrade; set it to `false` to keep the old behaviour. The group's
+  passphrase is derived from the app id and is not a secret: it keeps apps
+  apart, and the identity preamble and end-to-end encryption still protect the
+  traffic (threat model R22). `groupOwnerIntent` is not used and is
+  deprecated. Groups of three or more devices are untested.
+
 - **Python has a gateway-daemon client.** `GatewayManager`, as
   `ProtocolManager.gateway` when `reticulum_enabled=True`, speaks the
   [gateway-daemon contract](docs/spec/gateway-contract.md) over TCP to a
@@ -689,6 +724,14 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   link is usable and, to `None`, when the last one is not, once per edge: a
   layer going down with several links switches once, and links proved while
   the layer is down switch when it comes up.
+- **Android Wi-Fi Direct comes back when Wi-Fi does.** Turning Wi-Fi P2P off
+  reported the slot down to the core; turning it back on reported nothing,
+  restarted no discovery, and (with group formation on) left the framework's
+  dropped service request and record unregistered, so every later discovery
+  failed with `NO_SERVICE_REQUESTS`. An app started with Wi-Fi off never got
+  Wi-Fi Direct at all. The manager now reports the slot up again when P2P
+  returns, restarts discovery and re-registers what formation needs, and
+  re-registers the request on that error too.
 - **Android rejoins a Wi-Fi Direct group after the app restarts.** The group
   belongs to the system and outlives the process, but since Android 10 the
   connection broadcast is not sticky, so a manager that started inside an

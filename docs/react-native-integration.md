@@ -115,7 +115,8 @@ transports: {
 - Permissions: the SDK declares `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE` and `NEARBY_WIFI_DEVICES` (with `neverForLocation`). Request `NEARBY_WIFI_DEVICES` at runtime on Android 13+, and `ACCESS_FINE_LOCATION` on Android 12 and lower, where peer discovery needs it.
 - The SDK's manifest asserts `neverForLocation` on `NEARBY_WIFI_DEVICES`, and the build merges that flag into your app. An app that derives location from Wi-Fi replaces the declaration (`tools:node="replace"`) and then also needs `ACCESS_FINE_LOCATION` on Android 13+, which the SDK does not check for it.
 - `wifiDirect: { enabled: true }` starts the transport in `start()`. Grant `NEARBY_WIFI_DEVICES` (or, on 12 and lower, fine location) **before** `start()`: an enable refused for a missing grant is logged and not retried, so the transport stays off for the session. If you ask for the grant later, call `enableTransport('wifiDirect')` once it is given.
-- Config: `wifiDirect: { enabled: true, autoAccept: true, groupOwnerIntent: 10 }`.
+- `autoAccept: true` lets the SDK form the Wi-Fi Direct group itself on Android 10 and later: devices of the same app find each other and join one group, with no system dialog. Expect one to two minutes: two phones took 18 to 225 seconds (median about a minute), and Bluetooth, when on, carries traffic meanwhile. Without it, pair the phones once in the system's Wi-Fi Direct settings. `groupOwnerIntent` is not used.
+- Config: `wifiDirect: { enabled: true, autoAccept: true }`. `enableTransport('wifiDirect')` with no configuration keeps the `autoAccept` setting the transport already has.
 
 ### 4.3 Internet
 

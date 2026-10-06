@@ -171,8 +171,13 @@ transport.
 **Platform Notes**:
 - Android: `WifiP2pManager` for the group, a plain socket for the stream,
   and `PeerStreamSockets` for everything the chapter asks of that socket.
-  The manager does not form a group itself: one formed from the system's
-  Wi-Fi Direct settings (or by another app) is joined when
+  With `wifiDirect.autoAccept` on Android 10 and later, the manager forms the
+  group itself: devices of one application find each other over Wi-Fi P2P
+  service discovery (`_offlineprotocol._tcp`), the lowest address creates a
+  group whose name and passphrase are derived from the application id, and the
+  others join it, so neither phone shows a system dialog and a joiner needs
+  nothing from the owner. Without it, a group formed from the system's Wi-Fi Direct settings
+  (or by another app) is used. Either way the group is joined when
   `WIFI_P2P_CONNECTION_CHANGED_ACTION` reports it, or at start when it
   already exists (the broadcast is not sticky since Android 10), and a client
   reconnects to its group owner while the group lasts.

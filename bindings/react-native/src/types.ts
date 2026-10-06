@@ -414,9 +414,18 @@ export interface WifiDirectTransportConfig {
   enabled: boolean;
   /** Device name to advertise */
   deviceName?: string;
-  /** Enable autonomous group owner negotiation */
+  /**
+   * Android 10 and later: form the Wi-Fi Direct group without the system
+   * settings. Devices of the same app find each other over Wi-Fi P2P service
+   * discovery and join one group by derived credentials, with no dialog on
+   * either phone, typically in one to two minutes. Off by default: then a group
+   * formed in the system's Wi-Fi Direct settings is used.
+   */
   autoAccept?: boolean;
-  /** Group owner intent (0-15, higher = more likely to be GO) */
+  /**
+   * @deprecated Not used. The device with the lowest address owns a group
+   * the SDK forms.
+   */
   groupOwnerIntent?: number;
 }
 

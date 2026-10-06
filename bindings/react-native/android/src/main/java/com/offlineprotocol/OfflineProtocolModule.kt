@@ -2550,7 +2550,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     // Configure and start WiFi Direct transport via WifiDirectManager
                     if (wifiDirectManager == null) {
                         // Create manager if not already created
-                        wifiDirectManager = WifiDirectManager(reactApplicationContext, proto, currentConfig?.profile ?: "unknown") { level, message, context ->
+                        wifiDirectManager = WifiDirectManager(
+                            reactApplicationContext,
+                            proto,
+                            currentConfig?.profile ?: "unknown",
+                            appId = currentConfig?.appId ?: "",
+                        ) { level, message, context ->
                             emitDiagnostic(level, message, context)
                         }
                         emitDiagnostic("info", "WiFi Direct manager created on demand")
@@ -2558,11 +2563,21 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     
                     val manager = wifiDirectManager
                         ?: throw IllegalStateException("Failed to create WiFi Direct manager")
+                    // `autoAccept` is the documented switch for forming groups
+                    // without the system settings; see WifiDirectGroupFormation.
+                    // Read before the stop, applied after it: stop() undoes the
+                    // run that is ending, and a config that does not name the
+                    // key (the guide's enableTransport('wifiDirect') after a
+                    // permission grant) keeps the current setting.
+                    val autoAccept = config?.takeIf { it.hasKey("autoAccept") && !it.isNull("autoAccept") }
+                        ?.getBoolean("autoAccept")
                     
                     // Stop the manager first if it's running (to ensure clean restart)
                     if (manager.state == TransportState.RUNNING) {
                         manager.stop()
                     }
+                    manager.formGroups =
+                        WifiDirectGroupFormation.formGroupsAfterEnable(manager.formGroups, autoAccept)
                     
                     manager.start()
                     emitDiagnostic("info", "WiFi Direct transport enabled")

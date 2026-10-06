@@ -898,6 +898,50 @@ data-layer outcomes apply unchanged, so it buys the attacker nothing a
 direct send does not. Refusals are silent and counted, so the quotas are not
 an oracle.
 
+### R22. An Android Wi-Fi Direct group admits anyone who knows the application id
+
+With `wifiDirect.autoAccept`, Android devices of one application form one
+Wi-Fi Direct group whose network name and passphrase are derived from the
+application id alone, so that a device can join without having heard the
+owner (`WifiDirectGroupFormation`). The application id ships inside every
+copy of the application, so it is not a secret, and neither is the
+passphrase. A device in radio range (A1) that knows the id can join the
+group, or run a group under its name so that nearby devices join it instead
+and it carries their link. It can also publish a forged discovery record
+with a low `addr` to steer which device creates the group. The record also
+carries `addr` and an `app` tag over the air to every device in range: the
+same exposure as a Bluetooth LE advertisement, and like the BLE app tag
+([R15](#r15-the-bluetooth-le-app-tag-is-unsigned-and-readable)) the `app`
+tag names the application only to an observer who already knows its id.
+
+**Why it stands:** a secret passphrase would need a secret every device of
+the application shares and no copy of it reveals, which an application
+distributed to the public does not have. A passphrase exchanged per pair
+would need the two devices to hear each other first, which is the
+dependency the derived name exists to remove: on real phones discovery is
+one-sided, and the first design that named the group after its owner failed
+to form on two clean starts of nine.
+
+**What bounds it:** the group is only a link. Every stream over it proves
+its peer with the identity preamble before it carries anything, and every
+message is end to end encrypted above that, so a device in the group
+learns which addresses are present and can carry, delay or drop their
+frames, which any relay on any carrier can already do. What it costs is
+availability on this carrier: a squatting owner can hold an application's
+devices in a group that delivers nothing. A client leaves a group under the
+application's name after three dials at the top of its redial ladder prove
+no peer (about three minutes), and remembers that owner's device address
+for five minutes, leaving at once each time a join lands on it again (a
+join cannot be steered away from an owner: Android pins a named join to an
+interface address no application sees). After three such captures a device
+that heard a peer creates the group itself, so the squatter costs each
+device a few minutes per capture rather than the session; Bluetooth carries
+the traffic meanwhile. The bound is per device address: a squatter that
+changes its address captures the device again, a few minutes per change,
+and a squatter whose signal is stronger than the honest owner's keeps
+winning the join until the takeover. The same rule covers an owner whose
+application died, since the group can outlive the process. Formation is opt-in and Android-only.
+
 ## Network egress
 
 Until 0.26 the Rust crates opened no socket: every byte that left a device

@@ -1,7 +1,9 @@
 package com.offlineprotocol
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -60,5 +62,43 @@ class GroupOwnerRedialTest {
         assertNull(next(owner = null))
         assertNull(next(isGroupOwner = true))
         assertNull(next(running = false))
+    }
+
+    // --- Leaving a group whose owner is gone -------------------------------------
+
+    private fun after(
+        count: Int,
+        proved: Boolean = false,
+        sameOwner: Boolean = true,
+        currentDelayMs: Long = 60_000,
+    ) = GroupOwnerRedial.unprovedAtCeilingAfter(count, proved, sameOwner, currentDelayMs, maxDelayMs = 60_000)
+
+    @Test
+    fun `only dials at the ceiling count toward leaving`() {
+        // Below the ceiling an owner may be restarting its application.
+        assertEquals(0, after(0, currentDelayMs = 32_000))
+        assertEquals(1, after(0))
+        assertEquals(2, after(1))
+    }
+
+    @Test
+    fun `a proved stream or another owner starts the count over`() {
+        assertEquals(0, after(2, proved = true))
+        assertEquals(0, after(2, sameOwner = false))
+    }
+
+    @Test
+    fun `a client leaves an application's group whose owner keeps proving nothing`() {
+        // The group outlives the owner's process: a dead owner held its
+        // clients in a group that carried nothing, and a client in a group
+        // never formed again.
+        val n = GroupOwnerRedial.LEAVE_AFTER_UNPROVED_AT_CEILING
+        assertFalse(GroupOwnerRedial.shouldLeave(n - 1, applicationGroup = true))
+        assertTrue(GroupOwnerRedial.shouldLeave(n, applicationGroup = true))
+    }
+
+    @Test
+    fun `a group paired in the system settings is never left`() {
+        assertFalse(GroupOwnerRedial.shouldLeave(1_000, applicationGroup = false))
     }
 }
