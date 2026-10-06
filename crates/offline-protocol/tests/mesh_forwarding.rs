@@ -517,9 +517,10 @@ fn everyone_hearing_everyone_does_not_multiply_the_traffic() {
     //
     // This is the *worst* case rather than the expected one. These devices run
     // with the pre-transmit hold set to zero and are stepped in lock-step, so
-    // every forward is due at once and none of them ever gets the chance to
-    // stand down for a neighbor. Real timing spreads them out, and the
-    // cancellation that follows only lowers this number.
+    // a forward is due in the round it was queued, and only the copies that
+    // land in that same round take their senders off its fan-out. Real timing
+    // spreads the forwards out, so more copies arrive while each one waits and
+    // the fan-outs narrow further, which only lowers this number.
     let crossings = net.transmission_count(&msg_id);
     assert!(
         crossings < 21,
@@ -534,6 +535,44 @@ fn everyone_hearing_everyone_does_not_multiply_the_traffic() {
             .iter()
             .any(|(from, to, id)| from == "n6" && to == "far" && id == &msg_id),
         "the message should have reached the recipient through the cluster"
+    );
+}
+
+#[test]
+fn a_device_hearing_a_frame_from_every_side_still_carries_it_onward() {
+    // Three devices hear each other and the sender, and each also reaches
+    // dave, the one way on toward the recipient:
+    //
+    //     sender — {a, b, c} — dave — erin — far
+    //
+    // a, b and c each fan out to the three neighbors they have left, so dave
+    // receives three copies in one round. Cancelling on a duplicate assumed a
+    // neighbor's transmission had covered the region; it had covered a, b and
+    // c, never erin. Dave stood down every time, the frame died with its id
+    // suppressed everywhere it had been, and the sender's retries could not
+    // rescue it (#510). No tie-break is involved here, so this fails every
+    // run rather than the ~2% the dense-cluster test did.
+    let mut net = Neighborhood::new(&["sender", "a", "b", "c", "dave", "erin", "far"]);
+    for relay in ["a", "b", "c"] {
+        net.link("sender", relay);
+        net.link(relay, "dave");
+    }
+    net.link("a", "b");
+    net.link("a", "c");
+    net.link("b", "c");
+    net.link("dave", "erin");
+    net.link("erin", "far");
+
+    let msg_id = net.send("sender", "far", "around the crowd");
+
+    net.run_until_quiet(16);
+
+    assert_eq!(net.inbox("far"), vec!["around the crowd".to_string()]);
+    assert!(
+        net.transmissions
+            .iter()
+            .any(|(from, to, id)| from == "dave" && to == "erin" && id == &msg_id),
+        "dave must carry the frame on to the one neighbor that had no copy"
     );
 }
 

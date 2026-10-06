@@ -11,6 +11,27 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+## [Unreleased]
+
+### Fixed
+
+- **A message carried through a dense cluster no longer dies inside it**
+  ([#510](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/510)).
+  A forwarder that received a second copy of a frame while its own forward
+  waited cancelled the forward, on the assumption that a neighbor's
+  transmission had covered the same ground. It had not: every carrier hands a
+  frame to a few chosen neighbors rather than broadcasting it. In a cluster
+  where everyone hears everyone, the one device beside the way out could
+  stand down after two copies reached it from neighbors that never chose that
+  way, and the frame died with its id suppressed on every member, so the
+  sender's retries could not rescue it. A copy now takes only the neighbor
+  that sent it off the forward's fan-out, and a forward is dropped only when
+  every neighbor it could go to has handed it a copy. The
+  `mesh_forwarding::everyone_hearing_everyone_does_not_multiply_the_traffic`
+  flake (about 2% of runs) went from 4 failures in 200 runs to none. The
+  worst-case cost is unchanged: still at most one fan-out per device, inside
+  the same per-second budgets.
+
 ## [0.28.0] — 2026-10-06
 
 > **The peer-stream slot carries traffic on phones.** The mobile managers
