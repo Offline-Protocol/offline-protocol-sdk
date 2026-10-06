@@ -4016,9 +4016,11 @@ impl OfflineProtocol {
             restored.push(entry);
         }
         if legacy_probes_dropped > 0 {
-            warn!(
+            info!(
+                event = "outbox_entry_dropped",
+                repair_action = "legacy_confirmation_probe",
                 count = legacy_probes_dropped,
-                "Dropped persisted confirmation probes written by an older build"
+                "outbox_entry_dropped"
             );
         }
 

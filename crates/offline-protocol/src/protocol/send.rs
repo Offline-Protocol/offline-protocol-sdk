@@ -4140,7 +4140,7 @@ impl OfflineProtocol {
                         message_id = %message_id,
                         "Unreachable verdict for message without outbox entry, dropping"
                     );
-                    self.note_superseded_probe_verdict(&parsed_id);
+                    self.note_superseded_probe_verdict(&parsed_id, carrier);
                     return;
                 }
             },
@@ -4296,7 +4296,7 @@ impl OfflineProtocol {
             return;
         };
         if !self.is_parkable_plain_dm(&parsed_id) {
-            self.note_superseded_probe_verdict(&parsed_id);
+            self.note_superseded_probe_verdict(&parsed_id, carrier);
             return;
         }
         let Some(entry) = self.outbox.get_mut(&parsed_id) else {

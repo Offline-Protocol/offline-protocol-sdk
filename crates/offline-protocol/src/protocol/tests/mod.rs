@@ -41029,9 +41029,20 @@ fn an_unanswered_confirmation_probe_supersedes_the_last_one() {
             .unwrap_or(0);
         for _ in 0..2 {
             alice
-                .on_transport_send_failed(&late.as_str(), Some(verdict.to_string()))
+                .on_transport_send_failed_via(
+                    &late.as_str(),
+                    Some(verdict.to_string()),
+                    Some(TransportType::Internet),
+                )
                 .unwrap();
         }
+        assert_eq!(
+            alice
+                .reachability
+                .claim_for(&bob, TransportType::Internet, std::time::Instant::now()),
+            Some(crate::protocol::reachability::Claim::Unreachable),
+            "a late {verdict} verdict is recorded as a fact too"
+        );
         assert_eq!(
             alice
                 .confirmation_probe_unreachable_parks
@@ -41044,6 +41055,10 @@ fn an_unanswered_confirmation_probe_supersedes_the_last_one() {
             alice.confirmation_probe_due_at[&bob]
                 > Utc::now() + ChronoDuration::seconds(CONFIRMATION_PROBE_INTERVAL_SECS)
         );
+        // A fast-path probe while backed off keeps the back-off.
+        let backed_off = alice.confirmation_probe_due_at[&bob];
+        alice.send_session_confirmation_probe(&bob, "transport_confirmed");
+        assert_eq!(alice.confirmation_probe_due_at[&bob], backed_off);
     }
 
     // A probe whose send failed waits in the retry queue; the next probe

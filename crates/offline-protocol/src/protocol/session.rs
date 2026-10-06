@@ -457,11 +457,16 @@ impl OfflineProtocol {
         self.confirmation_probe_superseded.remove(peer_id);
     }
 
-    /// Backs the probe schedule off for a relay verdict on a probe that has
-    /// since been superseded (`confirmation_probe_superseded`). Consumed, so
-    /// one probe's verdict escalates once, as it did while the probe was
-    /// still queued. A no-op for any other id.
-    pub(super) fn note_superseded_probe_verdict(&mut self, message_id: &MessageId) {
+    /// Applies a relay verdict on a probe that has since been superseded
+    /// (`confirmation_probe_superseded`) the way the verdict handlers apply
+    /// one on a queued probe: the reachability fact, then the probe back-off.
+    /// Consumed, so one probe's verdict escalates once, as it did while the
+    /// probe was still queued. A no-op for any other id.
+    pub(super) fn note_superseded_probe_verdict(
+        &mut self,
+        message_id: &MessageId,
+        carrier: Option<TransportType>,
+    ) {
         let Some(peer) = self
             .confirmation_probe_superseded
             .iter()
@@ -471,6 +476,15 @@ impl OfflineProtocol {
             return;
         };
         self.confirmation_probe_superseded.remove(&peer);
+        if let Some(carrier) = carrier {
+            self.reachability.record(
+                &peer,
+                carrier,
+                Claim::Unreachable,
+                FactSource::GatewayVerdict,
+                Instant::now(),
+            );
+        }
         self.note_confirmation_probe_unreachable(&peer);
     }
 
@@ -480,7 +494,7 @@ impl OfflineProtocol {
     /// [`Self::apply_recipient_unreachable_failure`]). Without this, a peer that
     /// established an MLS session then vanished before confirming is re-probed
     /// every `CONFIRMATION_PROBE_INTERVAL_SECS` (5s) indefinitely, because
-    /// `kick_pending_session_reconciliation` re-arms it every scan and
+    /// `send_session_confirmation_probe` re-arms it on every probe and
     /// `on_transport_send_failed` otherwise never consults this scheduler. A
     /// handful of such peers pushes aggregate relay traffic past the
     /// per-connection rate limit, which disconnects the socket on a loop.
@@ -555,10 +569,16 @@ impl OfflineProtocol {
         // it can back the schedule off (`note_confirmation_probe_unreachable`
         // only escalates a peer that has a due time). Stamped before the send
         // so a verdict delivered during it is not overwritten.
-        self.confirmation_probe_due_at.insert(
-            peer_id.to_string(),
-            Utc::now() + ChronoDuration::seconds(CONFIRMATION_PROBE_INTERVAL_SECS),
-        );
+        //
+        // A later due time is kept: the scan only sends once the due time has
+        // passed, but the fast path can fire while the schedule is backed off,
+        // and resetting it would undo the ladder a relay verdict built.
+        let next = Utc::now() + ChronoDuration::seconds(CONFIRMATION_PROBE_INTERVAL_SECS);
+        let due_at = self
+            .confirmation_probe_due_at
+            .entry(peer_id.to_string())
+            .or_insert(next);
+        *due_at = (*due_at).max(next);
         match self.send_internal_message(
             peer_id,
             internal_prefixes::SESSION_CONFIRM_PROBE.to_string(),
