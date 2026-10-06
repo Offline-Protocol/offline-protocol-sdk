@@ -147,11 +147,22 @@ query by service type alone returns only the PTR record, so the TXT record that 
 arrives only for a query that names the instance. A device that owns a group, or is in the middle of
 joining one, answers no service discovery query, so two phones often hear each other minutes apart or
 not at all; that is why the group is named after the application and not its owner (a joiner needs
-nothing from the owner), why a join attempt is cancelled after eight seconds (the joiner is
-discoverable again), why a device that hears a lower peer creates the group itself after three joins
-found none, and why a device that heard no record still joins when it sees a group owner. And two
-groups can form at once, so an owner whose group stays empty for a randomised 30 to 60 seconds
-dissolves it and joins before creating again.
+nothing from the owner), why a join attempt is cancelled after fifteen seconds (the joiner is
+discoverable again; eight seconds cut off the supplicant's retry of a rejected association), why a
+device that hears a lower peer creates the group itself after three joins found none (a join the
+framework refuses outright counts), and why a device that heard no record still probes a group
+owner it sees, at most once a minute. And two groups can form at once, so an owner whose group
+stays empty for a randomised 30 to 60 seconds dissolves it and joins before creating again.
+
+A device alone keeps looking, but less often: service discovery backs off from 15 to 60 seconds
+while it hears no record, and the owner probe from one to four minutes while probes find no group
+(a Wi-Fi Direct printer or television is an owner no probe joins). Both start over when a record,
+a new owner or a new device appears. A device that is a client of any group, the application's or
+another (Wi-Fi Direct printing, a screen cast), forms nothing while it lasts.
+
+`formGroups` is read once by `start()`; `stop()` undoes what the run did (the service request, the
+record, a group it created) whatever the flag says by then. `enableTransport('wifiDirect')` with no
+configuration keeps the current setting rather than turning formation off.
 
 `PeerStreamSocketsTest` and `PeerStreamFramingTest` pin it, the latter
 replaying the chapter's vectors. The group handling itself is not covered in

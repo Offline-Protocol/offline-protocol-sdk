@@ -25,8 +25,7 @@ const config = {
     wifiDirect: {
       enabled: true, // Android only
       deviceName: 'MyDevice',
-      autoAccept: false,
-      groupOwnerIntent: 7, // 0-15, higher = more likely to be group owner
+      autoAccept: false, // Android 10+: true forms the group without the system settings
     },
     reticulum: {
       enabled: false, // Requires external Reticulum daemon

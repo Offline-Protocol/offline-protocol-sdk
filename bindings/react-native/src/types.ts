@@ -422,7 +422,10 @@ export interface WifiDirectTransportConfig {
    * formed in the system's Wi-Fi Direct settings is used.
    */
   autoAccept?: boolean;
-  /** Not used. The device with the lowest address owns a group the SDK forms. */
+  /**
+   * @deprecated Not used. The device with the lowest address owns a group
+   * the SDK forms.
+   */
   groupOwnerIntent?: number;
 }
 

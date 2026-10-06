@@ -521,8 +521,8 @@ interface TransportsConfig {
   wifiDirect?: {
     enabled: boolean;           // default: false (Android only)
     deviceName?: string;
-    autoAccept?: boolean;
-    groupOwnerIntent?: number;  // 0-15
+    autoAccept?: boolean;       // Android 10+: form the group without the system settings
+    groupOwnerIntent?: number;  // deprecated, not used
   };
   reticulum?: {
     enabled: boolean;           // default: false (requires external daemon)

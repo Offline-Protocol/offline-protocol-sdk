@@ -25,14 +25,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   Discovery between phones is asymmetric (a device that owns or is joining a
   group answers no discovery query), so nothing depends on hearing the owner:
   a device that heard a lower peer creates the group itself after three joins
-  found none, a device that heard nothing still joins when it sees a group
-  owner, and an owner whose group stays empty for 30 to 60 seconds dissolves
-  it so two groups that formed at once merge. Two phones (Android 13 and 15)
-  next to two Wi-Fi Direct televisions formed the group in all eight clean
-  starts, in 18 to 225 seconds (median about a minute). Off by default; without it a
-  group is formed in the system's Wi-Fi Direct settings, as before, and that
-  group is never dissolved. `groupOwnerIntent` is not used. Groups of three or
-  more devices are untested.
+  found none, a device that heard nothing probes a group owner it sees at most
+  once a minute, and an owner whose group stays empty for 30 to 60 seconds
+  dissolves it so two groups that formed at once merge. A device alone backs
+  off: discovery from 15 to 60 seconds, the owner probe from one to four
+  minutes. Two phones (Android 13 and 15) next to two Wi-Fi Direct televisions
+  formed the group in all eight clean starts, in 18 to 225 seconds (median
+  about a minute). Off by default; without it a group is formed in the
+  system's Wi-Fi Direct settings, as before, and that group is never
+  dissolved. **An app that already sets `autoAccept: true`**, as the
+  integration guide's example did while the option did nothing, starts forming
+  groups on upgrade; set it to `false` to keep the old behaviour. The group's
+  passphrase is derived from the app id and is not a secret: it keeps apps
+  apart, and the identity preamble and end-to-end encryption still protect the
+  traffic (threat model R22). `groupOwnerIntent` is not used and is
+  deprecated. Groups of three or more devices are untested.
 
 - **Python has a gateway-daemon client.** `GatewayManager`, as
   `ProtocolManager.gateway` when `reticulum_enabled=True`, speaks the
