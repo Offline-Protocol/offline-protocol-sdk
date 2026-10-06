@@ -20,6 +20,15 @@ pub const BLE_DEVICE_ID_CHAR_UUID: &str = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 /// bridges' literals to this one.
 pub const BLE_APP_TAG_CHAR_UUID: &str = "6E400005-B5A3-F393-E0A9-E50E24DCCA9E";
 
+/// BLE characteristic UUID for the hello: the identity assertion a central
+/// writes once on the link it opens, so the peripheral can map the central's
+/// address to a peer without dialling it back.
+///
+/// Optional on both sides (`docs/spec/ble-framing.md`, "Hello"). Android
+/// serves and writes it; `react_native_android_ble_central_says_hello` pins
+/// the bridge's literal to this one.
+pub const BLE_HELLO_CHAR_UUID: &str = "6E400006-B5A3-F393-E0A9-E50E24DCCA9E";
+
 /// Fallback fragment size used when no MTU has been negotiated for a peer.
 ///
 /// Matches the historical iOS CoreBluetooth auto-negotiated minimum ATT MTU

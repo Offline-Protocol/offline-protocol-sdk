@@ -694,7 +694,8 @@ itself also rides every frame in the clear ([R17](#r17-the-application-id-on-eve
 ### R16. The identity assertion is static and replayable on every carrier
 
 A peer proves its address with one fixed value: the Bluetooth LE Identity
-characteristic, and the preamble that opens every peer stream
+characteristic, the Bluetooth LE Hello a central writes on the link it opens,
+and the preamble that opens every peer stream
 ([BLE framing](../spec/ble-framing.md#the-identity-assertion),
 [peer-stream framing](../spec/stream-framing.md#the-preamble)). Nothing in it
 is challenged or timestamped. Anyone who has read a peer's assertion once can

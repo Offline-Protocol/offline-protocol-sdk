@@ -41,6 +41,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   down, unless one comes back first. Reconnects continue, and a peer that
   returns is announced again as it would be after any loss. A dial still in
   flight does not count as a link.
+- **Android Bluetooth messages no longer wait on a dial back to the sender**
+  ([#512](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/512)).
+  A peer's writes reach this phone's GATT server from the peer's central-role
+  address. When nothing had mapped that address yet, the server queued the
+  fragments and dialled the address to read the peer's identity, and since
+  that address does not advertise, the dial took from seconds to about 40 s
+  (11 s at p95 in a 30-round soak, 40 s after a Bluetooth toggle). An Android
+  central now writes its identity assertion to a new optional GATT
+  characteristic, Hello (`6E400006-…`), before its first message write, and
+  the server binds the address it proves with the same verifier the Identity
+  read uses. A peer without the characteristic, an iPhone among them, is
+  resolved as before. [BLE framing](docs/spec/ble-framing.md) specifies it.
 
 ## [0.28.0] — 2026-10-06
 

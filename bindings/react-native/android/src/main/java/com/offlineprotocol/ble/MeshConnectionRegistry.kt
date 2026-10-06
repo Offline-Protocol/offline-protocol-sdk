@@ -133,6 +133,8 @@ class MeshConnectionRegistry {
         serverConnections.add(address)
     }
 
+    fun hasServerConnection(address: String): Boolean = serverConnections.contains(address)
+
     fun untrackServerConnection(address: String) {
         serverConnections.remove(address)
     }

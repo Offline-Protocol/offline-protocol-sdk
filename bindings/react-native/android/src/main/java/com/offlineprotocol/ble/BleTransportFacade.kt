@@ -29,6 +29,7 @@ import com.offlineprotocol.mesh.MeshController
 import com.offlineprotocol.mesh.MeshController.ConnectionIntent
 import com.offlineprotocol.mesh.MeshController.MeshRole
 import uniffi.offline_protocol.OfflineProtocol
+import uniffi.offline_protocol.verifyIdentityAssertion
 import android.bluetooth.BluetoothStatusCodes
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
@@ -191,6 +192,7 @@ class BleTransportFacade(
         private val DEVICE_ID_CHAR_UUID = UUID.fromString("6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
         private val IDENTITY_CHAR_UUID = UUID.fromString("6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
         private val APP_TAG_CHAR_UUID = UUID.fromString("6E400005-B5A3-F393-E0A9-E50E24DCCA9E")
+        private val HELLO_CHAR_UUID = UUID.fromString("6E400006-B5A3-F393-E0A9-E50E24DCCA9E")
         private const val AD_TYPE_INCOMPLETE_128_BIT_SERVICE_UUIDS = 0x06
         private const val AD_TYPE_COMPLETE_128_BIT_SERVICE_UUIDS = 0x07
         private const val UUID_128_BIT_LENGTH_BYTES = 16
@@ -477,6 +479,7 @@ class BleTransportFacade(
             identityCharUuid = IDENTITY_CHAR_UUID,
             appTagCharUuid = APP_TAG_CHAR_UUID,
             appTag = appTag,
+            helloCharUuid = HELLO_CHAR_UUID,
             host = object : CentralGattClient.Host {
                 override val protocol: OfflineProtocol get() = this@BleTransportFacade.protocol
                 override val connections: MeshConnectionRegistry get() = this@BleTransportFacade.connections
@@ -558,6 +561,9 @@ class BleTransportFacade(
                     if (shuttingDown) return
                     schedulePeerLostGrace(peerId)
                 }
+
+                // The same value the Identity characteristic serves.
+                override fun helloBytes(): ByteArray? = cachedSignedIdentity?.encode()
 
                 override fun onPeerGivenUp(address: String, peerId: String) {
                     // Called on the BLE thread from finalizeGivenUpPeer, which has
@@ -1597,6 +1603,7 @@ class BleTransportFacade(
                 deviceIdUuid = DEVICE_ID_CHAR_UUID,
                 identityUuid = IDENTITY_CHAR_UUID,
                 appTagUuid = APP_TAG_CHAR_UUID,
+                helloUuid = HELLO_CHAR_UUID,
             )
 
             Log.i(TAG, "GATT server setup initiated, waiting for service registration callback...")
@@ -4201,6 +4208,15 @@ class BleTransportFacade(
             }
         }
 
+        override fun onInboundHello(device: BluetoothDevice, bytes: ByteArray) {
+            if (shuttingDown) return
+            val address = device.address
+            bleHandler.post {
+                if (shuttingDown) return@post
+                handleInboundHelloOnBleThread(address, bytes)
+            }
+        }
+
         override fun onNotificationSent(device: BluetoothDevice, status: Int) {
             if (shuttingDown) return
             // Our peripheral notify to this central completed — release the
@@ -4329,6 +4345,78 @@ class BleTransportFacade(
             refreshAdvertising("membership_change")
         }
         maybeHandleRebalance("disconnect")
+    }
+
+    /**
+     * Maps a central's address from the identity assertion it wrote to our
+     * Hello characteristic, so its writes are not queued behind a dial back
+     * to an address that does not advertise (#512).
+     *
+     * The assertion is checked by the one verifier, and only the address it
+     * derives is ever bound, exactly as on the central's Identity read
+     * (docs/spec/ble-framing.md, "The identity assertion"). A value that
+     * fails is ignored and the link resolves as before; so is one for a link
+     * already bound to another address, because a hello never rebinds a
+     * link. Like every assertion it is static, so a device that copied a
+     * peer's can label its own link with that peer's address and gain a
+     * link it cannot use (threat model R16).
+     *
+     * The peer is announced to the core only when no other link has
+     * announced it already; a second announce adds nothing but another
+     * `neighbor_discovered`. BLE-thread only.
+     */
+    private fun handleInboundHelloOnBleThread(address: String, bytes: ByteArray) {
+        assertOnBleThread("handleInboundHelloOnBleThread")
+        if (!connections.hasServerConnection(address)) return
+        val peerId = try {
+            verifyIdentityAssertion(bytes.map { it.toUByte() })
+        } catch (e: Exception) {
+            emitDiagnostic("warning", "BLE hello failed verification", mapOf(
+                "address" to address,
+                "reason" to (e.message ?: e.javaClass.simpleName),
+            ))
+            return
+        }
+        when (val bound = connections.deviceIdForAddress(address)) {
+            peerId -> {
+                cancelPeerLostGrace(peerId)
+                return
+            }
+            null -> Unit
+            else -> {
+                emitDiagnostic("warning", "BLE hello names a different peer than this link", mapOf(
+                    "address" to address,
+                    "bound" to bound,
+                    "hello" to peerId,
+                ))
+                return
+            }
+        }
+        val alreadyAnnounced = connections.addressesForDevice(peerId).isNotEmpty()
+        Log.i(TAG, "Hello from $address verified as $peerId")
+        connections.setDeviceIdentifier(address, peerId)
+        cancelPeerLostGrace(peerId)
+        val role = connections.consumePendingRole(address) ?: MeshRole.MEMBER
+        meshController.registerConnection(peerId, role)
+        connections.setConnectionRole(peerId, role)
+        meshController.markPeerActive(peerId)
+        meshController.markPeerActive(deviceId)
+        refreshSelfMetrics()
+        // The per-peer MTU goes in before the core hears of the peer, the
+        // invariant `CentralGattClient.announceVerifiedPeer` documents.
+        flushPeerMtu(address, peerId)
+        if (!alreadyAnnounced) {
+            try {
+                protocol.blePeerDiscovered(peerId, lastSeenRssi[address] ?: (-60).toShort())
+            } catch (e: Exception) {
+                Log.e(TAG, "Error notifying peer discovered", e)
+                emitDiagnostic("error", "Error notifying peer discovered", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
+            }
+        }
+        centralClient.drainPendingInboundFor(address, peerId)
+        if (state == TransportState.RUNNING) {
+            refreshAdvertising("membership_change")
+        }
     }
 
     private fun handleCentralConnectedOnBleThread(device: BluetoothDevice) {

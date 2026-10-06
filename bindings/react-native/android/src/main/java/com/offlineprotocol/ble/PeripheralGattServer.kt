@@ -144,6 +144,11 @@ class PeripheralGattServer(
         fun provideIdentityBytes(device: BluetoothDevice): ByteArray?
         /** Return this app's `BleAppTag`, or null to fail the read. */
         fun provideAppTagBytes(device: BluetoothDevice): ByteArray?
+        /** A central wrote its identity assertion to the Hello characteristic
+         *  on the link it opened to us ([acceptHelloWrite] has already bounded
+         *  it). Lets the transport learn who is writing on this link without
+         *  dialling the central's address back. Called on the binder thread. */
+        fun onInboundHello(device: BluetoothDevice, bytes: ByteArray) {}
         fun onReady()
         fun onSetupFailed(reason: String)
     }
@@ -158,6 +163,11 @@ class PeripheralGattServer(
          *  facade's MAX_FRAGMENT_SIZE (185 bytes) to tolerate MTU-negotiation
          *  headroom, but bounded so a hostile central cannot balloon memory. */
         const val MAX_INBOUND_WRITE_BYTES = 4096
+        /** Smallest Hello value: an identity assertion with empty signed data
+         *  (`IDENTITY_ASSERTION_MIN_LEN`, docs/spec/ble-framing.md). */
+        const val MIN_HELLO_WRITE_BYTES = 96
+        /** Largest Hello value, the ATT ceiling on one attribute value. */
+        const val MAX_HELLO_WRITE_BYTES = 512
         /** ATT protocol header subtracted from a negotiated ATT MTU to get the
          *  usable NOTIFY payload (MTU − 3). Matches CentralGattClient's
          *  ATT_HEADER_BYTES so both link directions report payloads on the
@@ -190,6 +200,8 @@ class PeripheralGattServer(
     private var identityCharacteristic: BluetoothGattCharacteristic? = null
     @Volatile
     private var appTagCharacteristic: BluetoothGattCharacteristic? = null
+    @Volatile
+    private var helloCharacteristic: BluetoothGattCharacteristic? = null
 
     private data class IdentitySnapshot(val bytes: ByteArray, val timestamp: Long)
 
@@ -242,6 +254,7 @@ class PeripheralGattServer(
         val deviceIdUuid: UUID,
         val identityUuid: UUID,
         val appTagUuid: UUID,
+        val helloUuid: UUID?,
     )
 
     /**
@@ -258,13 +271,14 @@ class PeripheralGattServer(
         deviceIdUuid: UUID,
         identityUuid: UUID,
         appTagUuid: UUID,
+        helloUuid: UUID? = null,
     ) {
         check(Looper.myLooper() == bleHandler.looper) {
             "PeripheralGattServer.start must be called on the BLE thread"
         }
         stop()
         setupAttempts = 0
-        pendingSetup = PendingSetup(serviceUuid, messageUuid, deviceIdUuid, identityUuid, appTagUuid)
+        pendingSetup = PendingSetup(serviceUuid, messageUuid, deviceIdUuid, identityUuid, appTagUuid, helloUuid)
         attemptSetup()
     }
 
@@ -287,6 +301,7 @@ class PeripheralGattServer(
         deviceIdCharacteristic = null
         identityCharacteristic = null
         appTagCharacteristic = null
+        helloCharacteristic = null
         subscribedCentralAddresses.clear()
         identityReadSnapshots.clear()
         isReady = false
@@ -418,10 +433,22 @@ class PeripheralGattServer(
             BluetoothGattCharacteristic.PROPERTY_READ,
             BluetoothGattCharacteristic.PERMISSION_READ,
         )
+        // A central writes its own identity assertion here once, on the link
+        // it opens, so this side can map the central's address to a peer
+        // without dialling it back (docs/spec/ble-framing.md, "Hello").
+        // Optional: a central that does not know it never writes it.
+        val helloChar = setup.helloUuid?.let {
+            BluetoothGattCharacteristic(
+                it,
+                BluetoothGattCharacteristic.PROPERTY_WRITE,
+                BluetoothGattCharacteristic.PERMISSION_WRITE,
+            )
+        }
         messageCharacteristic = message
         deviceIdCharacteristic = deviceIdChar
         identityCharacteristic = identityChar
         appTagCharacteristic = appTagChar
+        helloCharacteristic = helloChar
 
         val service = BluetoothGattService(
             setup.serviceUuid,
@@ -431,6 +458,7 @@ class PeripheralGattServer(
         service.addCharacteristic(deviceIdChar)
         service.addCharacteristic(identityChar)
         service.addCharacteristic(appTagChar)
+        helloChar?.let { service.addCharacteristic(it) }
 
         val added = try {
             server.addService(service)
@@ -479,6 +507,7 @@ class PeripheralGattServer(
         deviceIdCharacteristic = null
         identityCharacteristic = null
         appTagCharacteristic = null
+        helloCharacteristic = null
         isReady = false
 
         if (setupAttempts >= MAX_SETUP_ATTEMPTS) {
@@ -767,6 +796,18 @@ class PeripheralGattServer(
                             device, requestId, BluetoothGatt.GATT_SUCCESS, offset, null,
                         )
                     }
+                } else if (helloCharacteristic != null && characteristic.uuid == helloCharacteristic?.uuid) {
+                    val accepted = acceptHelloWrite(value, preparedWrite, offset)
+                    if (accepted) listener.onInboundHello(device, value)
+                    if (responseNeeded) {
+                        server.sendResponse(
+                            device,
+                            requestId,
+                            if (accepted) BluetoothGatt.GATT_SUCCESS else BluetoothGatt.GATT_FAILURE,
+                            offset,
+                            null,
+                        )
+                    }
                 } else {
                     if (responseNeeded) {
                         server.sendResponse(
@@ -851,3 +892,13 @@ class PeripheralGattServer(
         }
     }
 }
+
+/**
+ * Whether a write to the Hello characteristic is one value this side can act
+ * on: a single write (not a prepared/long write), at offset 0, sized like an
+ * identity assertion. Anything else is refused before the verifier sees it.
+ */
+internal fun acceptHelloWrite(value: ByteArray, preparedWrite: Boolean, offset: Int): Boolean =
+    !preparedWrite &&
+        offset == 0 &&
+        value.size in PeripheralGattServer.MIN_HELLO_WRITE_BYTES..PeripheralGattServer.MAX_HELLO_WRITE_BYTES

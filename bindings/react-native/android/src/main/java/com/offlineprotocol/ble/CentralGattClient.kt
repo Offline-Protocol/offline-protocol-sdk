@@ -36,7 +36,10 @@ import java.util.concurrent.ConcurrentHashMap
  *       `onCharacteristicRead(DEVICE_ID)` → `readCharacteristic(IDENTITY)`
  *       `onCharacteristicRead(IDENTITY)` → `setCharacteristicNotification`
  *          + `writeDescriptor(CCCD)`
- *       `onDescriptorWrite(CCCD success)` → mark link ready, drain outbound
+ *       `onDescriptorWrite(CCCD success)` → `writeCharacteristic(HELLO)` when
+ *          the peer offers it and the MTU carries it in one write
+ *       `onCharacteristicWrite(HELLO)`, or no hello → mark link ready, drain
+ *          outbound
  *     Firing more than one GATT op per callback entry is deliberately
  *     avoided — Android's BLE stack serialises one op at a time and some
  *     vendors silently drop a second op issued in the same tick, which
@@ -72,6 +75,8 @@ internal class CentralGattClient(
     /** This app's [BleAppTag], matched against a remote phone's instances. */
     private val appTag: ByteArray,
     private val host: Host,
+    /** The peer's optional Hello characteristic, or null to write no hello. */
+    private val helloCharUuid: UUID? = null,
     private val diagnosticEmitter: (level: String, message: String, ctx: Map<String, Any?>) -> Unit =
         { _, _, _ -> },
 ) {
@@ -155,6 +160,13 @@ internal class CentralGattClient(
          *  BLE thread. */
         fun onPeerLinkDropped(peerId: String) {}
 
+        /** This device's identity assertion, the value it serves on its own
+         *  Identity characteristic, written to a peer's Hello characteristic
+         *  so the peer can map our address without dialling it back. Null
+         *  while the identity is not primed: the link then goes ready
+         *  without a hello and the peer resolves us as before. */
+        fun helloBytes(): ByteArray? = null
+
         /** Entry point used by the retry-on-disconnect path to re-attempt
          *  connecting to a known address. Facade enforces the per-device
          *  RSSI / capacity / cooldown gating inside connectToDevice. */
@@ -197,6 +209,10 @@ internal class CentralGattClient(
          *  from the negotiated MTU to get usable Write-Without-Response
          *  payload. */
         private const val ATT_HEADER_BYTES = 3
+        /** How long link-ready waits on the hello write's callback. A hello
+         *  is best effort: the link goes ready when the write completes,
+         *  fails, or this runs out. */
+        private const val HELLO_WATCHDOG_MS = 3_000L
         /** Hard deadline for a `requestMtu` → `onMtuChanged` round-trip,
          *  in milliseconds. Some Android BLE stacks are known to accept
          *  `requestMtu` (returning true) and then never deliver the
@@ -239,6 +255,14 @@ internal class CentralGattClient(
     private val linkReady = ConcurrentHashMap.newKeySet<String>()
 
     private val connectionRetryCount = ConcurrentHashMap<String, Int>()
+
+    // Payload negotiated on each client link (MTU minus the ATT header),
+    // so the hello is written only where it fits in one write.
+    private val negotiatedPayload = ConcurrentHashMap<String, Int>()
+
+    // Hello writes awaiting their callback, keyed by address, holding the
+    // watchdog that goes ready without it. BLE-thread only.
+    private val helloInFlight = HashMap<String, Runnable>()
 
     private val deviceIdResolutionAttempts = ConcurrentHashMap<String, Long>()
 
@@ -441,7 +465,8 @@ internal class CentralGattClient(
             //   onMtuChanged → readCharacteristic(deviceId)
             //   onCharacteristicRead(deviceId) → readCharacteristic(identity)
             //   onCharacteristicRead(identity) → setNotification + writeDescriptor(CCCD)
-            //   onDescriptorWrite(CCCD success) → mark linkReady + drain
+            //   onDescriptorWrite(CCCD success) → writeCharacteristic(hello), if offered
+            //   onCharacteristicWrite(hello), or no hello → mark linkReady + drain
             // Firing more than one op here causes the second to be silently
             // dropped on some vendors, which is the class of bug where the
             // connection "looks healthy" but no messages flow. MTU negotiation
@@ -581,6 +606,7 @@ internal class CentralGattClient(
                 val stillConnected = host.connections.getGatt(address) != null
                 if (status == BluetoothGatt.GATT_SUCCESS && stillConnected) {
                     val maxPayload = (mtu - ATT_HEADER_BYTES).coerceAtLeast(0)
+                    negotiatedPayload[address] = maxPayload
                     Log.i(TAG, "Late onMtuChanged for $address after watchdog: mtu=$mtu payload=$maxPayload — forwarding to facade")
                     diagnosticEmitter(
                         "info",
@@ -596,6 +622,7 @@ internal class CentralGattClient(
             mtuWatchdogs.remove(address)?.let { bleHandler.removeCallbacks(it) }
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 val maxPayload = (mtu - ATT_HEADER_BYTES).coerceAtLeast(0)
+                negotiatedPayload[address] = maxPayload
                 Log.i(TAG, "MTU negotiated for $address: mtu=$mtu payload=$maxPayload")
                 diagnosticEmitter(
                     "info",
@@ -828,17 +855,26 @@ internal class CentralGattClient(
             // evict and CCCD-ack mutually serialisable on the looper.
             bleHandler.post {
                 if (host.isShuttingDown()) return@post
-                Log.i(TAG, "CCCD write acknowledged for $address — link ready")
-                diagnosticEmitter("info", "BLE link ready", mapOf("address" to address))
-                linkReady.add(address)
-                if (host.isRunning()) {
-                    host.drainAndSendFragments()
-                }
+                Log.i(TAG, "CCCD write acknowledged for $address")
+                sendHelloThenMarkReady(gatt)
             }
         }
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
             if (host.isShuttingDown()) return
+            if (helloCharUuid != null && characteristic.uuid == helloCharUuid) {
+                val address = gatt.device.address
+                bleHandler.post {
+                    if (host.isShuttingDown()) return@post
+                    val watchdog = helloInFlight.remove(address) ?: return@post
+                    bleHandler.removeCallbacks(watchdog)
+                    if (status != BluetoothGatt.GATT_SUCCESS) {
+                        diagnosticEmitter("info", "BLE hello refused", mapOf("address" to address, "status" to status))
+                    }
+                    markLinkReady(address)
+                }
+                return
+            }
             if (characteristic.uuid != messageCharUuid) return
             // Release the per-peer write gate and drive the next fragment. Done
             // even on a non-success status so a failed write cannot leave the
@@ -897,6 +933,7 @@ internal class CentralGattClient(
         // subsequent disconnect still benefits.
         connectionRetryCount.remove(address)
         host.connections.markClientEstablished(address)
+        negotiatedPayload.remove(address)
         linkReady.remove(address)
         // A new connection chooses its service instance afresh.
         clearServiceInstanceSelection(address)
@@ -1348,6 +1385,79 @@ internal class CentralGattClient(
         }
     }
 
+    /**
+     * Writes this device's identity assertion to the peer's Hello
+     * characteristic, then marks the link ready (#512).
+     *
+     * Without it the peer sees our writes arrive from an address it cannot
+     * map, our central-role address, which does not advertise. It queues them
+     * and dials that address back to read our identity, which took from
+     * seconds to about 40 s on two phones, all of it added to every message's
+     * delivery. The hello goes before link-ready, and so before any Message
+     * write, so the peer maps the address before our first fragment lands.
+     *
+     * Best effort, never a reason to drop a link: a peer without the
+     * characteristic, a link whose MTU cannot carry the value in one write,
+     * an identity not yet primed, a refused write and a missing callback all
+     * go ready as before. Written with response, because a write without one
+     * often reports no completion on Android. BLE-thread only.
+     */
+    private fun sendHelloThenMarkReady(gatt: BluetoothGatt) {
+        val address = gatt.device.address
+        val hello = helloCharUuid?.let { handshakeService(gatt)?.getCharacteristic(it) }
+        val bytes = if (hello != null) host.helloBytes() else null
+        val fits = bytes != null && bytes.size <= (negotiatedPayload[address] ?: 0)
+        if (hello == null || bytes == null || !fits) {
+            markLinkReady(address)
+            return
+        }
+        val started = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeCharacteristic(
+                    hello,
+                    bytes,
+                    BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
+                ) == BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                hello.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                @Suppress("DEPRECATION")
+                hello.value = bytes
+                @Suppress("DEPRECATION")
+                gatt.writeCharacteristic(hello)
+            }
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Permission denied writing hello to $address", e)
+            false
+        }
+        if (!started) {
+            markLinkReady(address)
+            return
+        }
+        val watchdog = object : Runnable {
+            override fun run() {
+                // Only for this write: a later link at the same address
+                // holds its own entry.
+                if (helloInFlight[address] !== this) return
+                helloInFlight.remove(address)
+                if (!host.isShuttingDown()) markLinkReady(address)
+            }
+        }
+        helloInFlight[address] = watchdog
+        bleHandler.postDelayed(watchdog, HELLO_WATCHDOG_MS)
+    }
+
+    private fun markLinkReady(address: String) {
+        // The link may have closed while the hello was in flight.
+        if (host.connections.getGatt(address) == null) return
+        Log.i(TAG, "BLE link ready for $address")
+        diagnosticEmitter("info", "BLE link ready", mapOf("address" to address))
+        linkReady.add(address)
+        if (host.isRunning()) {
+            host.drainAndSendFragments()
+        }
+    }
+
     private fun closeGattClient(gatt: BluetoothGatt, reason: String) {
         val address = gatt.device.address
         try {
@@ -1417,7 +1527,7 @@ internal class CentralGattClient(
      * Called from [handleDeviceIdRead], which runs on the BLE thread, so
      * all protocol calls here are safely off the binder thread.
      */
-    private fun drainPendingInboundFor(address: String, deviceId: String) {
+    internal fun drainPendingInboundFor(address: String, deviceId: String) {
         clearResolutionAttempt(address)
         var iterations = 0
         while (iterations < MAX_DRAIN_ITERATIONS) {

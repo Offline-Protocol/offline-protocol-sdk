@@ -14325,6 +14325,57 @@ mod tests {
         }
     }
 
+    /// A central's writes reached our GATT server from an address nothing had
+    /// mapped, so the server queued them and dialled that address back to read
+    /// its identity, seconds to about 40 s per resolution (#512). An Android
+    /// central now writes its identity assertion to the Hello characteristic
+    /// before its first Message write, and the server binds the address it
+    /// proves. `BleTransportFacade` has no test harness, so this pins the
+    /// facade's side; `CentralGattClientHelloTest` covers the central's.
+    #[test]
+    fn react_native_android_ble_central_says_hello() {
+        use offline_protocol_transport::constants::BLE_HELLO_CHAR_UUID;
+
+        let facade = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+        assert!(
+            facade.contains(&format!(
+                "HELLO_CHAR_UUID = UUID.fromString(\"{BLE_HELLO_CHAR_UUID}\")"
+            )),
+            "BleTransportFacade.kt must declare the Hello characteristic as {BLE_HELLO_CHAR_UUID}"
+        );
+        assert!(
+            facade.contains("helloUuid = HELLO_CHAR_UUID")
+                && facade.contains("helloCharUuid = HELLO_CHAR_UUID"),
+            "the facade must serve Hello on its server and write it from its central"
+        );
+
+        let start = facade
+            .find("private fun handleInboundHelloOnBleThread(")
+            .expect("the facade must handle an inbound hello");
+        let body = &facade[start..];
+        let body = &body[..body.find("\n    private fun ").unwrap_or(body.len())];
+        let verify = body
+            .find("verifyIdentityAssertion(")
+            .expect("a hello is bound only through the one verifier");
+        let bind = body
+            .find("connections.setDeviceIdentifier(address, peerId)")
+            .expect("a verified hello binds the writer's address to the derived address");
+        let mtu = body
+            .find("flushPeerMtu(address, peerId)")
+            .expect("a verified hello flushes the per-peer MTU");
+        let announce = body
+            .find("protocol.blePeerDiscovered(peerId")
+            .expect("a verified hello announces a peer no other link announced");
+        assert!(verify < bind, "verify before binding");
+        assert!(
+            mtu < announce,
+            "the per-peer MTU must be on file before the core hears of the peer, or a \
+             fragmenting send falls back to the 185-byte floor"
+        );
+    }
+
     /// Android hears Bluetooth go off and come back from the adapter's state
     /// broadcast, not only from a failed scan start. Polled once a minute, the
     /// transport missed a Bluetooth stack crash entirely (the stack restarts
