@@ -199,6 +199,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     companion object {
         const val NAME = "OfflineProtocolModule"
         const val EVENT_NAME = "OfflineProtocol_Event"
+        /** Field on every [EVENT_NAME] payload carrying [eventSeq]. */
+        const val EVENT_SEQ_FIELD = "seq"
 
         /**
          * The two *one-shot* event tags, which double as their
@@ -946,16 +948,41 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         if (!canEmitToJs()) {
             return false
         }
-        return try {
-            reactApplicationContext
-                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-                .emit(eventName, params)
-            true
-        } catch (e: Exception) {
-            android.util.Log.w(NAME, "Event emit failed for $eventName", e)
-            false
+        // Numbered under the lock and handed over inside it, so the numbers
+        // reach JS in the order they were given out whichever thread drove
+        // the core. See [eventSeq].
+        return synchronized(eventSeqLock) {
+            if (eventName == EVENT_NAME && params is WritableMap) {
+                params.putInt(EVENT_SEQ_FIELD, eventSeq++)
+            }
+            try {
+                reactApplicationContext
+                    .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                    .emit(eventName, params)
+                true
+            } catch (e: Exception) {
+                android.util.Log.w(NAME, "Event emit failed for $eventName", e)
+                false
+            }
         }
     }
+
+    /**
+     * The number the next event handed to JS on [EVENT_NAME] carries, so the
+     * TypeScript layer can see one go missing (#514).
+     *
+     * Nothing else here can: a bridgeless emit that fails inside React Native
+     * returns normally (see [sendEvent]), and the core's own reasons for
+     * acknowledging a message without surfacing it are `tracing` lines that
+     * never reach a device log. A gap in these numbers at JS says the event
+     * left this module and was lost in React Native; no gap, and no event,
+     * says it never reached this module. Detection, not recovery: a missing
+     * event is reported, never refetched. Only events handed over are
+     * numbered, so a refused gate (an event held, or dropped by design
+     * before JS subscribes) leaves no gap.
+     */
+    private var eventSeq = 0
+    private val eventSeqLock = Any()
 
     /**
      * Emits a *one-shot* event, holding it for redelivery if JS could not take

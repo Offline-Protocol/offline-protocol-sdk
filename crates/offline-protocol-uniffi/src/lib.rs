@@ -14484,6 +14484,34 @@ mod tests {
         }
     }
 
+    /// Every event a native module hands to JavaScript carries a number, so the
+    /// TypeScript layer can report one lost in React Native (#514), where a
+    /// bridgeless emit fails without the module seeing it. The field name is
+    /// written in three languages; one that drifts makes `seq` undefined at JS,
+    /// which reads as "an old native module" and silently reports nothing.
+    #[test]
+    fn react_native_events_are_numbered_for_gap_detection() {
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+        );
+        let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        let ts = rn_source_code_only("src/index.ts");
+        assert!(
+            kotlin.contains("const val EVENT_SEQ_FIELD = \"seq\"")
+                && kotlin.contains("params.putInt(EVENT_SEQ_FIELD, eventSeq++)"),
+            "OfflineProtocolModule.kt must number every event on its event name as `seq`"
+        );
+        assert!(
+            swift.contains("static let eventSeqField = \"seq\"")
+                && swift.contains("numbered[Self.eventSeqField] = eventSeq"),
+            "OfflineProtocolModule.swift must number every event on its event name as `seq`"
+        );
+        assert!(
+            ts.contains("(data: { eventJson: string; seq?: number }) => { this.checkEventSequence(data.seq);"),
+            "index.ts must check each event's `seq` before handling it"
+        );
+    }
+
     /// The buffered-inbound event set agrees across TypeScript, Kotlin and
     /// Swift, and each layer's hold is wired to a flush.
     ///

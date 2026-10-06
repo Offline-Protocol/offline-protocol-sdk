@@ -382,6 +382,17 @@ the two above:
   periodic event there would replay stale state; collapsing it into the
   one-shot map would keep one message of many.
 
+None of the three shapes covers an event the native module hands over and
+React Native then loses: a bridgeless emit reports failure by rejecting a task
+rather than throwing, so the module sees a success. Such a loss is made
+**visible**, not prevented. Both native modules number every event they hand
+over on the main event name (`seq`, given out and handed over under one lock),
+and the TypeScript layer reports a gap as a `diagnostic` event at level
+`warning` with message `native_event_gap` and the missing range. A gap says
+the event left the native module; no gap and no event says it never reached
+it. Nothing is refetched. `react_native_events_are_numbered_for_gap_detection`
+pins the field name in all three languages.
+
 ## C11. A storage adapter is a supported extension point, and is verified
 
 The SDK persists two separate things: MLS and identity secrets, through

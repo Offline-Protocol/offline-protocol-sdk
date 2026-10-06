@@ -54,6 +54,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   read uses. A peer without the characteristic, an iPhone among them, is
   resolved as before. [BLE framing](docs/spec/ble-framing.md) specifies it.
 
+### Added
+
+- **An event lost between the native module and JavaScript is reported**
+  (refs [#514](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/514)).
+  Both native modules number every event they hand to JavaScript, and the SDK
+  emits a `diagnostic` event (`message: "native_event_gap"`, with the missing
+  range) when a number is skipped. A bridgeless React Native emit can fail
+  without the native side seeing it, and three device-test gaps (a receipt
+  with no `message_received`, a delivery with no `message_delivered`) could
+  not be placed in the core or the bridge. This does not recover a lost
+  event; it says which side lost it.
+
 ## [0.28.0] — 2026-10-06
 
 > **The peer-stream slot carries traffic on phones.** The mobile managers
