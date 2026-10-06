@@ -165,8 +165,9 @@ reachable fails as that refusal.
 window grows to 5000 ids over seven days, `wifiDirect: { enabled: true }` now
 starts that transport in `start()` (on iOS that is the first Local Network
 prompt), the Android module declares the Wi-Fi Direct permissions and stops
-asking for location on Android 13 and later, and a key package refused by
-this device's clock is reported as a security warning.
+asking for location on Android 13 and later, an Android app that already sets
+`autoAccept: true` starts forming Wi-Fi Direct groups itself, and a key package
+refused by this device's clock is reported as a security warning.
 [§26](#26-behaviour-that-changes-without-a-compile-error-v0280) has the list.
 
 Work through it in order. [§0](#0-before-you-ship-downgrade-is-not-a-rollback)
@@ -2439,13 +2440,21 @@ lower. If your manifest declares `NEARBY_WIFI_DEVICES` without
 `wifiDirect: { enabled: true, autoAccept: true }` on Android 10 and later,
 devices of the same app find each other and join one group with no system
 dialog. It is off by default; without it, a group is still formed in the
-system's Wi-Fi Direct settings. `groupOwnerIntent` is not used.
+system's Wi-Fi Direct settings. An app that already sets `autoAccept: true`
+(the integration guide's example did, while the option did nothing) starts
+forming groups on upgrade: set it to `false` to keep the old behaviour. The
+group's passphrase is derived from the app id and is not a secret; it keeps
+apps apart, and the identity preamble and end-to-end encryption still protect
+the traffic. `stop()` removes an app-named group this device owns.
+`groupOwnerIntent` is not used and is deprecated.
 
 **A key package refused by this device's clock raises a security warning.**
 `security_warning` with `KEY_PACKAGE_OUTSIDE_VALIDITY_WINDOW`, once per peer,
-when a peer's key package is not valid at this device's time. Phones that have
+when a peer's key package is not valid at this device's time, whether it was
+refused on arrival or on the first send after a restart. Phones that have
 never been online often have the wrong date, and past a 30-day gap no session
-forms between them. Show the user a prompt to check the date and time. The
+forms between them. A package whose window has already closed is discarded
+like any expired package; one whose window has not started yet is kept. Show the user a prompt to check the date and time. The
 TypeScript `SecurityWarningCode` union gains the member.
 
 **`neighbor_lost` means nothing nearby reaches the peer.** It fires once, when
