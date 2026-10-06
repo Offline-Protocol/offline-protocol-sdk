@@ -27,7 +27,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   a device that heard a lower peer creates the group itself after three joins
   found none, a device that heard nothing probes a group owner it sees at most
   once a minute, and an owner whose group stays empty for 30 to 60 seconds
-  dissolves it so two groups that formed at once merge. A device alone backs
+  dissolves it so two groups that formed at once merge. A client whose owner
+  proves nothing for three dials at the top of its redial ladder (an owner
+  whose app died: the group outlives the process) leaves the group and forms
+  again, and `stop()` removes an app-named group this device owns even when it
+  was adopted at start. A device alone backs
   off: discovery from 15 to 60 seconds, the owner probe from one to four
   minutes. Two phones (Android 13 and 15) next to two Wi-Fi Direct televisions
   formed the group in all eight clean starts, in 18 to 225 seconds (median

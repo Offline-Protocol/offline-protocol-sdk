@@ -160,8 +160,16 @@ while it hears no record, and the owner probe from one to four minutes while pro
 a new owner or a new device appears. A device that is a client of any group, the application's or
 another (Wi-Fi Direct printing, a screen cast), forms nothing while it lasts.
 
-`formGroups` is read once by `start()`; `stop()` undoes what the run did (the service request, the
-record, a group it created) whatever the flag says by then. `enableTransport('wifiDirect')` with no
+The group outlives the process. An owner whose application died leaves a group with no listener that
+answers no discovery query, and every device that probes it joins a group that carries nothing, then
+never runs formation again because it is in a group. Two rules close that: a group under the
+application's name that this device owns is removed by `stop()` even when it was adopted at start
+rather than created by the run, and a client of such a group leaves it after three dials at the top of
+the redial ladder prove nothing (`GroupOwnerRedial.shouldLeave`) and joins before creating again. A
+group paired in the system settings is never removed or left.
+
+`formGroups` is set while stopped; `stop()` undoes what the run did (the service request, the
+record, an application group it created or adopted) whatever the flag says by then. `enableTransport('wifiDirect')` with no
 configuration keeps the current setting rather than turning formation off.
 
 `PeerStreamSocketsTest` and `PeerStreamFramingTest` pin it, the latter

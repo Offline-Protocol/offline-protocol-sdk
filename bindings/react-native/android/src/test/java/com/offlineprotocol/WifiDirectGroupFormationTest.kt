@@ -4,6 +4,7 @@ import com.offlineprotocol.WifiDirectGroupFormation.Action
 import com.offlineprotocol.WifiDirectGroupFormation.Advert
 import com.offlineprotocol.WifiDirectGroupFormation.Local
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -164,6 +165,14 @@ class WifiDirectGroupFormationTest {
         assertNull(WifiDirectGroupFormation.parse("mac", good + ("sid" to "printer"), 0))
     }
 
+    @Test
+    fun `a record with an entry this version does not know still parses`() {
+        // A later revision may add entries under txtvers=1; ignoring them is
+        // what lets it.
+        val txt = WifiDirectGroupFormation.txtRecord("off1q", app) + ("future" to "x")
+        assertEquals(Advert("mac", "off1q", app, 0), WifiDirectGroupFormation.parse("mac", txt, 0))
+    }
+
     // --- The credentials -------------------------------------------------------------
 
     @Test
@@ -171,6 +180,13 @@ class WifiDirectGroupFormationTest {
         val name = WifiDirectGroupFormation.networkName("com.example.app")
         assertTrue(name, WifiDirectGroupFormation.isValidNetworkName(name))
         assertTrue(name.toByteArray().size <= 32)
+    }
+
+    @Test
+    fun `names Android refuses are refused`() {
+        assertFalse(WifiDirectGroupFormation.isValidNetworkName("op-1234"))
+        assertFalse(WifiDirectGroupFormation.isValidNetworkName("DIRECT-"))
+        assertFalse(WifiDirectGroupFormation.isValidNetworkName("DIRECT-op-" + "a".repeat(23)))
     }
 
     @Test

@@ -928,9 +928,12 @@ message is end to end encrypted above that, so a device in the group
 learns which addresses are present and can carry, delay or drop their
 frames, which any relay on any carrier can already do. What it costs is
 availability on this carrier: a squatting owner can hold an application's
-devices in a group that delivers nothing, until its idle owners dissolve
-their own groups or Bluetooth carries the traffic instead. Formation is
-opt-in and Android-only.
+devices in a group that delivers nothing. A client leaves a group under the
+application's name after three dials at the top of its redial ladder prove
+no peer (about three minutes), and forms again, so the squatter costs each
+device a few minutes per capture rather than the session; Bluetooth carries
+the traffic meanwhile. The same rule covers an owner whose application died,
+since the group outlives the process. Formation is opt-in and Android-only.
 
 ## Network egress
 

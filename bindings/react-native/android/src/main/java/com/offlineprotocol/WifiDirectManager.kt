@@ -24,6 +24,7 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -222,6 +223,14 @@ class WifiDirectManager(
     // True while this device owns a group under the name it would derive,
     // which is the only kind of group formation ever dissolves.
     private var ownsFormationGroup = false
+    // True while this device is in a group under the application's name, as
+    // owner or client. Volatile: the socket thread reads it when a client's
+    // dials keep failing, to decide whether the group is ours to leave.
+    @Volatile private var inAppGroup = false
+    // A client's dials in a row toward an owner that proved nothing while the
+    // redial ladder sat at its ceiling; see [GroupOwnerRedial.shouldLeave].
+    private val unprovedAtCeiling = AtomicInteger(0)
+    private var nextPublishAtMs = 0L
     private var ownerIdleSinceMs = 0L
     private var failedJoins = 0
     // Any Wi-Fi Direct group owner in the peer list. An owner answers no
@@ -702,8 +711,10 @@ class WifiDirectManager(
                 currentPeers.add(device.deviceAddress)
                 if (!discoveredPeers.containsKey(device.deviceAddress)) {
                     discoveredPeers[device.deviceAddress] = device
-                    // Someone new is in range: ask for records at full rate.
+                    // Someone new is in range: ask for records now, and at
+                    // full rate after.
                     quietDiscoveryRounds = 0
+                    nextServiceDiscoveryAtMs = 0L
                     emitDiagnostic("info", "Discovered peer", mapOf(
                         "name" to device.deviceName,
                         "address" to device.deviceAddress
@@ -773,6 +784,8 @@ class WifiDirectManager(
             ownerClients = 0
             createdNetwork = null
             ownsFormationGroup = false
+            inAppGroup = false
+            unprovedAtCeiling.set(0)
             ownerIdleSinceMs = 0L
             // Posted: this is the broadcast receiver's onReceive, and ending
             // an announced stream is an FFI call. Same reasoning as the post
@@ -820,6 +833,9 @@ class WifiDirectManager(
                 heardSinceLastDiscovery = true
                 quietDiscoveryRounds = 0
                 if (adverts.put(device.deviceAddress, advert) == null) {
+                    // A new peer: the next round is due now, not at the end
+                    // of a period backed off while nothing was heard.
+                    nextServiceDiscoveryAtMs = 0L
                     emitDiagnostic("debug", "Wi-Fi Direct peer record", mapOf("address" to advert.address))
                 }
             },
@@ -857,6 +873,7 @@ class WifiDirectManager(
         if (!formGroups || !formationSupported) return
         addServiceRequest()
         advertPublished = false
+        nextPublishAtMs = 0L
         nextServiceDiscoveryAtMs = 0L
         quietDiscoveryRounds = 0
         heardSinceLastDiscovery = true
@@ -887,11 +904,14 @@ class WifiDirectManager(
         formationRegistered = false
         createdNetwork = null
         ownsFormationGroup = false
+        inAppGroup = false
+        unprovedAtCeiling.set(0)
         ownerIdleSinceMs = 0L
         adverts.clear()
         inGroup = false
         ownerClients = 0
         advertPublished = false
+        nextPublishAtMs = 0L
         failedJoins = 0
         joinFirstRemaining = 0
         joinIsProbe = false
@@ -913,7 +933,12 @@ class WifiDirectManager(
         adverts.values.removeAll { now - it.seenAtMs > ADVERT_TTL_MS }
         val address = localAddressOrNull() ?: return
 
-        if (!advertPublished) publishAdvert()
+        // Paced like a formation retry: a framework that keeps refusing the
+        // record is not asked again on every step.
+        if (!advertPublished && now >= nextPublishAtMs) {
+            nextPublishAtMs = now + FORMATION_RETRY_MS
+            publishAdvert()
+        }
 
         if (inGroup && isGroupOwner && ownsFormationGroup && ownerClients == 0) {
             if (ownerIdleSinceMs == 0L) {
@@ -1055,20 +1080,48 @@ class WifiDirectManager(
 
     /**
      * After any group change: count this owner's clients, and note whether the
-     * group is the application's, the only kind formation ever dissolves.
+     * group is the application's, the only kind formation ever dissolves or
+     * leaves.
+     *
+     * An application's group this device owns is this application's to
+     * remove on [stop], even one adopted at start rather than created by this
+     * run: no other application derives the name, and the group outlives the
+     * process. Left up after the process that served it died, it is an owner
+     * with no listener that answers no service discovery query, and every
+     * device of the application that probes it joins a group that carries
+     * nothing.
      */
     @SuppressLint("MissingPermission")
     private fun refreshGroupForFormation() {
         if (!formGroups || !formationSupported) return
-        if (!isGroupOwner) {
-            ownerClients = 0
-            ownsFormationGroup = false
-            return
-        }
         wifiP2pManager?.requestGroupInfo(channel) { group ->
-            ownerClients = group?.clientList?.size ?: 0
-            ownsFormationGroup = group?.networkName == appNetwork
+            inAppGroup = group?.networkName == appNetwork
+            if (isGroupOwner) {
+                ownerClients = group?.clientList?.size ?: 0
+                ownsFormationGroup = inAppGroup
+                if (ownsFormationGroup && createdNetwork == null) createdNetwork = appNetwork
+            } else {
+                ownerClients = 0
+                ownsFormationGroup = false
+            }
         }
+    }
+
+    /**
+     * Leaves an application's group whose owner keeps proving nothing, so
+     * formation decides again. Runs on the transport thread; re-reads
+     * everything, because the group can change between the socket thread's
+     * decision and here.
+     */
+    @SuppressLint("MissingPermission")
+    private fun leaveDeadApplicationGroup() {
+        if (state != TransportState.RUNNING || !formationRegistered) return
+        if (!inGroup || isGroupOwner || !inAppGroup) return
+        emitDiagnostic("info", "Leaving a Wi-Fi Direct group whose owner proves nothing")
+        wifiP2pManager?.removeGroup(channel, quietListener("leave dead group"))
+        failedJoins = 0
+        joinFirstRemaining = 2
+        nextFormationAtMs = SystemClock.elapsedRealtime() + FORMATION_TICK_MS
     }
 
     @SuppressLint("MissingPermission")
@@ -1228,6 +1281,20 @@ class WifiDirectManager(
      * would leave the client with no stream for the whole of the new group.
      */
     private fun scheduleReconnect(ended: String, proved: Boolean) {
+        val unproved = unprovedAtCeiling.updateAndGet {
+            GroupOwnerRedial.unprovedAtCeilingAfter(
+                count = it,
+                proved = proved,
+                sameOwner = groupOwnerAddress == ended,
+                currentDelayMs = reconnectDelayMs.get(),
+                maxDelayMs = RECONNECT_MAX_DELAY_MS,
+            )
+        }
+        if (!isGroupOwner && GroupOwnerRedial.shouldLeave(unproved, applicationGroup = inAppGroup)) {
+            unprovedAtCeiling.set(0)
+            transportHandler.post { leaveDeadApplicationGroup() }
+            return
+        }
         val plan = GroupOwnerRedial.next(
             ended = ended,
             proved = proved,
@@ -1421,6 +1488,41 @@ class WifiDirectManager(
  */
 internal object GroupOwnerRedial {
     data class Plan(val owner: String, val delayMs: Long, val nextDelayMs: Long)
+
+    /**
+     * Dials in a row at the ladder's ceiling, each proving nothing, after
+     * which a client leaves a group under the application's name. The group
+     * outlives the process that owned it, so an owner whose application died
+     * holds its clients in a group that carries nothing, and a client in a
+     * group never runs formation again. Three at the ceiling is about three
+     * minutes past the ladder's climb.
+     */
+    const val LEAVE_AFTER_UNPROVED_AT_CEILING = 3
+
+    /**
+     * The count of unproved dials at the ceiling after one more dial ended.
+     * A proved stream or a different owner starts it over; a dial below the
+     * ceiling leaves it alone, so an owner restarting its application is not
+     * mistaken for a dead one.
+     */
+    fun unprovedAtCeilingAfter(
+        count: Int,
+        proved: Boolean,
+        sameOwner: Boolean,
+        currentDelayMs: Long,
+        maxDelayMs: Long,
+    ): Int = when {
+        proved || !sameOwner -> 0
+        currentDelayMs >= maxDelayMs -> count + 1
+        else -> count
+    }
+
+    /**
+     * Whether a client leaves its group. Only a group under the application's
+     * name: one paired in the system settings is the user's, not ours.
+     */
+    fun shouldLeave(unprovedAtCeiling: Int, applicationGroup: Boolean): Boolean =
+        applicationGroup && unprovedAtCeiling >= LEAVE_AFTER_UNPROVED_AT_CEILING
 
     fun next(
         ended: String,
