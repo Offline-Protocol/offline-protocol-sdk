@@ -5,8 +5,9 @@ import ReactAppDependencyProvider
 
 @main
 class AppDelegate: UIResponder, UIApplicationDelegate {
+  /// React Native (`RCTDeviceInfo`, orientation notifications) still reads
+  /// `UIApplication.shared.delegate?.window` even when using UIScene lifecycle.
   var window: UIWindow?
-
   var reactNativeDelegate: ReactNativeDelegate?
   var reactNativeFactory: RCTReactNativeFactory?
 
@@ -21,15 +22,20 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     reactNativeDelegate = delegate
     reactNativeFactory = factory
 
-    window = UIWindow(frame: UIScreen.main.bounds)
-
-    factory.startReactNative(
-      withModuleName: "OfflineDemo",
-      in: window,
-      launchOptions: launchOptions
-    )
-
     return true
+  }
+
+  func application(
+    _ application: UIApplication,
+    configurationForConnecting connectingSceneSession: UISceneSession,
+    options: UIScene.ConnectionOptions
+  ) -> UISceneConfiguration {
+    let configuration = UISceneConfiguration(
+      name: "Default Configuration",
+      sessionRole: connectingSceneSession.role
+    )
+    configuration.delegateClass = SceneDelegate.self
+    return configuration
   }
 }
 
@@ -40,9 +46,16 @@ class ReactNativeDelegate: RCTDefaultReactNativeFactoryDelegate {
 
   override func bundleURL() -> URL? {
 #if DEBUG
-    RCTBundleURLProvider.sharedSettings().jsBundleURL(forBundleRoot: "index")
+#if targetEnvironment(simulator)
+    return RCTBundleURLProvider.sharedSettings().jsBundleURL(forBundleRoot: "index")
 #else
-    Bundle.main.url(forResource: "main", withExtension: "jsbundle")
+    if let embedded = Bundle.main.url(forResource: "main", withExtension: "jsbundle") {
+      return embedded
+    }
+    return RCTBundleURLProvider.sharedSettings().jsBundleURL(forBundleRoot: "index")
+#endif
+#else
+    return Bundle.main.url(forResource: "main", withExtension: "jsbundle")
 #endif
   }
 }

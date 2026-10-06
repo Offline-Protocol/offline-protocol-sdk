@@ -53,6 +53,8 @@ target 'OfflineDemo' do
 
     installer.pods_project.targets.each do |target|
       target.build_configurations.each do |build_config|
+        # MeshSdk.podspec still declares 13.0; current Xcode only accepts 15.0+.
+        build_config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.1'
         build_config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
         other_cflags = build_config.build_settings['OTHER_CFLAGS'] || '$(inherited)'
         other_cxxflags = build_config.build_settings['OTHER_CPLUSPLUSFLAGS'] || '$(inherited)'
