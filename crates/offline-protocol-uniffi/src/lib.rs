@@ -4230,6 +4230,13 @@ impl OfflineProtocol {
     }
 
     /// BLE: Status changed
+    ///
+    /// Unavailable means no Bluetooth LE link survives: the radio went off or
+    /// the platform stopped the transport, which drops its peers on that edge.
+    /// No per-peer loss is guaranteed for those links (Android gets no
+    /// disconnect callback when the adapter goes off), so each peer is
+    /// reported lost here, once, unless Wi-Fi Direct still reaches it. A
+    /// platform that reports its peers lost first, as iOS does, leaves none.
     pub fn ble_status_changed(&self, is_available: bool) -> Result<(), ProtocolError> {
         // Update the BLE transport status based on platform availability
         let new_status = if is_available {
@@ -4240,6 +4247,29 @@ impl OfflineProtocol {
         self.with_transport_fallible(CoreTransportType::BLE, |transport| {
             transport.on_status_changed(new_status);
         })?;
+        if is_available {
+            return Ok(());
+        }
+
+        // Left in place, a peer from before the radio went off kept counting
+        // as linked over Bluetooth, so its later Wi-Fi Direct loss was never
+        // reported and the app listed a neighbour nothing could reach.
+        let dropped: Vec<String> = {
+            let mut ble_state = self.lock_ble()?;
+            ble_state.peer_count = 0;
+            ble_state
+                .peers
+                .drain()
+                .map(|(peer_id, _)| peer_id)
+                .collect()
+        };
+        for peer_id in dropped {
+            if self.peer_linked_elsewhere(&peer_id, CoreTransportType::BLE) {
+                continue;
+            }
+            self.lock_inner()?.on_neighbor_lost(&peer_id);
+            self.emit_event(CoreEvent::NeighborLost { peer_id });
+        }
 
         Ok(())
     }
@@ -10153,6 +10183,75 @@ mod tests {
                 .any(|e| e.contains("neighbor_lost")),
             "still reachable over Wi-Fi Direct"
         );
+    }
+
+    /// Bluetooth switched off under a running app: Android reports the
+    /// adapter unavailable but no per-peer loss. The peer must be reported
+    /// lost then, and once only, even when the platform reports it later.
+    #[test]
+    fn test_ble_unavailable_reports_its_peers_lost_once() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+        protocol.ble_status_changed(true).unwrap();
+        protocol
+            .ble_peer_discovered("ble-peer".to_string(), -60)
+            .unwrap();
+        drained_events(&protocol);
+
+        protocol.ble_status_changed(false).unwrap();
+        let lost = drained_events(&protocol)
+            .iter()
+            .filter(|e| e.contains("neighbor_lost") && e.contains("ble-peer"))
+            .count();
+        assert_eq!(lost, 1, "the radio going off is the loss");
+        assert!(!protocol.lock_inner().unwrap().is_known_peer("ble-peer"));
+
+        // A late per-peer report from the platform adds nothing.
+        protocol.ble_peer_lost("ble-peer".to_string()).unwrap();
+        assert!(
+            !drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("neighbor_lost")),
+            "reported once"
+        );
+    }
+
+    /// The two phones' case: Bluetooth went off while both carriers linked
+    /// the peer, then Wi-Fi Direct dropped. The peer counted as linked over
+    /// Bluetooth from before the radio went off, so neither loss was ever
+    /// reported and the app kept a neighbour nothing reached.
+    #[test]
+    fn test_wifi_direct_loss_after_bluetooth_went_off_is_a_lost_neighbor() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+        protocol.ble_status_changed(true).unwrap();
+        protocol.wifi_direct_status_changed(true).unwrap();
+        protocol
+            .ble_peer_discovered("both".to_string(), -60)
+            .unwrap();
+        protocol
+            .wifi_direct_peer_connected("both".to_string())
+            .unwrap();
+        drained_events(&protocol);
+
+        protocol.ble_status_changed(false).unwrap();
+        assert!(
+            !drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("neighbor_lost")),
+            "still reachable over Wi-Fi Direct"
+        );
+
+        protocol
+            .wifi_direct_peer_disconnected("both".to_string())
+            .unwrap();
+        assert!(
+            drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("neighbor_lost") && e.contains("both")),
+            "nothing reaches it any more"
+        );
+        assert!(!protocol.lock_inner().unwrap().is_known_peer("both"));
     }
 
     /// `transport_switched` to Wi-Fi Direct follows the first proved link,

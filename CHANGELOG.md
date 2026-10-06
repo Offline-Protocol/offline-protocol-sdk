@@ -657,7 +657,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   the Wi-Fi Direct group but was still linked over Bluetooth LE (or the
   reverse) was reported lost and cleared from core discovery tracking, so an
   app dropped a neighbour it could still reach. `neighbor_lost` now fires
-  when the last mesh link to a peer ends.
+  when the last mesh link to a peer ends. Bluetooth reported unavailable
+  (the radio switched off, or the transport stopped) ends every Bluetooth
+  link at once, since Android delivers no per-link disconnect then.
 - **`transport_switched` to Wi-Fi Direct means a peer is connected.** It
   fired when the stream layer came up, which a platform manager does at start
   with or without a peer, saying "Connected to WiFi Direct peer group" while
