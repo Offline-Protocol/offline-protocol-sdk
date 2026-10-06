@@ -331,6 +331,33 @@ pub enum SecurityWarningCode {
     /// carrier available, and this warning explains a transport that stays
     /// down while its socket connects fine.
     GatewayAddressDeclarationRefused,
+    /// A peer's key package was refused because this device's clock is
+    /// outside its validity window: the window has not started yet, or has
+    /// already closed.
+    ///
+    /// Like [`Self::StaleControlFrame`], the first thing to check is a clock,
+    /// and it is usually this device's. A package is valid from an hour before
+    /// it was minted until 30 days after, by the receiver's clock. So a device
+    /// more than an hour behind a peer cannot start a session with it, though
+    /// the peer, whose clock accepts this device's package, still can. Once
+    /// the gap passes 30 days each side refuses the other's package and no
+    /// session forms at all: messages and connection requests wait for as long
+    /// as the clocks disagree, and both sides report this. Phones that have not
+    /// been online are where this happens. Many different peers is this
+    /// device's clock; one peer while others are fine is that peer's.
+    ///
+    /// A window that has already closed is not always a clock: a relay can
+    /// hold a package for days, and the receiver anchors its cached expiry to
+    /// when the frame arrived. That package is discarded, as an expired one
+    /// is, and the `reason` says either cause; the next package the peer sends
+    /// replaces it. A window that has not started is kept, since it becomes
+    /// valid once the clocks agree.
+    ///
+    /// Raised on every route that admits a pending package: when it arrives,
+    /// and on the first send after a restart. The package has not proved its
+    /// sender when the window is checked, so the peer named is a claim, and
+    /// the event is reported at most once per peer.
+    KeyPackageOutsideValidityWindow,
 }
 
 impl SecurityWarningCode {
@@ -354,6 +381,7 @@ impl SecurityWarningCode {
             Self::StaleControlFrame => "STALE_CONTROL_FRAME",
             Self::GatewayAddressBindingMismatch => "GATEWAY_ADDRESS_BINDING_MISMATCH",
             Self::GatewayAddressDeclarationRefused => "GATEWAY_ADDRESS_DECLARATION_REFUSED",
+            Self::KeyPackageOutsideValidityWindow => "KEY_PACKAGE_OUTSIDE_VALIDITY_WINDOW",
         }
     }
 }
@@ -4234,6 +4262,7 @@ mod tests {
             SecurityWarningCode::StaleControlFrame,
             SecurityWarningCode::GatewayAddressBindingMismatch,
             SecurityWarningCode::GatewayAddressDeclarationRefused,
+            SecurityWarningCode::KeyPackageOutsideValidityWindow,
         ];
         for code in all {
             // serde renders a unit enum variant as a quoted JSON string.
@@ -4263,7 +4292,8 @@ mod tests {
                 | SecurityWarningCode::GroupLeafIdentityUnproven
                 | SecurityWarningCode::StaleControlFrame
                 | SecurityWarningCode::GatewayAddressBindingMismatch
-                | SecurityWarningCode::GatewayAddressDeclarationRefused => {}
+                | SecurityWarningCode::GatewayAddressDeclarationRefused
+                | SecurityWarningCode::KeyPackageOutsideValidityWindow => {}
             }
         }
     }

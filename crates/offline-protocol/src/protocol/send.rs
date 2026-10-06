@@ -898,12 +898,11 @@ impl OfflineProtocol {
                     self.pending_key_packages.remove(recipient);
                     self.delete_peer_key_package_from_storage(recipient);
                 } else {
-                    {
-                        let manager = mls
-                            .read()
-                            .map_err(|_| Error::Other("MLS lock poisoned".to_string()))?;
-                        manager.import_key_package(recipient, &received_pkg.key_package_data)?;
-                    }
+                    self.import_pending_key_package(
+                        mls,
+                        recipient,
+                        &received_pkg.key_package_data,
+                    )?;
 
                     // Create session and send welcome message
                     let welcome = {

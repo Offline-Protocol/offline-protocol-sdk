@@ -73,6 +73,40 @@ pub enum MlsError {
     #[error("Invalid key package: {0}")]
     InvalidKeyPackage(String),
 
+    /// A peer's key package is well formed, but this device's clock falls
+    /// outside its validity window: before its `not_before`, or after its
+    /// `not_after`.
+    ///
+    /// Split from [`Self::InvalidKeyPackage`] because it has a different
+    /// remedy, and that remedy is usually a clock rather than the peer. The
+    /// window is judged against this device's own time, and a package starts
+    /// only an hour before it was minted, so a device whose clock runs more
+    /// than an hour behind its peer's refuses every package that peer sends.
+    /// Past the 30-day lifetime the peer refuses this device's packages too,
+    /// and no session forms from either side. Reported to the application as
+    /// `KEY_PACKAGE_OUTSIDE_VALIDITY_WINDOW`; before that it was a debug line,
+    /// and two phones a year apart sat on a pending connection request with
+    /// nothing anywhere to say why.
+    ///
+    /// `expired` says which end refused it, because the two have different
+    /// remedies. A window that has not started (`false`) is a clock, this
+    /// device's or the peer's, and the package becomes valid once the clocks
+    /// agree. A window that has closed (`true`) is this device's clock running
+    /// ahead *or* a package that is simply old: a relay can hold a package for
+    /// days, and the receiver's cached expiry is anchored to when the frame
+    /// arrived, not to when the package was minted. Blaming the clock for the
+    /// second, and keeping the package, would fail every attempt with a
+    /// correct clock until the cached expiry.
+    #[error(
+        "Key package is outside its validity window by this device's clock: {}",
+        if *.expired { "it has already closed" } else { "it has not started yet" }
+    )]
+    KeyPackageOutsideValidityWindow {
+        /// `true` when the window closed before this device's `now`, `false`
+        /// when it has not opened yet.
+        expired: bool,
+    },
+
     /// Failed to create a group.
     #[error("Group creation failed: {0}")]
     GroupCreation(String),
@@ -507,6 +541,9 @@ impl MlsError {
             Self::CredentialCreation(_) => "MLS credential creation failed",
             Self::KeyPackageCreation(_) => "Key package creation failed",
             Self::InvalidKeyPackage(_) => "The peer's key package was malformed or unusable",
+            Self::KeyPackageOutsideValidityWindow { .. } => {
+                "The peer's key package is not valid at this device's time"
+            }
             Self::GroupCreation(_) => "MLS group creation failed",
             Self::GroupNotFound(_) => "No local MLS group state for the requested conversation",
             Self::AddMember(_) => "Adding a member to the MLS group failed",
