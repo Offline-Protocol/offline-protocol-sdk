@@ -659,12 +659,17 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   app dropped a neighbour it could still reach. `neighbor_lost` now fires
   when the last mesh link to a peer ends. Bluetooth reported unavailable
   (the radio switched off, or the transport stopped) ends every Bluetooth
-  link at once, since Android delivers no per-link disconnect then.
+  link at once, since Android delivers no per-link disconnect then. The
+  Wi-Fi Direct layer going down does the same for its links: iOS takes it
+  down when the app backgrounds, before the OS ends the streams, and each
+  stream's own late end is no longer a second report.
 - **`transport_switched` to Wi-Fi Direct means a peer is connected.** It
   fired when the stream layer came up, which a platform manager does at start
   with or without a peer, saying "Connected to WiFi Direct peer group" while
   every send went over Bluetooth LE. It now fires when the first Wi-Fi Direct
-  link proves and, to `None`, when the last one ends.
+  link is usable and, to `None`, when the last one is not, once per edge: a
+  layer going down with several links switches once, and links proved while
+  the layer is down switch when it comes up.
 - **Android rejoins a Wi-Fi Direct group after the app restarts.** The group
   belongs to the system and outlives the process, but since Android 10 the
   connection broadcast is not sticky, so a manager that started inside an

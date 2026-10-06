@@ -4915,27 +4915,65 @@ impl OfflineProtocol {
         } else {
             offline_protocol_transport::TransportStatus::Disconnected
         };
-        self.with_transport_fallible(CoreTransportType::WiFiDirect, |transport| {
-            transport.on_status_changed(new_status);
-        })?;
+        // The links visible before and after, read under the one lock that
+        // flips the status. Leaving Available clears every link silently, so
+        // `before` is also exactly the set this flip ends.
+        let (ended, after) = self
+            .with_transport_fallible(CoreTransportType::WiFiDirect, |transport| {
+                let before = transport.connected_peers();
+                transport.on_status_changed(new_status);
+                (before, transport.connected_peers().len())
+            })?
+            .unwrap_or_default();
 
-        // No transport_switched here. This reports the stream layer, which a
-        // platform manager brings up at start whether or not any peer is
-        // there; announcing it as "connected to a peer group" told every app
-        // Wi-Fi Direct was carrying traffic while every send went over
-        // Bluetooth LE. The event follows the first link proved and the last
-        // one lost instead (wifi_direct_peer_connected / _disconnected), and a
-        // layer going down reports each of its links lost before this runs.
+        // The layer itself is not a switch: a platform manager brings it up
+        // at start whether or not any peer is there, and announcing that as
+        // "connected to a peer group" told every app Wi-Fi Direct was
+        // carrying traffic while every send went over Bluetooth LE. Only the
+        // links it hides or reveals move the edge.
+        self.emit_wifi_direct_switch(ended.len(), after);
+
+        // Not every platform ends its streams before the layer: iOS flips it
+        // on backgrounding and the OS kills the streams later, so a link this
+        // flip cleared is reported lost here, once. The stream's own late end
+        // then finds no link and adds nothing (wifi_direct_peer_disconnected).
+        if after == 0 {
+            for link in ended {
+                if self.peer_linked_elsewhere(&link.peer_id, CoreTransportType::WiFiDirect) {
+                    continue;
+                }
+                self.lock_inner()?.on_neighbor_lost(&link.peer_id);
+                self.emit_event(CoreEvent::NeighborLost {
+                    peer_id: link.peer_id,
+                });
+            }
+        }
 
         Ok(())
     }
 
-    /// How many peer-stream links the Wi-Fi Direct slot holds now.
-    fn wifi_direct_link_count(&self) -> usize {
-        self.with_transport(CoreTransportType::WiFiDirect, |transport| {
-            transport.connected_peers().len()
-        })
-        .unwrap_or(0)
+    /// Emits `transport_switched` on the Wi-Fi Direct carrier edge: from no
+    /// visible link to some, and from some to none.
+    ///
+    /// The one place the edge is decided. A link counts while the layer is up
+    /// (`Transport::connected_peers`), so a link proved while the layer is
+    /// down switches when the layer comes up, and a layer going down with
+    /// links held switches once, not once per late stream end.
+    fn emit_wifi_direct_switch(&self, before: usize, after: usize) {
+        let event = match (before, after) {
+            (0, 1..) => CoreEvent::TransportSwitched {
+                from: None,
+                to: "WiFiDirect".to_string(),
+                reason: "Connected to a Wi-Fi Direct peer".to_string(),
+            },
+            (1.., 0) => CoreEvent::TransportSwitched {
+                from: Some("WiFiDirect".to_string()),
+                to: "None".to_string(),
+                reason: "No Wi-Fi Direct peer is connected".to_string(),
+            },
+            _ => return,
+        };
+        self.emit_event(event);
     }
 
     /// Whether a mesh carrier other than `except` still links to `peer_id`.
@@ -5038,18 +5076,14 @@ impl OfflineProtocol {
 
         // Register the link with the transport so it can be addressed directly,
         // mirroring what ble_peer_discovered does for BLE.
-        let first_link = self.wifi_direct_link_count() == 0;
-        self.with_wifi_direct_transport_fallible(|wifi_transport| {
-            wifi_transport.on_peer_connected(peer_id.clone());
-        })?;
-
-        if first_link {
-            self.emit_event(CoreEvent::TransportSwitched {
-                from: None,
-                to: "WiFiDirect".to_string(),
-                reason: "Connected to a Wi-Fi Direct peer".to_string(),
-            });
-        }
+        let (before, after) = self
+            .with_wifi_direct_transport_fallible(|wifi_transport| {
+                let before = wifi_transport.connected_peers().len();
+                wifi_transport.on_peer_connected(peer_id.clone());
+                (before, wifi_transport.connected_peers().len())
+            })?
+            .unwrap_or_default();
+        self.emit_wifi_direct_switch(before, after);
 
         self.notify_neighbor_reachable(&peer_id, "WiFiDirect", None)
     }
@@ -5070,20 +5104,19 @@ impl OfflineProtocol {
 
         // Drop the link from the transport so it stops being offered as an
         // addressable neighbor.
-        self.with_wifi_direct_transport_fallible(|wifi_transport| {
-            wifi_transport.on_peer_disconnected(&peer_id);
-        })?;
+        let (before, held, after) = self
+            .with_wifi_direct_transport_fallible(|wifi_transport| {
+                let before = wifi_transport.connected_peers().len();
+                let held = wifi_transport.on_peer_disconnected(&peer_id);
+                (before, held, wifi_transport.connected_peers().len())
+            })?
+            .unwrap_or_default();
+        self.emit_wifi_direct_switch(before, after);
 
-        if self.wifi_direct_link_count() == 0 {
-            self.emit_event(CoreEvent::TransportSwitched {
-                from: Some("WiFiDirect".to_string()),
-                to: "None".to_string(),
-                reason: "No Wi-Fi Direct peer is connected".to_string(),
-            });
-        }
-
-        // A peer still linked over Bluetooth LE is not gone; see ble_peer_lost.
-        if self.peer_linked_elsewhere(&peer_id, CoreTransportType::WiFiDirect) {
+        // Reported once, and only when the peer is out of reach. A link the
+        // layer already ended was reported by wifi_direct_status_changed, and
+        // a peer still linked over Bluetooth LE is not gone (see ble_peer_lost).
+        if !held || self.peer_linked_elsewhere(&peer_id, CoreTransportType::WiFiDirect) {
             return Ok(());
         }
 
@@ -10306,6 +10339,122 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("transport_switched") && e.contains("\"to\":\"None\"")),
             "the last link going is the switch away"
+        );
+    }
+
+    /// iOS flips the layer down when the app backgrounds, before the OS kills
+    /// the streams, so each stream's own end arrives after the flip. The flip
+    /// is the switch away and the loss, once; the late ends add nothing. Each
+    /// late end used to emit its own switch to `None`, and the flip none.
+    #[test]
+    fn test_wifi_direct_layer_down_before_its_streams_end_reports_once() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+        protocol.wifi_direct_status_changed(true).unwrap();
+        protocol.ble_status_changed(true).unwrap();
+        protocol
+            .ble_peer_discovered("both".to_string(), -60)
+            .unwrap();
+        for peer in ["a", "b", "both"] {
+            protocol
+                .wifi_direct_peer_connected(peer.to_string())
+                .unwrap();
+        }
+        drained_events(&protocol);
+
+        protocol.wifi_direct_status_changed(false).unwrap();
+        let flip = drained_events(&protocol);
+        let switched: Vec<&String> = flip
+            .iter()
+            .filter(|e| e.contains("transport_switched"))
+            .collect();
+        assert_eq!(switched.len(), 1, "one switch away: {switched:?}");
+        assert!(switched[0].contains("\"to\":\"None\""));
+        for peer in ["\"a\"", "\"b\""] {
+            assert_eq!(
+                flip.iter()
+                    .filter(|e| e.contains("neighbor_lost") && e.contains(peer))
+                    .count(),
+                1,
+                "{peer} is lost with the layer"
+            );
+        }
+        assert!(
+            !flip
+                .iter()
+                .any(|e| e.contains("neighbor_lost") && e.contains("both")),
+            "still reachable over Bluetooth LE"
+        );
+        assert!(!protocol.lock_inner().unwrap().is_known_peer("a"));
+        assert!(protocol.lock_inner().unwrap().is_known_peer("both"));
+
+        for peer in ["a", "b", "both"] {
+            protocol
+                .wifi_direct_peer_disconnected(peer.to_string())
+                .unwrap();
+        }
+        let late = drained_events(&protocol);
+        assert!(
+            !late
+                .iter()
+                .any(|e| e.contains("transport_switched") || e.contains("neighbor_lost")),
+            "the late stream ends add nothing: {late:?}"
+        );
+    }
+
+    /// Links proved while the layer is down are not carrying anything yet:
+    /// the switch comes once, when the layer comes up and reveals them.
+    #[test]
+    fn test_wifi_direct_links_proved_while_down_switch_when_the_layer_comes_up() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+        drained_events(&protocol);
+
+        protocol
+            .wifi_direct_peer_connected("c".to_string())
+            .unwrap();
+        protocol
+            .wifi_direct_peer_connected("d".to_string())
+            .unwrap();
+        assert!(
+            !drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("transport_switched")),
+            "the layer is down"
+        );
+
+        protocol.wifi_direct_status_changed(true).unwrap();
+        let switched = drained_events(&protocol)
+            .into_iter()
+            .filter(|e| e.contains("transport_switched") && e.contains("\"to\":\"WiFiDirect\""))
+            .count();
+        assert_eq!(
+            switched, 1,
+            "the layer coming up reveals both links at once"
+        );
+    }
+
+    /// A stream that never proved a peer was never announced; its end is not
+    /// a loss and not a switch.
+    #[test]
+    fn test_wifi_direct_end_of_an_unannounced_stream_reports_nothing() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+        protocol.wifi_direct_status_changed(true).unwrap();
+        protocol
+            .wifi_direct_peer_connected("a".to_string())
+            .unwrap();
+        drained_events(&protocol);
+
+        protocol
+            .wifi_direct_peer_disconnected("stranger".to_string())
+            .unwrap();
+        let events = drained_events(&protocol);
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.contains("transport_switched") || e.contains("neighbor_lost")),
+            "nothing was held: {events:?}"
         );
     }
 
