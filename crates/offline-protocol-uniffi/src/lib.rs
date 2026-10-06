@@ -14263,6 +14263,58 @@ mod tests {
         );
     }
 
+    /// Android hears Bluetooth go off and come back from the adapter's state
+    /// broadcast, not only from a failed scan start. Polled once a minute, the
+    /// transport missed a Bluetooth stack crash entirely (the stack restarts
+    /// in under a second and takes the GATT server, advertiser and pending
+    /// connects with it), and the other phone could not reach this one until
+    /// the app restarted. `BleTransportFacade` has no test harness, so this
+    /// pins the wiring: registered once the transport runs, unregistered
+    /// behind the shutdown barrier, and the radio-lost arm drops the links.
+    #[test]
+    fn react_native_android_ble_listens_for_bluetooth_state_changes() {
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+        let start = kotlin
+            .find("private fun startUnsafe()")
+            .expect("BleTransportFacade.kt must start in startUnsafe");
+        let start_body = &kotlin[start..];
+        let running = start_body
+            .find("updateState(TransportState.RUNNING)")
+            .expect("startUnsafe must reach RUNNING");
+        let register = start_body
+            .find("registerAdapterStateReceiver()")
+            .expect("startUnsafe must listen for Bluetooth state changes");
+        assert!(
+            running < register,
+            "register once the transport runs, so a broadcast never meets a half-started one"
+        );
+
+        let stop = kotlin
+            .find("private fun stopUnsafe()")
+            .expect("BleTransportFacade.kt must stop in stopUnsafe");
+        let stop_body = &kotlin[stop..];
+        let barrier = stop_body
+            .find("shuttingDown = true")
+            .expect("stopUnsafe must raise the shutdown barrier");
+        let unregister = stop_body
+            .find("unregisterAdapterStateReceiver()")
+            .expect("stopUnsafe must stop listening for Bluetooth state changes");
+        assert!(barrier < unregister);
+
+        let handler = kotlin
+            .find("private fun onAdapterStateChanged(")
+            .expect("the receiver must hand off to onAdapterStateChanged");
+        let lost = kotlin[handler..]
+            .find("AdapterStateTransition.RADIO_LOST ->")
+            .expect("a radio loss must be handled");
+        let drop = kotlin[handler..]
+            .find("dropLinksAfterRadioLoss()")
+            .expect("a radio loss must drop the dead links");
+        assert!(lost < drop);
+    }
+
     /// The buffered-inbound event set agrees across TypeScript, Kotlin and
     /// Swift, and each layer's hold is wired to a flush.
     ///

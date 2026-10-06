@@ -3,7 +3,10 @@ package com.offlineprotocol.ble
 import android.Manifest
 import android.bluetooth.*
 import android.bluetooth.le.*
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.BatteryManager
@@ -1305,6 +1308,7 @@ class BleTransportFacade(
             if (isScanning) {
                 reportBleAvailability(true, "start")
             }
+            registerAdapterStateReceiver()
             
             Log.i(TAG, "BLE transport ready - scanning and advertising active")
             emitDiagnostic(
@@ -1354,6 +1358,7 @@ class BleTransportFacade(
         // maps. The flag is @Volatile, which is sufficient because every
         // reader is a callback that races with a single BLE-thread writer.
         shuttingDown = true
+        unregisterAdapterStateReceiver()
 
         // Stop fragment polling — must happen before clearing queues
         bleHandler.removeCallbacks(fragmentPollingRunnable)
@@ -1687,6 +1692,77 @@ class BleTransportFacade(
     }
     
     /**
+     * The adapter's state broadcasts, delivered on the BLE thread. Without
+     * them the transport learned Bluetooth had gone off only when a later scan
+     * start failed (up to a minute, on the scan watchdog), learned it was back
+     * only on the recovery ladder's next rung (12 to 29 s on two phones), and
+     * never learned of a Bluetooth stack crash at all: the stack restarts in
+     * under a second, the adapter reads enabled again by the next check, and
+     * the GATT server, advertiser and pending connects this app held are gone.
+     * On an Android 13 phone a stack crash left the other phone unable to
+     * reach it until the app restarted. A crash arrives as an ordinary
+     * ON -> TURNING_OFF broadcast, which is what this acts on.
+     */
+    private val adapterStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+            onAdapterStateChanged(
+                intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR),
+            )
+        }
+    }
+    private var adapterStateReceiverRegistered = false
+
+    private fun registerAdapterStateReceiver() {
+        if (adapterStateReceiverRegistered) return
+        val filter = IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.registerReceiver(adapterStateReceiver, filter, null, bleHandler, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                context.registerReceiver(adapterStateReceiver, filter, null, bleHandler)
+            }
+            adapterStateReceiverRegistered = true
+        } catch (e: Exception) {
+            // The watchdog and recovery ladder still cover a plain toggle.
+            Log.w(TAG, "Could not listen for Bluetooth state changes", e)
+        }
+    }
+
+    private fun unregisterAdapterStateReceiver() {
+        if (!adapterStateReceiverRegistered) return
+        adapterStateReceiverRegistered = false
+        try {
+            context.unregisterReceiver(adapterStateReceiver)
+        } catch (e: IllegalArgumentException) {
+            // Already unregistered.
+        }
+    }
+
+    private fun onAdapterStateChanged(adapterState: Int) {
+        if (shuttingDown) return
+        when (AdapterStateTransition.of(adapterState)) {
+            AdapterStateTransition.RADIO_LOST -> {
+                if (!adapterWasOff) dropLinksAfterRadioLoss()
+                adapterWasOff = true
+                // The scan died with the adapter. Follow it locally, so the
+                // recovery starts a new one rather than finding one "running".
+                stopScanning("adapter_off", preserveRecoveryBackoff = true)
+                reportBleAvailability(false, "adapter_off")
+                if (state == TransportState.RUNNING) scheduleBleRecovery()
+            }
+            AdapterStateTransition.RADIO_BACK -> {
+                if (!adapterWasOff || state != TransportState.RUNNING) return
+                Log.i(TAG, "Bluetooth is back: rebuilding scan, GATT server and advertising")
+                emitDiagnostic("info", "Bluetooth is back, rebuilding the transport")
+                cancelBleRecovery()
+                bleHandler.post(bleRecoveryRunnable)
+            }
+            AdapterStateTransition.NONE -> Unit
+        }
+    }
+
+    /**
      * Bluetooth went off under a running transport: report every identified
      * peer lost, then drop the link state, as iOS's dropLinksAfterRadioLoss
      * does. Android delivers no disconnect callback for most of those links,
@@ -1696,8 +1772,8 @@ class BleTransportFacade(
      * one registration per link on every toggle (one phone held five).
      * Peers that come back are found and verified again from scratch.
      *
-     * Runs once per outage, on the BLE thread, where both adapter-off checks
-     * in [startScanning] run.
+     * Runs once per outage, on the BLE thread: from [adapterStateReceiver],
+     * or from the adapter-off checks in [startScanning] if they see it first.
      */
     private fun dropLinksAfterRadioLoss() {
         val peerIds = connections.deviceIds()

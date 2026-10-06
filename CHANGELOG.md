@@ -800,15 +800,22 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   mesh candidates seen in the last five seconds, so a few phones never read
   as dense, and a peer passed over in a crowded mesh is reconsidered after a
   minute. Both platforms make the same choice for the same peer.
-- **Android: Bluetooth switched off and on drops its dead links.** Android
-  delivers no disconnect for most links when the adapter goes off, so the
-  dead links stayed: they counted against the connection cap, kept peers
-  mapped to addresses they no longer use, and each held a GATT client
-  registration (one phone held five stale ones after a session of toggles,
-  against a stack limit of about thirty). A peer probed while its
-  radio was coming back was also cached as "not a mesh device" for five
-  minutes. The transport now reports each peer lost and clears the link
-  state when it sees the adapter off, as iOS already did.
+- **Android: Bluetooth switched off and on, or a Bluetooth stack crash, no
+  longer strands the mesh.** The transport polled the adapter once a minute,
+  so it noticed Bluetooth going off up to a minute late, came back on its
+  recovery ladder (12 to 29 s after Bluetooth returned on two phones), and
+  never noticed a stack crash at all: on an Android 13 phone the stack
+  restarted in under a second and took this app's GATT server, advertiser
+  and pending connect with it, and the other phone could not reach it until
+  the app restarted. It now listens for the adapter's state broadcast, which
+  reports a crash like a toggle. On the way down it reports each peer lost
+  and drops the dead links, which Android delivers no disconnect for and
+  which otherwise counted against the connection cap, kept peers mapped to
+  old addresses, and held GATT client registrations (one phone held five
+  stale ones after a session of toggles). On the way up it rebuilds the
+  scan, GATT server and advertising at once. A peer probed while its radio
+  was coming back is no longer cached as "not a mesh device" for five
+  minutes either.
 
 ### Changed
 
