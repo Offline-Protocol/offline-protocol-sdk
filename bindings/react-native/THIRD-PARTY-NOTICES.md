@@ -41,17 +41,17 @@ upstream source on each crate's page) — the exact versions are listed below.
 
 Used by:
 
-- [offline-protocol 0.27.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-core 0.27.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-data 0.27.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-mls 0.27.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-reliability 0.27.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-router 0.27.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-sealed 0.27.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-services 0.27.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-telemetry-wire 0.27.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-transport 0.27.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
-- [offline-protocol-uniffi 0.27.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol 0.28.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-core 0.28.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-data 0.28.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-mls 0.28.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-reliability 0.28.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-router 0.28.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-sealed 0.28.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-services 0.28.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-telemetry-wire 0.28.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-transport 0.28.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
+- [offline-protocol-uniffi 0.28.0](https://github.com/Offline-Protocol/offline-protocol-sdk)
 
 ```
 GNU AFFERO GENERAL PUBLIC LICENSE
