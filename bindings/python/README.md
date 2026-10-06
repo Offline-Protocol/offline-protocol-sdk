@@ -6,31 +6,33 @@ Python bindings for the Offline Protocol SDK: offline-first mesh networking with
 
 > **Upgrading an existing install?** Read [docs/UPGRADING.md](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/UPGRADING.md)
 > first — `ProtocolManager` now requires an explicit `state_root`, and this
-> release is not safely downgradable.
+> release is not safely downgradable. From 0.28.0, an `InternetManager` you
+> construct yourself needs the `app_id=` keyword; the one `ProtocolManager`
+> builds already has it.
 
 ## Quick Start
 
-### 1. Build the native library
+### 1. Install
 
 ```bash
-cd bindings/python
-bash scripts/build-desktop.sh
+pip install offline-protocol-sdk
 ```
 
-This compiles the Rust core for your platform and generates the FFI bindings. It
-regenerates Swift and Kotlin alongside Python by delegating to the repo-root
-`scripts/generate-bindings.sh` — the three are one artifact set off one UDL, so
-they are never refreshed apart.
+Wheels are published for Python 3.10 or later on:
 
-**Prerequisites:** Rust toolchain, `uniffi-bindgen` (`cargo install uniffi --version 0.30.0 --features cli --locked`).
+| Platform | Wheel tag | Requires |
+|----------|-----------|----------|
+| macOS, Apple Silicon (arm64) | `macosx_14_0_arm64` | macOS 14 or later |
+| Linux x86_64 | `manylinux_2_34_x86_64` | glibc 2.34 or later |
+| Linux aarch64 | `manylinux_2_34_aarch64` | glibc 2.34 or later |
+| Windows x86_64 | `win_amd64` | |
 
-### 2. Install the package
+Each wheel carries the native library, so there is nothing to compile. There
+is no wheel for Intel macOS, for musl Linux such as Alpine, or for an older
+glibc, and no source distribution, so on those hosts pip finds nothing to
+install: [build from source](#building-from-source) instead.
 
-```bash
-pip install -e .
-```
-
-### 3. Use it
+### 2. Use it
 
 ```python
 import asyncio
@@ -41,7 +43,7 @@ from offline_protocol_sdk.offline_protocol import ProtocolConfig, OverflowPolicy
 
 config = ProtocolConfig(
     app_id="my-app",
-    user_id="alice",
+    profile="alice",
     ble_enabled=False,
     wifi_direct_enabled=False,
     internet_enabled=True,
@@ -59,6 +61,9 @@ config = ProtocolConfig(
     overflow_policy=OverflowPolicy.DROP_OLDEST,
 )
 
+# The peer's address: its pm.local_address. A username reaches nobody.
+peer_address = "off1..."
+
 async def main():
     # The installer must remove this application-owned directory on uninstall.
     state_root = Path("/app/install-owned-data/offline-protocol")
@@ -70,7 +75,7 @@ async def main():
         pm.internet.configure(server_url="ws://relay.example.com")
         await pm.internet.start()
 
-        msg_id = pm.send_message("bob", "Hello from Python!")
+        msg_id = pm.send_message(peer_address, "Hello from Python!")
         print(f"Sent: {msg_id}")
 
         # Keep running to receive messages
@@ -78,6 +83,25 @@ async def main():
 
 asyncio.run(main())
 ```
+
+### Building from source
+
+For a host without a wheel, or to work on the binding itself, build the
+native library from a clone of the repository:
+
+```bash
+git clone https://github.com/Offline-Protocol/offline-protocol-sdk
+cd offline-protocol-sdk/bindings/python
+bash scripts/build-desktop.sh
+pip install -e .
+```
+
+`build-desktop.sh` compiles the Rust core for your platform and generates the
+FFI bindings. It regenerates Swift and Kotlin alongside Python by delegating to
+the repo-root `scripts/generate-bindings.sh`: the three are one artifact set
+off one UDL, so they are never refreshed apart.
+
+**Prerequisites:** Rust toolchain, `uniffi-bindgen` (`cargo install uniffi --version 0.30.0 --features cli --locked`).
 
 ### Two hosts without a relay
 
@@ -438,13 +462,13 @@ pip-audit --strict
 
 ## Platform Support
 
-| Target | Architecture | Library |
-|--------|-------------|---------|
-| macOS | Apple Silicon (arm64) | `.dylib` |
-| macOS | Intel (x86_64) | `.dylib` |
-| Linux | x86_64 | `.so` |
-| Linux | aarch64 | `.so` |
-| Windows | x86_64 | `.dll` |
+| Target | Architecture | Library | Wheel on PyPI |
+|--------|-------------|---------|---------------|
+| macOS | Apple Silicon (arm64) | `.dylib` | Yes, macOS 14 or later |
+| macOS | Intel (x86_64) | `.dylib` | No, [build from source](#building-from-source) |
+| Linux | x86_64 | `.so` | Yes, glibc 2.34 or later |
+| Linux | aarch64 | `.so` | Yes, glibc 2.34 or later |
+| Windows | x86_64 | `.dll` | Yes |
 
 ## License
 
