@@ -33,9 +33,11 @@ for bridging:
 
 1. **Every device can forward.** The bias picks among a population that is
    entirely capable, so a wrong pick costs a little redundancy.
-2. **Suppression makes redundancy cheap.** A neighbour that hears someone else
-   carry a frame stands down, so several devices trying is nearly as cheap as
-   one.
+2. **Suppression makes redundancy cheap.** A neighbour that hears a frame
+   from a neighbour leaves that neighbour out of its own fan-out, and one whose
+   neighbours all hold it sends nothing, so several devices trying costs far
+   less than the arithmetic suggests. (This once read "stands down"; a copy
+   cancelling a forward outright could strand a frame, #510.)
 
 Backbone attachment has neither. Most devices structurally *cannot* bridge: no
 Reticulum interface, no fixed power, no stable address. So "everyone can, the

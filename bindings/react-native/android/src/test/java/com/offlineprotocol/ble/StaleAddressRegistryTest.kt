@@ -35,4 +35,75 @@ class StaleAddressRegistryTest {
         registry.removeIdentifiersForAddress("only")
         assertEquals(null, registry.addressForDevice("peerB"))
     }
+
+    @Test
+    fun `a live link at an address that resolved earlier still counts`() {
+        // A hello maps the peer's central-role address last, so the peer's
+        // address is the one our client link may be giving up on. Its server
+        // link at the other address is live, and must keep it from being
+        // reported lost.
+        val registry = MeshConnectionRegistry()
+        registry.setDeviceIdentifier("client-side", "peerC")
+        registry.setDeviceIdentifier("server-side", "peerC")
+        registry.trackServerConnection("server-side")
+        registry.setDeviceIdentifier("client-side", "peerC")
+        assertEquals("client-side", registry.addressForDevice("peerC"))
+
+        assertTrue(registry.hasOtherLiveLink("peerC", excluding = "client-side"))
+
+        registry.removeIdentifiersForAddress("client-side")
+        assertEquals(
+            "the surviving address becomes the peer's address",
+            "server-side",
+            registry.addressForDevice("peerC"),
+        )
+    }
+
+    @Test
+    fun `removing every address of a two-address peer leaves nothing mapped`() {
+        // What eviction does: a peer known at its client-side address and at
+        // the server-side address a hello mapped must lose both, or the one
+        // left behind keeps a link the core was told is gone.
+        val registry = MeshConnectionRegistry()
+        registry.setDeviceIdentifier("client-side", "peerE")
+        registry.setDeviceIdentifier("server-side", "peerE")
+        registry.trackServerConnection("server-side")
+
+        for (address in registry.addressesForDevice("peerE")) {
+            registry.untrackServerConnection(address)
+            registry.removeIdentifiersForAddress(address)
+        }
+
+        assertEquals(emptyList<String>(), registry.addressesForDevice("peerE"))
+        assertEquals(null, registry.addressForDevice("peerE"))
+        assertEquals(0, registry.serverConnectionCount())
+        assertTrue(!registry.hasEstablishedLink("peerE"))
+    }
+
+    @Test
+    fun `deviceIds lists each identified peer once`() {
+        val registry = MeshConnectionRegistry()
+        registry.setDeviceIdentifier("old", "peerA")
+        registry.setDeviceIdentifier("new", "peerA")
+        registry.setDeviceIdentifier("other", "peerB")
+
+        assertEquals(setOf("peerA", "peerB"), registry.deviceIds())
+        registry.clear()
+        assertTrue(registry.deviceIds().isEmpty())
+    }
+
+    @Test
+    fun `an established link at any of a peer's addresses keeps it live`() {
+        // deviceToAddress holds only the address that resolved last, so a
+        // check through it misses a link from the peer's other address.
+        val registry = MeshConnectionRegistry()
+        registry.setDeviceIdentifier("server-side", "peerA")
+        registry.trackServerConnection("server-side")
+        registry.setDeviceIdentifier("client-side", "peerA")
+
+        assertTrue(registry.hasEstablishedLink("peerA"))
+        registry.untrackServerConnection("server-side")
+        assertFalse(registry.hasEstablishedLink("peerA"))
+        assertEquals(setOf("server-side", "client-side"), registry.addressesForDevice("peerA").toSet())
+    }
 }

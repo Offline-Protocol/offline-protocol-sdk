@@ -416,6 +416,19 @@ class RecordingGatt : ShadowBluetoothGatt() {
     @Implementation
     override fun discoverServices(): Boolean = true
 
+    val writes = mutableListOf<Pair<UUID, ByteArray>>()
+    var writeResult = android.bluetooth.BluetoothStatusCodes.SUCCESS
+
+    @Implementation
+    override fun writeCharacteristic(
+        characteristic: BluetoothGattCharacteristic,
+        value: ByteArray,
+        writeType: Int,
+    ): Int {
+        writes += characteristic.uuid to value
+        return writeResult
+    }
+
     @Implementation
     override fun disconnect() { closed = true }
 

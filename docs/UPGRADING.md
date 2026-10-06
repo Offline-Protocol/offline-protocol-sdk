@@ -1,14 +1,14 @@
 # Upgrading
 
 Everything an application team has to change to move off `v0.16.x` and onto the
-current `v0.27.x` line.
+current `v0.28.x` line.
 
 The breaking changes all landed in the **storage-split release**, `v0.17.0` —
 `initialize_mls` changes shape, three config updaters become fallible, and
 several previously-accepted inputs are now rejected at the boundary. Sections
 1–12 below cover that release and are the ones that can stop your build.
 
-Since `v0.17.0` six releases can break a build. `v0.20.0` enables iOS
+Since `v0.17.0` seven releases can break a build. `v0.20.0` enables iOS
 autolinking, so a manual `pod 'MeshSdk'` line left in your `Podfile` now fails
 `pod install` — React Native on iOS only; it is a one-line deletion, and
 [§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) has the
@@ -45,7 +45,13 @@ and it is short: the replacement is one call with two strings. `v0.27.0`
 breaks two things, both narrow: the `offline-protocol-transport` crate drops
 `WIFI_DIRECT_MAX_PAYLOAD_SIZE`, and Python's `BlePeripheral` drops its
 `identity_json` argument
-([§25](#25-behaviour-that-changes-without-a-compile-error-v0270)).
+([§25](#25-behaviour-that-changes-without-a-compile-error-v0270)). `v0.28.0`
+breaks two builds, both narrow: Python's `InternetManager` requires `app_id=`,
+and an exhaustive TypeScript `switch` over `SecurityWarningCode` needs a case
+for the new member. It also breaks one thing at run time: iOS's peer-stream
+slot moves from MultipeerConnectivity to Network framework, so an iPhone on
+`v0.28` does not see one on `v0.27` or earlier over that slot
+([§26](#26-behaviour-that-changes-without-a-compile-error-v0280)).
 
 Otherwise, where a later section documents an
 addition or a behaviour change, it is labelled inline with the release that
@@ -156,6 +162,14 @@ with the relay sends one frame rather than a copy per member.
 carrier instead of Bluetooth LE, and a send every carrier refused as not
 reachable fails as that refusal.
 [§25](#25-behaviour-that-changes-without-a-compile-error-v0270) has the list.
+`v0.28.0` changes defaults and transports more than signatures: the dedup
+window grows to 5000 ids over seven days, `wifiDirect: { enabled: true }` now
+starts that transport in `start()` (on iOS that is the first Local Network
+prompt), the Android module declares the Wi-Fi Direct permissions and stops
+asking for location on Android 13 and later, an Android app that already sets
+`autoAccept: true` starts forming Wi-Fi Direct groups itself, and a key package
+refused by this device's clock is reported as a security warning.
+[§26](#26-behaviour-that-changes-without-a-compile-error-v0280) has the list.
 
 Work through it in order. [§0](#0-before-you-ship-downgrade-is-not-a-rollback)
 is a release-engineering decision, not a code change, and it is the one that
@@ -2389,6 +2403,93 @@ Bluetooth address or a profile label, and drops a link that fails.
 ceiling is the 1 MiB message ceiling, and the framing constants are
 `PEER_STREAM_MAX_FRAME_BYTES`, `PEER_STREAM_LENGTH_PREFIX_LEN` and
 `PEER_STREAM_PREAMBLE_FLOOR`.
+
+---
+
+## 26. Behaviour that changes without a compile error *(v0.28.0)*
+
+Everything here compiles against `v0.27.x` unchanged except the Python
+`InternetManager` call and an exhaustive TypeScript `switch` over
+`SecurityWarningCode`. Each paragraph says what to check.
+
+**iOS: the peer-stream slot runs on Network framework.** The `wifiDirect`
+transport on iOS opens TCP streams over the local network or AWDL instead of
+using MultipeerConnectivity. An iPhone on this release does not find one on
+`v0.27` or earlier over this slot, so upgrade a fleet together or expect the
+two to meet over Bluetooth LE or the relay only. In `Info.plist`,
+`NSBonjourServices` needs `_offlineprotocol._tcp` (the `_udp` entry can go)
+and `NSLocalNetworkUsageDescription` is still required. A denied local-network
+permission is now an `error` diagnostic rather than silence.
+
+**`wifiDirect: { enabled: true }` starts the transport.** `start()` now enables
+it, as it already did internet, Nostr and Reticulum. Before, the setting did
+nothing unless the application also called `enableTransport('wifiDirect')`. On
+iOS this makes the first `start()` show the Local Network prompt; on Android it
+starts Wi-Fi Direct. Remove the setting if you did not mean to run the
+transport, and drop any `enableTransport('wifiDirect')` you added as a
+workaround (calling it again restarts the transport).
+
+**Android: Wi-Fi Direct permissions come from the SDK.** The module now
+declares `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE`, `INTERNET` and
+`NEARBY_WIFI_DEVICES` (with `neverForLocation`), and on Android 13 and later it
+no longer requires a location grant for Wi-Fi Direct. Request
+`NEARBY_WIFI_DEVICES` at runtime on 13+ and `ACCESS_FINE_LOCATION` on 12 and
+lower. If your manifest declares `NEARBY_WIFI_DEVICES` without
+`neverForLocation`, yours wins the merge and location stays required.
+
+**Android can form the Wi-Fi Direct group itself.** With
+`wifiDirect: { enabled: true, autoAccept: true }` on Android 10 and later,
+devices of the same app find each other and join one group with no system
+dialog. It is off by default; without it, a group is still formed in the
+system's Wi-Fi Direct settings. An app that already sets `autoAccept: true`
+(the integration guide's example did, while the option did nothing) starts
+forming groups on upgrade: set it to `false` to keep the old behaviour. The
+group's passphrase is derived from the app id and is not a secret; it keeps
+apps apart, and the identity preamble and end-to-end encryption still protect
+the traffic. `stop()` removes an app-named group this device owns.
+`groupOwnerIntent` is not used and is deprecated.
+
+**A key package refused by this device's clock raises a security warning.**
+`security_warning` with `KEY_PACKAGE_OUTSIDE_VALIDITY_WINDOW`, once per peer,
+when a peer's key package is not valid at this device's time, whether it was
+refused on arrival or on the first send after a restart. Phones that have
+never been online often have the wrong date, and past a 30-day gap no session
+forms between them. A package whose window has already closed is discarded
+like any expired package; one whose window has not started yet is kept.
+Show the user a prompt to check the date and time. The TypeScript
+`SecurityWarningCode` union gains the member.
+
+**`neighbor_lost` means nothing nearby reaches the peer.** It fires once, when
+the last Bluetooth LE or Wi-Fi Direct link to the peer ends. Before, one
+Bluetooth departure could fire it twice, and a peer that left one carrier while
+still linked over the other was reported lost. An app that removed a peer on
+`neighbor_lost` now keeps a reachable one; one that counted the events now
+sees one per departure. Bluetooth switched off, on this phone or by a stack
+restart, ends every Bluetooth link at once, so it then fires for each peer
+nothing else reaches; Android used to report none of them.
+
+**`transport_switched` to Wi-Fi Direct follows a peer, not the layer.** It
+fires when the first Wi-Fi Direct link proves and, to `None`, when the last
+one ends, rather than when the transport starts. To show what DORS routes
+over, follow `dors_transport_selected` / `dors_transport_switched`.
+
+**Dedup keeps 5000 ids for seven days.** `maxTrackedMessages` goes from 2000
+to 5000 and `retentionTimeSecs` from 86400 to 604800. A config that sets the
+old values keeps them, and with them the re-sends a shorter window lets
+through.
+
+**iOS: an overflowing outbound fragment queue is discarded whole.** Both
+outbound queues now drop the whole per-peer queue when full, as Android does,
+rather than their oldest fragments, which split messages. The acknowledgement
+retry and data-sync anti-entropy re-send what is lost.
+
+**Documents replicate only when flushed.** Unchanged behaviour, now stated: an
+edit is stored and sent only when `flush()` or `flushAll()` runs. Flush on a
+short throttle while the user edits, and once more when editing stops.
+
+**Python: `InternetManager` requires `app_id`.** It is keyword-only with no
+default. `ProtocolManager` already passes it; only code that builds an
+`InternetManager` directly needs `app_id=`.
 
 ---
 

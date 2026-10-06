@@ -164,6 +164,17 @@ converge and it is needed most.
 Concurrent media transfers are capped per peer (2), so one large transfer cannot
 starve the link.
 
+**A Bluetooth LE peer with no link left is reported lost within a bound.** On
+Android, once no link to a peer is up (a central connected to our server, or a
+client link of ours whose connect completed, at any address the peer used), it
+is reported lost 15 seconds later unless a link comes back first. Reconnect
+attempts carry on during the grace; once the peer is reported lost, it returns
+through discovery like any other lost peer. A dial still in flight is not a link,
+because a dial to a phone whose Bluetooth is off lasts the stack's whole
+connect timeout. Without the bound, links that closed cleanly kept the peer a
+neighbour until the reconnect backoff gave up, about two minutes, and a peer
+reached only through our server indefinitely.
+
 ## What "sent" means at each layer
 
 This is a recurring source of confusion for application teams:

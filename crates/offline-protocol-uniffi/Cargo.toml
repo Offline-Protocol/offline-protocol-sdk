@@ -53,6 +53,9 @@ offline-protocol = { workspace = true, features = ["test-utils"] }
 # The wire types the FFI tests parse captured uploads back into, so a body
 # the pipe sends is checked against what the ingest binds.
 offline-protocol-telemetry-wire = { workspace = true }
+# The identity assertion's length floor, which the Android Hello bound
+# mirrors and a source guard pins.
+offline-protocol-sealed = { workspace = true }
 
 [build-dependencies]
 uniffi = { version = "0.30", features = ["build"] }

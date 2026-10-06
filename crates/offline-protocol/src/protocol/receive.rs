@@ -428,8 +428,9 @@ impl OfflineProtocol {
         // Route learning is skipped along with the rest, which is deliberate:
         // the copy teaches nothing the first one did not, and the table is not
         // what forwarding decisions are made from. A duplicate we still hold a
-        // pending copy of is *not* absorbed here — standing down for a neighbor
-        // needs the neighbor set — so that case still takes the full path.
+        // pending copy of is *not* absorbed here: it narrows that forward's
+        // fan-out, which `admit` records, so that case still takes the full
+        // path.
         if self
             .mesh_relay
             .absorb_settled_duplicate(&message.id.as_str())
@@ -466,18 +467,8 @@ impl OfflineProtocol {
             return;
         }
 
-        let neighbors = self.transport_manager.mesh_neighbors();
-        let degree = neighbors.len();
-        // Whether we hold the link to the recipient ourselves. At the last hop
-        // no other device can be assumed to have it, so our copy must not be
-        // dropped in favour of a neighbor's.
-        let is_last_hop = neighbors
-            .iter()
-            .any(|n| n.peer_id == message.recipient.as_str());
-        match self
-            .mesh_relay
-            .admit(message, arrival_peer, degree, is_last_hop)
-        {
+        let degree = self.transport_manager.mesh_neighbors().len();
+        match self.mesh_relay.admit(message, arrival_peer, degree) {
             MeshRelayAdmission::Queued => {
                 debug!(
                     message_id = %message.id,
@@ -609,6 +600,9 @@ impl OfflineProtocol {
                 if let Some(peer) = relay.arrival_peer.as_deref() {
                     exclude.push(peer);
                 }
+                // Neighbors that handed us a copy while this waited hold the
+                // frame already (`MeshRelayGovernor::admit`).
+                exclude.extend(relay.heard_from.iter().map(String::as_str));
                 let onward = self.mesh_relay.select_targets(
                     neighbors
                         .iter()
@@ -631,6 +625,25 @@ impl OfflineProtocol {
                 }
             };
             let deliver_direct = targets.first() == Some(&recipient);
+
+            // Every neighbor we could hand it to has handed it to us. This is
+            // the one way a duplicate ends a forward: the frame is not lost,
+            // it is held all around us, and requeueing it would only spend
+            // the next ticks finding the same answer.
+            if targets.is_empty()
+                && !held
+                && !relay.heard_from.is_empty()
+                && neighbors
+                    .iter()
+                    .any(|n| relay.heard_from.iter().any(|peer| peer == &n.peer_id))
+            {
+                debug!(
+                    message_id = %message.id,
+                    "Every onward neighbor already holds this frame"
+                );
+                self.mesh_relay.drop_covered(relay);
+                continue;
+            }
 
             if targets.is_empty() {
                 // Nowhere to hand it right now: we hold no link, or the only

@@ -60,6 +60,7 @@ let package = Package(
             sources: [
                 "AddressDeclarationPolicy.swift",
                 "BleAppTag.swift",
+                "BleDensityPolicy.swift",
                 "BleMessageNotificationPolicy.swift",
                 "BleServiceInstanceSelection.swift",
                 "EncryptionConfigReader.swift",
@@ -116,6 +117,7 @@ let package = Package(
             sources: [
                 "AddressDeclarationPolicyTests.swift",
                 "BleAppTagTests.swift",
+                "BleDensityPolicyTests.swift",
                 "BleMessageNotificationPolicyTests.swift",
                 "BleServiceInstanceSelectionTests.swift",
                 "EncryptionConfigReaderTests.swift",
