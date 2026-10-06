@@ -513,6 +513,14 @@ impl OfflineProtocol {
     }
 
     pub(super) fn send_session_confirmation_probe(&mut self, peer_id: &str, source_event: &str) {
+        // Superseded, not failed: the new probe asks the same question, so
+        // the old one's retry ladder would only stack onto it. Here rather
+        // than in the scan because the Welcome fast path sends one too, and
+        // a probe it replaced would keep its full ladder. Silent, and no
+        // delivery failure is recorded against the carrier.
+        if let Some(previous) = self.confirmation_probe_outstanding.remove(peer_id) {
+            self.forget_outbound_message(&previous);
+        }
         match self.send_internal_message(
             peer_id,
             internal_prefixes::SESSION_CONFIRM_PROBE.to_string(),
@@ -611,15 +619,6 @@ impl OfflineProtocol {
             if due_at > now {
                 continue;
             }
-            // Superseded, not failed: the new probe asks the same question, so
-            // the old one's retry ladder would only stack onto it. Silent, and
-            // no delivery failure is recorded against the carrier.
-            if let Some(previous) = self.confirmation_probe_outstanding.remove(&peer_id) {
-                self.retry_queue.remove(&previous.as_str());
-                self.ack_manager.remove_ack(&previous);
-                self.remove_outbox_entry(&previous);
-            }
-
             self.send_session_confirmation_probe(&peer_id, source_event);
             self.confirmation_probe_due_at.insert(
                 peer_id,

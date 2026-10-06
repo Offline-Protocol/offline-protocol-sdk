@@ -2,8 +2,8 @@
 
 use super::state_crypto::{StateRecordCipher, SEALED_RECORD_OVERHEAD, STATE_RECORD_KEY_BYTES};
 use super::{
-    lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol, OutboxEntry,
-    PeerCapabilities, PendingDecryptRecord, PendingMessage, PendingMessageRecord,
+    internal_prefixes, lifetime_expired, storage_keys, MediaTransferDescriptor, OfflineProtocol,
+    OutboxEntry, PeerCapabilities, PendingDecryptRecord, PendingMessage, PendingMessageRecord,
     ReceivedKeyPackage, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
     DATA_CUSTODY_V1, DATA_GROUP_BLOB_V1, DATA_GROUP_V1, DATA_INTEREST_V1, DATA_MEDIA_V1,
     DATA_SYNC_V1, DATA_TOMBSTONE_V1, MAX_BLOCKED_USERS, MAX_KEY_PACKAGE_SENT_TO,
@@ -3992,6 +3992,20 @@ impl OfflineProtocol {
             // slipped in (e.g. from an older build) so it can't be resurrected.
             if Self::is_media_outbox_message(&entry.message) {
                 warn!(message_id = %message_id, "Dropping persisted media outbox entry");
+                budget.claim();
+                self.delete_outbox_key(&message_id);
+                continue;
+            }
+
+            // A confirmation probe carries no user data, and the one sent
+            // before the restart is not in `confirmation_probe_outstanding`,
+            // so the next probe could not supersede it and it would keep a
+            // full retry ladder. The next scan asks the same question.
+            if entry
+                .message
+                .content
+                .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
+            {
                 budget.claim();
                 self.delete_outbox_key(&message_id);
                 continue;

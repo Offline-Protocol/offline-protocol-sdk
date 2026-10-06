@@ -40965,13 +40965,19 @@ fn an_unanswered_confirmation_probe_supersedes_the_last_one() {
         );
     };
 
+    // The scan and the Welcome fast path (`on_transport_send_confirmed`)
+    // both probe, interleaved: either may supersede the other's probe.
     handle.clear_sent_messages();
-    for _ in 0..6 {
-        make_due(&mut alice);
-        alice.kick_pending_session_reconciliation("test");
+    for round in 0..6 {
+        if round % 2 == 0 {
+            make_due(&mut alice);
+            alice.kick_pending_session_reconciliation("test");
+        } else {
+            alice.send_session_confirmation_probe(&id("bob").to_string(), "transport_confirmed");
+        }
     }
     let sent = probes(&handle);
-    assert_eq!(sent.len(), 6, "every due scan still probes");
+    assert_eq!(sent.len(), 6, "every due scan and fast path still probes");
 
     let outstanding: Vec<_> = alice.outbox.keys().filter(|id| sent.contains(id)).collect();
     assert_eq!(
@@ -40979,9 +40985,50 @@ fn an_unanswered_confirmation_probe_supersedes_the_last_one() {
         vec![sent.last().unwrap()],
         "only the latest probe waits in the outbox; each superseded the last"
     );
-    assert!(
-        !alice.retry_queue.contains(&sent[0].as_str()),
-        "a superseded probe keeps no retry ladder"
+    for superseded in &sent[..sent.len() - 1] {
+        assert!(
+            !alice.retry_queue.contains(&superseded.as_str()),
+            "a superseded probe keeps no retry ladder"
+        );
+        assert!(
+            !alice.ack_manager.is_waiting_for_ack(superseded),
+            "a superseded probe's ACK timeout would re-queue it"
+        );
+    }
+}
+
+/// A probe persisted before a restart is not in
+/// `confirmation_probe_outstanding`, so no later probe could supersede it.
+/// Restore drops it: it carries no user data, and the next scan asks again.
+#[test]
+fn a_persisted_confirmation_probe_is_not_restored() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let entry = |message: Message| OutboxEntry {
+        message,
+        attempt_count: 1,
+        first_sent_at: chrono::Utc::now(),
+        last_sent_at: chrono::Utc::now(),
+        last_transport: None,
+        reseal: None,
+        relay_pushed: false,
+    };
+    let probe = test_message("bob", internal_prefixes::SESSION_CONFIRM_PROBE);
+    let real = test_message("bob", "hello");
+    let real_id = real.id.clone();
+    store_outbox_entry(&storage, &entry(probe));
+    store_outbox_entry(&storage, &entry(real));
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+
+    let restored: Vec<_> = protocol.outbox_messages().map(|m| m.id.clone()).collect();
+    assert_eq!(restored, vec![real_id.clone()]);
+    assert_eq!(
+        storage.list_keys(storage_keys::OUTBOX).unwrap(),
+        vec![real_id.as_str().to_string()],
+        "the probe's record is deleted, not left to be restored next launch"
     );
 }
 

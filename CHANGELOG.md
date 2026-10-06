@@ -389,8 +389,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   the outbox hit its 500-entry cap, eviction failed the user's own messages
   with `Outbox capacity exceeded`. Seen on a device test between an Android and
   an iPhone, offline over BLE. Each new probe now supersedes the last, quietly
-  and without counting against the carrier, so a peer holds one probe in the
-  outbox and is still probed on the same cadence.
+  and without counting against the carrier, whether the periodic scan or the
+  Welcome fast path sent it, and a probe persisted before a restart is not
+  restored. A peer holds one probe in the outbox and is still probed on the
+  same cadence.
 
 - **A key package refused by this device's clock is reported.** A peer's key
   package is valid from an hour before it was minted until 30 days after,

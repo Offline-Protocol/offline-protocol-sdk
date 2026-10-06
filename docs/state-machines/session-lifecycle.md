@@ -93,6 +93,23 @@ re-enters the desync path. Repeating the reset flag would tear down a
 replacement session whose Welcome is in flight, so it belongs with the
 split-session work rather than here.
 
+### An unconfirmed session holds one probe
+
+An unconfirmed session is probed on a fixed cadence, and **a peer holds at most
+one probe in the outbox**: each new probe supersedes the last rather than
+stacking its own retry ladder on top. The cadence only backs off on a relay
+`unreachable` verdict, which a relay that pushes to offline users or a mesh-only
+link never produces, so stacked probes once filled the outbox and capacity
+eviction failed real messages.
+
+The supersede lives in the one function that sends a probe, because two paths
+call it: the periodic scan and the fast path taken when the transport confirms
+a Welcome went out. A supersede in the scan alone left the fast path's probe
+with its full ladder. Superseding is not a delivery failure and is not counted
+against the carrier. A probe is not restored after a restart either: the new
+process does not know which probe was the last, so a restored one could never
+be superseded, and the next scan asks the same question.
+
 ### Both-create convergence
 
 Both peers can create a session simultaneously. The tiebreaker orders the two
@@ -114,14 +131,6 @@ or its acknowledgement confirms too. Successful decrypt is the trigger added on
 top so that the one side no other trigger can reach, the both-create owner, is
 still covered. Only that owner, waiting on the adopt path, depends on decrypt
 alone.
-
-An unconfirmed session is probed on a fixed cadence, and **a peer holds at most
-one probe in the outbox**: each new probe supersedes the last rather than
-stacking its own retry ladder on top. The cadence only backs off on a relay
-`unreachable` verdict, which a relay that pushes to offline users or a mesh-only
-link never produces, so stacked probes once filled the outbox and capacity
-eviction failed real messages. Superseding is not a delivery failure and is not
-counted against the carrier.
 
 The drain is downstream of the confirmation **transition**, not of decryption as
 such: a decrypt on a session that is already confirmed does not re-run it.

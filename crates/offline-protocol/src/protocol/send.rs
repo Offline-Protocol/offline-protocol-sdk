@@ -3283,6 +3283,20 @@ impl OfflineProtocol {
         self.media_outbox.remove(message_id)
     }
 
+    /// Takes `message_id` out of the three places that can send it again:
+    /// the retry queue, the pending-ACK tracker and the outbox. One without
+    /// the others resurrects it (see [`Self::retire_undeliverable_message`]).
+    /// No failure is recorded against the carrier: that is the give-up
+    /// path's, and a message withdrawn for being superseded did not fail.
+    pub(super) fn forget_outbound_message(
+        &mut self,
+        message_id: &MessageId,
+    ) -> Option<OutboxEntry> {
+        self.retry_queue.remove(&message_id.as_str());
+        self.ack_manager.remove_ack(message_id);
+        self.remove_outbox_entry(message_id)
+    }
+
     /// Takes a message this device has given up on out of everything that
     /// could send it again, returning its outbox entry if it still had one.
     ///
@@ -3307,10 +3321,8 @@ impl OfflineProtocol {
         message_id: &MessageId,
         media_reason: &str,
     ) -> Option<OutboxEntry> {
-        self.retry_queue.remove(&message_id.as_str());
-        self.ack_manager.remove_ack(message_id);
         self.handle_outbound_media_chunk_failed(message_id, media_reason);
-        let entry = self.remove_outbox_entry(message_id);
+        let entry = self.forget_outbound_message(message_id);
         if let Some(transport) = entry.as_ref().and_then(|entry| entry.last_transport) {
             self.transport_manager.record_delivery_failure(transport);
         }
