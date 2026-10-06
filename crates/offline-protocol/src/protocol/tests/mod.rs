@@ -40217,6 +40217,231 @@ fn the_ratchet_survives_a_restart() {
     );
 }
 
+/// A peer's key package whose window this device's clock is outside of
+/// blocks every session with that peer, and used to say so only in a debug
+/// line: two offline phones a year apart sat on a pending connection request
+/// with nothing to tell either user to check the date. It is now reported
+/// under its own code, once per peer however often the session is retried.
+#[test]
+fn a_key_package_outside_its_window_by_our_clock_is_reported_once_per_peer() {
+    let mut alice = protocol_with_mls("alice");
+    let warnings: Arc<Mutex<Vec<(String, SecurityWarningCode)>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let sink = Arc::clone(&warnings);
+        alice.on_event(move |e| {
+            if let Event::SecurityWarning {
+                peer_id,
+                reason_code,
+                ..
+            } = e
+            {
+                sink.lock().unwrap().push((peer_id, reason_code));
+            }
+        });
+    }
+
+    // Bob's clock runs a year ahead of Alice's.
+    let now = Utc::now().timestamp() as u64;
+    let year = 365 * 24 * 3600;
+    let bob = id("bob");
+    let bytes = offline_protocol_mls::MlsManager::key_package_with_window_for_testing(
+        &bob,
+        now + year - 3600,
+        now + year + 30 * 24 * 3600,
+    )
+    .unwrap();
+    alice.pending_key_packages.insert(
+        bob.clone(),
+        ReceivedKeyPackage {
+            key_package_data: bytes,
+            local_expires_at_ms: u64::MAX,
+        },
+    );
+
+    for _ in 0..3 {
+        let err = alice
+            .establish_secure_session(&bob)
+            .expect_err("no session can form from a package that is not valid yet");
+        assert!(
+            matches!(
+                err,
+                Error::Mls(
+                    offline_protocol_mls::MlsError::KeyPackageOutsideValidityWindow {
+                        expired: false
+                    }
+                )
+            ),
+            "refused for the wrong reason: {err:?}"
+        );
+    }
+
+    let seen = warnings.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![(
+            bob.clone(),
+            SecurityWarningCode::KeyPackageOutsideValidityWindow
+        )],
+        "exactly one warning naming the peer, whatever the retry count"
+    );
+    assert!(
+        alice.has_pending_key_package(&bob),
+        "a window that has not started becomes valid once the clocks agree, so \
+         the package is kept"
+    );
+}
+
+/// Collects `(peer_id, code, reason)` for every security warning `protocol`
+/// raises.
+fn collect_security_warnings(
+    protocol: &mut OfflineProtocol,
+) -> Arc<Mutex<Vec<(String, SecurityWarningCode, String)>>> {
+    let warnings = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&warnings);
+    protocol.on_event(move |e| {
+        if let Event::SecurityWarning {
+            peer_id,
+            reason_code,
+            reason,
+        } = e
+        {
+            sink.lock().unwrap().push((peer_id, reason_code, reason));
+        }
+    });
+    warnings
+}
+
+/// Places a key package for `peer` whose window runs from `not_before` to
+/// `not_after` in `protocol`'s pending map, as a frame that arrived would.
+fn insert_pending_key_package_with_window(
+    protocol: &mut OfflineProtocol,
+    peer: &str,
+    not_before: u64,
+    not_after: u64,
+) {
+    let bytes = offline_protocol_mls::MlsManager::key_package_with_window_for_testing(
+        peer, not_before, not_after,
+    )
+    .unwrap();
+    let pkg = ReceivedKeyPackage {
+        key_package_data: bytes,
+        local_expires_at_ms: u64::MAX,
+    };
+    protocol.persist_peer_key_package(peer, &pkg);
+    protocol.pending_key_packages.insert(peer.to_string(), pkg);
+}
+
+/// The send path imports a pending package through its own route, and that
+/// route is the one taken on the first send after a restart (the warning
+/// throttle is in memory, the package is restored from storage) or whenever
+/// `auto_key_exchange` is off. Reported only on the arrival route, the message
+/// queued "anyway" and the app heard nothing: the failure the code exists for.
+#[test]
+fn a_send_reports_a_key_package_outside_its_window_once() {
+    let mut config = create_test_config_for_user("alice");
+    config.encryption.auto_key_exchange = false;
+    // The stock default: a send to a peer with no session queues behind
+    // establishment and kicks it, rather than going out in the clear.
+    config.encryption.require_encryption = true;
+    config.encryption.store_pending = true;
+    let mut alice = OfflineProtocol::new(config).unwrap();
+    alice
+        .initialize_mls_for_test(Arc::new(crate::mls::InMemoryStorage::new()))
+        .unwrap();
+    alice.start().unwrap();
+    let warnings = collect_security_warnings(&mut alice);
+
+    let now = Utc::now().timestamp() as u64;
+    let year = 365 * 24 * 3600;
+    let bob = id("bob");
+    insert_pending_key_package_with_window(
+        &mut alice,
+        &bob,
+        now + year - 3600,
+        now + year + 30 * 24 * 3600,
+    );
+
+    for _ in 0..3 {
+        alice
+            .send_message(&bob, "hello", None, None::<String>)
+            .expect("the message queues behind establishment");
+    }
+
+    let seen: Vec<_> = warnings
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(peer, code, _)| (peer.clone(), *code))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![(
+            bob.clone(),
+            SecurityWarningCode::KeyPackageOutsideValidityWindow
+        )],
+        "the send path reports the refusal, once however many sends retry it"
+    );
+    assert!(alice.has_pending_key_package(&bob));
+}
+
+/// A window that has already closed is not necessarily a clock: a relay can
+/// hold a package for days, and the cached expiry is anchored to when the
+/// frame arrived. So it is reported without telling the user their clock is
+/// wrong, and discarded like any expired package, rather than kept to fail
+/// every attempt until the cached expiry.
+#[test]
+fn a_key_package_whose_window_closed_is_reported_and_discarded() {
+    let mut alice = protocol_with_mls("alice");
+    let warnings = collect_security_warnings(&mut alice);
+
+    let now = Utc::now().timestamp() as u64;
+    let day = 24 * 3600;
+    let bob = id("bob");
+    insert_pending_key_package_with_window(&mut alice, &bob, now - 60 * day, now - 30 * day);
+    assert!(
+        alice.load_peer_key_package_from_storage(&bob).is_some(),
+        "negative control: the package starts out persisted"
+    );
+    let err = alice
+        .establish_secure_session(&bob)
+        .expect_err("no session can form from a package whose window closed");
+    assert!(
+        matches!(
+            err,
+            Error::Mls(
+                offline_protocol_mls::MlsError::KeyPackageOutsideValidityWindow { expired: true }
+            )
+        ),
+        "refused for the wrong reason: {err:?}"
+    );
+
+    assert!(
+        !alice.has_pending_key_package(&bob),
+        "a closed window never reopens on a correct clock, so the package goes"
+    );
+    assert!(
+        alice.load_peer_key_package_from_storage(&bob).is_none(),
+        "and its durable copy with it, or the next launch restores it"
+    );
+    let seen = warnings.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "one warning: {seen:?}");
+    let (peer, code, reason) = &seen[0];
+    assert_eq!(
+        (peer, *code),
+        (&bob, SecurityWarningCode::KeyPackageOutsideValidityWindow)
+    );
+    assert!(
+        reason.contains("older than its 30-day window"),
+        "the reason names the stale package, not only the clock: {reason}"
+    );
+
+    // Once gone, the next attempt is plain "not ready", not the same refusal.
+    assert!(matches!(
+        alice.establish_secure_session(&bob),
+        Err(Error::SessionNotReady(_))
+    ));
+}
+
 /// The refusal is reported under its own code, so an integrator can tell a
 /// clock fault from the signature failures it would otherwise be filed under.
 #[test]

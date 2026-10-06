@@ -103,14 +103,23 @@ Add to `AndroidManifest.xml`:
 <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
 <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
-<!-- WiFi Direct -->
-<uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-<uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
-<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
-
-<!-- Internet -->
-<uses-permission android:name="android.permission.INTERNET" />
 ```
+
+Wi-Fi Direct and the internet need nothing in your manifest: the SDK's own
+manifest declares `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE`, `INTERNET` and
+`NEARBY_WIFI_DEVICES`, and the build merges them into your app. It declares
+`NEARBY_WIFI_DEVICES` with `android:usesPermissionFlags="neverForLocation"`,
+and that flag reaches your merged manifest too: the transport derives no
+location from Wi-Fi, so on Android 13+ it needs `NEARBY_WIFI_DEVICES` alone.
+Request it at runtime before `start()`. On Android 12 and lower, request
+`ACCESS_FINE_LOCATION`, which peer discovery needs there.
+
+If your app does derive location from Wi-Fi scans, it must not inherit that
+assertion. Replace the declaration in your manifest with
+`tools:node="replace"` and no `usesPermissionFlags`, and also hold
+`ACCESS_FINE_LOCATION` on Android 13+: the SDK checks only
+`NEARBY_WIFI_DEVICES` there, so without the location grant peer discovery
+fails rather than the transport reporting itself unavailable.
 
 ---
 
@@ -512,8 +521,8 @@ interface TransportsConfig {
   wifiDirect?: {
     enabled: boolean;           // default: false (Android only)
     deviceName?: string;
-    autoAccept?: boolean;
-    groupOwnerIntent?: number;  // 0-15
+    autoAccept?: boolean;       // Android 10+: form the group without the system settings
+    groupOwnerIntent?: number;  // deprecated, not used
   };
   reticulum?: {
     enabled: boolean;           // default: false (requires external daemon)

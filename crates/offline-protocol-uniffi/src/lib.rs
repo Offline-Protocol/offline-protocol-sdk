@@ -4196,7 +4196,7 @@ impl OfflineProtocol {
     /// BLE: Peer lost
     pub fn ble_peer_lost(&self, peer_id: String) -> Result<(), ProtocolError> {
         let mut ble_state = self.lock_ble()?;
-        ble_state.peers.remove(&peer_id);
+        let was_known = ble_state.peers.remove(&peer_id).is_some();
         ble_state.peer_count = ble_state.peers.len() as u32;
         drop(ble_state);
 
@@ -4204,6 +4204,15 @@ impl OfflineProtocol {
         self.with_ble_transport_fallible(|ble_transport| {
             ble_transport.on_peer_lost(&peer_id);
         })?;
+
+        // Reported once, and only when the peer is out of reach. Android
+        // reports a peer lost once per stale Bluetooth address it gives up on,
+        // so one departure arrived as two `neighbor_lost`; and a peer still
+        // linked over Wi-Fi Direct is not gone, so telling the core and the
+        // app it was dropped a reachable neighbour from both.
+        if !was_known || self.peer_linked_elsewhere(&peer_id, CoreTransportType::BLE) {
+            return Ok(());
+        }
 
         // Notify the core protocol of neighbor loss
         {
@@ -4221,6 +4230,13 @@ impl OfflineProtocol {
     }
 
     /// BLE: Status changed
+    ///
+    /// Unavailable means no Bluetooth LE link survives: the radio went off or
+    /// the platform stopped the transport, which drops its peers on that edge.
+    /// No per-peer loss is guaranteed for those links (Android gets no
+    /// disconnect callback when the adapter goes off), so each peer is
+    /// reported lost here, once, unless Wi-Fi Direct still reaches it. A
+    /// platform that reports its peers lost first, as iOS does, leaves none.
     pub fn ble_status_changed(&self, is_available: bool) -> Result<(), ProtocolError> {
         // Update the BLE transport status based on platform availability
         let new_status = if is_available {
@@ -4231,6 +4247,29 @@ impl OfflineProtocol {
         self.with_transport_fallible(CoreTransportType::BLE, |transport| {
             transport.on_status_changed(new_status);
         })?;
+        if is_available {
+            return Ok(());
+        }
+
+        // Left in place, a peer from before the radio went off kept counting
+        // as linked over Bluetooth, so its later Wi-Fi Direct loss was never
+        // reported and the app listed a neighbour nothing could reach.
+        let dropped: Vec<String> = {
+            let mut ble_state = self.lock_ble()?;
+            ble_state.peer_count = 0;
+            ble_state
+                .peers
+                .drain()
+                .map(|(peer_id, _)| peer_id)
+                .collect()
+        };
+        for peer_id in dropped {
+            if self.peer_linked_elsewhere(&peer_id, CoreTransportType::BLE) {
+                continue;
+            }
+            self.lock_inner()?.on_neighbor_lost(&peer_id);
+            self.emit_event(CoreEvent::NeighborLost { peer_id });
+        }
 
         Ok(())
     }
@@ -4876,27 +4915,86 @@ impl OfflineProtocol {
         } else {
             offline_protocol_transport::TransportStatus::Disconnected
         };
-        self.with_transport_fallible(CoreTransportType::WiFiDirect, |transport| {
-            transport.on_status_changed(new_status);
-        })?;
+        // The links visible before and after, read under the one lock that
+        // flips the status. Leaving Available clears every link silently, so
+        // `before` is also exactly the set this flip ends.
+        let (ended, after) = self
+            .with_transport_fallible(CoreTransportType::WiFiDirect, |transport| {
+                let before = transport.connected_peers();
+                transport.on_status_changed(new_status);
+                (before, transport.connected_peers().len())
+            })?
+            .unwrap_or_default();
 
-        // Emit connection event
-        let event = if is_connected {
-            CoreEvent::TransportSwitched {
-                from: None,
-                to: "WiFiDirect".to_string(),
-                reason: "Connected to WiFi Direct peer group".to_string(),
+        // The layer itself is not a switch: a platform manager brings it up
+        // at start whether or not any peer is there, and announcing that as
+        // "connected to a peer group" told every app Wi-Fi Direct was
+        // carrying traffic while every send went over Bluetooth LE. Only the
+        // links it hides or reveals move the edge.
+        self.emit_wifi_direct_switch(ended.len(), after);
+
+        // Not every platform ends its streams before the layer: iOS flips it
+        // on backgrounding and the OS kills the streams later, so a link this
+        // flip cleared is reported lost here, once. The stream's own late end
+        // then finds no link and adds nothing (wifi_direct_peer_disconnected).
+        if after == 0 {
+            for link in ended {
+                if self.peer_linked_elsewhere(&link.peer_id, CoreTransportType::WiFiDirect) {
+                    continue;
+                }
+                self.lock_inner()?.on_neighbor_lost(&link.peer_id);
+                self.emit_event(CoreEvent::NeighborLost {
+                    peer_id: link.peer_id,
+                });
             }
-        } else {
-            CoreEvent::TransportSwitched {
-                from: Some("WiFiDirect".to_string()),
-                to: "None".to_string(),
-                reason: "Disconnected from WiFi Direct peer group".to_string(),
-            }
-        };
-        self.emit_event(event);
+        }
 
         Ok(())
+    }
+
+    /// Emits `transport_switched` on the Wi-Fi Direct carrier edge: from no
+    /// visible link to some, and from some to none.
+    ///
+    /// The one place the edge is decided. A link counts while the layer is up
+    /// (`Transport::connected_peers`), so a link proved while the layer is
+    /// down switches when the layer comes up, and a layer going down with
+    /// links held switches once, not once per late stream end.
+    fn emit_wifi_direct_switch(&self, before: usize, after: usize) {
+        let event = match (before, after) {
+            (0, 1..) => CoreEvent::TransportSwitched {
+                from: None,
+                to: "WiFiDirect".to_string(),
+                reason: "Connected to a Wi-Fi Direct peer".to_string(),
+            },
+            (1.., 0) => CoreEvent::TransportSwitched {
+                from: Some("WiFiDirect".to_string()),
+                to: "None".to_string(),
+                reason: "No Wi-Fi Direct peer is connected".to_string(),
+            },
+            _ => return,
+        };
+        self.emit_event(event);
+    }
+
+    /// Whether a mesh carrier other than `except` still links to `peer_id`.
+    ///
+    /// A neighbour is lost when nothing nearby reaches it any more, not when
+    /// one of two carriers drops it.
+    fn peer_linked_elsewhere(&self, peer_id: &str, except: CoreTransportType) -> bool {
+        let on_ble = except != CoreTransportType::BLE
+            && recover_mutex(&self.ble_state, "ble_state")
+                .peers
+                .contains_key(peer_id);
+        let on_wifi_direct = except != CoreTransportType::WiFiDirect
+            && self
+                .with_transport(CoreTransportType::WiFiDirect, |transport| {
+                    transport
+                        .connected_peers()
+                        .iter()
+                        .any(|link| link.peer_id == peer_id)
+                })
+                .unwrap_or(false);
+        on_ble || on_wifi_direct
     }
 
     /// Peer stream: one frame body arrived on the stream that proved
@@ -4978,9 +5076,14 @@ impl OfflineProtocol {
 
         // Register the link with the transport so it can be addressed directly,
         // mirroring what ble_peer_discovered does for BLE.
-        self.with_wifi_direct_transport_fallible(|wifi_transport| {
-            wifi_transport.on_peer_connected(peer_id.clone());
-        })?;
+        let (before, after) = self
+            .with_wifi_direct_transport_fallible(|wifi_transport| {
+                let before = wifi_transport.connected_peers().len();
+                wifi_transport.on_peer_connected(peer_id.clone());
+                (before, wifi_transport.connected_peers().len())
+            })?
+            .unwrap_or_default();
+        self.emit_wifi_direct_switch(before, after);
 
         self.notify_neighbor_reachable(&peer_id, "WiFiDirect", None)
     }
@@ -5001,9 +5104,21 @@ impl OfflineProtocol {
 
         // Drop the link from the transport so it stops being offered as an
         // addressable neighbor.
-        self.with_wifi_direct_transport_fallible(|wifi_transport| {
-            wifi_transport.on_peer_disconnected(&peer_id);
-        })?;
+        let (before, held, after) = self
+            .with_wifi_direct_transport_fallible(|wifi_transport| {
+                let before = wifi_transport.connected_peers().len();
+                let held = wifi_transport.on_peer_disconnected(&peer_id);
+                (before, held, wifi_transport.connected_peers().len())
+            })?
+            .unwrap_or_default();
+        self.emit_wifi_direct_switch(before, after);
+
+        // Reported once, and only when the peer is out of reach. A link the
+        // layer already ended was reported by wifi_direct_status_changed, and
+        // a peer still linked over Bluetooth LE is not gone (see ble_peer_lost).
+        if !held || self.peer_linked_elsewhere(&peer_id, CoreTransportType::WiFiDirect) {
+            return Ok(());
+        }
 
         // Notify the core protocol of neighbor loss, matching ble_peer_lost —
         // WiFi Direct is the only other carrier with an explicit disconnect
@@ -10016,6 +10131,330 @@ mod tests {
                 .iter()
                 .any(|e| e.contains("neighbor_lost") && e.contains("wifi-peer")),
             "WiFi Direct disconnect must still emit NeighborLost"
+        );
+    }
+
+    /// Android gives up on each stale Bluetooth address of one peer
+    /// separately, and each give-up reported the peer lost: two
+    /// `neighbor_lost` for one departure, measured on two phones.
+    #[test]
+    fn test_ble_peer_lost_twice_reports_one_neighbor_lost() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+        protocol
+            .ble_peer_discovered("ble-peer".to_string(), -60)
+            .unwrap();
+        drained_events(&protocol);
+
+        protocol.ble_peer_lost("ble-peer".to_string()).unwrap();
+        protocol.ble_peer_lost("ble-peer".to_string()).unwrap();
+
+        let lost = drained_events(&protocol)
+            .iter()
+            .filter(|e| e.contains("neighbor_lost") && e.contains("ble-peer"))
+            .count();
+        assert_eq!(lost, 1, "one departure is one neighbor_lost");
+    }
+
+    /// A peer that leaves the Wi-Fi Direct group but is still linked over
+    /// Bluetooth LE is still a neighbour. Reporting it lost made the demo app
+    /// drop a peer it could reach, and cleared core discovery tracking for it.
+    #[test]
+    fn test_wifi_direct_loss_with_a_ble_link_is_not_a_lost_neighbor() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+        // As a platform manager does at start, before any stream proves.
+        protocol.wifi_direct_status_changed(true).unwrap();
+        protocol
+            .ble_peer_discovered("both".to_string(), -60)
+            .unwrap();
+        protocol
+            .wifi_direct_peer_connected("both".to_string())
+            .unwrap();
+        drained_events(&protocol);
+
+        protocol
+            .wifi_direct_peer_disconnected("both".to_string())
+            .unwrap();
+        assert!(
+            !drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("neighbor_lost")),
+            "still reachable over Bluetooth LE"
+        );
+        assert!(protocol.lock_inner().unwrap().is_known_peer("both"));
+
+        protocol.ble_peer_lost("both".to_string()).unwrap();
+        assert!(
+            drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("neighbor_lost") && e.contains("both")),
+            "the last carrier going is the loss"
+        );
+    }
+
+    /// The mirror case: Bluetooth LE drops a peer the Wi-Fi Direct slot
+    /// still holds a stream to.
+    #[test]
+    fn test_ble_loss_with_a_wifi_direct_link_is_not_a_lost_neighbor() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+        // As a platform manager does at start, before any stream proves.
+        protocol.wifi_direct_status_changed(true).unwrap();
+        protocol
+            .ble_peer_discovered("both".to_string(), -60)
+            .unwrap();
+        protocol
+            .wifi_direct_peer_connected("both".to_string())
+            .unwrap();
+        drained_events(&protocol);
+
+        protocol.ble_peer_lost("both".to_string()).unwrap();
+        assert!(
+            !drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("neighbor_lost")),
+            "still reachable over Wi-Fi Direct"
+        );
+    }
+
+    /// Bluetooth switched off under a running app: Android reports the
+    /// adapter unavailable but no per-peer loss. The peer must be reported
+    /// lost then, and once only, even when the platform reports it later.
+    #[test]
+    fn test_ble_unavailable_reports_its_peers_lost_once() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+        protocol.ble_status_changed(true).unwrap();
+        protocol
+            .ble_peer_discovered("ble-peer".to_string(), -60)
+            .unwrap();
+        drained_events(&protocol);
+
+        protocol.ble_status_changed(false).unwrap();
+        let lost = drained_events(&protocol)
+            .iter()
+            .filter(|e| e.contains("neighbor_lost") && e.contains("ble-peer"))
+            .count();
+        assert_eq!(lost, 1, "the radio going off is the loss");
+        assert!(!protocol.lock_inner().unwrap().is_known_peer("ble-peer"));
+
+        // A late per-peer report from the platform adds nothing.
+        protocol.ble_peer_lost("ble-peer".to_string()).unwrap();
+        assert!(
+            !drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("neighbor_lost")),
+            "reported once"
+        );
+    }
+
+    /// The two phones' case: Bluetooth went off while both carriers linked
+    /// the peer, then Wi-Fi Direct dropped. The peer counted as linked over
+    /// Bluetooth from before the radio went off, so neither loss was ever
+    /// reported and the app kept a neighbour nothing reached.
+    #[test]
+    fn test_wifi_direct_loss_after_bluetooth_went_off_is_a_lost_neighbor() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+        protocol.ble_status_changed(true).unwrap();
+        protocol.wifi_direct_status_changed(true).unwrap();
+        protocol
+            .ble_peer_discovered("both".to_string(), -60)
+            .unwrap();
+        protocol
+            .wifi_direct_peer_connected("both".to_string())
+            .unwrap();
+        drained_events(&protocol);
+
+        protocol.ble_status_changed(false).unwrap();
+        assert!(
+            !drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("neighbor_lost")),
+            "still reachable over Wi-Fi Direct"
+        );
+
+        protocol
+            .wifi_direct_peer_disconnected("both".to_string())
+            .unwrap();
+        assert!(
+            drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("neighbor_lost") && e.contains("both")),
+            "nothing reaches it any more"
+        );
+        assert!(!protocol.lock_inner().unwrap().is_known_peer("both"));
+    }
+
+    /// `transport_switched` to Wi-Fi Direct follows the first proved link,
+    /// not the layer coming up: the layer starts with the manager, peer or
+    /// no peer, and the old event told apps Wi-Fi Direct was carrying
+    /// traffic while every send went over Bluetooth LE.
+    #[test]
+    fn test_wifi_direct_transport_switched_follows_links_not_the_layer() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+        drained_events(&protocol);
+
+        protocol.wifi_direct_status_changed(true).unwrap();
+        assert!(
+            !drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("transport_switched")),
+            "the layer coming up is not a switch"
+        );
+
+        protocol
+            .wifi_direct_peer_connected("a".to_string())
+            .unwrap();
+        protocol
+            .wifi_direct_peer_connected("b".to_string())
+            .unwrap();
+        let switched: Vec<String> = drained_events(&protocol)
+            .into_iter()
+            .filter(|e| e.contains("transport_switched"))
+            .collect();
+        assert_eq!(
+            switched.len(),
+            1,
+            "one switch for the first link: {switched:?}"
+        );
+        assert!(switched[0].contains("WiFiDirect"));
+
+        protocol
+            .wifi_direct_peer_disconnected("a".to_string())
+            .unwrap();
+        assert!(
+            !drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("transport_switched")),
+            "a link remains"
+        );
+        protocol
+            .wifi_direct_peer_disconnected("b".to_string())
+            .unwrap();
+        assert!(
+            drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("transport_switched") && e.contains("\"to\":\"None\"")),
+            "the last link going is the switch away"
+        );
+    }
+
+    /// iOS flips the layer down when the app backgrounds, before the OS kills
+    /// the streams, so each stream's own end arrives after the flip. The flip
+    /// is the switch away and the loss, once; the late ends add nothing. Each
+    /// late end used to emit its own switch to `None`, and the flip none.
+    #[test]
+    fn test_wifi_direct_layer_down_before_its_streams_end_reports_once() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+        protocol.wifi_direct_status_changed(true).unwrap();
+        protocol.ble_status_changed(true).unwrap();
+        protocol
+            .ble_peer_discovered("both".to_string(), -60)
+            .unwrap();
+        for peer in ["a", "b", "both"] {
+            protocol
+                .wifi_direct_peer_connected(peer.to_string())
+                .unwrap();
+        }
+        drained_events(&protocol);
+
+        protocol.wifi_direct_status_changed(false).unwrap();
+        let flip = drained_events(&protocol);
+        let switched: Vec<&String> = flip
+            .iter()
+            .filter(|e| e.contains("transport_switched"))
+            .collect();
+        assert_eq!(switched.len(), 1, "one switch away: {switched:?}");
+        assert!(switched[0].contains("\"to\":\"None\""));
+        for peer in ["\"a\"", "\"b\""] {
+            assert_eq!(
+                flip.iter()
+                    .filter(|e| e.contains("neighbor_lost") && e.contains(peer))
+                    .count(),
+                1,
+                "{peer} is lost with the layer"
+            );
+        }
+        assert!(
+            !flip
+                .iter()
+                .any(|e| e.contains("neighbor_lost") && e.contains("both")),
+            "still reachable over Bluetooth LE"
+        );
+        assert!(!protocol.lock_inner().unwrap().is_known_peer("a"));
+        assert!(protocol.lock_inner().unwrap().is_known_peer("both"));
+
+        for peer in ["a", "b", "both"] {
+            protocol
+                .wifi_direct_peer_disconnected(peer.to_string())
+                .unwrap();
+        }
+        let late = drained_events(&protocol);
+        assert!(
+            !late
+                .iter()
+                .any(|e| e.contains("transport_switched") || e.contains("neighbor_lost")),
+            "the late stream ends add nothing: {late:?}"
+        );
+    }
+
+    /// Links proved while the layer is down are not carrying anything yet:
+    /// the switch comes once, when the layer comes up and reveals them.
+    #[test]
+    fn test_wifi_direct_links_proved_while_down_switch_when_the_layer_comes_up() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+        drained_events(&protocol);
+
+        protocol
+            .wifi_direct_peer_connected("c".to_string())
+            .unwrap();
+        protocol
+            .wifi_direct_peer_connected("d".to_string())
+            .unwrap();
+        assert!(
+            !drained_events(&protocol)
+                .iter()
+                .any(|e| e.contains("transport_switched")),
+            "the layer is down"
+        );
+
+        protocol.wifi_direct_status_changed(true).unwrap();
+        let switched = drained_events(&protocol)
+            .into_iter()
+            .filter(|e| e.contains("transport_switched") && e.contains("\"to\":\"WiFiDirect\""))
+            .count();
+        assert_eq!(
+            switched, 1,
+            "the layer coming up reveals both links at once"
+        );
+    }
+
+    /// A stream that never proved a peer was never announced; its end is not
+    /// a loss and not a switch.
+    #[test]
+    fn test_wifi_direct_end_of_an_unannounced_stream_reports_nothing() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+        protocol.wifi_direct_status_changed(true).unwrap();
+        protocol
+            .wifi_direct_peer_connected("a".to_string())
+            .unwrap();
+        drained_events(&protocol);
+
+        protocol
+            .wifi_direct_peer_disconnected("stranger".to_string())
+            .unwrap();
+        let events = drained_events(&protocol);
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.contains("transport_switched") || e.contains("neighbor_lost")),
+            "nothing was held: {events:?}"
         );
     }
 
@@ -16304,6 +16743,97 @@ mod tests {
         }
     }
 
+    /// The Android Wi-Fi Direct send callback is registered for the slot, not
+    /// for a manager that does not exist yet.
+    ///
+    /// `wireTransportCallbacks` runs at `create`, and the module builds its
+    /// Wi-Fi Direct manager only later, inside `enableTransport`. Gated on
+    /// `wifiDirectManager?.let`, the registration never happened in any app,
+    /// and every body and every acknowledgement on the transport waited for the
+    /// manager's 2s fallback poll: a median of about three seconds per delivery
+    /// between two phones, against under a tenth of a second with the callback.
+    /// Nothing failed, it was only slow, which is why only this catches it. The
+    /// callback resolves the manager when it fires, so a manager that
+    /// `enableTransport` replaces needs no second registration, and the field
+    /// it reads from the core's thread is volatile.
+    #[test]
+    fn react_native_android_wifi_direct_callback_does_not_wait_for_a_manager() {
+        let code = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+        );
+        for (what, pinned) in [
+            (
+                "the registration, gated on the slot",
+                "if (currentConfig?.wifiDirectEnabled == true) { try { \
+                 proto.setWifiDirectTransportCallback(object : \
+                 uniffi.offline_protocol.WifiDirectTransportCallback { override fun \
+                 onMessagesAvailable() { wifiDirectManager?.onMessagesAvailable() } })",
+            ),
+            (
+                "the field the callback reads",
+                "@Volatile private var wifiDirectManager: WifiDirectManager? = null",
+            ),
+        ] {
+            assert!(
+                code.contains(pinned),
+                "OfflineProtocolModule.kt: {what}. A Wi-Fi Direct callback that waits for a \
+                 manager is never registered, because the manager is built after create, and \
+                 the transport falls back to its 2s poll. Expected to find:\n  {pinned}"
+            );
+        }
+        assert!(
+            !code.contains(
+                "wifiDirectManager?.let { manager -> try { proto.setWifiDirectTransportCallback"
+            ),
+            "OfflineProtocolModule.kt registers the Wi-Fi Direct callback only when a manager \
+             already exists, which at create time it never does"
+        );
+    }
+
+    /// The Android Wi-Fi Direct manager joins a group that formed before it
+    /// started.
+    ///
+    /// Since Android 10 `WIFI_P2P_CONNECTION_CHANGED_ACTION` is not sticky, so a
+    /// receiver registered at start hears nothing about a group that already
+    /// exists, and the group belongs to the system, not the process. An app
+    /// restarted while still grouped neither listened as owner nor dialled as
+    /// client, and stayed unreachable until someone tore the group down in the
+    /// system settings. Seen on two phones (Android 13 and 15) after every app
+    /// restart. The manager asks once, after it is running.
+    #[test]
+    fn react_native_android_wifi_direct_joins_a_group_formed_before_start() {
+        let code =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        for (what, pinned) in [
+            (
+                "startUnsafe asks, once it is running",
+                "transportHandler.post(messagePollingRunnable) adoptExistingGroup()",
+            ),
+            (
+                "the question and what an answer does",
+                "private fun adoptExistingGroup() { \
+                 wifiP2pManager?.requestConnectionInfo(channel) { info -> if \
+                 (info?.groupFormed == true && state == TransportState.RUNNING) {",
+            ),
+        ] {
+            assert!(
+                code.contains(pinned),
+                "WifiDirectManager.kt: {what}. Without it an app restarted inside a Wi-Fi \
+                 Direct group never joins it. Expected to find:\n  {pinned}"
+            );
+        }
+        let adopt = code
+            .split("private fun adoptExistingGroup()")
+            .nth(1)
+            .and_then(|rest| rest.split("private fun ").next())
+            .expect("adoptExistingGroup exists");
+        assert!(
+            adopt.contains("handleConnectionChanged(true)"),
+            "adoptExistingGroup must hand a formed group to handleConnectionChanged, the one \
+             path that listens as owner and dials as client"
+        );
+    }
+
     /// No Android transport callback from Rust may wait on a confinement thread.
     ///
     /// **Android only, and deliberately so** — the title names the platform
@@ -17530,6 +18060,43 @@ mod tests {
                  {needed}"
             );
         }
+        // Asking to leave a dead owner's group does not end the redial. The
+        // leave's removeGroup can fail (BUSY in a group transition), and a
+        // client still in the group with no redial posted had nothing left
+        // that would ever fire: no stream, no leave retry, no formation.
+        assert!(
+            kotlin.contains(
+                "if (!isGroupOwner && GroupOwnerRedial.shouldLeave(unproved, \
+                 applicationGroup = inAppGroup)) { \
+                 transportHandler.post { leaveDeadApplicationGroup() } } \
+                 val plan = GroupOwnerRedial.next("
+            ),
+            "WifiDirectManager.kt must keep redialling after it asks to leave a dead owner's group"
+        );
+        // A join by credentials is never named. The supplicant takes the
+        // address as the owner's BSSID (its P2P interface address), and every
+        // address an application sees is a device address, so a named join
+        // matched no network: for five minutes after leaving a dead owner,
+        // every join failed, merges included.
+        assert!(
+            !kotlin.contains("setDeviceAddress("),
+            "WifiDirectManager.kt must not name the owner of a join by credentials"
+        );
+        // A connection does not start the join counters over; the group-info
+        // callback does, once the owner is known. A reset on connection ran
+        // before a capture by a remembered dead owner was counted, so the
+        // count never reached the takeover.
+        assert!(
+            kotlin.contains(
+                "inGroup = connected if (connected) { \
+                 transportHandler.removeCallbacks(joinWindowTimeout) \
+                 formationBackoffMs = FORMATION_RETRY_MS }"
+            ) && kotlin.contains(
+                "failedJoins = WifiDirectGroupFormation.failedJoinsAfterGroupJoined(failedJoins, leftOwner)"
+            ),
+            "WifiDirectManager.kt must settle the join counters in refreshGroupForFormation, \
+             not on CONNECTION_CHANGED"
+        );
         for call in ["host.peerStreamConnected(", "host.peerStreamReceived("] {
             assert_eq!(
                 swift.matches(call).count(),

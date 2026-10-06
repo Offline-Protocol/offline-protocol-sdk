@@ -15,6 +15,41 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Android forms its Wi-Fi Direct group itself.** With
+  `wifiDirect: { enabled: true, autoAccept: true }` on Android 10 and later,
+  devices of the same app find each other over Wi-Fi P2P service discovery
+  (`_offlineprotocol._tcp`, the stream chapter's record plus an `app` entry),
+  and join one group whose name and passphrase are derived from the app id:
+  the lowest address creates it and the others join. No system dialog appears
+  on either phone, which a `WifiP2pManager.connect` invitation would show.
+  Discovery between phones is asymmetric (a device that owns or is joining a
+  group answers no discovery query), so nothing depends on hearing the owner:
+  a device that heard a lower peer creates the group itself after three joins
+  found none, a device that heard nothing probes a group owner it sees at most
+  once a minute, and an owner whose group stays empty for 30 to 60 seconds
+  dissolves it so two groups that formed at once merge. A client whose owner
+  proves nothing for three dials at the top of its redial ladder (an owner
+  whose app died: the group can outlive the process) leaves the group and
+  remembers that owner for five minutes. Every group of an app has one name,
+  so a join can land on the owner just left, and Android offers an app no way
+  to steer it elsewhere; a join that lands there leaves at once and counts as
+  one that found no group, so a device that heard a peer creates the group
+  itself after three. Which owner a join lands on beside a dead one stays the
+  system's choice, so the merge there is bounded, not guaranteed. `stop()`
+  removes an app-named group this device owns even when it was adopted at
+  start. A device alone backs off: discovery from 15 to 60 seconds, the owner
+  probe from one to four minutes. Two phones (Android 13 and 15) next to two
+  Wi-Fi Direct televisions formed the group in all eight clean starts, in 18 to 225 seconds (median
+  about a minute). Off by default; without it a group is formed in the
+  system's Wi-Fi Direct settings, as before, and that group is never
+  dissolved. **An app that already sets `autoAccept: true`**, as the
+  integration guide's example did while the option did nothing, starts forming
+  groups on upgrade; set it to `false` to keep the old behaviour. The group's
+  passphrase is derived from the app id and is not a secret: it keeps apps
+  apart, and the identity preamble and end-to-end encryption still protect the
+  traffic (threat model R22). `groupOwnerIntent` is not used and is
+  deprecated. Groups of three or more devices are untested.
+
 - **Python has a gateway-daemon client.** `GatewayManager`, as
   `ProtocolManager.gateway` when `reticulum_enabled=True`, speaks the
   [gateway-daemon contract](docs/spec/gateway-contract.md) over TCP to a
@@ -267,7 +302,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   where they are: the transport managers, the storage providers and the
   generated bindings, less the five files that need React. The Swift package
   is `OfflineProtocolSDK`, assembled by `scripts/assemble-swift-package.sh`.
-  The Android library is `com.offlineprotocol:offline-protocol-android`,
+  The Android library is `com.offlineprotocol:offline-protocol-sdk`,
   built by the Gradle build in `bindings/kotlin`. CI builds and tests both
   on every pull request, and builds an application against each. A release
   publishes them (below). What is public in them is what the React Native
@@ -287,7 +322,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   (`offline-protocol-X.Y.Z-swift-package.tar.gz`), whose manifest names that
   archive by url and checksum. Then, each behind a repository variable, the
   library is signed and uploaded to Maven Central as
-  `com.offlineprotocol:offline-protocol-android`, and the wheels go to PyPI by
+  `com.offlineprotocol:offline-protocol-sdk`, and the wheels go to PyPI by
   trusted publishing; a dry run with Maven Central on uploads a deployment
   the Portal validates and then drops. The Swift package is pulled rather
   than pushed: `Offline-Protocol/offline-protocol-swift` has a workflow that
@@ -356,6 +391,26 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   an iPhone, offline over BLE. Each new probe now supersedes the last, quietly
   and without counting against the carrier, so a peer holds one probe in the
   outbox and is still probed on the same cadence.
+
+- **A key package refused by this device's clock is reported.** A peer's key
+  package is valid from an hour before it was minted until 30 days after,
+  judged by the receiver's clock. A device more than an hour behind a peer
+  cannot start a session with it, and past 30 days neither side can, so no
+  session forms and messages and connection requests stay pending forever.
+  The only trace was a debug line. Two Android phones that had never been
+  online (one set to 2024, the other to 2025) reproduced it. The refusal
+  now raises a `security_warning` with the new code
+  `KEY_PACKAGE_OUTSIDE_VALIDITY_WINDOW`, once per peer, and is logged at
+  `warn`, whether the package was refused on arrival or on the first send
+  after a restart. `MlsError::KeyPackageOutsideValidityWindow { expired }`
+  replaces the `InvalidKeyPackage` text for this one refusal on every route
+  that admits a peer's package. A package whose window has already closed is
+  discarded like any expired package, because it may be an old package a relay
+  held rather than a clock, and kept it failed every attempt until its cached
+  expiry; one whose window has not started is kept. The window itself is
+  unchanged. TypeScript's
+  `SecurityWarningCode` union gains the code, so an exhaustive `switch` over it
+  needs a new arm.
 
 - **An old message no longer comes back as a push notification, again and
   again.** A direct message the relay had pushed stayed in the outbox well past
@@ -656,6 +711,67 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   dropped, and the core's acknowledgement and retry cover it. A client also
   opened another socket to its group owner on every group change; it now
   keeps one and reconnects it while the group lasts.
+- **Android Wi-Fi Direct sends at once, not on a two-second poll.** The
+  module registered the transport's send callback at `create` only if a
+  Wi-Fi Direct manager already existed, and the manager is built later, by
+  `enableTransport`, so it never was. Every message and every acknowledgement
+  waited for the manager's 2s fallback poll: on two phones a delivery took a
+  median of about three seconds (0.3 to 8), against about 85 ms with the
+  callback. It is now registered whenever the config enables the slot.
+- **A neighbour is reported lost once, and only when nothing reaches it.**
+  Android reports a Bluetooth peer lost once per stale address it gives up
+  on, so one departure arrived as two `neighbor_lost`. And a peer that left
+  the Wi-Fi Direct group but was still linked over Bluetooth LE (or the
+  reverse) was reported lost and cleared from core discovery tracking, so an
+  app dropped a neighbour it could still reach. `neighbor_lost` now fires
+  when the last mesh link to a peer ends. Bluetooth reported unavailable
+  (the radio switched off, or the transport stopped) ends every Bluetooth
+  link at once, since Android delivers no per-link disconnect then. The
+  Wi-Fi Direct layer going down does the same for its links: iOS takes it
+  down when the app backgrounds, before the OS ends the streams, and each
+  stream's own late end is no longer a second report.
+- **`transport_switched` to Wi-Fi Direct means a peer is connected.** It
+  fired when the stream layer came up, which a platform manager does at start
+  with or without a peer, saying "Connected to WiFi Direct peer group" while
+  every send went over Bluetooth LE. It now fires when the first Wi-Fi Direct
+  link is usable and, to `None`, when the last one is not, once per edge: a
+  layer going down with several links switches once, and links proved while
+  the layer is down switch when it comes up.
+- **Android Wi-Fi Direct comes back when Wi-Fi does.** Turning Wi-Fi P2P off
+  reported the slot down to the core; turning it back on reported nothing,
+  restarted no discovery, and (with group formation on) left the framework's
+  dropped service request and record unregistered, so every later discovery
+  failed with `NO_SERVICE_REQUESTS`. An app started with Wi-Fi off never got
+  Wi-Fi Direct at all. The manager now reports the slot up again when P2P
+  returns, restarts discovery and re-registers what formation needs, and
+  re-registers the request on that error too.
+- **Android rejoins a Wi-Fi Direct group after the app restarts.** The group
+  belongs to the system and outlives the process, but since Android 10 the
+  connection broadcast is not sticky, so a manager that started inside an
+  existing group never heard of it: no listener as owner, no dial as client,
+  and the peer stayed unreachable until someone removed the group in the
+  system settings. The manager now asks for the group once it is running and
+  joins it.
+- **React Native starts the peer-stream slot when the config enables it.**
+  `start()` brought up internet, Nostr and Reticulum from their config
+  sections but not `transports.wifiDirect`, so `wifiDirect: { enabled: true }`,
+  the documented way to turn it on, left it off for the whole session with
+  nothing logged. It is now enabled after the core starts, and a failure is
+  logged rather than thrown, as for the other transports. On iOS this starts
+  the Network framework peer stream, so an app that set `enabled: true` there
+  now gets the Local Network prompt on first start.
+- **The Android module declares the Wi-Fi Direct permissions.** It declared
+  the Bluetooth ones but not `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE` or
+  `NEARBY_WIFI_DEVICES`, so an app that followed the guide reported "WiFi P2P
+  is not available on this device" on Android 13 and later. They are declared
+  now, `NEARBY_WIFI_DEVICES` with `neverForLocation`, and on Android 13 and
+  later the transport no longer requires a location grant. Android 12 and
+  lower still gate peer discovery on `ACCESS_FINE_LOCATION`, which the app
+  declares and requests. The `neverForLocation` flag merges into every app
+  that adds the library, including one that declares the permission itself
+  without it; an app that derives location from Wi-Fi replaces the
+  declaration with `tools:node="replace"`, and the README says how. The
+  library's release check now refuses an AAR whose declaration lost the flag.
 - **The Bluetooth LE centrals use the strict verifier.** iOS and Android
   checked a peer's identity with the permissive `verifySignature`, which
   accepts some forged assertions the strict check refuses. They now call

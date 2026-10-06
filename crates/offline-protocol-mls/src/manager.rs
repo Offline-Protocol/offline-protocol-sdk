@@ -673,11 +673,7 @@ impl MlsManager {
         offline_protocol_core::validate_id_chars(user_id, "User ID")
             .map_err(|e| MlsError::InvalidUserId(e.to_string()))?;
 
-        let key_package_in = KeyPackageIn::tls_deserialize_exact(key_package_data)
-            .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?;
-        let key_package = key_package_in
-            .validate(self.provider.crypto(), ProtocolVersion::Mls10)
-            .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?;
+        let key_package = self.validate_peer_key_package(key_package_data)?;
 
         Self::verify_credential_identity(&key_package, user_id)?;
         Self::verify_address_binding(&key_package, user_id)?;
@@ -698,13 +694,8 @@ impl MlsManager {
             .load(key_type, user_id)?
             .ok_or_else(|| MlsError::NoKeyPackage(user_id.to_string()))?;
 
-        let key_package_in = KeyPackageIn::tls_deserialize_exact(&data)
-            .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?;
-
         // Validate using the crypto backend
-        let key_package = key_package_in
-            .validate(self.provider.crypto(), ProtocolVersion::Mls10)
-            .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?;
+        let key_package = self.validate_peer_key_package(&data)?;
 
         // Defense in depth: entries written to storage out-of-band must not
         // come back attributed to the wrong user. Both checks run again here
@@ -716,6 +707,84 @@ impl MlsManager {
         Self::verify_lifetime_bound(&key_package)?;
 
         Ok(key_package)
+    }
+
+    /// Validates a key package this install did not mint.
+    ///
+    /// The one place a peer's package meets OpenMLS's checks, so that a
+    /// package refused for its validity window comes back as
+    /// [`MlsError::KeyPackageOutsideValidityWindow`] on every route that
+    /// admits one (import, the cache read, adding a group member) rather than
+    /// as free text on some of them, so the engine can report it. The window
+    /// is the only refusal whose usual cause is a clock.
+    ///
+    /// Takes the bytes rather than a parsed package because `validate`
+    /// consumes the package, and which end of the window refused it is read
+    /// back from the bytes only on that failure, so the accepting path pays
+    /// nothing for it.
+    fn validate_peer_key_package(&self, key_package_data: &[u8]) -> Result<KeyPackage> {
+        KeyPackageIn::tls_deserialize_exact(key_package_data)
+            .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?
+            .validate(self.provider.crypto(), ProtocolVersion::Mls10)
+            .map_err(|e| match e {
+                KeyPackageVerifyError::InvalidLifetime => {
+                    MlsError::KeyPackageOutsideValidityWindow {
+                        expired: Self::window_has_closed(key_package_data),
+                    }
+                }
+                other => MlsError::InvalidKeyPackage(other.to_string()),
+            })
+    }
+
+    /// Whether a package OpenMLS refused for its lifetime was refused because
+    /// the window has already closed, rather than because it has not opened.
+    ///
+    /// OpenMLS exposes no lifetime on an unvalidated `KeyPackageIn` outside
+    /// its `test-utils` feature, so the window is read from its serde form: the
+    /// leaf node's `Lifetime` is the only `{not_before, not_after}` object in a
+    /// key package. Read through OpenMLS's own types rather than by walking the
+    /// TLS encoding by hand, which would be a second key package codec. If the
+    /// shape ever changes the answer is `false`, the refusal is reported as a
+    /// clock and the package is kept, which is how this refusal was handled
+    /// before the two ends were told apart; the tests on both ends pin it.
+    ///
+    /// OpenMLS admits `not_before < now < not_after`, so a refused package
+    /// whose `not_after` is at or before `now` closed, and any other did not
+    /// start. A clock before the epoch reads as "not started", which is right:
+    /// that clock is behind.
+    fn window_has_closed(key_package_data: &[u8]) -> bool {
+        fn find_lifetime(value: &serde_json::Value) -> Option<u64> {
+            match value {
+                serde_json::Value::Object(map) => {
+                    if map
+                        .get("not_before")
+                        .and_then(serde_json::Value::as_u64)
+                        .is_some()
+                    {
+                        if let Some(not_after) =
+                            map.get("not_after").and_then(serde_json::Value::as_u64)
+                        {
+                            return Some(not_after);
+                        }
+                    }
+                    map.values().find_map(find_lifetime)
+                }
+                serde_json::Value::Array(items) => items.iter().find_map(find_lifetime),
+                _ => None,
+            }
+        }
+
+        let Some(not_after) = KeyPackageIn::tls_deserialize_exact(key_package_data)
+            .ok()
+            .and_then(|package| serde_json::to_value(&package).ok())
+            .and_then(|value| find_lifetime(&value))
+        else {
+            return false;
+        };
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|now| now.as_secs() >= not_after)
+            .unwrap_or(false)
     }
 
     /// Requires a key package's validity window to be no wider than this
@@ -1104,10 +1173,7 @@ impl MlsManager {
         invitee_user_id: &str,
         member_key_package: &[u8],
     ) -> Result<(WelcomeMessage, EncryptedMessage)> {
-        let key_package = KeyPackageIn::tls_deserialize_exact(member_key_package)
-            .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?
-            .validate(self.provider.crypto(), ProtocolVersion::Mls10)
-            .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?;
+        let key_package = self.validate_peer_key_package(member_key_package)?;
 
         Self::verify_credential_identity(&key_package, invitee_user_id)?;
         Self::verify_address_binding(&key_package, invitee_user_id)?;
@@ -2038,6 +2104,37 @@ impl MlsManager {
         self.group_manager.save_group(group_id, &group)?;
 
         commit
+            .tls_serialize_detached()
+            .map_err(|e| MlsError::Serialization(e.to_string()))
+    }
+
+    /// Mints a key package claiming `claimed` whose validity window runs from
+    /// `not_before` to `not_after` (seconds since the epoch): what a peer
+    /// whose clock is somewhere else entirely would send.
+    ///
+    /// The window is checked before the identity binding, so the claimed
+    /// identity is never proved here, which is also what makes the refusal
+    /// it provokes attacker-reachable.
+    pub fn key_package_with_window_for_testing(
+        claimed: &str,
+        not_before: u64,
+        not_after: u64,
+    ) -> Result<Vec<u8>> {
+        let storage: Arc<dyn MlsStorage> = Arc::new(crate::storage::InMemoryStorage::new());
+        let provider = MlsProvider::new(MlsStorageAdapter::new(storage));
+        let keys = SignatureKeyPair::new(DEFAULT_CIPHERSUITE.signature_algorithm())
+            .map_err(|e| MlsError::CryptoGeneration(format!("{:?}", e)))?;
+        keys.store(provider.storage())
+            .map_err(|e| MlsError::CryptoGeneration(format!("storing key: {:?}", e)))?;
+        let credential = CredentialWithKey {
+            credential: Credential::new(CredentialType::Basic, claimed.as_bytes().to_vec()),
+            signature_key: keys.public().into(),
+        };
+        KeyPackage::builder()
+            .key_package_lifetime(Lifetime::init(not_before, not_after))
+            .build(DEFAULT_CIPHERSUITE, &provider, &keys, credential)
+            .map_err(|e| MlsError::KeyPackageCreation(e.to_string()))?
+            .key_package()
             .tls_serialize_detached()
             .map_err(|e| MlsError::Serialization(e.to_string()))
     }
@@ -4887,6 +4984,74 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs()
+    }
+
+    /// A peer whose clock runs a year ahead of ours mints a window that has
+    /// not started yet by our clock. It is refused, and refused as a window
+    /// problem rather than as a malformed package, because that is what tells
+    /// an application to look at a clock. Two phones a year apart reproduced
+    /// this, and the only trace was a debug line.
+    #[test]
+    fn a_window_that_has_not_started_by_our_clock_is_reported_as_such() {
+        let (manager, _) = create_addressed_manager("alice");
+        let year = 365 * 24 * 60 * 60;
+        let (peer, bytes) = key_package_with_window(
+            "bob",
+            Lifetime::init(
+                now_secs() + year - 3600,
+                now_secs() + year + 30 * 24 * 60 * 60,
+            ),
+        );
+
+        let err = manager
+            .import_key_package(&peer, &bytes)
+            .expect_err("a window that starts in a year is not valid now");
+        assert!(
+            matches!(
+                err,
+                MlsError::KeyPackageOutsideValidityWindow { expired: false }
+            ),
+            "refused for the wrong reason: {err:?}"
+        );
+    }
+
+    /// The other side of the same skew: a peer whose clock runs behind mints a
+    /// window that has already closed by ours.
+    #[test]
+    fn a_window_that_closed_by_our_clock_is_reported_as_such() {
+        let (manager, _) = create_addressed_manager("alice");
+        let day = 24 * 60 * 60;
+        let (peer, bytes) = key_package_with_window(
+            "bob",
+            Lifetime::init(now_secs() - 60 * day, now_secs() - 30 * day),
+        );
+
+        let err = manager
+            .import_key_package(&peer, &bytes)
+            .expect_err("a window that closed a month ago is not valid now");
+        assert!(
+            matches!(
+                err,
+                MlsError::KeyPackageOutsideValidityWindow { expired: true }
+            ),
+            "refused for the wrong reason: {err:?}"
+        );
+    }
+
+    /// Every other refusal keeps its old type and text: only the window moved.
+    /// The width cap in particular stays `InvalidKeyPackage`, because a package
+    /// claiming a year is a peer's policy, not anyone's clock.
+    #[test]
+    fn only_the_window_refusal_changes_type() {
+        let (manager, _) = create_addressed_manager("alice");
+        let (peer, bytes) = key_package_with_window("bob", Lifetime::new(365 * 24 * 60 * 60));
+        let err = manager.import_key_package(&peer, &bytes).unwrap_err();
+        assert!(matches!(&err, MlsError::InvalidKeyPackage(m) if m.contains("wider than")));
+
+        let err = manager
+            .import_key_package(&peer, b"not a key package")
+            .unwrap_err();
+        assert!(matches!(err, MlsError::InvalidKeyPackage(_)), "{err:?}");
     }
 
     /// The case the issue was filed on: mls-rs hands out a year by default, and

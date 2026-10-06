@@ -53,6 +53,9 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     private var dataStore: DataStore? = null
     private var bleTransport: BleTransportFacade? = null
     private var internetManager: InternetManager? = null
+    // Volatile: the core's Wi-Fi Direct callback reads it from whichever
+    // thread queued the body (see wireTransportCallbacks).
+    @Volatile
     private var wifiDirectManager: WifiDirectManager? = null
     private var reticulumManager: ReticulumManager? = null
     private var nostrManager: NostrManager? = null
@@ -2547,7 +2550,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     // Configure and start WiFi Direct transport via WifiDirectManager
                     if (wifiDirectManager == null) {
                         // Create manager if not already created
-                        wifiDirectManager = WifiDirectManager(reactApplicationContext, proto, currentConfig?.profile ?: "unknown") { level, message, context ->
+                        wifiDirectManager = WifiDirectManager(
+                            reactApplicationContext,
+                            proto,
+                            currentConfig?.profile ?: "unknown",
+                            appId = currentConfig?.appId ?: "",
+                        ) { level, message, context ->
                             emitDiagnostic(level, message, context)
                         }
                         emitDiagnostic("info", "WiFi Direct manager created on demand")
@@ -2555,11 +2563,21 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     
                     val manager = wifiDirectManager
                         ?: throw IllegalStateException("Failed to create WiFi Direct manager")
+                    // `autoAccept` is the documented switch for forming groups
+                    // without the system settings; see WifiDirectGroupFormation.
+                    // Read before the stop, applied after it: stop() undoes the
+                    // run that is ending, and a config that does not name the
+                    // key (the guide's enableTransport('wifiDirect') after a
+                    // permission grant) keeps the current setting.
+                    val autoAccept = config?.takeIf { it.hasKey("autoAccept") && !it.isNull("autoAccept") }
+                        ?.getBoolean("autoAccept")
                     
                     // Stop the manager first if it's running (to ensure clean restart)
                     if (manager.state == TransportState.RUNNING) {
                         manager.stop()
                     }
+                    manager.formGroups =
+                        WifiDirectGroupFormation.formGroupsAfterEnable(manager.formGroups, autoAccept)
                     
                     manager.start()
                     emitDiagnostic("info", "WiFi Direct transport enabled")
@@ -4987,20 +5005,23 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             }
         }
 
-        // WiFi Direct callback
-        wifiDirectManager?.let { manager ->
+        // WiFi Direct callback. Registered on the slot, not on a manager:
+        // the manager is only ever built later, by enableTransport, so a
+        // registration that waited for one never happened, and every body
+        // and every acknowledgement on this transport waited for the 2s poll
+        // (a median of about three seconds per delivery on two phones, against
+        // under a tenth of a second with it). The callback finds whichever
+        // manager is current when it fires, so a manager that enableTransport
+        // replaces needs no second registration. The peer-stream transport
+        // behind the slot exists when the slot is enabled, and wakes this
+        // only for a body queued toward an address a stream proved.
+        if (currentConfig?.wifiDirectEnabled == true) {
             try {
                 proto.setWifiDirectTransportCallback(object : uniffi.offline_protocol.WifiDirectTransportCallback {
                     override fun onMessagesAvailable() {
-                        manager.onMessagesAvailable()
+                        wifiDirectManager?.onMessagesAvailable()
                     }
                 })
-                // The peer-stream transport behind the `wifi_direct` slot is
-                // registered whenever the slot is enabled, and it wakes this
-                // callback only for a message queued toward an address a
-                // stream proved. This manager exchanges no preamble yet, so
-                // it proves none and is never woken; the polling loop finds
-                // the same empty queue.
                 emitDiagnostic("info", "WiFi Direct transport callback registered")
             } catch (e: Throwable) {
                 android.util.Log.w(NAME, "WiFi Direct transport callback not available; using fallback polling", e)

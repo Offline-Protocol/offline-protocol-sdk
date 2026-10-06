@@ -12,7 +12,7 @@ This guide covers integrating the Offline Protocol SDK into React Native applica
 - Xcode 15+ (iOS) / Android Studio Giraffe+ (Android).
 - Rust toolchain (nightly not required), Node.js 18+, Yarn or npm.
 - BLE support enabled in project entitlements and manifest.
-- Optional: Wi‑Fi Direct requires Android 10+ with `android.permission.NEARBY_WIFI_DEVICES`.
+- Optional: Wi‑Fi Direct needs `android.permission.NEARBY_WIFI_DEVICES` granted at runtime on Android 13+ (the SDK declares it), and `ACCESS_FINE_LOCATION` on Android 12 and lower.
 
 ### 1.2 Installation
 
@@ -112,8 +112,11 @@ transports: {
 
 ### 4.2 Wi‑Fi Direct (Android)
 
-- Permissions: `NEARBY_WIFI_DEVICES` (Android 13+), `ACCESS_FINE_LOCATION`, `CHANGE_WIFI_STATE`.
-- Config: `wifiDirect: { enabled: true, autoAccept: true, groupOwnerIntent: 10 }`.
+- Permissions: the SDK declares `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE` and `NEARBY_WIFI_DEVICES` (with `neverForLocation`). Request `NEARBY_WIFI_DEVICES` at runtime on Android 13+, and `ACCESS_FINE_LOCATION` on Android 12 and lower, where peer discovery needs it.
+- The SDK's manifest asserts `neverForLocation` on `NEARBY_WIFI_DEVICES`, and the build merges that flag into your app. An app that derives location from Wi-Fi replaces the declaration (`tools:node="replace"`) and then also needs `ACCESS_FINE_LOCATION` on Android 13+, which the SDK does not check for it.
+- `wifiDirect: { enabled: true }` starts the transport in `start()`. Grant `NEARBY_WIFI_DEVICES` (or, on 12 and lower, fine location) **before** `start()`: an enable refused for a missing grant is logged and not retried, so the transport stays off for the session. If you ask for the grant later, call `enableTransport('wifiDirect')` once it is given.
+- `autoAccept: true` lets the SDK form the Wi-Fi Direct group itself on Android 10 and later: devices of the same app find each other and join one group, with no system dialog. Expect one to two minutes: two phones took 18 to 225 seconds (median about a minute), and Bluetooth, when on, carries traffic meanwhile. Without it, pair the phones once in the system's Wi-Fi Direct settings. `groupOwnerIntent` is not used.
+- Config: `wifiDirect: { enabled: true, autoAccept: true }`. `enableTransport('wifiDirect')` with no configuration keeps the `autoAccept` setting the transport already has.
 
 ### 4.3 Internet
 
@@ -213,7 +216,7 @@ if (state !== ProtocolState.Running) {
 }
 ```
 
-**`start()` only restores the transports it can see.** It re-enables the ones declared in the constructor config the instance still holds — BLE, and `transports.internet` / `nostr` / `reticulum` — and nothing else. Anything you enable out of band has to be re-issued by you: **Wi‑Fi Direct always**, because `start()` never starts it, and **the relay** whenever the `serverAddress` or `authToken` reaches the SDK through `enableTransport('internet', ...)` rather than through `transports.internet`. `Running` is not a claim that any particular transport is attached — `getActiveTransports()` is the read that answers that.
+**`start()` only restores the transports it can see.** It re-enables the ones declared in the constructor config the instance still holds — BLE, and `transports.internet` / `nostr` / `reticulum` / `wifiDirect` — and nothing else. Anything you enable out of band has to be re-issued by you: **Wi‑Fi Direct** when you turned it on with `enableTransport('wifiDirect')` rather than `transports.wifiDirect`, and **the relay** whenever the `serverAddress` or `authToken` reaches the SDK through `enableTransport('internet', ...)` rather than through `transports.internet`. `Running` is not a claim that any particular transport is attached — `getActiveTransports()` is the read that answers that.
 
 Two more things to know if you restart the SDK yourself:
 
@@ -259,7 +262,7 @@ registerMeshWakeTask(async () => {
 Three more things the task has to get right:
 
 - **Be idempotent.** The task is allowed to run while your app is in the foreground — the alternative is React Native crashing the process when the user opens the app mid-wake — so it can find a protocol already live. Return early instead of building a second one.
-- **Re-issue what `start()` does not restore.** Wi‑Fi Direct always, and the relay whenever its `serverAddress`/`authToken` arrive through `enableTransport('internet', ...)`. Same list as §6.2.
+- **Re-issue what `start()` does not restore.** Wi‑Fi Direct when it is not in `transports.wifiDirect`, and the relay whenever its `serverAddress`/`authToken` arrive through `enableTransport('internet', ...)`. Same list as §6.2.
 - **Resolve promptly.** The keep-alive holds the process; the task does not need to. Past its budget React Native terminates it.
 
 **If the wake does not land, the keep-alive stops itself.** A task that was never registered, failed to boot, threw, or simply declined all end the same way: a watchdog brings the service down rather than leave a "Mesh Active" notification over a mesh that is not running. Declining is a legitimate outcome — return early and the device goes back to the §6.2 behaviour.

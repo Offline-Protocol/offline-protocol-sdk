@@ -220,8 +220,16 @@ impl WifiDirectTransport {
     }
 
     /// Drops the live link to `peer_id` (platform disconnect callback).
-    pub fn on_peer_disconnected(&self, peer_id: &str) {
-        self.connected_links.lock_or_recover().remove(peer_id);
+    ///
+    /// Returns whether a link was held. A layer going down clears every
+    /// link at once, so a stream's own end reported after that (iOS flips
+    /// the layer on backgrounding, before the OS kills the streams) finds
+    /// nothing, and the caller must not report that peer lost a second time.
+    pub fn on_peer_disconnected(&self, peer_id: &str) -> bool {
+        self.connected_links
+            .lock_or_recover()
+            .remove(peer_id)
+            .is_some()
     }
 
     /// Called when a message is received from a peer.

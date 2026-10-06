@@ -414,9 +414,18 @@ export interface WifiDirectTransportConfig {
   enabled: boolean;
   /** Device name to advertise */
   deviceName?: string;
-  /** Enable autonomous group owner negotiation */
+  /**
+   * Android 10 and later: form the Wi-Fi Direct group without the system
+   * settings. Devices of the same app find each other over Wi-Fi P2P service
+   * discovery and join one group by derived credentials, with no dialog on
+   * either phone, typically in one to two minutes. Off by default: then a group
+   * formed in the system's Wi-Fi Direct settings is used.
+   */
   autoAccept?: boolean;
-  /** Group owner intent (0-15, higher = more likely to be GO) */
+  /**
+   * @deprecated Not used. The device with the lowest address owns a group
+   * the SDK forms.
+   */
   groupOwnerIntent?: number;
 }
 
@@ -2518,7 +2527,8 @@ export type SecurityWarningCode =
   | 'GROUP_LEAF_IDENTITY_UNPROVEN'
   | 'STALE_CONTROL_FRAME'
   | 'GATEWAY_ADDRESS_BINDING_MISMATCH'
-  | 'GATEWAY_ADDRESS_DECLARATION_REFUSED';
+  | 'GATEWAY_ADDRESS_DECLARATION_REFUSED'
+  | 'KEY_PACKAGE_OUTSIDE_VALIDITY_WINDOW';
 
 /**
  * A security-relevant anomaly was detected for a peer.
@@ -2597,6 +2607,22 @@ export type SecurityWarningCode =
  * frames or running a broken build. Nothing is torn down — the frame is
  * dropped, unacknowledged, and a peer whose frame was genuinely just slow
  * re-sends a fresh one.
+ *
+ * `KEY_PACKAGE_OUTSIDE_VALIDITY_WINDOW` is the same kind of finding for key
+ * packages, and again the first thing to check is a clock. A peer's key
+ * package is valid from an hour before it was made until 30 days after,
+ * judged by this device's clock. A device more than an hour behind a peer
+ * cannot start a session with it (the peer still can, and usually does).
+ * Past 30 days each side refuses the other's package, both report this, and
+ * no encrypted session forms: messages and connection requests wait until
+ * the clocks agree. This is what happens between phones that have not been
+ * online to set their time. Many `peer_id`s is this device's clock; one is that
+ * peer's. A window that has already closed may instead be an old package a
+ * relay held for days; that package is discarded and the next one the peer
+ * sends replaces it, and `reason` names both causes. Reported once per peer,
+ * whether the refusal came when the package arrived or on a later send, and
+ * `peer_id` is a claim, since the package has not proved its sender when its
+ * window is checked. Show the user a prompt to check the date and time.
  */
 export interface SecurityWarningEvent extends BaseEvent {
   type: 'security_warning';

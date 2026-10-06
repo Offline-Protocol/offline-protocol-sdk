@@ -1331,6 +1331,24 @@ export class OfflineProtocol {
         );
       }
     }
+
+    // Auto-enable the peer-stream slot (Wi-Fi Direct on Android, Network
+    // framework streams on iOS) when the config asks for it. Both native
+    // modules build its manager only inside enableTransport, so
+    // `wifiDirect: { enabled: true }` alone used to leave the transport off
+    // for the whole session, with nothing logged to say so.
+    const wifiDirectConfig = this.config.transports?.wifiDirect;
+    if (wifiDirectConfig?.enabled) {
+      try {
+        await this.enableTransport("wifiDirect", wifiDirectConfig);
+        console.log("[OfflineProtocol] Wi-Fi Direct transport auto-enabled");
+      } catch (error) {
+        console.warn(
+          "[OfflineProtocol] Failed to auto-enable Wi-Fi Direct transport:",
+          error
+        );
+      }
+    }
   }
 
   /**

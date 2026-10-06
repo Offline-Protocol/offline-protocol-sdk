@@ -137,7 +137,53 @@ so the two-dialler tie that the lower-address rule settles cannot occur. A
 client whose stream ends while the group is up reconnects on a doubling
 delay, always to the owner the group has at that moment: on a group switch
 the new owner's first dial can lose to the old stream still closing, and the
-redial is then the only one left. The manager does not form a group; it joins one the system formed.
+redial is then the only one left. The manager joins a group the system formed, including one that
+formed before it started: since Android 10 the connection broadcast is not sticky, so the manager asks
+for the group once it is running. With `formGroups` (`wifiDirect.autoAccept`, Android 10 and later)
+it also forms one: `WifiDirectGroupFormation` holds the rules (who creates, who joins, the network
+name and passphrase, both derived from the application id) and `WifiDirectGroupFormationTest` pins
+them. Three behaviours of the radio shaped them and are worth knowing before changing them. A DNS-SD
+query by service type alone returns only the PTR record, so the TXT record that carries the address
+arrives only for a query that names the instance. A device that owns a group, or is in the middle of
+joining one, answers no service discovery query, so two phones often hear each other minutes apart or
+not at all; that is why the group is named after the application and not its owner (a joiner needs
+nothing from the owner), why a join attempt is cancelled after fifteen seconds (the joiner is
+discoverable again; eight seconds cut off the supplicant's retry of a rejected association), why a
+device that hears a lower peer creates the group itself after three joins found none (a join the
+framework refuses outright counts), and why a device that heard no record still probes a group
+owner it sees, at most once a minute. And two groups can form at once, so an owner whose group
+stays empty for a randomised 30 to 60 seconds dissolves it and joins before creating again.
+
+A device alone keeps looking, but less often: service discovery backs off from 15 to 60 seconds
+while it hears no record, and the owner probe from one to four minutes while probes find no group
+(a Wi-Fi Direct printer or television is an owner no probe joins). Both start over when a record,
+a new owner or a new device appears. A device that is a client of any group, the application's or
+another (Wi-Fi Direct printing, a screen cast), forms nothing while it lasts.
+
+The group can outlive the process: the framework removes it only when no application on the phone
+still holds Wi-Fi P2P. An owner whose application died leaves a group with no listener that
+answers no discovery query, and every device that probes it joins a group that carries nothing, then
+never runs formation again because it is in a group. Two rules close that: a group under the
+application's name that this device owns is removed by `stop()` even when it was adopted at start
+rather than created by the run, and a client of such a group leaves it after three dials at the top of
+the redial ladder prove nothing (`GroupOwnerRedial.shouldLeave`). Leaving is not enough on its own:
+every group of the application has one name, so a join by name lands on whichever owner of it the
+supplicant picks (by signal), and the one in sight is the owner just left. The first version rejoined
+it ten seconds later, every time. A join cannot be steered away from it: `setDeviceAddress` on a join
+by credentials becomes the supplicant's `go_bssid`, which must equal the owner's P2P interface address,
+and an application only ever sees device addresses, so a join named that way matches no network. So
+the owner left is remembered for five minutes by device address (longer than an owner whose application
+comes back takes to dissolve its empty group): it no longer counts as an owner nearby, a join that
+lands in its group leaves at once and counts as one that found no group
+(`WifiDirectGroupFormation.joinedLeftOwner`, `failedJoinsAfterGroupJoined`; the counters are settled
+once the owner is known, never on `CONNECTION_CHANGED`, or each capture would zero them), so a device
+that heard a peer creates after three, and its record heard again forgives it. Beside a dead owner the
+merge is bounded by that takeover, not guaranteed. The redial goes on after a leave is asked for, so a leave the framework refuses is asked again. A
+group paired in the system settings is never removed or left.
+
+`formGroups` is set while stopped; `stop()` undoes what the run did (the service request, the
+record, an application group it created or adopted) whatever the flag says by then. `enableTransport('wifiDirect')` with no
+configuration keeps the current setting rather than turning formation off.
 
 `PeerStreamSocketsTest` and `PeerStreamFramingTest` pin it, the latter
 replaying the chapter's vectors. The group handling itself is not covered in

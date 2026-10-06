@@ -19,6 +19,8 @@ CHECKER = REPO / "scripts" / "check_android_aar.py"
 MANIFEST = """<manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.offlineprotocol">
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"/>
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation"/>
     <application>
         <service android:name="com.offlineprotocol.MeshForegroundService"/>
     </application>
@@ -169,11 +171,37 @@ class CheckTests(unittest.TestCase):
 
     def test_a_required_entry_in_a_comment_is_missing(self):
         for name in ("com.offlineprotocol.MeshForegroundService",
-                     "android.permission.BLUETOOTH_CONNECT"):
+                     "android.permission.BLUETOOTH_CONNECT",
+                     "android.permission.NEARBY_WIFI_DEVICES"):
             manifest = re.sub(rf'(<[^<]*"{re.escape(name)}"[^>]*>)', r"<!-- \1 -->", MANIFEST)
             self.assertIn("<!--", manifest)
             problems = check(aar(manifest=manifest), require_natives=False)
             self.assertProblem(problems, f"does not declare {name}")
+
+    def test_a_required_permission_without_its_flag_is_refused(self):
+        for name, flag in check_android_aar.REQUIRED_PERMISSION_FLAGS:
+            manifest = MANIFEST.replace(f'android:usesPermissionFlags="{flag}"', "")
+            self.assertNotIn(flag, manifest)
+            problems = check(aar(manifest=manifest), require_natives=False)
+            self.assertProblem(problems, f"declares {name} without usesPermissionFlags {flag}")
+
+    def test_a_required_flag_beside_others_passes(self):
+        manifest = MANIFEST.replace(
+            'android:usesPermissionFlags="neverForLocation"',
+            'android:usesPermissionFlags="neverForLocation|0x2"',
+        )
+        self.assertEqual(check(aar(manifest=manifest), require_natives=False), [])
+
+    def test_a_required_flag_in_a_comment_is_missing(self):
+        manifest = MANIFEST.replace(
+            '<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"\n'
+            '        android:usesPermissionFlags="neverForLocation"/>',
+            '<uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"/>'
+            '<!-- android:usesPermissionFlags="neverForLocation" -->',
+        )
+        self.assertIn("<!--", manifest)
+        problems = check(aar(manifest=manifest), require_natives=False)
+        self.assertProblem(problems, "without usesPermissionFlags neverForLocation")
 
     def test_each_missing_rule_is_refused(self):
         for rule in check_android_aar.REQUIRED_RULES:
