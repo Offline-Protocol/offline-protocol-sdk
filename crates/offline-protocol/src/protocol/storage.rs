@@ -882,6 +882,16 @@ const _: () = assert!(
      underflows to zero and it can never prune at all"
 );
 
+// The outbox walk charges a legacy confirmation probe's delete to its pool
+// (`restore_outbox`). A build that stacked probes could leave a full outbox
+// of them, and if the pool is smaller than that the walk breaks on probes and
+// leaves real messages unrestored until a later launch.
+const _: () = assert!(
+    MAX_RESTORE_PRUNE_DELETES >= MAX_OUTBOX_ENTRIES,
+    "an outbox full of legacy confirmation probes must clear in one launch, \
+     or the walk breaks on them and defers restoring real messages"
+);
+
 /// A pool of durable restore-path deletes, drawn on by one or more walks.
 ///
 /// The unit the [`MAX_RESTORE_PRUNE_DELETES`] bound is actually about. A pool

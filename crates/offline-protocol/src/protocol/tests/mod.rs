@@ -41202,6 +41202,53 @@ fn a_persisted_confirmation_probe_is_not_restored() {
     assert_eq!(storage.list_keys(storage_keys::OUTBOX).unwrap().len(), 1);
 }
 
+/// The first launch after upgrading from the build that stacked probes can
+/// find an outbox full of them. Their deletes are charged to the walk's pool,
+/// so the pool has to cover a full outbox, or the walk breaks on probes and a
+/// real message behind them waits for a later launch to be restored.
+#[test]
+fn an_outbox_full_of_legacy_probes_clears_in_one_launch() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let entry = |message: Message| OutboxEntry {
+        message,
+        attempt_count: 1,
+        first_sent_at: chrono::Utc::now(),
+        last_sent_at: chrono::Utc::now(),
+        last_transport: None,
+        reseal: None,
+        relay_pushed: false,
+    };
+    for _ in 0..crate::constants::MAX_OUTBOX_ENTRIES {
+        store_outbox_entry(
+            &storage,
+            &entry(test_message(
+                "bob",
+                internal_prefixes::SESSION_CONFIRM_PROBE,
+            )),
+        );
+    }
+    let real = test_message("bob", "hello");
+    let real_id = real.id.clone();
+    store_outbox_entry(&storage, &entry(real));
+
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+
+    let restored: Vec<_> = protocol.outbox_messages().map(|m| m.id.clone()).collect();
+    assert_eq!(
+        restored,
+        vec![real_id.clone()],
+        "the real message is restored"
+    );
+    assert_eq!(
+        storage.list_keys(storage_keys::OUTBOX).unwrap(),
+        vec![real_id.as_str().to_string()],
+        "every legacy probe is deleted in the same launch"
+    );
+}
+
 /// Pins component (D) of the flap fix: the opt-in edge-driven parking gate.
 /// With `edge_driven_unreachable_dm` on, a durably-unreachable DM keeps being
 /// timed-probed up to `DM_UNREACHABLE_PROBE_LIMIT` times, then stops (rests in
