@@ -261,8 +261,13 @@ internal class CentralGattClient(
     private val negotiatedPayload = ConcurrentHashMap<String, Int>()
 
     // Hello writes awaiting their callback, keyed by address, holding the
-    // watchdog that goes ready without it. BLE-thread only.
-    private val helloInFlight = HashMap<String, Runnable>()
+    // link the write went out on and the watchdog that goes ready without the
+    // callback. Keyed to the link as well as the address: a link that closes
+    // mid-hello and a new one at the same address within the watchdog window
+    // must not share an entry, or the old watchdog marks the new link ready
+    // mid-handshake and a late callback from the old link does the same.
+    // Concurrent because a disconnect arrives on a binder thread.
+    private val helloInFlight = ConcurrentHashMap<String, Pair<BluetoothGatt, Runnable>>()
 
     private val deviceIdResolutionAttempts = ConcurrentHashMap<String, Long>()
 
@@ -346,6 +351,7 @@ internal class CentralGattClient(
         deviceIdResolutionAttempts.remove(address)
         advertisedDeviceIds.remove(address)
         cancelMtuWatchdog(address)
+        cancelHelloWatchdog(address, null)
         clearServiceInstanceSelection(address)
     }
 
@@ -361,7 +367,19 @@ internal class CentralGattClient(
         serviceInstanceProbes.clear()
         appTagReadWatchdogs.values.forEach { bleHandler.removeCallbacks(it) }
         appTagReadWatchdogs.clear()
+        helloInFlight.values.forEach { bleHandler.removeCallbacks(it.second) }
+        helloInFlight.clear()
         boundServiceInstanceIds.clear()
+    }
+
+    /**
+     * Drops the hello pending at [address], only if it belongs to [gatt] when
+     * one is given, and cancels its watchdog.
+     */
+    private fun cancelHelloWatchdog(address: String, gatt: BluetoothGatt?) {
+        val entry = helloInFlight[address] ?: return
+        if (gatt != null && entry.first !== gatt) return
+        if (helloInFlight.remove(address, entry)) bleHandler.removeCallbacks(entry.second)
     }
 
     /**
@@ -866,8 +884,11 @@ internal class CentralGattClient(
                 val address = gatt.device.address
                 bleHandler.post {
                     if (host.isShuttingDown()) return@post
-                    val watchdog = helloInFlight.remove(address) ?: return@post
-                    bleHandler.removeCallbacks(watchdog)
+                    // Only for the hello this link wrote: a link that closed
+                    // and reopened at the same address holds its own entry.
+                    val entry = helloInFlight[address] ?: return@post
+                    if (entry.first !== gatt || !helloInFlight.remove(address, entry)) return@post
+                    bleHandler.removeCallbacks(entry.second)
                     if (status != BluetoothGatt.GATT_SUCCESS) {
                         diagnosticEmitter("info", "BLE hello refused", mapOf("address" to address, "status" to status))
                     }
@@ -976,6 +997,7 @@ internal class CentralGattClient(
         val address = gatt.device.address
         val wasConnected = host.connections.getGatt(address) != null
         host.connections.removeGatt(address)
+        cancelHelloWatchdog(address, gatt)
         linkReady.remove(address)
 
         // Don't remove from discovered list - keep trying to reconnect.
@@ -1438,12 +1460,12 @@ internal class CentralGattClient(
             override fun run() {
                 // Only for this write: a later link at the same address
                 // holds its own entry.
-                if (helloInFlight[address] !== this) return
-                helloInFlight.remove(address)
+                val entry = helloInFlight[address] ?: return
+                if (entry.second !== this || !helloInFlight.remove(address, entry)) return
                 if (!host.isShuttingDown()) markLinkReady(address)
             }
         }
-        helloInFlight[address] = watchdog
+        helloInFlight[address] = gatt to watchdog
         bleHandler.postDelayed(watchdog, HELLO_WATCHDOG_MS)
     }
 
@@ -1467,6 +1489,7 @@ internal class CentralGattClient(
             Log.w(TAG, "Error closing gatt for $address ($reason)", e)
         }
         host.connections.removeGatt(address)
+        cancelHelloWatchdog(address, gatt)
         linkReady.remove(address)
         // Drop the unproven claim with the link, so a reconnect cannot pair
         // this connection's device id with the next one's identity.

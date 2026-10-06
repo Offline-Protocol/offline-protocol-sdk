@@ -4546,6 +4546,22 @@ class BleTransportFacade(
                 flushPeerMtu(address, peerId)
             }
         }
+        if (isCleanDisconnect && connections.getGatt(address) == null) {
+            connections.deviceIdForAddress(address)?.let { peerId ->
+                if (connections.hasOtherLiveLink(peerId, address)) {
+                    // A hello mapped this peer at the central-role address its
+                    // link to us came from, and that became the address we send
+                    // to. With that link gone and no client link of ours there,
+                    // every fragment would queue and the drain would dial an
+                    // address that does not advertise, while our own link to the
+                    // peer sat idle. Drop the address: the registry points the
+                    // peer back at its live link, and a new link from the peer
+                    // brings a new hello.
+                    connections.removeIdentifiersForAddress(address)
+                    centralClient.clearResolutionAttempt(address)
+                }
+            }
+        }
         if (!isCleanDisconnect) {
             lastSeenRssi.remove(address)
             connections.deviceIdForAddress(address)?.let { peerId ->
