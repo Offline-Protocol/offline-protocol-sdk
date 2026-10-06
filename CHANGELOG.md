@@ -692,7 +692,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   now, `NEARBY_WIFI_DEVICES` with `neverForLocation`, and on Android 13 and
   later the transport no longer requires a location grant. Android 12 and
   lower still gate peer discovery on `ACCESS_FINE_LOCATION`, which the app
-  declares and requests.
+  declares and requests. The `neverForLocation` flag merges into every app
+  that adds the library, including one that declares the permission itself
+  without it; an app that derives location from Wi-Fi replaces the
+  declaration with `tools:node="replace"`, and the README says how. The
+  library's release check now refuses an AAR whose declaration lost the flag.
 - **The Bluetooth LE centrals use the strict verifier.** iOS and Android
   checked a peer's identity with the permissive `verifySignature`, which
   accepts some forged assertions the strict check refuses. They now call

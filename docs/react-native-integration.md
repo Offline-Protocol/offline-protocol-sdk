@@ -12,7 +12,7 @@ This guide covers integrating the Offline Protocol SDK into React Native applica
 - Xcode 15+ (iOS) / Android Studio Giraffe+ (Android).
 - Rust toolchain (nightly not required), Node.js 18+, Yarn or npm.
 - BLE support enabled in project entitlements and manifest.
-- Optional: Wi‑Fi Direct requires Android 10+ with `android.permission.NEARBY_WIFI_DEVICES`.
+- Optional: Wi‑Fi Direct needs `android.permission.NEARBY_WIFI_DEVICES` granted at runtime on Android 13+ (the SDK declares it), and `ACCESS_FINE_LOCATION` on Android 12 and lower.
 
 ### 1.2 Installation
 
@@ -113,7 +113,8 @@ transports: {
 ### 4.2 Wi‑Fi Direct (Android)
 
 - Permissions: the SDK declares `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE` and `NEARBY_WIFI_DEVICES` (with `neverForLocation`). Request `NEARBY_WIFI_DEVICES` at runtime on Android 13+, and `ACCESS_FINE_LOCATION` on Android 12 and lower, where peer discovery needs it.
-- `wifiDirect: { enabled: true }` starts the transport in `start()`.
+- The SDK's manifest asserts `neverForLocation` on `NEARBY_WIFI_DEVICES`, and the build merges that flag into your app. An app that derives location from Wi-Fi replaces the declaration (`tools:node="replace"`) and then also needs `ACCESS_FINE_LOCATION` on Android 13+, which the SDK does not check for it.
+- `wifiDirect: { enabled: true }` starts the transport in `start()`. Grant `NEARBY_WIFI_DEVICES` (or, on 12 and lower, fine location) **before** `start()`: an enable refused for a missing grant is logged and not retried, so the transport stays off for the session. If you ask for the grant later, call `enableTransport('wifiDirect')` once it is given.
 - Config: `wifiDirect: { enabled: true, autoAccept: true, groupOwnerIntent: 10 }`.
 
 ### 4.3 Internet
