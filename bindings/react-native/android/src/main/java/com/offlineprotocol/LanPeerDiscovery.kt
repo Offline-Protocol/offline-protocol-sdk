@@ -423,7 +423,7 @@ internal class LanPeerDiscovery(
                     if (code == NsdManager.FAILURE_ALREADY_ACTIVE && ++alreadyActive <= MAX_ALREADY_ACTIVE) {
                         // A resolve from before a restart is still running:
                         // this one waits for it, a few times, then gives way.
-                        pendingResolves.addFirst(info)
+                        if (services.containsKey(info.serviceName)) pendingResolves.addFirst(info)
                         handler.postDelayed({
                             if (resolving === this) { resolving = null; resolveNext() }
                         }, RESOLVE_RETRY_MS)
@@ -475,6 +475,10 @@ internal class LanPeerDiscovery(
 
     private fun resolved(info: NsdServiceInfo) {
         if (!onOurNetwork(info)) return
+        // Lost while the resolve was in flight: NSD sends one loss, already
+        // handled, so a record written now would never be removed and its
+        // address would be dialed for the rest of the network's life.
+        if (!services.containsKey(info.serviceName)) return
         val address = lanAdvertAddress(info.attributes) ?: return
         val local = localAddress() ?: return
         if (address == local) return
