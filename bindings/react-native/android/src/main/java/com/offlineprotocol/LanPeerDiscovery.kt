@@ -431,6 +431,7 @@ internal class LanPeerDiscovery(
                     }
                     alreadyActive = 0
                     resolving = null
+                    retryResolve(info.serviceName)
                     resolveNext()
                 }
             }
@@ -446,6 +447,7 @@ internal class LanPeerDiscovery(
             }
             resolving = null
             alreadyActive = 0
+            retryResolve(next.serviceName)
             resolveNext()
         }, RESOLVE_TIMEOUT_MS)
         try {
@@ -454,9 +456,21 @@ internal class LanPeerDiscovery(
         } catch (e: Exception) {
             resolving = null
             diagnostic("warning", "LAN resolve failed", mapOf("error" to (e.message ?: e.javaClass.simpleName)))
+            retryResolve(next.serviceName)
             // Posted: an item that throws again must not recurse here.
             handler.post { resolveNext() }
         }
+    }
+
+    /**
+     * A resolve of [name] gave up (failed, timed out, or gave way to one
+     * still running). It is queued again later while NSD still reports the
+     * service: NSD reports a service again only after losing it, so a resolve
+     * dropped for good left that peer unresolved for the session, unreachable
+     * if it never dials this device itself.
+     */
+    private fun retryResolve(name: String) {
+        retryLater { refresh(name) }
     }
 
     private fun resolved(info: NsdServiceInfo) {
