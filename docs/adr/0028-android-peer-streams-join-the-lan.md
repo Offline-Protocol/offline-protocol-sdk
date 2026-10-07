@@ -29,7 +29,7 @@ the other closes, and the pair reconnects forever with no error on either side.
    (`txtvers=1`, `addr`, no `app`), whenever `wifiDirect.enabled` is set. No
    new switch: iOS does the same under the same flag. Before T extensions 7
    (Android 12 and lower, and 13 without that update) it holds a multicast
-   lock while browsing: the platform drops mDNS for an app without one there.
+   lock while advertising or browsing: the platform drops mDNS for an app without one there.
 2. **Android keeps the stream the lower address opened, and the newer of two
    such, on every carrier.** One rule, not one per carrier: a pair in one P2P
    group and on one LAN has two dialers on one link table, keyed by address.
