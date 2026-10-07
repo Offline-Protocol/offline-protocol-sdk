@@ -62,14 +62,9 @@ internal class LanPeerDiscovery(
 
     private var started = false
     private var paused = false
-    private var network: Network? = null
-    /**
-     * Every Wi-Fi network the request matches now, with its properties. More
-     * than one can be up at once (Android's make-before-break switch, a
-     * local-only network another app asked for); one is current, the others
-     * wait in case it is lost.
-     */
-    private val candidates = LinkedHashMap<Network, LinkProperties>()
+    /** The matching Wi-Fi networks and the one followed ([NetworkChoice]). */
+    private val networks = NetworkChoice<Network, LinkProperties>()
+    private val network: Network? get() = networks.current
     /** Bumped whenever what was found stops counting, so stale callbacks and timers do nothing. */
     private var generation = 0
 
@@ -78,8 +73,6 @@ internal class LanPeerDiscovery(
     private var registeredName: String? = null
     private var discovery: NsdManager.DiscoveryListener? = null
 
-    /** What discovery found, by instance name: resolved again to refresh a record. */
-    private val services = HashMap<String, NsdServiceInfo>()
     /** Resolved peer records by instance name. */
     private val records = HashMap<String, Record>()
     /** The instance name each advertised address is dialed at. */
@@ -87,17 +80,8 @@ internal class LanPeerDiscovery(
     private val unprovable = HashSet<String>()
     private val policy = PeerStreamDialPolicy()
 
-    // One resolve at a time: before API 34 a second one fails
-    // FAILURE_ALREADY_ACTIVE.
-    private val pendingResolves = ArrayDeque<NsdServiceInfo>()
-    /**
-     * The resolve in flight, by its listener. A callback acts only while it
-     * is still this one, so forgetting it (pause, a network change, the
-     * watchdog) retires a resolve that is late or never answers.
-     */
-    private var resolving: NsdManager.ResolveListener? = null
-    /** `FAILURE_ALREADY_ACTIVE` answers in a row, capped at [MAX_ALREADY_ACTIVE]. */
-    private var alreadyActive = 0
+    /** What NSD reports, and its resolves, one at a time ([ResolveQueue]). */
+    private val resolves = ResolveQueue<NsdServiceInfo>({ it.serviceName })
 
     // Held while the advert or the browse is active. Before T extensions 7
     // (Android 12 and lower, and 13 without that update) the Wi-Fi driver
@@ -163,8 +147,7 @@ internal class LanPeerDiscovery(
         if (!started) return
         started = false
         try { connectivity.unregisterNetworkCallback(networkCallback) } catch (_: Exception) {}
-        network = null
-        candidates.clear()
+        networks.clear()
         stopNsd()
     }
 
@@ -184,33 +167,25 @@ internal class LanPeerDiscovery(
 
     // MARK: - The network
 
-    /**
-     * A matching network came up or changed. The current one is kept until
-     * it is lost: following whichever network spoke last tore down every LAN
-     * stream on each change from another, and could settle on one that was
-     * about to go, leaving none while another was still up.
-     */
+    /** A matching network came up or changed; [NetworkChoice] decides what it means. */
     private fun networkUp(network: Network, properties: LinkProperties) {
         if (!started) return
-        candidates[network] = properties
-        when (this.network) {
-            null -> adopt(network, properties)
-            network -> networkChanged(properties.linkAddresses.map { it.address }.toSet())
-            else -> {}
+        when (networks.up(network, properties)) {
+            NetworkChoice.Up.ADOPT -> adopt(properties)
+            NetworkChoice.Up.UPDATE -> networkChanged(properties.linkAddresses.map { it.address }.toSet())
+            NetworkChoice.Up.WAIT -> {}
         }
     }
 
     private fun networkLost(network: Network) {
-        candidates.remove(network)
-        if (network != this.network) return
-        this.network = null
+        if (!networks.lost(network)) return
         stopNsd()
         networkChanged(null)
-        candidates.entries.firstOrNull()?.let { (next, properties) -> adopt(next, properties) }
+        networks.fallback()?.let { (_, properties) -> adopt(properties) }
     }
 
-    private fun adopt(network: Network, properties: LinkProperties) {
-        this.network = network
+    /** The network now followed ([networks]`.current`) starts the carrier. */
+    private fun adopt(properties: LinkProperties) {
         networkChanged(properties.linkAddresses.map { it.address }.toSet())
         startNsd()
     }
@@ -239,13 +214,10 @@ internal class LanPeerDiscovery(
     }
 
     private fun forgetRecords() {
-        services.clear()
+        resolves.clear()
         records.clear()
         adverts = emptyMap()
         unprovable.clear()
-        pendingResolves.clear()
-        resolving = null
-        alreadyActive = 0
     }
 
     private fun register(address: String) {
@@ -381,82 +353,67 @@ internal class LanPeerDiscovery(
     private fun found(info: NsdServiceInfo) {
         if (!onOurNetwork(info)) return
         if (info.serviceName == registeredName) return
-        services[info.serviceName] = info
-        pendingResolves.add(info)
+        resolves.found(info)
         resolveNext()
     }
 
     /** Resolves [name] again: Android's cache answers with its latest port and host. */
     private fun refresh(name: String) {
-        val info = services[name] ?: return
-        if (pendingResolves.none { it.serviceName == name }) pendingResolves.add(info)
+        resolves.queue(name)
         resolveNext()
     }
 
     private fun lost(info: NsdServiceInfo) {
         if (!onOurNetwork(info)) return
         val name = info.serviceName
-        services.remove(name)
-        pendingResolves.removeAll { it.serviceName == name }
+        resolves.lost(name)
         if (records.remove(name) == null) return
         unprovable.remove(name)
         rebuild(emptySet())
     }
 
     private fun resolveNext() {
-        if (resolving != null) return
-        val next = pendingResolves.removeFirstOrNull() ?: return
+        val ticket = resolves.next() ?: return
+        val name = ticket.item.serviceName
         val listener = object : NsdManager.ResolveListener {
             override fun onServiceResolved(info: NsdServiceInfo) {
                 handler.post {
-                    if (resolving !== this) return@post
-                    resolving = null
-                    alreadyActive = 0
-                    resolved(info)
+                    if (resolves.answered(ticket)) resolved(info)
                     resolveNext()
                 }
             }
 
             override fun onResolveFailed(info: NsdServiceInfo, code: Int) {
                 handler.post {
-                    if (resolving !== this) return@post
-                    if (code == NsdManager.FAILURE_ALREADY_ACTIVE && ++alreadyActive <= MAX_ALREADY_ACTIVE) {
+                    if (code == NsdManager.FAILURE_ALREADY_ACTIVE && resolves.waitForActive(ticket)) {
                         // A resolve from before a restart is still running:
                         // this one waits for it, a few times, then gives way.
-                        if (services.containsKey(info.serviceName)) pendingResolves.addFirst(info)
-                        handler.postDelayed({
-                            if (resolving === this) { resolving = null; resolveNext() }
-                        }, RESOLVE_RETRY_MS)
+                        handler.postDelayed({ if (resolves.release(ticket)) resolveNext() }, RESOLVE_RETRY_MS)
                         return@post
                     }
-                    alreadyActive = 0
-                    resolving = null
-                    retryResolve(info.serviceName)
+                    if (resolves.gaveUp(ticket)) retryResolve(name)
                     resolveNext()
                 }
             }
         }
-        resolving = listener
         // NsdManager promises no answer, and one resolve that never comes back
         // held the queue for good: no peer found later was ever resolved,
         // and a refresh after a dead port waited behind it.
         handler.postDelayed({
-            if (resolving !== listener) return@postDelayed
+            if (!resolves.gaveUp(ticket)) return@postDelayed
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 try { nsd.stopServiceResolution(listener) } catch (_: Exception) {}
             }
-            resolving = null
-            alreadyActive = 0
-            retryResolve(next.serviceName)
+            retryResolve(name)
             resolveNext()
         }, RESOLVE_TIMEOUT_MS)
         try {
             @Suppress("DEPRECATION")
-            nsd.resolveService(next, listener)
+            nsd.resolveService(ticket.item, listener)
         } catch (e: Exception) {
-            resolving = null
+            resolves.gaveUp(ticket)
             diagnostic("warning", "LAN resolve failed", mapOf("error" to (e.message ?: e.javaClass.simpleName)))
-            retryResolve(next.serviceName)
+            retryResolve(name)
             // Posted: an item that throws again must not recurse here.
             handler.post { resolveNext() }
         }
@@ -475,10 +432,6 @@ internal class LanPeerDiscovery(
 
     private fun resolved(info: NsdServiceInfo) {
         if (!onOurNetwork(info)) return
-        // Lost while the resolve was in flight: NSD sends one loss, already
-        // handled, so a record written now would never be removed and its
-        // address would be dialed for the rest of the network's life.
-        if (!services.containsKey(info.serviceName)) return
         val address = lanAdvertAddress(info.attributes) ?: return
         val local = localAddress() ?: return
         if (address == local) return
@@ -628,7 +581,6 @@ internal class LanPeerDiscovery(
         private const val RESOLVE_RETRY_MS = 1_000L
         /** A resolve with no answer by then is given up, and the next one runs. */
         private const val RESOLVE_TIMEOUT_MS = 15_000L
-        private const val MAX_ALREADY_ACTIVE = 5
         /** A failed advert or browse is tried again after this long. iOS's `REBUILD_DELAY`. */
         private const val REBUILD_DELAY_MS = 5_000L
 
