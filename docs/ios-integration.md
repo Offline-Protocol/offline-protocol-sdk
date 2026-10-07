@@ -442,8 +442,9 @@ local-network privacy blocks discovery; the SDK reports a denial as an
 ```
 
 The slot reaches other iPhones and, on a shared network, hosts running the
-Python binding's `PeerStreamManager`. It does not interoperate with
-Android's Wi-Fi Direct, and an SDK from 0.27 or earlier, which used
+Python binding's `PeerStreamManager`, and Android phones on the same Wi-Fi
+network running an SDK newer than 0.28.0 (never over Android's Wi-Fi Direct,
+which iOS cannot join). An SDK from 0.27 or earlier, which used
 MultipeerConnectivity, does not see it. Available transports:
 - Bluetooth Low Energy
 - Internet

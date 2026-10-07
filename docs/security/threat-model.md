@@ -139,8 +139,13 @@ Python host all speak plain TCP, which the
 part of the trust argument. A device on the path is A1 for those frames. It
 reads what an envelope leaves in clear, such as the application id
 ([R17](#r17-the-application-id-on-every-frame-is-cleartext-and-unsigned)),
-and never a payload. The iOS manager's hop was encrypted while it used
-MultipeerConnectivity
+and never a payload. On a shared Wi-Fi network the path is every device on
+it, for Android since it joined the LAN
+([ADR 0028](../adr/0028-android-peer-streams-join-the-lan.md)) as for iOS and
+hosts before; a listener open to that network takes at most twelve inbound
+streams of its sixteen, and four from one remote address, so strangers'
+sockets cannot stop it dialing. The iOS manager's hop was encrypted while it
+used MultipeerConnectivity
 ([ADR 0027](../adr/0027-ios-peer-streams-ride-network-framework.md)).
 
 ### Boundary 5: end to end

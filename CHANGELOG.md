@@ -11,6 +11,54 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+## [Unreleased]
+
+> **Android and iOS meet on a shared Wi-Fi network.** The Android
+> peer-stream slot now finds iPhones and Python hosts on the Wi-Fi network
+> it is on, and they find it, with no Wi-Fi Direct group.
+> [§27](docs/UPGRADING.md#27-behaviour-that-changes-without-a-compile-error-unreleased)
+> lists what changes without a compile error.
+
+### Added
+
+- **Android peer streams on the Wi-Fi network.** With
+  `wifiDirect: { enabled: true }`, the Android manager advertises and browses
+  DNS-SD `_offlineprotocol._tcp` through `NsdManager` on the Wi-Fi network it
+  is on, with the record iOS and Python publish (`txtvers=1`, `addr`, the same
+  instance name), and dials what it finds on iOS's policy: the lower address
+  at once, the higher after five seconds, a redial ladder up to a minute, and
+  a record whose dial is answered by another address left out. Dials are bound
+  to the Wi-Fi network (a socket left to the default network goes out over
+  cellular on a Wi-Fi with no internet) and carry the record's `addr` as the
+  address the preamble must prove. A Wi-Fi network with no internet counts.
+  The slot stays up while either the group or the network is, and Wi-Fi P2P
+  going off, or leaving the group, ends only the group's streams. It needs
+  `ACCESS_NETWORK_STATE`, which the module declares, and no runtime grant, so
+  it also runs on a phone that has not granted `NEARBY_WIFI_DEVICES`. A network
+  that blocks multicast or isolates clients (many guest and office networks)
+  finds nothing, and Android to iOS with no shared network still goes over
+  Bluetooth LE or the relays
+  ([ADR 0028](docs/adr/0028-android-peer-streams-join-the-lan.md)).
+
+### Changed
+
+- **Android keeps the stream the lower address opened.** Of two streams for
+  one address, Android kept the newer; iOS and Python keep the one the lower
+  address opened, and the newer of two such. On a shared network both ends
+  dial, and two different rules keep opposite streams and reconnect forever.
+  Android now computes the same rule, comparing addresses by their UTF-8
+  bytes, and `every_peer_stream_manager_keeps_the_same_stream` (renamed from
+  `ios_and_python_peer_streams_keep_the_same_stream`) pins all three copies.
+  Inside a Wi-Fi Direct group a client that is the higher address can no
+  longer supersede its own half-open stream: its reconnect waits for keepalive,
+  about thirty seconds.
+- **Android peer streams use the iOS and Python keepalive**: 15 seconds idle,
+  5 between probes, 3 probes, where the OS default was two hours.
+- **Android's peer-stream listener bounds inbound streams.** It binds every
+  interface, so any device on a shared network could take all sixteen slots.
+  At most twelve are inbound now, and four from one remote address, iOS's
+  bounds.
+
 ## [0.28.0] — 2026-10-06
 
 > **The peer-stream slot carries traffic on phones.** The mobile managers

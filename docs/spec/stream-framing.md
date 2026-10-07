@@ -3,9 +3,9 @@
 ## What this chapter is for
 
 A peer stream is a byte stream the platform established to exactly one other
-device: a Wi-Fi Direct group socket on Android, a TCP connection over a LAN
-or over AWDL (Apple's peer-to-peer Wi-Fi) on iOS, a TCP connection over a LAN
-or over a routed mesh on a host. To the protocol
+device: a Wi-Fi Direct group socket or a TCP connection over a LAN on
+Android, a TCP connection over a LAN or over AWDL (Apple's peer-to-peer Wi-Fi)
+on iOS, a TCP connection over a LAN or over a routed mesh on a host. To the protocol
 engine these are one transport, registered in the slot the FFI names
 `wifi_direct` for historical reasons, and this chapter is what makes them one:
 it specifies the only two things a stream does not get from its platform for
@@ -243,8 +243,11 @@ Nothing in this chapter requires discovery: a stream opened to a configured
 host and port is complete as specified. Where a LAN offers DNS-SD
 (RFC 6763), an implementation that advertises MUST use the service type
 `_offlineprotocol._tcp` (fifteen characters, the maximum a service label
-allows) and a TXT record whose first entry is `txtvers=1` and which carries
-`addr=<off1…>`, the advertiser's canonical address.
+allows) and a TXT record that carries `txtvers=1`, first where the
+advertiser controls the order (RFC 6763 section 6.7), and
+`addr=<off1…>`, the advertiser's canonical address. A browser MUST look
+entries up by key and MUST NOT depend on their order: Android's `NsdManager`
+keeps a record's attributes in a map and does not promise one.
 
 A framework that publishes DNS-SD on the implementation's behalf is bound by
 the same rule, and MUST NOT publish `_offlineprotocol._tcp` for a service
@@ -254,6 +257,11 @@ app's `NSBonjourServices` must list `_offlineprotocol._tcp`, or iOS
 local-network privacy blocks discovery. The iOS manager once used
 MultipeerConnectivity, which published the same type in front of its own
 protocol, so a host on the same LAN found an iPhone it could not speak to.
+The Android manager publishes and browses the same record through
+`NsdManager` on the Wi-Fi network it is on, with the same instance name (a
+digest of the address), and binds its dials to that network, since a socket
+left to the default network goes out over cellular on a Wi-Fi network with
+no internet ([ADR 0028](../adr/0028-android-peer-streams-join-the-lan.md)).
 
 The `addr` entry is a hint the preamble proves. It tells a browser which
 device it is about to connect to, so the derived address of the preamble can
@@ -265,7 +273,7 @@ and carries no meaning; an implementation SHOULD NOT put the address there,
 since the TXT entry already carries it and one copy is one place to get it
 wrong.
 
-On Android, Wi-Fi Direct carries the same record over Wi-Fi P2P service
+On Android, Wi-Fi Direct also carries the record over Wi-Fi P2P service
 discovery when an application lets the SDK form the group
 (`wifiDirect.autoAccept`). The record adds one entry for that use: `app`, a
 tag of the application id that keeps applications' devices apart. The `addr` entry

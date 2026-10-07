@@ -410,7 +410,11 @@ export interface InternetTransportConfig {
  * WiFi Direct transport configuration
  */
 export interface WifiDirectTransportConfig {
-  /** Enable WiFi Direct transport */
+  /**
+   * Enable the peer-stream slot. Android: Wi-Fi Direct, and DNS-SD on the
+   * Wi-Fi network it is on, which finds iPhones and Python hosts there. iOS:
+   * Network framework streams on the LAN and over AWDL.
+   */
   enabled: boolean;
   /** Device name to advertise */
   deviceName?: string;
@@ -627,7 +631,7 @@ export interface TransportsConfig {
   ble?: BleTransportConfig;
   /** Internet transport configuration */
   internet?: InternetTransportConfig;
-  /** WiFi Direct transport configuration (Android only) */
+  /** Peer-stream slot configuration (Wi-Fi Direct and LAN on Android, LAN and AWDL on iOS) */
   wifiDirect?: WifiDirectTransportConfig;
   /** Reticulum mesh transport configuration (requires external Reticulum daemon) */
   reticulum?: ReticulumTransportConfig;

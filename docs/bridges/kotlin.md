@@ -104,10 +104,12 @@ exemption list, pinned in `RelayAnswerPrefixesTest.kt`.
 
 See [C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language).
 
-## K8. A Wi-Fi Direct socket's verdict is its preamble, not its connect
+## K8. A peer stream's verdict is its preamble, not its connect
 
 `WifiDirectManager` fills the peer-stream slot with Wi-Fi Direct group
-sockets, framed as [the chapter](../spec/stream-framing.md) specifies. A
+sockets and, through `LanPeerDiscovery`, with TCP sockets on the Wi-Fi
+network the device is on, framed as [the chapter](../spec/stream-framing.md)
+specifies. A
 socket's peer is announced to the core only under the address
 `verifyIdentityAssertion` derived from its first frame: never on connect, and
 never under the socket endpoint or `"go:<ip>"`, which is what this manager

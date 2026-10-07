@@ -262,7 +262,7 @@ macOS, Linux, and Windows can use the Python binding's snake_case
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `transports.ble.enabled` | boolean | true | Enable BLE mesh |
-| `transports.wifiDirect.enabled` | boolean | false | Enable the [peer-stream](spec/stream-framing.md) slot: Wi-Fi Direct on Android, a TCP stream over a LAN or AWDL on iOS (which needs `_offlineprotocol._tcp` in `NSBonjourServices`, see the [iOS guide](ios-integration.md#platform-limitations)) |
+| `transports.wifiDirect.enabled` | boolean | false | Enable the [peer-stream](spec/stream-framing.md) slot: Wi-Fi Direct and a TCP stream over the Wi-Fi network on Android, a TCP stream over a LAN or AWDL on iOS (which needs `_offlineprotocol._tcp` in `NSBonjourServices`, see the [iOS guide](ios-integration.md#platform-limitations)) |
 | `transports.internet.enabled` | boolean | true | Enable Internet |
 | `transports.reticulum.enabled` | boolean | false | Enable Reticulum mesh (requires a gateway daemon speaking [contract v1](spec/gateway-contract.md#gateway-daemon-contract-v1)) |
 | `transports.reticulum.daemonAddress` | string | `localhost:4242` | Host and port of the gateway daemon |
@@ -917,6 +917,7 @@ Two consequences worth knowing:
 - `BLUETOOTH`, `BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT`
 - `ACCESS_FINE_LOCATION` (for BLE scanning)
 - `ACCESS_WIFI_STATE`, `NEARBY_WIFI_DEVICES`
+- `ACCESS_NETWORK_STATE` (declared by the SDK; the peer-stream slot's LAN carrier)
 
 ### iOS
 
