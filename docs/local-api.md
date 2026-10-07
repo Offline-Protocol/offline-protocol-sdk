@@ -54,7 +54,35 @@ offline-protocol-service --config config.json \
 [Configuration](configuration.md)); `--listen` and `--peer` drive the
 peer-stream transport when the configuration enables it, and `--gateway
 HOST:PORT` names the gateway daemon when it enables `reticulum` (default
-`localhost:4242`, see [the gateway contract](spec/gateway-contract.md)). Two carriers:
+`localhost:4242`, see [the gateway contract](spec/gateway-contract.md)).
+
+### Which transports run
+
+The server starts every transport the configuration enables and the host
+can run, once the engine has an address to prove:
+
+| Transport | Enabled by | Started when |
+|---|---|---|
+| Peer stream | `wifi_direct_enabled` | Always. `--listen`, `--peer` and `--lan` configure it. |
+| Bluetooth LE central and peripheral | `ble_enabled` | The platform has a backend (BlueZ on Linux). The peripheral advertises this device to phones. |
+| Internet relay | `internet_enabled` | `--relay URL` names the relay; the token, if any, is read from `OFFLINE_PROTOCOL_RELAY_TOKEN` (`--relay-token-env` names another variable). |
+| Gateway | `reticulum_enabled` | Always once configured; `--gateway` names the daemon. |
+
+`--lan` advertises this host on the LAN over DNS-SD and dials every other
+host that advertises the same service type, so two hosts on one segment find
+each other with no `--peer` list. It needs the optional dependency
+(`pip install 'offline-protocol-sdk[lan]'`), and multicast DNS, so a
+container must share the host's network. An address a record carries is a
+hint; the stream's preamble proves the peer.
+
+**A transport that fails to start is logged and stays stopped, and the
+others run; the server fails only when none starts.** The failure this
+prevents is a Bluetooth adapter another process holds, or a refused
+advertisement, taking the LAN path down with it. A flag the configuration
+cannot honour (`--lan` without `wifi_direct_enabled`, `--relay` without
+`internet_enabled`) is refused at start rather than ignored.
+
+Two carriers serve the API itself:
 
 | Carrier | How | Credential |
 |---|---|---|

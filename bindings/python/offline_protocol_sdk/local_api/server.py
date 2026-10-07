@@ -100,8 +100,8 @@ class LocalApiServer:
     ----------
     manager:
         A manager that has not been started. The server registers itself as
-        its event handler, starts it, and starts its peer-stream transport
-        when the configuration enables one.
+        its event handler, starts it, and then starts every transport the
+        configuration enables and can run (see :meth:`_start_carriers`).
     policy:
         The space allow-lists and method denials; empty by default.
     socket_path:
@@ -193,13 +193,7 @@ class LocalApiServer:
         self._manager.on_event(self._on_engine_event)
         await self._manager.start()
         try:
-            if self._manager.peer_stream is not None:
-                await self._manager.peer_stream.start()
-            # Only once configured: an unconfigured gateway client has no
-            # daemon to dial, and starting it would refuse the whole server.
-            gateway = self._manager.gateway
-            if gateway is not None and gateway.is_available():
-                await gateway.start()
+            await self._start_carriers()
             engine = self._manager.protocol
             services = generated.MeshServices(engine)
             data: Any
@@ -270,6 +264,55 @@ class LocalApiServer:
         )
         self.port = server.sockets[0].getsockname()[1]
         return server
+
+    def _configured_carriers(self) -> list[tuple[str, Any]]:
+        """The transports this server starts, in order, as (name, manager).
+
+        A transport is listed when the configuration built its manager and
+        the manager can run here: the peer stream always, the Bluetooth
+        central and peripheral where the platform has a backend, the
+        internet relay and the gateway client only once an address to dial
+        was configured (unconfigured, each has nothing to connect to and
+        would refuse to start).
+        """
+        manager = self._manager
+        carriers: list[tuple[str, Any]] = []
+        if manager.peer_stream is not None:
+            carriers.append(("peer stream", manager.peer_stream))
+        for name, transport in (
+            ("Bluetooth LE central", manager.ble),
+            ("Bluetooth LE peripheral", manager.ble_peripheral),
+            ("internet relay", manager.internet),
+            ("gateway", manager.gateway),
+        ):
+            if transport is not None and transport.is_available():
+                carriers.append((name, transport))
+        return carriers
+
+    async def _start_carriers(self) -> None:
+        """Starts every configured transport; fails only when none starts.
+
+        The engine is already running, so this device has the address the
+        peer stream and the peripheral prove. A transport that fails to
+        start is logged and left stopped, and the others run: a radio that
+        another process holds must not take the LAN path down with it. When
+        every configured transport failed, the server has no way to reach
+        anyone and the first failure is raised.
+        """
+        carriers = self._configured_carriers()
+        failures: list[BaseException] = []
+        for name, transport in carriers:
+            try:
+                await transport.start()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("the %s did not start and stays stopped: %s", name, exc)
+                failures.append(exc)
+            else:
+                logger.info("the %s is running", name)
+        if carriers and len(failures) == len(carriers):
+            raise failures[0]
 
     async def stop(self) -> None:
         """Closes every connection, then the engine and its transports."""
