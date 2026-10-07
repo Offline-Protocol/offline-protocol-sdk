@@ -51,9 +51,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `ios_and_python_peer_streams_keep_the_same_stream`) pins all three copies.
   Inside a Wi-Fi Direct group a client that is the higher address can no
   longer supersede its own half-open stream: its reconnect waits for keepalive,
-  about thirty seconds.
-- **Android peer streams use the iOS and Python keepalive**: 15 seconds idle,
-  5 between probes, 3 probes, where the OS default was two hours.
+  about thirty seconds on Android 10 and later.
+- **Android peer streams use the iOS and Python keepalive** on Android 10 and
+  later: 15 seconds idle, 5 between probes, 3 probes, and 30 seconds for
+  unacknowledged data, where the OS defaults were two hours and about fifteen
+  minutes.
 - **Android's peer-stream listener bounds inbound streams.** It binds every
   interface, so any device on a shared network could take all sixteen slots.
   At most twelve are inbound now, and four from one remote address, iOS's

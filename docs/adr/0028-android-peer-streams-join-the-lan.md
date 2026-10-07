@@ -35,9 +35,13 @@ the other closes, and the pair reconnects forever with no error on either side.
    compares UTF-16 units and orders differently past the BMP.
    `every_peer_stream_manager_keeps_the_same_stream` pins the Kotlin, Swift
    and Python copies together.
-3. **Keepalive is 15 seconds idle, 5 between probes, 3 probes**, the iOS and
-   Python timers, set with `Os.setsockoptInt` because `java.net.Socket`
-   cannot set them.
+3. **Keepalive is 15 seconds idle, 5 between probes, 3 probes, with a
+   30-second `TCP_USER_TIMEOUT`**, the iOS and Python timers, set with
+   `Os.setsockoptInt` because `java.net.Socket` cannot set them. The user
+   timeout is what bounds a stale stream holding unacknowledged data, where
+   keepalive sends no probe. Android 10 and later only: before API 29
+   `ParcelFileDescriptor.fromSocket` hands back the socket's own descriptor
+   rather than a duplicate, so closing it closed the socket.
 4. **Inbound streams are bounded as on iOS**: 16 open, at most 12 inbound,
    at most 4 from one remote address, so a listener open to a whole network
    cannot take the slots this device dials with.
@@ -50,7 +54,8 @@ the other closes, and the pair reconnects forever with no error on either side.
 - A group client that is the higher address can no longer supersede its own
   half-open stream. Its reconnect is refused until keepalive ends the stale
   one, about thirty seconds, where "newer supersedes" reconnected at once.
-  The lower address's reconnect still supersedes at once.
+  The lower address's reconnect still supersedes at once. On Android 7 to 9
+  the OS defaults apply, and the wait can be two hours.
 - An Android device with `wifiDirect.enabled` now announces its address to
   every device on the Wi-Fi network it joins, as an iPhone already does
   (threat model R16). The envelope fields a frame leaves in clear are

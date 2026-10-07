@@ -2524,8 +2524,9 @@ stays off until `enableTransport('wifiDirect')` after the grant.
 **Android: of two streams for one address, the lower-opened one is kept.**
 Inside a Wi-Fi Direct group this changes one thing: a client whose address is
 higher than its group owner's reconnects past a half-open stream after
-keepalive ends it, about thirty seconds, instead of at once. Bluetooth LE and
-the relays carry traffic meanwhile.
+keepalive ends it, about thirty seconds on Android 10 and later (up to two
+hours on 7 to 9, which keep the OS defaults), instead of at once. Bluetooth LE
+and the relays carry traffic meanwhile.
 
 **Android peers on an older release** neither advertise nor browse on the
 LAN, so they meet a phone on this release only inside a Wi-Fi Direct group,

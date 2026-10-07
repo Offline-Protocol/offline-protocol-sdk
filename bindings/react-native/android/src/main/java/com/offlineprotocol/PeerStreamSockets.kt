@@ -1,5 +1,6 @@
 package com.offlineprotocol
 
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.system.Os
 import android.system.OsConstants
@@ -421,21 +422,30 @@ internal class PeerStreamSockets(
     }
 
     /**
-     * Keepalive at 15 s idle, 5 s between probes, 3 probes, the iOS and
-     * Python timers. The higher address's reconnect past a half-open stream
-     * is refused until the held one ends, and with the OS default (two hours
-     * idle) an idle dead stream would hold the address that long. Best
-     * effort: a socket that refuses the options keeps the default.
+     * Keepalive at 15 s idle, 5 s between probes, 3 probes, and a 30 s bound
+     * on unacknowledged data, the iOS and Python timers. The higher address's
+     * reconnect past a half-open stream is refused until the held one ends.
+     * With the OS defaults an idle dead stream holds the address for two
+     * hours, and keepalive sends no probe while data waits unacknowledged,
+     * so one with a write outstanding holds it until retransmission gives up
+     * (about fifteen minutes); `TCP_USER_TIMEOUT` bounds that case.
+     *
+     * Android 10 and later only. Before API 29 `fromSocket` takes the
+     * socket's own descriptor instead of a duplicate, so closing it closed
+     * the socket under every stream. Those versions keep the OS defaults.
+     * Best effort: a socket that refuses the options keeps the defaults.
      */
     private fun tuneKeepalive(socket: Socket) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
         try {
-            // A duplicate of the socket's descriptor: options set on it apply
-            // to the socket, and closing it leaves the socket open.
+            // A duplicate of the socket's descriptor from API 29: options set
+            // on it apply to the socket, and closing it leaves the socket open.
             ParcelFileDescriptor.fromSocket(socket).use { pfd ->
                 val fd = pfd.fileDescriptor
                 Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, TCP_KEEPIDLE, 15)
                 Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, TCP_KEEPINTVL, 5)
                 Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, TCP_KEEPCNT, 3)
+                Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, TCP_USER_TIMEOUT, 30_000)
             }
         } catch (_: Throwable) {}
     }
@@ -535,3 +545,4 @@ internal class PeerStreamSockets(
 private const val TCP_KEEPIDLE = 4
 private const val TCP_KEEPINTVL = 5
 private const val TCP_KEEPCNT = 6
+private const val TCP_USER_TIMEOUT = 18

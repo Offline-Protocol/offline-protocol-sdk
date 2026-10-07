@@ -127,9 +127,13 @@ report run under that stream's lock, so no body reaches the core after its
 loss report.
 
 A peer that vanishes without a FIN stays announced until keepalive notices:
-15 seconds idle, 5 between probes, 3 probes, the iOS and Python timers, set
-through `Os.setsockoptInt` because `java.net.Socket` cannot set the
-interval. The core's acknowledgements are still the real signal that a peer
+15 seconds idle, 5 between probes, 3 probes, and a 30-second
+`TCP_USER_TIMEOUT` for a stream holding unacknowledged data, where keepalive
+sends no probe. These are the iOS and Python timers, set through
+`Os.setsockoptInt` because `java.net.Socket` cannot set them, and only on
+Android 10 and later: before API 29 `ParcelFileDescriptor.fromSocket` takes
+the socket's own descriptor, so closing it closed the socket. Older versions
+keep the OS defaults (two hours idle). The core's acknowledgements are still the real signal that a peer
 is gone, as P9 says for the same reason.
 
 `NsdManager`'s `DiscoveryListener` reports a record found and lost, never
@@ -148,7 +152,7 @@ opened, and the newer of two such: P9's rule, compared by UTF-8 bytes, and
 Python copies. Inside a group only the client dials, so the rule reduces to
 "newer wins" there, except that a client that is the higher address cannot
 supersede its own half-open stream: its reconnect is refused until keepalive
-ends the stale one, about thirty seconds. That is the price of the rule being
+ends the stale one, about thirty seconds (two hours on Android 7 to 9). That is the price of the rule being
 one rule; a pair that shares a group and a LAN has two dialers on one link
 table (ADR 0028). A client whose stream ends while the group is up reconnects on a doubling
 delay, always to the owner the group has at that moment: on a group switch
