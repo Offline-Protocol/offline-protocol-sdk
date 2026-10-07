@@ -315,16 +315,14 @@ class LocalApiServer:
         for name, transport in carriers:
             try:
                 # A start cut off by the deadline leaves the transport in
-                # STARTING, which every transport's stop() accepts, so the
-                # manager's teardown still closes what it opened.
+                # STARTING, which every transport's stop() accepts.
                 await asyncio.wait_for(transport.start(), self._carrier_start_timeout)
             except asyncio.CancelledError:
                 raise
             except asyncio.TimeoutError:
-                logger.error(
-                    "the %s did not start within %s s and stays stopped", name, self._carrier_start_timeout
-                )
+                logger.error("the %s did not start within %s s and is stopped", name, self._carrier_start_timeout)
                 failures.append(TimeoutError(f"the {name} did not start within {self._carrier_start_timeout} s"))
+                await self._stop_late_carrier(name, transport)
             except Exception as exc:
                 logger.error("the %s did not start and stays stopped: %s", name, exc)
                 failures.append(exc)
@@ -332,6 +330,24 @@ class LocalApiServer:
                 logger.info("the %s is running", name)
         if carriers and len(failures) == len(carriers):
             raise failures[0]
+
+    async def _stop_late_carrier(self, name: str, transport: Any) -> None:
+        """Tears down a transport whose start ran past the deadline.
+
+        The cancel landed at whatever the backend was awaiting, and the
+        backend may still finish it: a Bluetooth peripheral has its GATT
+        callbacks wired before it awaits the advertisement, so one that
+        un-wedges later would advertise and take writes with nothing
+        watching it until shutdown. Stopped now, under the same deadline.
+        """
+        try:
+            await asyncio.wait_for(transport.stop(), self._carrier_start_timeout)
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            logger.error("the %s did not stop within %s s either", name, self._carrier_start_timeout)
+        except Exception as exc:
+            logger.error("the %s could not be stopped either: %s", name, exc)
 
     async def stop(self) -> None:
         """Closes every connection, then the engine and its transports."""

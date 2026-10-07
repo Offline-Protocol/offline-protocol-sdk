@@ -43,7 +43,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   that reported the relay running and passed `/health`. A variable named
   with `--relay-token-env` and left unset is refused rather than read as
   "no token", and each transport has 30 seconds to start before it counts
-  as failed.
+  as failed and is stopped.
 
 ## [0.28.0] — 2026-10-06
 

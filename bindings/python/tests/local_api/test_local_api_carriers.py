@@ -27,11 +27,17 @@ from .test_local_api_server import _cli_args
 
 
 def _bluetooth_present(
-    monkeypatch, started: list[str], *, central_fails=False, peripheral_fails=False, peripheral_hangs=False
+    monkeypatch,
+    started: list[str],
+    *,
+    central_fails=False,
+    peripheral_fails=False,
+    peripheral_hangs=False,
+    stopped: list[str] | None = None,
 ):
     """Stands in for the radio: both roles report available, and start()
     records itself, raises the way a refused adapter does, or never returns
-    the way a wedged backend does."""
+    the way a wedged backend does. stop() records itself in ``stopped``."""
 
     async def central_start(self):
         if central_fails:
@@ -45,15 +51,19 @@ def _bluetooth_present(
             raise TransportError("org.bluez.Error.Failed: Maximum advertisements reached")
         started.append("peripheral")
 
-    async def stop(self):
-        return None
+    def recording_stop(role):
+        async def stop(self):
+            if stopped is not None:
+                stopped.append(role)
+
+        return stop
 
     monkeypatch.setattr(BleManager, "is_available", lambda self: True)
     monkeypatch.setattr(BlePeripheral, "is_available", lambda self: True)
     monkeypatch.setattr(BleManager, "start", central_start)
     monkeypatch.setattr(BlePeripheral, "start", peripheral_start)
-    monkeypatch.setattr(BleManager, "stop", stop)
-    monkeypatch.setattr(BlePeripheral, "stop", stop)
+    monkeypatch.setattr(BleManager, "stop", recording_stop("central"))
+    monkeypatch.setattr(BlePeripheral, "stop", recording_stop("peripheral"))
 
 
 def _peer_stream_manager(profile: str, **config) -> ProtocolManager:
@@ -92,15 +102,19 @@ async def test_a_refused_advertiser_leaves_the_peer_stream_running(harness, monk
 
 
 async def test_a_transport_that_never_starts_counts_as_failed(harness, monkeypatch, caplog):
-    """A wedged backend must not keep the API socket from opening."""
+    """A wedged backend must not keep the API socket from opening, and is
+    torn down at the deadline rather than left half-started until shutdown:
+    a backend that finishes late would otherwise run with nothing watching."""
     started: list[str] = []
-    _bluetooth_present(monkeypatch, started, peripheral_hangs=True)
+    stopped: list[str] = []
+    _bluetooth_present(monkeypatch, started, peripheral_hangs=True, stopped=stopped)
     manager = ProtocolManager(make_config(profile="wedged-ble-user", ble_enabled=True))
     with caplog.at_level(logging.ERROR, logger="offline_protocol_sdk.local_api.server"):
         server = await asyncio.wait_for(harness.server(manager=manager, carrier_start_timeout=0.2), 10)
     client = await harness.client(server)
     assert (await client.hello("notes"))["state"] == "Running"
     assert started == ["central"]
+    assert stopped == ["peripheral"]
     assert any("Bluetooth LE peripheral" in r.getMessage() and "within" in r.getMessage() for r in caplog.records)
 
 

@@ -79,8 +79,11 @@ hint; the stream's preamble proves the peer.
 others run; the server fails only when none starts.** The failure this
 prevents is a Bluetooth adapter another process holds, or a refused
 advertisement, taking the LAN path down with it. A transport that has not
-started within 30 seconds counts as failed, so a Bluetooth backend that
-hangs cannot keep the API socket from opening. A flag the configuration
+started within 30 seconds counts as failed and is stopped then, not at
+shutdown, so a Bluetooth backend that hangs cannot keep the API socket from
+opening, nor finish starting later with nothing watching it. Transports start
+one after another, so the socket can take up to 30 seconds per configured
+transport to open. A flag the configuration
 cannot honour (`--lan` without `wifi_direct_enabled`, `--relay` without
 `internet_enabled`) is refused at start rather than ignored, and so is a
 value the transport could never use: `--relay` must be a `ws://` or `wss://`
