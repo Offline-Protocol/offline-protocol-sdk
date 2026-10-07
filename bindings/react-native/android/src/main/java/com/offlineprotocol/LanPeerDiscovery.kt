@@ -230,10 +230,7 @@ internal class LanPeerDiscovery(
             }
 
             override fun onRegistrationFailed(info: NsdServiceInfo, code: Int) {
-                handler.post {
-                    if (registration === this) registration = null
-                    diagnostic("error", "LAN advert failed", mapOf("code" to code))
-                }
+                handler.post { if (registration === this) registrationFailed(mapOf("code" to code)) }
             }
 
             override fun onServiceUnregistered(info: NsdServiceInfo) {}
@@ -243,9 +240,19 @@ internal class LanPeerDiscovery(
         try {
             nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
         } catch (e: Exception) {
-            registration = null
-            diagnostic("error", "LAN advert failed", mapOf("error" to (e.message ?: e.javaClass.simpleName)))
+            registrationFailed(mapOf("error" to (e.message ?: e.javaClass.simpleName)))
         }
+    }
+
+    /**
+     * The advert failed: tried again later, as iOS rebuilds its listener. A
+     * failure was final until the network changed, which left this device
+     * invisible to every peer on it for the session.
+     */
+    private fun registrationFailed(context: Map<String, Any?>) {
+        registration = null
+        diagnostic("error", "LAN advert failed", context)
+        retryLater { if (network != null && registration == null) localAddress()?.let { register(it) } }
     }
 
     private fun discover() {
@@ -256,10 +263,7 @@ internal class LanPeerDiscovery(
             override fun onDiscoveryStopped(serviceType: String) {}
 
             override fun onStartDiscoveryFailed(serviceType: String, code: Int) {
-                handler.post {
-                    if (discovery === this) discovery = null
-                    diagnostic("error", "LAN discovery failed to start", mapOf("code" to code))
-                }
+                handler.post { if (discovery === this) discoveryFailed(mapOf("code" to code)) }
             }
 
             override fun onStopDiscoveryFailed(serviceType: String, code: Int) {}
@@ -276,14 +280,35 @@ internal class LanPeerDiscovery(
         try {
             nsd.discoverServices(WifiDirectGroupFormation.SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
         } catch (e: Exception) {
-            discovery = null
-            diagnostic("error", "LAN discovery failed to start", mapOf("error" to (e.message ?: e.javaClass.simpleName)))
+            discoveryFailed(mapOf("error" to (e.message ?: e.javaClass.simpleName)))
         }
+    }
+
+    /**
+     * The browse failed to start: the lock it took is let go, since nothing
+     * browses under it, and it is tried again later, as iOS rebuilds its
+     * browser. A failure was final until the network changed.
+     */
+    private fun discoveryFailed(context: Map<String, Any?>) {
+        discovery = null
+        releaseMulticastLock()
+        diagnostic("error", "LAN discovery failed to start", context)
+        retryLater { if (!paused && network != null) discover() }
+    }
+
+    /** Runs [retry] after [REBUILD_DELAY_MS] unless the NSD state it was for has gone. */
+    private fun retryLater(retry: () -> Unit) {
+        val expected = generation
+        handler.postDelayed({ if (started && expected == generation) retry() }, REBUILD_DELAY_MS)
     }
 
     private fun stopDiscovery() {
         discovery?.let { try { nsd.stopServiceDiscovery(it) } catch (_: Exception) {} }
         discovery = null
+        releaseMulticastLock()
+    }
+
+    private fun releaseMulticastLock() {
         try { multicastLock?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
     }
 
@@ -492,6 +517,8 @@ internal class LanPeerDiscovery(
         /** A connect that takes longer is left to the redial ladder. iOS's `DIAL_TIMEOUT`. */
         private const val DIAL_TIMEOUT_MS = 10_000
         private const val RESOLVE_RETRY_MS = 1_000L
+        /** A failed advert or browse is tried again after this long. iOS's `REBUILD_DELAY`. */
+        private const val REBUILD_DELAY_MS = 5_000L
 
         /**
          * The DNS-SD instance name: a digest of the address, as iOS and Python
