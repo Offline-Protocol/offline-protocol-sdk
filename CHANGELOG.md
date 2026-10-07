@@ -63,6 +63,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   the threat model gains R23 (the front trusts every process that can reach
   it) and the Python bridge rules gain P13.
 
+- **A container image for the service, and an HTTP demo.**
+  `bindings/python/docker` builds one service per host on `python:3.12-slim`
+  with the `lan` and `http` extras, configured from environment variables,
+  and its README lists what a host's container manifest must grant (host
+  networking for multicast DNS, inbound TCP 7878, a persistent volume, the
+  store key from a secret store, and the system D-Bus socket for Bluetooth
+  LE) and the failure each grant prevents. `examples/http-front` has a
+  provider with no SDK import and a `curl` client. Two containers from the
+  image found each other over multicast DNS with no peer list and served a
+  request through the front, and the address and registrations survived a
+  restart. Bluetooth LE from a container is untested on hardware.
+
 ### Changed
 
 - **A peer-stream or relay flag the configuration cannot honour is refused.**

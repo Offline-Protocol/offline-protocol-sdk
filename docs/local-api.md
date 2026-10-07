@@ -145,7 +145,9 @@ beside `--http` on the same service: both would receive every request and
 call the callback twice. Off loopback it requires `--http-token-file`, and
 on a host where a browser runs it should have one on loopback too; the
 residual risk of a front any local process can reach is R23 in the threat
-model.
+model. [examples/http-front](../examples/http-front) has a provider and a
+client, and [the container image](../bindings/python/docker) runs one
+service per host with the front on.
 
 ## The policy file
 
