@@ -130,6 +130,9 @@ public class WifiDirectManager: NSObject, TransportManager {
         /// mid-preamble has not been heard.
         var heard = false
         var proved = false
+        /// Whether a body followed the preamble: the stream carried the
+        /// peer. Only this starts the redial ladder over; see `receive(on:)`.
+        var carried = false
 
         init(connection: NWConnection, outbound: Bool, dialed: String?) {
             self.connection = connection
@@ -665,10 +668,20 @@ public class WifiDirectManager: NSObject, TransportManager {
                     case .success(let frame):
                         stream.heard = true
                         self.peers.received(frame, from: stream)
-                        if !stream.proved, let address = stream.dialed,
+                        if !stream.carried, let address = stream.dialed,
                            self.peers.provedAddress(of: stream) == address {
-                            stream.proved = true
-                            self.dialPolicy.proved(address)
+                            if stream.proved {
+                                // A body after the preamble. A proof alone does
+                                // not start the ladder over: a stream the peer
+                                // refuses for its own held one (a stale stream
+                                // there) proves the address too, and resetting
+                                // on it redialed every second until that stream
+                                // died. Android's `Ran.delivered` is the same rule.
+                                stream.carried = true
+                                self.dialPolicy.proved(address)
+                            } else {
+                                stream.proved = true
+                            }
                         }
                     case .failure(let refusal):
                         self.emitDiagnostic("warning", "Peer stream refused", context: ["reason": refusal.reason])

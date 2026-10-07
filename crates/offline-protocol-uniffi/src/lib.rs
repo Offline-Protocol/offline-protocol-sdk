@@ -18114,6 +18114,46 @@ mod tests {
         }
     }
 
+    /// A peer-stream redial ladder starts over only after a stream that
+    /// carried its peer, on iOS and Android alike.
+    ///
+    /// A stream the peer refuses for its own held one proves the address all
+    /// the same, so a ladder that reset on proof redialed every second, with a
+    /// connect and a loss reported each round, until the peer's stale stream
+    /// died. Each platform holds its copy of the rule in its own words, so the
+    /// lines are pinned here (docs/bridges C5, ADR 0028).
+    #[test]
+    fn peer_stream_redial_ladders_reset_only_on_a_carried_stream() {
+        let swift = rn_source_code_only("ios/WifiDirectManager.swift");
+        let lan =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/LanPeerDiscovery.kt");
+        let manager =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        for (code, needed) in [
+            (
+                &swift,
+                "if stream.proved { stream.carried = true self.dialPolicy.proved(address) }",
+            ),
+            (&lan, "if (ran.proved == address && ran.delivered) {"),
+            (&manager, "delivered = ran.delivered,"),
+            (
+                &manager,
+                "if (ran.delivered) reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)",
+            ),
+        ] {
+            assert!(
+                code.contains(needed),
+                "a redial ladder must start over only on a stream that carried its peer. \
+                 Expected to find:\n  {needed}"
+            );
+        }
+        assert_eq!(
+            swift.matches("dialPolicy.proved(").count(),
+            1,
+            "ios/WifiDirectManager.swift: the ladder starts over in one place"
+        );
+    }
+
     /// Android's LAN carrier publishes and reads the record iOS and Python do.
     ///
     /// A browser finds a peer only by the service type, names its record by

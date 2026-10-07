@@ -56,6 +56,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   later: 15 seconds idle, 5 between probes, 3 probes, and 30 seconds for
   unacknowledged data, where the OS defaults were two hours and about fifteen
   minutes.
+- **A peer-stream redial ladder starts over only after a stream that carried
+  its peer**, on iOS and Android: a body after the preamble, not the proof
+  alone. A stream the peer refused for its own stale one proved the address
+  too, so the dialer was announced and lost every second until that stream
+  died, and a Wi-Fi Direct client whose owner was held by a LAN stream
+  redialed it every second. Such a client now waits for that stream to end.
 - **Android's peer-stream listener bounds inbound streams.** It binds every
   interface, so any device on a shared network could take all sixteen slots.
   At most twelve are inbound now, and four from one remote address, iOS's
