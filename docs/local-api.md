@@ -80,7 +80,12 @@ others run; the server fails only when none starts.** The failure this
 prevents is a Bluetooth adapter another process holds, or a refused
 advertisement, taking the LAN path down with it. A flag the configuration
 cannot honour (`--lan` without `wifi_direct_enabled`, `--relay` without
-`internet_enabled`) is refused at start rather than ignored.
+`internet_enabled`) is refused at start rather than ignored, and so is a
+value the transport could never use: `--relay` must be a `ws://` or `wss://`
+URL with a host, because the internet transport retries a failed connect
+for as long as it runs and would never report the mistake, and a variable
+named with `--relay-token-env` must be set. A `ws://` relay that is not on
+loopback is accepted with a warning: the token crosses the network in clear.
 
 Two carriers serve the API itself:
 

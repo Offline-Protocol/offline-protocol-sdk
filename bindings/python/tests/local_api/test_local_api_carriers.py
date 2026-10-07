@@ -9,7 +9,7 @@ honour instead of ignoring it.
 
 from __future__ import annotations
 
-import os
+import logging
 
 import pytest
 
@@ -167,3 +167,34 @@ async def test_the_relay_flag_without_internet_is_refused(tmp_path):
     )
     with pytest.raises(SystemExit, match="internet_enabled"):
         cli.build_manager(args)
+
+
+@pytest.mark.parametrize("url", ["https://relay.example.test", "relay.example.test:443", "wss://", "wss:///path"])
+async def test_a_relay_that_is_not_a_websocket_url_is_refused(tmp_path, url):
+    """The transport retries a failed connect for as long as it runs, so a
+    mis-typed relay would otherwise be a service that reports the relay
+    running and never reaches it."""
+    cli, args = _cli_args(tmp_path, "--relay", url)
+    with pytest.raises(SystemExit, match="--relay takes a ws:// or wss:// URL"):
+        cli.build_manager(args)
+
+
+async def test_a_named_token_variable_that_is_unset_is_refused(tmp_path, monkeypatch):
+    """Without a token the transport authenticates with the profile name."""
+    monkeypatch.delenv("OP_TEST_UNSET_RELAY_TOKEN", raising=False)
+    cli, args = _cli_args(
+        tmp_path, "--relay", "wss://relay.example.test", "--relay-token-env", "OP_TEST_UNSET_RELAY_TOKEN"
+    )
+    with pytest.raises(SystemExit, match="OP_TEST_UNSET_RELAY_TOKEN is not set"):
+        cli.build_manager(args)
+
+
+@pytest.mark.parametrize(("url", "warned"), [("ws://relay.example.test", True), ("ws://127.0.0.1:9000", False)])
+async def test_a_cleartext_relay_off_loopback_is_warned_about(tmp_path, caplog, url, warned):
+    cli, args = _cli_args(tmp_path, "--relay", url)
+    with caplog.at_level(logging.WARNING, logger="offline_protocol_sdk.local_api.cli"):
+        manager = cli.build_manager(args)
+    try:
+        assert any("not TLS" in r.getMessage() for r in caplog.records) is warned
+    finally:
+        await manager.close()
