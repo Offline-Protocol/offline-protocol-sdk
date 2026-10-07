@@ -2516,6 +2516,7 @@ advertisement. There is no switch for the LAN alone: turn `wifiDirect` off if
 you do not want either. The module adds `ACCESS_NETWORK_STATE` and
 `CHANGE_WIFI_MULTICAST_STATE`, install-time permissions with no prompt; the
 second lets Android 12 and lower hold the multicast lock mDNS needs there.
+When you move your app to target Android 17 (API 37), it must declare `ACCESS_LOCAL_NETWORK` and request it before `start()`, or the LAN carrier stays off with a warning diagnostic. The SDK does not declare it, because a declaration revokes the grant apps targeting 36 and lower hold by default.
 
 **Android: the transport starts without the Wi-Fi Direct grant.** Without
 `NEARBY_WIFI_DEVICES` (or fine location on 12 and lower), `start()` used to

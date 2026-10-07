@@ -1,6 +1,7 @@
 package com.offlineprotocol
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
@@ -12,6 +13,7 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.ext.SdkExtensions
+import androidx.core.content.ContextCompat
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -41,7 +43,7 @@ import java.util.concurrent.RejectedExecutionException
  * thread (TransportConfinement).
  */
 internal class LanPeerDiscovery(
-    context: Context,
+    private val context: Context,
     private val handler: Handler,
     private val executor: ExecutorService,
     private val sockets: PeerStreamSockets,
@@ -115,6 +117,13 @@ internal class LanPeerDiscovery(
 
     fun start() {
         if (started) return
+        if (!localNetworkPermitted()) {
+            // Off rather than half on: without the grant NsdManager shows a
+            // system service picker on every browse, and sockets to the LAN
+            // are refused. A later grant takes effect on the next start.
+            diagnostic("warning", "LAN carrier off: ACCESS_LOCAL_NETWORK not granted", emptyMap())
+            return
+        }
         started = true
         // Without INTERNET removed, the default request skips a Wi-Fi network
         // with no route out, which is exactly the offline LAN this is for.
@@ -460,7 +469,22 @@ internal class LanPeerDiscovery(
             ?.let { schedule(address, it) }
     }
 
+    /**
+     * Whether this app may reach the local network. An app targeting Android
+     * 17 (API 37) needs `ACCESS_LOCAL_NETWORK`, a runtime grant; one targeting
+     * 36 or lower holds it by default, so the check passes. The module does
+     * not declare it: a declaration revokes that default grant.
+     */
+    private fun localNetworkPermitted(): Boolean =
+        Build.VERSION.SDK_INT < API_37 ||
+            ContextCompat.checkSelfPermission(context, ACCESS_LOCAL_NETWORK) ==
+            PackageManager.PERMISSION_GRANTED
+
     companion object {
+        /** Android 17. Not a named constant in the SDK this module compiles against. */
+        private const val API_37 = 37
+        private const val ACCESS_LOCAL_NETWORK = "android.permission.ACCESS_LOCAL_NETWORK"
+
         private fun needsMulticastLock(): Boolean =
             Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
                 SdkExtensions.getExtensionVersion(Build.VERSION_CODES.TIRAMISU) < 7
