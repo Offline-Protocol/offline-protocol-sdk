@@ -224,9 +224,13 @@ created owner-only. The service starts every transport the configuration
 enables: `--lan` (with the `lan` extra) finds the other hosts on the LAN
 with no `--peer` list, `ble_enabled` starts both Bluetooth LE roles so phones
 can find this host, and `--relay URL` connects the internet transport. A
-transport that fails to start is logged and the others run. A client opens
-the socket, sends `hello` with its application id, and calls the engine's
-own methods by name:
+transport that fails to start is logged and the others run. With the `http`
+extra, `--http 127.0.0.1:8080` also starts the HTTP front, which lets an
+application that does not use the SDK call a service on another device with a
+plain HTTP request to `<service>.<device>.offline.protocol.internal` (see
+[the HTTP front chapter](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/spec/http-front.md)).
+A client opens the socket, sends `hello` with its application id, and calls
+the engine's own methods by name:
 
 ```python
 import asyncio, json
@@ -505,4 +509,6 @@ redistributed in this wheel: [python-zeroconf](https://pypi.org/project/zeroconf
 for DNS-SD, and [ifaddr](https://pypi.org/project/ifaddr/) (MIT), used to
 list the interface addresses a record publishes. Both are imported only when a
 manager or bridge is asked to advertise or discover; the base install imports
-neither.
+neither. The `http` extra (`pip install 'offline-protocol-sdk[http]'`) adds
+[aiohttp](https://pypi.org/project/aiohttp/) (Apache-2.0 AND MIT) and its
+dependencies, used by the HTTP front, and imported only when a front starts.

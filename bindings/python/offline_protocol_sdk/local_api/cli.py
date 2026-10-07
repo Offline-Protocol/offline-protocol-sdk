@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from ..gateway_manager import DEFAULT_DAEMON_ADDRESS
+from ..http_front.cli import add_front_arguments, front_options
 from ..protocol_manager import ProtocolManager
 from . import codec
 from .authz import Policy
@@ -90,6 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="HOST:PORT",
         help=f"the gateway daemon to attach to when the config enables reticulum (default: {DEFAULT_DAEMON_ADDRESS})",
     )
+    add_front_arguments(parser, standalone=False)
     parser.add_argument("--policy", help="JSON file with the space allow-lists and method denials")
     parser.add_argument("--no-health", action="store_true", help="do not answer GET /health")
     parser.add_argument("--log-level", default="INFO")
@@ -195,7 +197,25 @@ def build_server(args: argparse.Namespace, manager: ProtocolManager) -> LocalApi
     )
 
 
-async def run(server: LocalApiServer) -> None:
+def http_front_options(args: argparse.Namespace) -> dict[str, Any] | None:
+    """The HTTP front's options when ``--http`` asks for one, checked
+    before anything starts. Registrations are kept beside the state root
+    unless ``--http-registry`` names another file."""
+    if not args.http:
+        return None
+    options = front_options(args)
+    if options["registry_path"] is None:
+        state_root = args.state_root or os.environ.get("OFFLINE_PROTOCOL_STATE_ROOT")
+        if state_root:
+            options["registry_path"] = str(Path(state_root) / "http-front-services.json")
+    from ..http_front.front import LOOPBACK_HOSTS
+
+    if options["host"] not in LOOPBACK_HOSTS and options["token_path"] is None:
+        raise SystemExit(f"--http on {options['host']} needs --http-token-file: off loopback the front is never open")
+    return options
+
+
+async def run(server: LocalApiServer, http: dict[str, Any] | None = None) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -204,21 +224,37 @@ async def run(server: LocalApiServer) -> None:
         except (NotImplementedError, RuntimeError):
             signal.signal(sig, lambda *_: stop.set())
     await server.start()
+    front = None
     try:
+        if http is not None:
+            # Imported here: the front needs the `http` extra, and a service
+            # without --http must not.
+            from ..http_front.front import HttpFront
+
+            front = HttpFront(
+                socket_path=server.socket_path,
+                tcp_port=server.port if server.socket_path is None else None,
+                local_api_token=server.token,
+                **http,
+            )
+            await front.start()
         await stop.wait()
     finally:
+        if front is not None:
+            await front.stop()
         await server.stop()
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=args.log_level.upper(), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    http = http_front_options(args)
     manager = build_manager(args)
     try:
         server = build_server(args, manager)
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
-    asyncio.run(run(server))
+    asyncio.run(run(server, http))
     return 0
 
 
