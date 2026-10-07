@@ -33,7 +33,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   address the preamble must prove. A Wi-Fi network with no internet counts.
   The slot stays up while either the group or the network is, and Wi-Fi P2P
   going off, or leaving the group, ends only the group's streams. It needs
-  `ACCESS_NETWORK_STATE`, which the module declares, and no runtime grant, so
+  `ACCESS_NETWORK_STATE` and `CHANGE_WIFI_MULTICAST_STATE` (a multicast lock
+  while browsing on Android 12 and lower, where mDNS needs one), which the
+  module declares, and no runtime grant, so
   it also runs on a phone that has not granted `NEARBY_WIFI_DEVICES`. A network
   that blocks multicast or isolates clients (many guest and office networks)
   finds nothing, and Android to iOS with no shared network still goes over

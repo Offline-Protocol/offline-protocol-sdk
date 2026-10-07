@@ -8,7 +8,10 @@ import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
+import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Handler
+import android.os.ext.SdkExtensions
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.Socket
@@ -80,9 +83,20 @@ internal class LanPeerDiscovery(
     private val pendingResolves = ArrayDeque<NsdServiceInfo>()
     private var resolving = false
 
-    // ponytail: no MulticastLock. NsdManager runs in the system, which
-    // receives multicast without one on the devices tested; take one
-    // (CHANGE_WIFI_MULTICAST_STATE) if a device misses adverts while idle.
+    // Held while browsing. Before T extensions 7 (Android 12 and lower, and
+    // 13 without that update) the Wi-Fi driver drops the multicast mDNS
+    // runs on unless an app holds one, so this device would neither hear
+    // a peer's answers nor the queries a peer sends to find it (NsdManager's
+    // own documentation). From extension 7 the system manages it for a
+    // foreground app, and a lock only costs battery, so none is taken.
+    private val multicastLock: WifiManager.MulticastLock? =
+        if (needsMulticastLock()) {
+            context.applicationContext.getSystemService(WifiManager::class.java)
+                ?.createMulticastLock("offlineprotocol-lan")
+                ?.apply { setReferenceCounted(false) }
+        } else {
+            null
+        }
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
@@ -226,6 +240,7 @@ internal class LanPeerDiscovery(
     }
 
     private fun discover() {
+        try { multicastLock?.acquire() } catch (_: Exception) {}
         if (discovery != null) return
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(serviceType: String) {}
@@ -260,6 +275,7 @@ internal class LanPeerDiscovery(
     private fun stopDiscovery() {
         discovery?.let { try { nsd.stopServiceDiscovery(it) } catch (_: Exception) {} }
         discovery = null
+        try { multicastLock?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
     }
 
     private fun found(info: NsdServiceInfo) {
@@ -445,6 +461,10 @@ internal class LanPeerDiscovery(
     }
 
     companion object {
+        private fun needsMulticastLock(): Boolean =
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                SdkExtensions.getExtensionVersion(Build.VERSION_CODES.TIRAMISU) < 7
+
         /** A connect that takes longer is left to the redial ladder. iOS's `DIAL_TIMEOUT`. */
         private const val DIAL_TIMEOUT_MS = 10_000
         private const val RESOLVE_RETRY_MS = 1_000L

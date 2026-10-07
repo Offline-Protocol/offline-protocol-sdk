@@ -2513,8 +2513,9 @@ on the Wi-Fi network it is on and opens streams to iPhones, Python hosts and
 other Android phones it finds there, as an iPhone already did. Every device on
 that network can see the address, the same exposure as a Bluetooth LE
 advertisement. There is no switch for the LAN alone: turn `wifiDirect` off if
-you do not want either. The module adds `ACCESS_NETWORK_STATE`, an
-install-time permission with no prompt.
+you do not want either. The module adds `ACCESS_NETWORK_STATE` and
+`CHANGE_WIFI_MULTICAST_STATE`, install-time permissions with no prompt; the
+second lets Android 12 and lower hold the multicast lock mDNS needs there.
 
 **Android: the transport starts without the Wi-Fi Direct grant.** Without
 `NEARBY_WIFI_DEVICES` (or fine location on 12 and lower), `start()` used to

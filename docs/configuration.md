@@ -917,7 +917,7 @@ Two consequences worth knowing:
 - `BLUETOOTH`, `BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT`
 - `ACCESS_FINE_LOCATION` (for BLE scanning)
 - `ACCESS_WIFI_STATE`, `NEARBY_WIFI_DEVICES`
-- `ACCESS_NETWORK_STATE` (declared by the SDK; the peer-stream slot's LAN carrier)
+- `ACCESS_NETWORK_STATE`, `CHANGE_WIFI_MULTICAST_STATE` (declared by the SDK; the peer-stream slot's LAN carrier)
 
 ### iOS
 

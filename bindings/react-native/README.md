@@ -107,7 +107,7 @@ Add to `AndroidManifest.xml`:
 
 Wi-Fi Direct and the internet need nothing in your manifest: the SDK's own
 manifest declares `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE`, `INTERNET`,
-`ACCESS_NETWORK_STATE` and `NEARBY_WIFI_DEVICES`, and the build merges them
+`ACCESS_NETWORK_STATE`, `CHANGE_WIFI_MULTICAST_STATE` and `NEARBY_WIFI_DEVICES`, and the build merges them
 into your app. The peer-stream slot also finds iPhones and hosts on the Wi-Fi
 network the phone is on, which needs no runtime grant. It declares
 `NEARBY_WIFI_DEVICES` with `android:usesPermissionFlags="neverForLocation"`,
