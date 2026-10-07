@@ -18241,6 +18241,7 @@ mod tests {
                 &[
                     "is PeerStreamPreamble.Outcome.Announce -> outcome.address",
                     "if (!announce(stream, address, outbound)) {",
+                    "PeerStreamDialPolicy.admitsInbound(host, inboundHosts, reserved, limits)",
                     "val announcement = links.announce(stream, address, outbound, local) \
                      if (announcement.refused) {",
                     "if (!deliver(stream, address, body)) {",

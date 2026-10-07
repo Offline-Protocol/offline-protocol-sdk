@@ -14,7 +14,6 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -89,8 +88,21 @@ internal class PeerStreamSockets(
         val writeChunkBytes: Int = 64 * 1024,
         /** A writer blocked on one piece this long is stalled on the peer. */
         val writeStallMs: Long = 2_000L,
-        /** Open sockets, proved or not. A group is a handful of devices. */
+        /** Open sockets, proved or not. */
         val maxStreams: Int = 16,
+        /**
+         * The inbound share of [maxStreams]. The rest is left to dials, so a
+         * listener full of strangers' sockets never stops this device
+         * reaching the peers it finds. iOS's `maxInbound`.
+         */
+        val maxInbound: Int = 12,
+        /**
+         * Inbound sockets one remote address may hold, proved or not. A peer
+         * needs one, two while it reconnects past its own stale stream.
+         * iOS's `maxInboundPerHost`, Python's `MAX_STREAMS_PER_HOST` scaled
+         * to this budget.
+         */
+        val maxInboundPerHost: Int = 4,
         /**
          * Queued bytes toward one peer beyond which a body is dropped (the
          * core retries it), and only while that peer's writer is stalled. The
@@ -103,11 +115,12 @@ internal class PeerStreamSockets(
     enum class SendResult { QUEUED, NO_STREAM, OUT_OF_BOUNDS, QUEUE_FULL }
 
     private val openStreams: MutableSet<Stream> = ConcurrentHashMap.newKeySet()
-    // Slots taken against [Limits.maxStreams]. Reserved by an increment that
-    // decides, not by reading the set's size and adding afterwards: two
-    // sockets accepted at once both read a size under the limit, and both
-    // got in.
-    private val reserved = AtomicInteger(0)
+    // Slots taken against [Limits], decided and taken under one lock, not by
+    // reading the set's size and adding afterwards: two sockets accepted at
+    // once both read a size under the limit, and both got in.
+    private val admission = Any()
+    private var reserved = 0
+    private val inboundHosts = ArrayList<String?>()
     private val links = PeerStreamLinks<Stream>()
 
     // Daemon, like the stream threads, so an instance dropped without
@@ -134,12 +147,10 @@ internal class PeerStreamSockets(
      */
     fun run(socket: Socket, outbound: Boolean, accepting: () -> Boolean): String? {
         val endpoint = socket.remoteSocketAddress?.toString() ?: "unknown"
+        val remoteHost = if (outbound) null else socket.inetAddress?.hostAddress
         val refusal = when {
             !accepting() -> "not running"
-            reserved.incrementAndGet() > limits.maxStreams -> {
-                reserved.decrementAndGet()
-                "at stream limit"
-            }
+            !reserve(outbound, remoteHost) -> "at stream limit"
             else -> null
         }
         if (refusal != null) {
@@ -152,7 +163,7 @@ internal class PeerStreamSockets(
             return null
         }
         // The slot is released by endStream, which runs once per stream.
-        val stream = Stream(socket)
+        val stream = Stream(socket, outbound, remoteHost)
         openStreams.add(stream)
         // Re-checked after the add: a closeAll() that snapshotted the set just
         // before it cannot miss this stream, because the owner stops
@@ -327,11 +338,29 @@ internal class PeerStreamSockets(
      * or [closeAll]. Reports the loss if the stream still held its address,
      * under the lock the deliveries take.
      */
+    private fun reserve(outbound: Boolean, host: String?): Boolean = synchronized(admission) {
+        val admitted = if (outbound) {
+            reserved < limits.maxStreams
+        } else {
+            PeerStreamDialPolicy.admitsInbound(host, inboundHosts, reserved, limits)
+        }
+        if (admitted) {
+            reserved++
+            if (!outbound) inboundHosts.add(host)
+        }
+        admitted
+    }
+
+    private fun release(stream: Stream) = synchronized(admission) {
+        reserved--
+        if (!stream.outbound) inboundHosts.remove(stream.remoteHost)
+    }
+
     private fun endStream(stream: Stream) {
         synchronized(stream.lock) {
             if (stream.closed) return
             stream.closed = true
-            reserved.decrementAndGet()
+            release(stream)
             links.remove(stream)?.let { address ->
                 try {
                     host.peerDisconnected(address)
@@ -379,7 +408,12 @@ internal class PeerStreamSockets(
      * and splice a prefix into another frame's body) and a peer that stops
      * reading blocks only its own queue.
      */
-    private inner class Stream(val socket: Socket) {
+    private inner class Stream(
+        val socket: Socket,
+        val outbound: Boolean,
+        /** The remote host an inbound socket came from, for [Limits.maxInboundPerHost]. */
+        val remoteHost: String?,
+    ) {
         /** Guards [closed] and the stream's calls into the host. */
         val lock = Any()
         var closed = false

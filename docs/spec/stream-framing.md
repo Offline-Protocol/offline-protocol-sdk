@@ -222,7 +222,9 @@ is at most one body in flight, `DEFAULT_MAX_MESSAGE_SIZE + 4` bytes, because a
 frame is read whole before the next prefix. The number of streams a receiver
 accepts, and the preamble deadline, are local policy, and a conforming
 implementation chooses its own. The mobile managers use ten seconds and
-sixteen open streams; the Python manager's choices are in its bridge rules.
+sixteen open streams, of which at most twelve are inbound and four come from
+one remote address, because a listener on a shared network is open to every
+device on it; the Python manager's choices are in its bridge rules.
 Which of two streams for one address to keep is policy too, but every
 implementation in this repository keeps the same one: the stream opened by
 the lower address (addresses compared by their UTF-8 bytes), and the newer of

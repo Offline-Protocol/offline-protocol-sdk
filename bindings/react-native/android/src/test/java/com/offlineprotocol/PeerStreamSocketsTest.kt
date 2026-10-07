@@ -321,6 +321,23 @@ class PeerStreamSocketsTest {
     }
 
     @Test
+    fun `one remote host holds at most its inbound share`() {
+        // Every test socket comes from loopback, one host.
+        val host = Host("peer-a")
+        val a = PeerStreamSockets(host, fast.copy(maxInboundPerHost = 2, preambleTimeoutMs = 5_000))
+        val port = listen(a)
+        val first = raw(port).also { it.readBody() }
+        raw(port).readBody()
+        assertTrue(raw(port).closedByPeer())
+
+        // Ending one frees its share, once the listener side has seen it end.
+        first.close()
+        val until = System.currentTimeMillis() + 5_000
+        while (a.openCount > 1 && System.currentTimeMillis() < until) Thread.sleep(10)
+        assertArrayEquals(assertion("peer-a"), raw(port).readBody())
+    }
+
+    @Test
     fun `a socket that arrives while stopped is closed unread`() {
         val host = Host("peer-a")
         val port = listen(PeerStreamSockets(host, fast)) { false }
