@@ -1,0 +1,437 @@
+package com.offlineprotocol
+
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.net.nsd.NsdManager
+import android.net.nsd.NsdServiceInfo
+import android.os.Handler
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.RejectedExecutionException
+
+/**
+ * The peer-stream slot's LAN carrier: DNS-SD `_offlineprotocol._tcp` on the
+ * Wi-Fi network this device is on, so it finds iPhones and Python hosts there
+ * and they find it (ADR 0028, stream-framing.md "Finding a peer on a LAN").
+ *
+ * It publishes the record iOS and Python publish (`txtvers=1`, `addr`, the
+ * same instance name), browses for theirs, and dials what it finds on the
+ * policy iOS dials on ([PeerStreamDialPolicy]): the lower address at once,
+ * the higher after a grace delay, so the stream both ends keep usually
+ * arrives first. Inbound LAN streams arrive at [WifiDirectManager]'s
+ * listener, which already binds every interface. What a stream does once
+ * open is [PeerStreamSockets]'s, the same as for a group stream.
+ *
+ * A record's `addr` is a hint: a dial passes it as the preamble's expected
+ * address, and a record whose dial is answered by another address is left
+ * out until it is published again.
+ *
+ * Every method and every framework callback runs on [handler]'s thread
+ * (the transport thread); connects and stream reads run on [executor],
+ * because nothing that blocks on the network may run on the transport
+ * thread (TransportConfinement).
+ */
+internal class LanPeerDiscovery(
+    context: Context,
+    private val handler: Handler,
+    private val executor: ExecutorService,
+    private val sockets: PeerStreamSockets,
+    private val port: Int,
+    private val localAddress: () -> String?,
+    /** The transport is running: what a stream's `accepting` asks. */
+    private val running: () -> Boolean,
+    /** The Wi-Fi network's own addresses when it comes up, null when it goes. */
+    private val networkChanged: (Set<InetAddress>?) -> Unit,
+    private val diagnostic: (level: String, message: String, context: Map<String, Any?>) -> Unit,
+) {
+    private data class Record(val address: String, val host: InetAddress, val port: Int)
+
+    private val connectivity = context.getSystemService(ConnectivityManager::class.java)
+    private val nsd = context.getSystemService(NsdManager::class.java)
+
+    private var started = false
+    private var paused = false
+    private var network: Network? = null
+    /** Bumped whenever what was found stops counting, so stale callbacks and timers do nothing. */
+    private var generation = 0
+
+    private var registration: NsdManager.RegistrationListener? = null
+    /** Our record's name as registered (NSD renames on a conflict). */
+    private var registeredName: String? = null
+    private var discovery: NsdManager.DiscoveryListener? = null
+
+    /** Resolved peer records by instance name. */
+    private val records = HashMap<String, Record>()
+    /** The instance name each advertised address is dialed at. */
+    private var adverts: Map<String, String> = emptyMap()
+    private val unprovable = HashSet<String>()
+    private val policy = PeerStreamDialPolicy()
+
+    // One resolve at a time: before API 34 a second one fails
+    // FAILURE_ALREADY_ACTIVE.
+    private val pendingResolves = ArrayDeque<NsdServiceInfo>()
+    private var resolving = false
+
+    // ponytail: no MulticastLock. NsdManager runs in the system, which
+    // receives multicast without one on the devices tested; take one
+    // (CHANGE_WIFI_MULTICAST_STATE) if a device misses adverts while idle.
+
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            val properties = try { connectivity.getLinkProperties(network) } catch (_: Exception) { null }
+            if (properties != null) handler.post { networkUp(network, properties) }
+        }
+
+        override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) {
+            handler.post { networkUp(network, properties) }
+        }
+
+        override fun onLost(network: Network) {
+            handler.post { networkLost(network) }
+        }
+    }
+
+    fun start() {
+        if (started) return
+        started = true
+        // Without INTERNET removed, the default request skips a Wi-Fi network
+        // with no route out, which is exactly the offline LAN this is for.
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        try {
+            connectivity.registerNetworkCallback(request, networkCallback)
+        } catch (e: Exception) {
+            diagnostic("error", "LAN discovery could not watch Wi-Fi", mapOf(
+                "error" to (e.message ?: e.javaClass.simpleName),
+            ))
+        }
+    }
+
+    /** Ends discovery and advertising. The owner ends the LAN streams. */
+    fun stop() {
+        if (!started) return
+        started = false
+        try { connectivity.unregisterNetworkCallback(networkCallback) } catch (_: Exception) {}
+        network = null
+        stopNsd()
+    }
+
+    /** Stops browsing and dialing; the record stays published. */
+    fun pause() {
+        paused = true
+        stopDiscovery()
+        // No loss reports arrive while not browsing, so what was found is
+        // forgotten and found again on resume.
+        forgetRecords()
+    }
+
+    fun resume() {
+        paused = false
+        if (network != null) discover()
+    }
+
+    // MARK: - The network
+
+    private fun networkUp(network: Network, properties: LinkProperties) {
+        if (!started) return
+        val current = this.network
+        if (current != null && current != network) networkLost(current)
+        val addresses = properties.linkAddresses.map { it.address }.toSet()
+        this.network = network
+        networkChanged(addresses)
+        if (current != network) startNsd()
+    }
+
+    private fun networkLost(network: Network) {
+        if (network != this.network) return
+        this.network = null
+        stopNsd()
+        networkChanged(null)
+    }
+
+    // MARK: - NSD
+
+    private fun startNsd() {
+        generation++
+        val address = localAddress()
+        if (address == null) {
+            diagnostic("warning", "LAN advert skipped: no identity yet", emptyMap())
+        } else {
+            register(address)
+        }
+        if (!paused) discover()
+    }
+
+    private fun stopNsd() {
+        generation++
+        registration?.let { try { nsd.unregisterService(it) } catch (_: Exception) {} }
+        registration = null
+        registeredName = null
+        stopDiscovery()
+        forgetRecords()
+        policy.reset()
+    }
+
+    private fun forgetRecords() {
+        records.clear()
+        adverts = emptyMap()
+        unprovable.clear()
+        pendingResolves.clear()
+        resolving = false
+    }
+
+    private fun register(address: String) {
+        // Order is the framework's: NsdServiceInfo keeps attributes in a map,
+        // so `txtvers` may not come first. Every reader looks entries up by key.
+        val info = NsdServiceInfo().apply {
+            serviceName = instanceName(address)
+            serviceType = WifiDirectGroupFormation.SERVICE_TYPE
+            port = this@LanPeerDiscovery.port
+            setAttribute(WifiDirectGroupFormation.KEY_VERSION, "1")
+            setAttribute(WifiDirectGroupFormation.KEY_ADDRESS, address)
+        }
+        val listener = object : NsdManager.RegistrationListener {
+            override fun onServiceRegistered(info: NsdServiceInfo) {
+                handler.post { if (registration === this) registeredName = info.serviceName }
+            }
+
+            override fun onRegistrationFailed(info: NsdServiceInfo, code: Int) {
+                handler.post {
+                    if (registration === this) registration = null
+                    diagnostic("error", "LAN advert failed", mapOf("code" to code))
+                }
+            }
+
+            override fun onServiceUnregistered(info: NsdServiceInfo) {}
+            override fun onUnregistrationFailed(info: NsdServiceInfo, code: Int) {}
+        }
+        registration = listener
+        try {
+            nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
+        } catch (e: Exception) {
+            registration = null
+            diagnostic("error", "LAN advert failed", mapOf("error" to (e.message ?: e.javaClass.simpleName)))
+        }
+    }
+
+    private fun discover() {
+        if (discovery != null) return
+        val listener = object : NsdManager.DiscoveryListener {
+            override fun onDiscoveryStarted(serviceType: String) {}
+            override fun onDiscoveryStopped(serviceType: String) {}
+
+            override fun onStartDiscoveryFailed(serviceType: String, code: Int) {
+                handler.post {
+                    if (discovery === this) discovery = null
+                    diagnostic("error", "LAN discovery failed to start", mapOf("code" to code))
+                }
+            }
+
+            override fun onStopDiscoveryFailed(serviceType: String, code: Int) {}
+
+            override fun onServiceFound(info: NsdServiceInfo) {
+                handler.post { if (discovery === this) found(info) }
+            }
+
+            override fun onServiceLost(info: NsdServiceInfo) {
+                handler.post { if (discovery === this) lost(info.serviceName) }
+            }
+        }
+        discovery = listener
+        try {
+            nsd.discoverServices(WifiDirectGroupFormation.SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+        } catch (e: Exception) {
+            discovery = null
+            diagnostic("error", "LAN discovery failed to start", mapOf("error" to (e.message ?: e.javaClass.simpleName)))
+        }
+    }
+
+    private fun stopDiscovery() {
+        discovery?.let { try { nsd.stopServiceDiscovery(it) } catch (_: Exception) {} }
+        discovery = null
+    }
+
+    private fun found(info: NsdServiceInfo) {
+        if (info.serviceName == registeredName) return
+        pendingResolves.add(info)
+        resolveNext()
+    }
+
+    private fun lost(name: String) {
+        pendingResolves.removeAll { it.serviceName == name }
+        if (records.remove(name) == null) return
+        unprovable.remove(name)
+        rebuild(emptySet())
+    }
+
+    private fun resolveNext() {
+        if (resolving) return
+        val next = pendingResolves.removeFirstOrNull() ?: return
+        resolving = true
+        val expected = generation
+        val listener = object : NsdManager.ResolveListener {
+            override fun onServiceResolved(info: NsdServiceInfo) {
+                handler.post {
+                    if (expected != generation) return@post
+                    resolving = false
+                    resolved(info)
+                    resolveNext()
+                }
+            }
+
+            override fun onResolveFailed(info: NsdServiceInfo, code: Int) {
+                handler.post {
+                    if (expected != generation) return@post
+                    if (code == NsdManager.FAILURE_ALREADY_ACTIVE) {
+                        // A resolve from before a restart is still running.
+                        pendingResolves.addFirst(info)
+                        handler.postDelayed({
+                            if (expected == generation) { resolving = false; resolveNext() }
+                        }, RESOLVE_RETRY_MS)
+                        return@post
+                    }
+                    resolving = false
+                    resolveNext()
+                }
+            }
+        }
+        try {
+            @Suppress("DEPRECATION")
+            nsd.resolveService(next, listener)
+        } catch (e: Exception) {
+            resolving = false
+            diagnostic("warning", "LAN resolve failed", mapOf("error" to (e.message ?: e.javaClass.simpleName)))
+        }
+    }
+
+    private fun resolved(info: NsdServiceInfo) {
+        val address = lanAdvertAddress(info.attributes) ?: return
+        val local = localAddress() ?: return
+        if (address == local) return
+        @Suppress("DEPRECATION")
+        val host = info.host ?: return
+        val name = info.serviceName
+        records[name] = Record(address, host, info.port)
+        // A record published again may now hold what it advertises.
+        unprovable.remove(name)
+        rebuild(setOf(name))
+        if (adverts[address] != name) return
+        val weAreLower = PeerStreamLinks.newStreamWins(outbound = true, localAddress = local, peer = address)
+        policy.discovered(address, weAreLower, sockets.holds(address))?.let { schedule(address, it) }
+    }
+
+    private fun rebuild(fresh: Set<String>) {
+        unprovable.retainAll(records.keys)
+        adverts = PeerStreamDialPolicy.adverts(
+            records.map { (name, record) -> record.address to name },
+            fresh, adverts, unprovable,
+        )
+    }
+
+    // MARK: - Dialing
+
+    private fun schedule(address: String, delayMs: Long) {
+        val expected = generation
+        handler.postDelayed({ if (expected == generation) dial(address) }, delayMs)
+    }
+
+    /**
+     * Opens a stream toward [address], unless it went away or is already held
+     * (an inbound stream got here first), or later when no slot is free.
+     */
+    private fun dial(address: String) {
+        val name = adverts[address]
+        val record = name?.let { records[it] }
+        val network = network
+        if (paused || !running() || name == null || record == null || network == null || sockets.holds(address)) {
+            policy.abandoned(address)
+            return
+        }
+        if (!sockets.hasRoom()) {
+            policy.noSlot(address)?.let { schedule(address, it) }
+            return
+        }
+        val expected = generation
+        try {
+            executor.execute {
+                val ran = connectAndRun(network, record, address)
+                handler.post { if (expected == generation) ended(address, name, ran) }
+            }
+        } catch (_: RejectedExecutionException) {
+            policy.abandoned(address)
+        }
+    }
+
+    /** Runs on [executor]: the connect and the stream's whole life. */
+    private fun connectAndRun(network: Network, record: Record, address: String): PeerStreamSockets.Ran {
+        val socket = Socket()
+        return try {
+            // Bound to the Wi-Fi network: an unbound socket follows the
+            // default network, which is cellular on a Wi-Fi with no internet.
+            network.bindSocket(socket)
+            socket.connect(InetSocketAddress(record.host, record.port), DIAL_TIMEOUT_MS)
+            sockets.run(socket, outbound = true, PeerStreamSockets.Carrier.LAN, expected = address) { running() }
+        } catch (e: Exception) {
+            try { socket.close() } catch (_: Exception) {}
+            diagnostic("info", "LAN dial failed", mapOf(
+                "address" to address,
+                "error" to (e.message ?: e.javaClass.simpleName),
+            ))
+            PeerStreamSockets.Ran(proved = null, heard = false)
+        }
+    }
+
+    /**
+     * An outbound stream is over. It is dialed again, later each time, while
+     * its advert stays. A dial answered by a peer that proved nothing, or
+     * another address, leaves its record out: a device claiming another's
+     * address, or one that moved, would fail the same way on every redial
+     * and keep the real record for the address undialed.
+     */
+    private fun ended(address: String, name: String, ran: PeerStreamSockets.Ran) {
+        if (ran.proved == address) {
+            policy.proved(address)
+        } else if (ran.heard && ran.proved == null && records.containsKey(name)) {
+            unprovable.add(name)
+            rebuild(emptySet())
+        }
+        policy.ended(address, adverts.containsKey(address), sockets.holds(address))
+            ?.let { schedule(address, it) }
+    }
+
+    companion object {
+        /** A connect that takes longer is left to the redial ladder. iOS's `DIAL_TIMEOUT`. */
+        private const val DIAL_TIMEOUT_MS = 10_000
+        private const val RESOLVE_RETRY_MS = 1_000L
+
+        /**
+         * The DNS-SD instance name: a digest of the address, as iOS and Python
+         * name their own, so a restarted advert replaces its record in each
+         * peer's cache instead of publishing a second one beside it.
+         */
+        fun instanceName(address: String): String =
+            "op-" + WifiDirectGroupFormation.hex(WifiDirectGroupFormation.sha256(address), 8)
+
+        /**
+         * The peer address a LAN record advertises, or null for a record that
+         * is not a peer hint: another version, no `addr`, or a service
+         * instance (`sid`, the DNS-SD mapping chapter), which names the same
+         * host as its peer record and would open a second stream to it. No
+         * `app` entry is required: iOS and Python publish none.
+         */
+        fun lanAdvertAddress(attributes: Map<String, ByteArray?>): String? {
+            if (attributes.containsKey(WifiDirectGroupFormation.KEY_SERVICE_ID)) return null
+            if (attributes[WifiDirectGroupFormation.KEY_VERSION]?.decodeToString() != "1") return null
+            val address = attributes[WifiDirectGroupFormation.KEY_ADDRESS]?.decodeToString() ?: return null
+            return address.takeIf { it.startsWith("off1") }
+        }
+    }
+}

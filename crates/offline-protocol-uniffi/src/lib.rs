@@ -17149,7 +17149,7 @@ mod tests {
             ),
             (
                 "the question and what an answer does",
-                "private fun adoptExistingGroup() { \
+                "private fun adoptExistingGroup() { if (channel == null) return \
                  wifiP2pManager?.requestConnectionInfo(channel) { info -> if \
                  (info?.groupFormed == true && state == TransportState.RUNNING) {",
             ),
@@ -18110,6 +18110,53 @@ mod tests {
                 python.contains(needed),
                 "peer_stream_manager.py: the stream the lower address opened must win, as in \
                  ios/PeerStreamFraming.swift. Expected to find:\n  {needed}"
+            );
+        }
+    }
+
+    /// Android's LAN carrier publishes and reads the record iOS and Python do.
+    ///
+    /// A browser finds a peer only by the service type, names its record by
+    /// the address's digest so a restarted advert replaces the stale one, and
+    /// dials with the record's `addr` as the address the preamble must prove.
+    /// Each is a hand-mirrored literal (docs/bridges C5) whose drift fails
+    /// silently: an Android phone and an iPhone on one network that never
+    /// find each other, or two records for one peer (ADR 0028).
+    #[test]
+    fn android_lan_peer_streams_publish_the_ios_and_python_record() {
+        let formation = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/WifiDirectGroupFormation.kt",
+        );
+        let lan =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/LanPeerDiscovery.kt");
+        let swift = rn_source_code_only("ios/WifiDirectManager.swift");
+        for (code, needed) in [
+            (
+                &formation,
+                "const val SERVICE_TYPE = \"_offlineprotocol._tcp\"",
+            ),
+            (&swift, "static let SERVICE_TYPE = \"_offlineprotocol._tcp\""),
+            (&formation, "const val KEY_VERSION = \"txtvers\""),
+            (&formation, "const val KEY_ADDRESS = \"addr\""),
+            (
+                &lan,
+                "setAttribute(WifiDirectGroupFormation.KEY_VERSION, \"1\") \
+                 setAttribute(WifiDirectGroupFormation.KEY_ADDRESS, address)",
+            ),
+            (
+                &lan,
+                "\"op-\" + WifiDirectGroupFormation.hex(WifiDirectGroupFormation.sha256(address), 8)",
+            ),
+            (
+                &lan,
+                "sockets.run(socket, outbound = true, PeerStreamSockets.Carrier.LAN, \
+                 expected = address)",
+            ),
+        ] {
+            assert!(
+                code.contains(needed),
+                "the Android LAN record must match the iOS and Python one. \
+                 Expected to find:\n  {needed}"
             );
         }
     }
