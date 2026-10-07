@@ -63,6 +63,13 @@ internal class LanPeerDiscovery(
     private var started = false
     private var paused = false
     private var network: Network? = null
+    /**
+     * Every Wi-Fi network the request matches now, with its properties. More
+     * than one can be up at once (Android's make-before-break switch, a
+     * local-only network another app asked for); one is current, the others
+     * wait in case it is lost.
+     */
+    private val candidates = LinkedHashMap<Network, LinkProperties>()
     /** Bumped whenever what was found stops counting, so stale callbacks and timers do nothing. */
     private var generation = 0
 
@@ -157,6 +164,7 @@ internal class LanPeerDiscovery(
         started = false
         try { connectivity.unregisterNetworkCallback(networkCallback) } catch (_: Exception) {}
         network = null
+        candidates.clear()
         stopNsd()
     }
 
@@ -176,21 +184,35 @@ internal class LanPeerDiscovery(
 
     // MARK: - The network
 
+    /**
+     * A matching network came up or changed. The current one is kept until
+     * it is lost: following whichever network spoke last tore down every LAN
+     * stream on each change from another, and could settle on one that was
+     * about to go, leaving none while another was still up.
+     */
     private fun networkUp(network: Network, properties: LinkProperties) {
         if (!started) return
-        val current = this.network
-        if (current != null && current != network) networkLost(current)
-        val addresses = properties.linkAddresses.map { it.address }.toSet()
-        this.network = network
-        networkChanged(addresses)
-        if (current != network) startNsd()
+        candidates[network] = properties
+        when (this.network) {
+            null -> adopt(network, properties)
+            network -> networkChanged(properties.linkAddresses.map { it.address }.toSet())
+            else -> {}
+        }
     }
 
     private fun networkLost(network: Network) {
+        candidates.remove(network)
         if (network != this.network) return
         this.network = null
         stopNsd()
         networkChanged(null)
+        candidates.entries.firstOrNull()?.let { (next, properties) -> adopt(next, properties) }
+    }
+
+    private fun adopt(network: Network, properties: LinkProperties) {
+        this.network = network
+        networkChanged(properties.linkAddresses.map { it.address }.toSet())
+        startNsd()
     }
 
     // MARK: - NSD
