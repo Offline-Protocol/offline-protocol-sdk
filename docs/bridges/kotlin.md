@@ -136,6 +136,13 @@ the socket's own descriptor, so closing it closed the socket. Older versions
 keep the OS defaults (two hours idle). The core's acknowledgements are still the real signal that a peer
 is gone, as P9 says for the same reason.
 
+A redial ladder starts over only after a stream that carried its peer: a
+body after the preamble. A proof alone is not enough, because a stream refused
+for the one already held proves its peer too, and a ladder that reset on it
+redialed every second while that stream lived. A group client whose dial is
+refused because another stream (a LAN one) holds its owner's address does not
+redial at all; it dials the owner again when that stream is lost.
+
 `NsdManager`'s `DiscoveryListener` reports a record found and lost, never
 changed. A peer that restarts and publishes the same instance name on a new
 port, with no goodbye in between, is an update the listener never delivers,

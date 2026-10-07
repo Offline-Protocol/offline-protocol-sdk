@@ -427,7 +427,10 @@ internal class LanPeerDiscovery(
      * and keep the real record for the address undialed.
      */
     private fun ended(address: String, name: String, ran: PeerStreamSockets.Ran) {
-        if (ran.proved == address) {
+        if (ran.proved == address && ran.delivered) {
+            // Carried the peer: the ladder starts over. A proof the peer then
+            // refused (its stale stream holds us) climbs it like a miss, or
+            // the dialer would be announced and lost every second.
             policy.proved(address)
         } else if (ran.heard && ran.proved == null && records.containsKey(name)) {
             unprovable.add(name)

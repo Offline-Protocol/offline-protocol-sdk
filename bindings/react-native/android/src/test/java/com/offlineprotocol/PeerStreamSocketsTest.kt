@@ -421,6 +421,49 @@ class PeerStreamSocketsTest {
     }
 
     @Test
+    fun `run reports a proof, and a delivery only once a body arrives`() {
+        val host = Host("peer-a")
+        val a = PeerStreamSockets(host, fast)
+        val results = LinkedBlockingQueue<PeerStreamSockets.Ran>()
+        val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
+        cleanup.add(server)
+        thread(isDaemon = true) {
+            while (!server.isClosed) {
+                val s = try { server.accept() } catch (_: IOException) { return@thread }
+                cleanup.add(s)
+                thread(isDaemon = true) { results.add(a.run(s, outbound = false) { true }) }
+            }
+        }
+
+        // Held by peer-b's first stream, which is higher than us: refused here.
+        val held = raw(server.localPort).also { it.readBody() }
+        held.send(assertion("peer-b"))
+        assertEquals("connected:peer-b", host.next())
+        val refused = raw(server.localPort).also { it.readBody() }
+        refused.send(assertion("peer-b"))
+        assertEquals(
+            PeerStreamSockets.Ran(proved = "peer-b", heard = true, delivered = false),
+            results.poll(5, TimeUnit.SECONDS),
+        )
+
+        held.send("body".toByteArray())
+        assertEquals("message:peer-b:4", host.next())
+        held.close()
+        assertEquals(
+            PeerStreamSockets.Ran(proved = "peer-b", heard = true, delivered = true),
+            results.poll(5, TimeUnit.SECONDS),
+        )
+
+        // A preamble that does not verify: heard, proved nothing.
+        val liar = raw(server.localPort).also { it.readBody() }
+        liar.send(assertion("bad-x"))
+        assertEquals(
+            PeerStreamSockets.Ran(proved = null, heard = true, delivered = false),
+            results.poll(5, TimeUnit.SECONDS),
+        )
+    }
+
+    @Test
     fun `closeAll reports each announced stream once and delivers nothing after`() {
         val host = Host("peer-a")
         val a = PeerStreamSockets(host, fast)

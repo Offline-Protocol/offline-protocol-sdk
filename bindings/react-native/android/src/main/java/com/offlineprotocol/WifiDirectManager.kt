@@ -287,6 +287,9 @@ class WifiDirectManager(
     // The LAN carrier, between start and stop. Transport thread only.
     private var lan: LanPeerDiscovery? = null
     @Volatile private var groupOwnerAddress: String? = null
+    // The owner's proved address while another stream holds it and this
+    // client's own dial is parked; see [scheduleReconnect].
+    @Volatile private var heldOwnerAddress: String? = null
     // The client's next reconnect delay; see [RECONNECT_INITIAL_DELAY_MS].
     private val reconnectDelayMs = AtomicLong(RECONNECT_INITIAL_DELAY_MS)
 
@@ -467,7 +470,12 @@ class WifiDirectManager(
             networkChanged = ::lanNetworkChanged,
             diagnostic = ::emitDiagnostic,
         ).also { it.start() }
-        sockets.onLost = { address -> transportHandler.post { lan?.peerLost(address) } }
+        sockets.onLost = { address ->
+            transportHandler.post {
+                lan?.peerLost(address)
+                ownerStreamLost(address)
+            }
+        }
 
         // Start message polling
         transportHandler.post(messagePollingRunnable)
@@ -530,6 +538,7 @@ class WifiDirectManager(
         // dial and a later start() waits for its own CONNECTION_CHANGED.
         isGroupOwner = false
         groupOwnerAddress = null
+        heldOwnerAddress = null
         reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)
 
         // Unregister receiver
@@ -840,6 +849,7 @@ class WifiDirectManager(
         } else {
             isGroupOwner = false
             groupOwnerAddress = null
+            heldOwnerAddress = null
             ownerClients = 0
             createdNetwork = null
             ownsFormationGroup = false
@@ -1374,7 +1384,7 @@ class WifiDirectManager(
         // open another socket to the same owner.
         if (!outboundOpen.compareAndSet(false, true)) return
         socketExecutor.execute {
-            var proved = false
+            var ran = PeerStreamSockets.Ran(proved = null, heard = false)
             try {
                 val socket = Socket()
                 try {
@@ -1393,10 +1403,10 @@ class WifiDirectManager(
                 // No claim to compare against: the owner's IP says nothing
                 // about who it is, so the address its preamble derives is its
                 // id (stream-framing.md, "The preamble").
-                proved = sockets.run(socket, outbound = true) { state == TransportState.RUNNING }.proved != null
+                ran = sockets.run(socket, outbound = true) { state == TransportState.RUNNING }
             } finally {
                 outboundOpen.set(false)
-                scheduleReconnect(address, proved)
+                scheduleReconnect(address, ran)
             }
         }
     }
@@ -1411,11 +1421,17 @@ class WifiDirectManager(
      * then the only dial left, so a check that the owner is still [ended]
      * would leave the client with no stream for the whole of the new group.
      */
-    private fun scheduleReconnect(ended: String, proved: Boolean) {
+    private fun scheduleReconnect(ended: String, ran: PeerStreamSockets.Ran) {
+        // Another stream (a LAN one, say) holds the owner's address: this
+        // dial was refused for it, or superseded by it. The owner is alive
+        // and reachable, so there is nothing to redial until that stream is
+        // lost ([ownerStreamLost]).
+        val held = ran.proved?.let { sockets.holds(it) } == true
+        if (held) heldOwnerAddress = ran.proved
         val unproved = unprovedAtCeiling.updateAndGet {
             GroupOwnerRedial.unprovedAtCeilingAfter(
                 count = it,
-                proved = proved,
+                proved = ran.proved != null,
                 sameOwner = groupOwnerAddress == ended,
                 currentDelayMs = reconnectDelayMs.get(),
                 maxDelayMs = RECONNECT_MAX_DELAY_MS,
@@ -1431,7 +1447,8 @@ class WifiDirectManager(
         }
         val plan = GroupOwnerRedial.next(
             ended = ended,
-            proved = proved,
+            delivered = ran.delivered,
+            held = held,
             running = state == TransportState.RUNNING,
             isGroupOwner = isGroupOwner,
             owner = groupOwnerAddress,
@@ -1440,7 +1457,7 @@ class WifiDirectManager(
             maxDelayMs = RECONNECT_MAX_DELAY_MS,
         )
         if (plan == null) {
-            if (proved) reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)
+            if (ran.delivered) reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)
             return
         }
         reconnectDelayMs.set(plan.nextDelayMs)
@@ -1462,6 +1479,20 @@ class WifiDirectManager(
      */
     private fun closeAllConnections() {
         sockets.closeAll()
+    }
+
+    /**
+     * An announced stream to [address] ended. If it was the one that held the
+     * group owner's address when this client's own dial was refused, the
+     * client dials its owner again. Transport thread.
+     */
+    private fun ownerStreamLost(address: String) {
+        if (address != heldOwnerAddress) return
+        heldOwnerAddress = null
+        val owner = groupOwnerAddress
+        if (state == TransportState.RUNNING && !isGroupOwner && owner != null) {
+            connectToGroupOwner(owner)
+        }
     }
 
     /**
@@ -1691,9 +1722,17 @@ internal object GroupOwnerRedial {
     fun shouldLeave(unprovedAtCeiling: Int, applicationGroup: Boolean): Boolean =
         applicationGroup && unprovedAtCeiling >= LEAVE_AFTER_UNPROVED_AT_CEILING
 
+    /**
+     * The next dial toward the owner, or null for none. [delivered] is
+     * whether the stream that ended carried the owner (a body after the
+     * preamble), which starts the ladder over; a proof alone does not, since
+     * a stream the owner refused proves it too. [held] is whether another
+     * stream holds the owner's address now: then nothing is redialed.
+     */
     fun next(
         ended: String,
-        proved: Boolean,
+        delivered: Boolean,
+        held: Boolean,
         running: Boolean,
         isGroupOwner: Boolean,
         owner: String?,
@@ -1701,8 +1740,8 @@ internal object GroupOwnerRedial {
         initialDelayMs: Long,
         maxDelayMs: Long,
     ): Plan? {
-        if (!running || isGroupOwner || owner == null) return null
-        val delay = if (proved || owner != ended) initialDelayMs else currentDelayMs
+        if (!running || isGroupOwner || owner == null || held) return null
+        val delay = if (delivered || owner != ended) initialDelayMs else currentDelayMs
         return Plan(owner, delay, minOf(delay * 2, maxDelayMs))
     }
 }

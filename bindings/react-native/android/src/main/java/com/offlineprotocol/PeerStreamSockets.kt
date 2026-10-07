@@ -118,9 +118,15 @@ internal class PeerStreamSockets(
     /**
      * What [run] saw. [proved] is the address the preamble proved, also when
      * the stream then lost to the one already held; [heard] is whether the
-     * peer sent anything at all, which tells a liar from a silent socket.
+     * peer sent anything at all, which tells a liar from a silent socket;
+     * [delivered] is whether a body reached the host after the preamble.
+     *
+     * Only [delivered] says the stream carried the peer. A stream refused
+     * here because another holds the address, or closed by a peer whose
+     * stale stream wins there, proves the peer and carries nothing, and a
+     * redial ladder that reset on proof alone redialed it every second.
      */
-    data class Ran(val proved: String?, val heard: Boolean)
+    data class Ran(val proved: String?, val heard: Boolean, val delivered: Boolean = false)
 
     /** The link a stream rides, so one going down ends only its own streams. */
     enum class Carrier { P2P, LAN }
@@ -179,6 +185,7 @@ internal class PeerStreamSockets(
         val endpoint = socket.remoteSocketAddress?.toString() ?: "unknown"
         var proved: String? = null
         var heard = false
+        var delivered = false
         val remoteHost = if (outbound) null else socket.inetAddress?.hostAddress
         val refusal = when {
             !accepting() -> "not running"
@@ -192,7 +199,7 @@ internal class PeerStreamSockets(
                 "reason" to refusal,
             ))
             closeQuietly(socket)
-            return Ran(proved, heard)
+            return Ran(proved, heard, delivered)
         }
         // The slot is released by endStream, which runs once per stream.
         val stream = Stream(socket, outbound, remoteHost, carrier)
@@ -202,7 +209,7 @@ internal class PeerStreamSockets(
         // accepting before it closes everything.
         if (!accepting()) {
             endStream(stream)
-            return Ran(proved, heard)
+            return Ran(proved, heard, delivered)
         }
 
         var why = "ended"
@@ -217,7 +224,7 @@ internal class PeerStreamSockets(
                 host.identityAssertion()
             } catch (e: Exception) {
                 why = "no identity to present: ${e.message ?: "unknown"}"
-                return Ran(proved, heard)
+                return Ran(proved, heard, delivered)
             }
             stream.enqueue(PeerStreamFraming.frame(assertion))
 
@@ -238,11 +245,11 @@ internal class PeerStreamSockets(
                     is PeerStreamPreamble.Outcome.Announce -> outcome.address
                     is PeerStreamPreamble.Outcome.Refuse -> {
                         why = "preamble refused: ${outcome.reason}"
-                        return Ran(proved, heard)
+                        return Ran(proved, heard, delivered)
                     }
                     is PeerStreamPreamble.Outcome.Deliver -> {
                         why = "preamble state out of order"
-                        return Ran(proved, heard)
+                        return Ran(proved, heard, delivered)
                     }
                 }
             } finally {
@@ -253,7 +260,7 @@ internal class PeerStreamSockets(
             proved = address
             if (!announce(stream, address, outbound)) {
                 why = "ended or refused before the announcement"
-                return Ran(proved, heard)
+                return Ran(proved, heard, delivered)
             }
             host.diagnostic("info", "Peer stream proved", mapOf(
                 "address" to address,
@@ -264,8 +271,9 @@ internal class PeerStreamSockets(
                 val body = PeerStreamFraming.readBody(input, preamble = false)
                 if (!deliver(stream, address, body)) {
                     why = "superseded or ended"
-                    return Ran(proved, heard)
+                    return Ran(proved, heard, delivered)
                 }
+                delivered = true
             }
         } catch (e: PeerStreamFraming.Refused) {
             why = "frame refused: ${e.reason}"
@@ -280,7 +288,7 @@ internal class PeerStreamSockets(
                 "reason" to why,
             ))
         }
-        return Ran(proved, heard)
+        return Ran(proved, heard, delivered)
     }
 
     /**
