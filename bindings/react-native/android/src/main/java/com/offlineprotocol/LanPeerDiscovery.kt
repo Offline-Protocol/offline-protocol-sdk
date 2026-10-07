@@ -602,6 +602,11 @@ internal class LanPeerDiscovery(
      */
     private fun localNetworkPermitted(): Boolean =
         Build.VERSION.SDK_INT < API_37 ||
+            // The restriction keys off the app's target, so this holds
+            // whether or not the platform's default grant to older targets
+            // (ConnectivityCompatChanges.USE_NSD_PICKER_WHEN_NO_LOCAL_NET_PERMISSION)
+            // shows up in checkSelfPermission.
+            context.applicationInfo.targetSdkVersion < API_37 ||
             ContextCompat.checkSelfPermission(context, ACCESS_LOCAL_NETWORK) ==
             PackageManager.PERMISSION_GRANTED
 
