@@ -1425,9 +1425,15 @@ class WifiDirectManager(
         // Another stream (a LAN one, say) holds the owner's address: this
         // dial was refused for it, or superseded by it. The owner is alive
         // and reachable, so there is nothing to redial until that stream is
-        // lost ([ownerStreamLost]).
+        // lost ([ownerStreamLost]). Published before the check, because the
+        // loss is handled on the transport thread: a stream lost between a
+        // check and a later write found nothing to redial, and parked this
+        // client with no stream until the group changed. In this order a
+        // loss either lands before the check, which then sees nothing held
+        // and redials below, or after it, and finds the address.
+        ran.proved?.let { heldOwnerAddress = it }
         val held = ran.proved?.let { sockets.holds(it) } == true
-        if (held) heldOwnerAddress = ran.proved
+        if (!held && ran.proved != null && heldOwnerAddress == ran.proved) heldOwnerAddress = null
         val unproved = unprovedAtCeiling.updateAndGet {
             GroupOwnerRedial.unprovedAtCeilingAfter(
                 count = it,
