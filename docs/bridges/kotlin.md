@@ -132,6 +132,16 @@ through `Os.setsockoptInt` because `java.net.Socket` cannot set the
 interval. The core's acknowledgements are still the real signal that a peer
 is gone, as P9 says for the same reason.
 
+`NsdManager`'s `DiscoveryListener` reports a record found and lost, never
+changed. A peer that restarts and publishes the same instance name on a new
+port, with no goodbye in between, is an update the listener never delivers,
+where iOS hears a changed record and dials. So the LAN carrier dials back any
+peer whose announced stream ends while its record is still advertised, on the
+usual policy, and a dial that nothing answers resolves the record again
+before the redial, which returns the cache's current port. Without both, an
+Android phone left the restarted peer to dial it, and dialed the dead port
+itself (seen on devices against an advertise-only Python host).
+
 Of two streams for one address, the manager keeps the one the lower address
 opened, and the newer of two such: P9's rule, compared by UTF-8 bytes, and
 `every_peer_stream_manager_keeps_the_same_stream` pins it to the iOS and

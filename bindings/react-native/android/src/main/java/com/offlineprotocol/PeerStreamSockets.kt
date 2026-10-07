@@ -145,6 +145,12 @@ internal class PeerStreamSockets(
     /** Whether any stream has proved a peer: nothing is sendable otherwise. */
     fun isEmpty(): Boolean = links.isEmpty()
 
+    /**
+     * Told each address whose announced stream ended, after the core was.
+     * The LAN carrier dials back a peer it still sees advertised.
+     */
+    @Volatile var onLost: ((String) -> Unit)? = null
+
     /** Whether a stream holds [address] now. */
     fun holds(address: String): Boolean = links.handleFor(address) != null
 
@@ -392,6 +398,7 @@ internal class PeerStreamSockets(
     }
 
     private fun endStream(stream: Stream) {
+        var lost: String? = null
         synchronized(stream.lock) {
             if (stream.closed) return
             stream.closed = true
@@ -404,8 +411,10 @@ internal class PeerStreamSockets(
                         "error" to (e.message ?: "unknown"),
                     ))
                 }
+                lost = address
             }
         }
+        lost?.let { address -> onLost?.invoke(address) }
         openStreams.remove(stream)
         stream.abort()
         stream.shutdownWriter()

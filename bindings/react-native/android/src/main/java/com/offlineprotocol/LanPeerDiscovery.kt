@@ -66,6 +66,8 @@ internal class LanPeerDiscovery(
     private var registeredName: String? = null
     private var discovery: NsdManager.DiscoveryListener? = null
 
+    /** What discovery found, by instance name: resolved again to refresh a record. */
+    private val services = HashMap<String, NsdServiceInfo>()
     /** Resolved peer records by instance name. */
     private val records = HashMap<String, Record>()
     /** The instance name each advertised address is dialed at. */
@@ -181,6 +183,7 @@ internal class LanPeerDiscovery(
     }
 
     private fun forgetRecords() {
+        services.clear()
         records.clear()
         adverts = emptyMap()
         unprovable.clear()
@@ -261,11 +264,20 @@ internal class LanPeerDiscovery(
 
     private fun found(info: NsdServiceInfo) {
         if (info.serviceName == registeredName) return
+        services[info.serviceName] = info
         pendingResolves.add(info)
         resolveNext()
     }
 
+    /** Resolves [name] again: Android's cache answers with its latest port and host. */
+    private fun refresh(name: String) {
+        val info = services[name] ?: return
+        if (pendingResolves.none { it.serviceName == name }) pendingResolves.add(info)
+        resolveNext()
+    }
+
     private fun lost(name: String) {
+        services.remove(name)
         pendingResolves.removeAll { it.serviceName == name }
         if (records.remove(name) == null) return
         unprovable.remove(name)
@@ -336,6 +348,24 @@ internal class LanPeerDiscovery(
         )
     }
 
+    /**
+     * An announced stream to [address] ended, on either carrier, inbound or
+     * outbound. While its record is still advertised it is dialed on the
+     * usual policy, unless a dial is already under way (an outbound stream's
+     * own end redials through [ended]).
+     *
+     * Needed because this API reports no change to a record: a peer that
+     * restarts and publishes the same name on a new port, with no goodbye in
+     * between, is an update NsdManager's DiscoveryListener never delivers.
+     * iOS hears it as a changed record and dials; here nothing would.
+     */
+    fun peerLost(address: String) {
+        if (!started || paused || !adverts.containsKey(address)) return
+        val local = localAddress() ?: return
+        val weAreLower = PeerStreamLinks.newStreamWins(outbound = true, localAddress = local, peer = address)
+        policy.discovered(address, weAreLower, sockets.holds(address))?.let { schedule(address, it) }
+    }
+
     // MARK: - Dialing
 
     private fun schedule(address: String, delayMs: Long) {
@@ -402,6 +432,10 @@ internal class LanPeerDiscovery(
         } else if (ran.heard && ran.proved == null && records.containsKey(name)) {
             unprovable.add(name)
             rebuild(emptySet())
+        } else if (!ran.heard) {
+            // Nothing answered: the peer may be back on another port, which
+            // reached the cache as an update this API does not report.
+            refresh(name)
         }
         policy.ended(address, adverts.containsKey(address), sockets.holds(address))
             ?.let { schedule(address, it) }

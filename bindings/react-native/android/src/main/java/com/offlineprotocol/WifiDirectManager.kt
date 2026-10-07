@@ -467,6 +467,7 @@ class WifiDirectManager(
             networkChanged = ::lanNetworkChanged,
             diagnostic = ::emitDiagnostic,
         ).also { it.start() }
+        sockets.onLost = { address -> transportHandler.post { lan?.peerLost(address) } }
 
         // Start message polling
         transportHandler.post(messagePollingRunnable)
