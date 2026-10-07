@@ -364,6 +364,21 @@ and `test_relay_answer_prefixes.py` pins it as literals. Before #368 there was
 no Python copy, and the injection had drifted to `__GRP_*` names the registry
 never held.
 
+## P13. The HTTP front carries bodies only in sealed messages, and its literals are pinned
+
+`offline_protocol_sdk.http_front` is a client of the local API like any
+other, so every rule of [the local API bridge](local-api.md) holds for it
+unchanged: it declares one application id, its sends are stamped with it,
+and the server holds its inbound messages while it is away. It sends every
+request and response as a direct message, never on the service request path,
+whose bodies are plaintext, and it acts only on a `message_received` the
+engine reports as `encrypted`. Discovery is the one thing it takes from the
+service path. The envelope limits, the carried-header list, the application
+id and the error tokens of [the chapter](../spec/http-front.md) are module
+literals, and its tests pin them as literals (C5). `aiohttp` is imported only
+when the front starts, behind the `http` extra, so the base install's
+dependency set is unchanged.
+
 ## Testing
 
 ```bash
