@@ -92,12 +92,16 @@ internal class LanPeerDiscovery(
     /** `FAILURE_ALREADY_ACTIVE` answers in a row, capped at [MAX_ALREADY_ACTIVE]. */
     private var alreadyActive = 0
 
-    // Held while browsing. Before T extensions 7 (Android 12 and lower, and
-    // 13 without that update) the Wi-Fi driver drops the multicast mDNS
-    // runs on unless an app holds one, so this device would neither hear
-    // a peer's answers nor the queries a peer sends to find it (NsdManager's
-    // own documentation). From extension 7 the system manages it for a
-    // foreground app, and a lock only costs battery, so none is taken.
+    // Held while the advert or the browse is active. Before T extensions 7
+    // (Android 12 and lower, and 13 without that update) the Wi-Fi driver
+    // drops the multicast mDNS runs on unless an app holds one, so this
+    // device would neither hear a peer's answers nor the queries a peer
+    // sends to find it (NsdManager's own documentation). The advert needs it
+    // as much as the browse: a lock that followed the browse alone was let
+    // go on pause and during a browse retry, while the record stayed
+    // published and could not be found. From extension 7 the system manages
+    // it for a foreground app, and a lock only costs battery, so none is
+    // taken.
     private val multicastLock: WifiManager.MulticastLock? =
         if (needsMulticastLock()) {
             context.applicationContext.getSystemService(WifiManager::class.java)
@@ -248,6 +252,7 @@ internal class LanPeerDiscovery(
             override fun onUnregistrationFailed(info: NsdServiceInfo, code: Int) {}
         }
         registration = listener
+        acquireMulticastLock()
         try {
             nsd.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
         } catch (e: Exception) {
@@ -262,13 +267,14 @@ internal class LanPeerDiscovery(
      */
     private fun registrationFailed(context: Map<String, Any?>) {
         registration = null
+        releaseMulticastLockIfIdle()
         diagnostic("error", "LAN advert failed", context)
         retryLater { if (network != null && registration == null) localAddress()?.let { register(it) } }
     }
 
     private fun discover() {
-        try { multicastLock?.acquire() } catch (_: Exception) {}
         if (discovery != null) return
+        acquireMulticastLock()
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(serviceType: String) {}
             override fun onDiscoveryStopped(serviceType: String) {}
@@ -304,13 +310,13 @@ internal class LanPeerDiscovery(
     }
 
     /**
-     * The browse failed to start: the lock it took is let go, since nothing
-     * browses under it, and it is tried again later, as iOS rebuilds its
-     * browser. A failure was final until the network changed.
+     * The browse failed to start: tried again later, as iOS rebuilds its
+     * browser. A failure was final until the network changed. The lock is
+     * let go only if no advert needs it either.
      */
     private fun discoveryFailed(context: Map<String, Any?>) {
         discovery = null
-        releaseMulticastLock()
+        releaseMulticastLockIfIdle()
         diagnostic("error", "LAN discovery failed to start", context)
         retryLater { if (!paused && network != null) discover() }
     }
@@ -324,10 +330,16 @@ internal class LanPeerDiscovery(
     private fun stopDiscovery() {
         discovery?.let { try { nsd.stopServiceDiscovery(it) } catch (_: Exception) {} }
         discovery = null
-        releaseMulticastLock()
+        releaseMulticastLockIfIdle()
     }
 
-    private fun releaseMulticastLock() {
+    private fun acquireMulticastLock() {
+        try { multicastLock?.acquire() } catch (_: Exception) {}
+    }
+
+    /** Lets the lock go once neither the advert nor the browse needs it. */
+    private fun releaseMulticastLockIfIdle() {
+        if (registration != null || discovery != null) return
         try { multicastLock?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
     }
 
