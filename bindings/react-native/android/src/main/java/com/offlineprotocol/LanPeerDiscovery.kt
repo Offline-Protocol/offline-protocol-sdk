@@ -83,7 +83,14 @@ internal class LanPeerDiscovery(
     // One resolve at a time: before API 34 a second one fails
     // FAILURE_ALREADY_ACTIVE.
     private val pendingResolves = ArrayDeque<NsdServiceInfo>()
-    private var resolving = false
+    /**
+     * The resolve in flight, by its listener. A callback acts only while it
+     * is still this one, so forgetting it (pause, a network change, the
+     * watchdog) retires a resolve that is late or never answers.
+     */
+    private var resolving: NsdManager.ResolveListener? = null
+    /** `FAILURE_ALREADY_ACTIVE` answers in a row, capped at [MAX_ALREADY_ACTIVE]. */
+    private var alreadyActive = 0
 
     // Held while browsing. Before T extensions 7 (Android 12 and lower, and
     // 13 without that update) the Wi-Fi driver drops the multicast mDNS
@@ -211,7 +218,8 @@ internal class LanPeerDiscovery(
         adverts = emptyMap()
         unprovable.clear()
         pendingResolves.clear()
-        resolving = false
+        resolving = null
+        alreadyActive = 0
     }
 
     private fun register(address: String) {
@@ -335,15 +343,14 @@ internal class LanPeerDiscovery(
     }
 
     private fun resolveNext() {
-        if (resolving) return
+        if (resolving != null) return
         val next = pendingResolves.removeFirstOrNull() ?: return
-        resolving = true
-        val expected = generation
         val listener = object : NsdManager.ResolveListener {
             override fun onServiceResolved(info: NsdServiceInfo) {
                 handler.post {
-                    if (expected != generation) return@post
-                    resolving = false
+                    if (resolving !== this) return@post
+                    resolving = null
+                    alreadyActive = 0
                     resolved(info)
                     resolveNext()
                 }
@@ -351,26 +358,43 @@ internal class LanPeerDiscovery(
 
             override fun onResolveFailed(info: NsdServiceInfo, code: Int) {
                 handler.post {
-                    if (expected != generation) return@post
-                    if (code == NsdManager.FAILURE_ALREADY_ACTIVE) {
-                        // A resolve from before a restart is still running.
+                    if (resolving !== this) return@post
+                    if (code == NsdManager.FAILURE_ALREADY_ACTIVE && ++alreadyActive <= MAX_ALREADY_ACTIVE) {
+                        // A resolve from before a restart is still running:
+                        // this one waits for it, a few times, then gives way.
                         pendingResolves.addFirst(info)
                         handler.postDelayed({
-                            if (expected == generation) { resolving = false; resolveNext() }
+                            if (resolving === this) { resolving = null; resolveNext() }
                         }, RESOLVE_RETRY_MS)
                         return@post
                     }
-                    resolving = false
+                    alreadyActive = 0
+                    resolving = null
                     resolveNext()
                 }
             }
         }
+        resolving = listener
+        // NsdManager promises no answer, and one resolve that never comes back
+        // held the queue for good: no peer found later was ever resolved,
+        // and a refresh after a dead port waited behind it.
+        handler.postDelayed({
+            if (resolving !== listener) return@postDelayed
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                try { nsd.stopServiceResolution(listener) } catch (_: Exception) {}
+            }
+            resolving = null
+            alreadyActive = 0
+            resolveNext()
+        }, RESOLVE_TIMEOUT_MS)
         try {
             @Suppress("DEPRECATION")
             nsd.resolveService(next, listener)
         } catch (e: Exception) {
-            resolving = false
+            resolving = null
             diagnostic("warning", "LAN resolve failed", mapOf("error" to (e.message ?: e.javaClass.simpleName)))
+            // Posted: an item that throws again must not recurse here.
+            handler.post { resolveNext() }
         }
     }
 
@@ -517,6 +541,9 @@ internal class LanPeerDiscovery(
         /** A connect that takes longer is left to the redial ladder. iOS's `DIAL_TIMEOUT`. */
         private const val DIAL_TIMEOUT_MS = 10_000
         private const val RESOLVE_RETRY_MS = 1_000L
+        /** A resolve with no answer by then is given up, and the next one runs. */
+        private const val RESOLVE_TIMEOUT_MS = 15_000L
+        private const val MAX_ALREADY_ACTIVE = 5
         /** A failed advert or browse is tried again after this long. iOS's `REBUILD_DELAY`. */
         private const val REBUILD_DELAY_MS = 5_000L
 
