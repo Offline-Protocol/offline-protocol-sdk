@@ -47,8 +47,8 @@ import java.util.concurrent.atomic.AtomicLong
  * this manager hands each socket and each outbound body: the preamble under
  * one deadline, the frame bounds (the ceiling is inclusive, and a refused
  * length closes the socket rather than reading on; the reader this replaced
- * got both wrong), one announced stream per address with the newer
- * superseding, a per-stream writer, and the ordering that keeps a delivery
+ * got both wrong), one announced stream per address with the one the lower
+ * address opened kept, a per-stream writer, and the ordering that keeps a delivery
  * from landing after a loss report. It is framework-free and tested on real
  * loopback sockets. What stays here is the group: the listener, the one
  * outbound socket a client opens to its owner, and reconnecting that socket

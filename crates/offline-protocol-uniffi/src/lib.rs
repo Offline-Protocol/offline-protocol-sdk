@@ -18052,20 +18052,21 @@ mod tests {
         );
     }
 
-    /// The iOS and Python peer-stream managers keep the same one of two
-    /// streams for an address.
+    /// The iOS, Android and Python peer-stream managers keep the same one of
+    /// two streams for an address.
     ///
-    /// Both ends of a pair may dial, and a Python host on a LAN dials every
-    /// peer it discovers, so the choice of which stream to keep is a
+    /// Both ends of a pair may dial, and every manager on a LAN dials the
+    /// peers it discovers, so the choice of which stream to keep is a
     /// hand-mirrored policy (docs/bridges C5): the stream the lower address
-    /// opened wins. If the two copies drift, an iPhone and a Python host each
-    /// keep the stream the other closes, and the pair reconnects forever,
-    /// with no error on either side (ADR 0027). Pinned as the two lines each
-    /// rule is made of. Android keeps the newer stream instead, because a
-    /// Wi-Fi Direct group has one dialer.
+    /// opened wins, addresses ordered by their UTF-8 bytes. If two copies
+    /// drift, a pair each keeps the stream the other closes and reconnects
+    /// forever, with no error on either side (ADR 0027, ADR 0028). Pinned as
+    /// the lines each rule is made of.
     #[test]
-    fn ios_and_python_peer_streams_keep_the_same_stream() {
+    fn every_peer_stream_manager_keeps_the_same_stream() {
         let swift = rn_source_code_only("ios/PeerStreamFraming.swift");
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/PeerStreamFraming.kt");
         let python_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../bindings/python/offline_protocol_sdk/peer_stream_manager.py");
         let python = std::fs::read_to_string(&python_path)
@@ -18083,6 +18084,22 @@ mod tests {
                 swift.contains(needed),
                 "ios/PeerStreamFraming.swift: the stream the lower address opened must win, \
                  as in peer_stream_manager.py. Expected to find:\n  {needed}"
+            );
+        }
+        for needed in [
+            "val local = localAddress ?: return false",
+            "val weOpen = utf8Precedes(local, peer) return outbound == weOpen",
+            "val x = a.encodeToByteArray() val y = b.encodeToByteArray()",
+            "val d = (x[i].toInt() and 0xff) - (y[i].toInt() and 0xff) \
+             if (d != 0) return d < 0 } return x.size < y.size",
+            "if (byAddress.containsKey(address) && \
+             !newStreamWins(outbound, localAddress, address) ) { \
+             return Announcement(firstForAddress = false, superseded = null, refused = true) }",
+        ] {
+            assert!(
+                kotlin.contains(needed),
+                "android PeerStreamFraming.kt: the stream the lower address opened must win, \
+                 by UTF-8 bytes, as on iOS and in Python. Expected to find:\n  {needed}"
             );
         }
         for needed in [
@@ -18223,7 +18240,9 @@ mod tests {
                 ],
                 &[
                     "is PeerStreamPreamble.Outcome.Announce -> outcome.address",
-                    "if (!announce(stream, address)) {",
+                    "if (!announce(stream, address, outbound)) {",
+                    "val announcement = links.announce(stream, address, outbound, local) \
+                     if (announcement.refused) {",
                     "if (!deliver(stream, address, body)) {",
                     "links.remove(stream)?.let { address -> try { host.peerDisconnected(address)",
                     "if (announcement.firstForAddress) { try { host.peerConnected(address)",

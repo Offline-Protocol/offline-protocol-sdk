@@ -183,7 +183,7 @@ between two of the winning kind the newer supersedes the older (the lower
 address reconnecting must not be blocked by its own half-open stream). Either
 way the core sees one announcement and one loss per address. The iOS manager
 keeps the same stream by the same rule, because an iPhone and a host on one
-LAN both dial; `ios_and_python_peer_streams_keep_the_same_stream` pins the
+LAN both dial; `every_peer_stream_manager_keeps_the_same_stream` pins the
 two copies together
 ([ADR 0027](../adr/0027-ios-peer-streams-ride-network-framework.md)).
 

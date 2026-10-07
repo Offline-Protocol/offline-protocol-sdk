@@ -124,17 +124,21 @@ from asyncio's single thread: a stream's announcement, deliveries and loss
 report run under that stream's lock, so no body reaches the core after its
 loss report.
 
-One limit is stated rather than fixed. A client that vanishes without a
-FIN stays announced until the stream notices: Java cannot set the keepalive
-interval, so `SO_KEEPALIVE` runs on the platform default (commonly two
-hours), and the write deadline sees no stall until both kernel buffers are
-full. The core's acknowledgements are the real signal that a peer is gone,
-as P9 says for the same reason.
+A peer that vanishes without a FIN stays announced until keepalive notices:
+15 seconds idle, 5 between probes, 3 probes, the iOS and Python timers, set
+through `Os.setsockoptInt` because `java.net.Socket` cannot set the
+interval. The core's acknowledgements are still the real signal that a peer
+is gone, as P9 says for the same reason.
 
-Local policy differs from P9 on purpose. The newer of two streams for one
-address supersedes the older, because only the client dials its group owner,
-so the two-dialler tie that the lower-address rule settles cannot occur. A
-client whose stream ends while the group is up reconnects on a doubling
+Of two streams for one address, the manager keeps the one the lower address
+opened, and the newer of two such: P9's rule, compared by UTF-8 bytes, and
+`every_peer_stream_manager_keeps_the_same_stream` pins it to the iOS and
+Python copies. Inside a group only the client dials, so the rule reduces to
+"newer wins" there, except that a client that is the higher address cannot
+supersede its own half-open stream: its reconnect is refused until keepalive
+ends the stale one, about thirty seconds. That is the price of the rule being
+one rule; a pair that shares a group and a LAN has two dialers on one link
+table (ADR 0028). A client whose stream ends while the group is up reconnects on a doubling
 delay, always to the owner the group has at that moment: on a group switch
 the new owner's first dial can lose to the old stream still closing, and the
 redial is then the only one left. The manager joins a group the system formed, including one that

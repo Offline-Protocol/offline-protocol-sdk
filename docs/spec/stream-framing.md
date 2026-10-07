@@ -223,16 +223,17 @@ frame is read whole before the next prefix. The number of streams a receiver
 accepts, and the preamble deadline, are local policy, and a conforming
 implementation chooses its own. The mobile managers use ten seconds and
 sixteen open streams; the Python manager's choices are in its bridge rules.
-Which of two streams for one address to keep is policy too, and the
-implementations differ for a reason. The Python and iOS managers keep the
-stream opened by the lower address, and the newer of two such, because both
-ends of a pair dial and must agree without talking: a host dials every peer
-it lists or discovers, and an iPhone dials every peer it discovers
-([ADR 0027](../adr/0027-ios-peer-streams-ride-network-framework.md)). The two
-must compute the rule alike, or an iPhone and a host each keep the stream the
-other closes and reconnect forever. The Android manager keeps the newer,
-because a Wi-Fi Direct group has one dialer, and on a phone the duplicate is
-almost always the same peer reconnecting past a half-open stream.
+Which of two streams for one address to keep is policy too, but every
+implementation in this repository keeps the same one: the stream opened by
+the lower address (addresses compared by their UTF-8 bytes), and the newer of
+two such. Both ends of a pair dial and must agree without talking: a host
+dials every peer it lists or discovers, and so do an iPhone and an Android
+phone ([ADR 0027](../adr/0027-ios-peer-streams-ride-network-framework.md),
+[ADR 0028](../adr/0028-android-peer-streams-join-the-lan.md)). Two ends that
+compute the rule differently each keep the stream the other closes and
+reconnect forever. The rule costs the higher address an immediate reconnect
+past its own half-open stream: the lower end refuses the new one until
+keepalive ends the old.
 
 ## Finding a peer on a LAN
 

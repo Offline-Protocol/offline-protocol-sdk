@@ -1,5 +1,8 @@
 package com.offlineprotocol
 
+import android.os.ParcelFileDescriptor
+import android.system.Os
+import android.system.OsConstants
 import java.io.BufferedInputStream
 import java.io.DataInputStream
 import java.io.EOFException
@@ -33,8 +36,9 @@ import java.util.concurrent.atomic.AtomicLong
  *   [Host.peerConnected] once per address, each body attributed to it, and
  *   [Host.peerDisconnected] once, if and only if the stream still held the
  *   address when it ended.
- * - One announced stream per address, newer superseding older, through
- *   [PeerStreamLinks]. A superseded stream is closed and reports nothing.
+ * - One announced stream per address, the one the lower address opened
+ *   kept, through [PeerStreamLinks]. A superseded or refused stream is
+ *   closed and reports nothing.
  * - A stream's announcement, deliveries and loss report run under that
  *   stream's lock, so no body reaches the host after its loss report. The
  *   core re-adds a neighbour on any inbound body, so a delivery that raced
@@ -163,6 +167,7 @@ internal class PeerStreamSockets(
         try {
             try { socket.tcpNoDelay = true } catch (_: Exception) {}
             try { socket.keepAlive = true } catch (_: Exception) {}
+            tuneKeepalive(socket)
 
             // Ours goes first and without waiting for theirs, so neither side
             // can hold the other half-open by staying silent.
@@ -199,8 +204,8 @@ internal class PeerStreamSockets(
             } finally {
                 deadline.cancel(false)
             }
-            if (!announce(stream, address)) {
-                why = "ended before the announcement"
+            if (!announce(stream, address, outbound)) {
+                why = "ended or refused before the announcement"
                 return null
             }
             proved = address
@@ -263,10 +268,19 @@ internal class PeerStreamSockets(
      * the host if no stream held it. False when the stream was ended first,
      * in which case nothing was announced.
      */
-    private fun announce(stream: Stream, address: String): Boolean {
+    private fun announce(stream: Stream, address: String, outbound: Boolean): Boolean {
+        val local = try { host.localAddress() } catch (_: Exception) { null }
         synchronized(stream.lock) {
             if (stream.closed) return false
-            val announcement = links.announce(stream, address)
+            val announcement = links.announce(stream, address, outbound, local)
+            if (announcement.refused) {
+                // The held stream wins: this one closes without a report,
+                // and the peer, computing the same rule, keeps the other too.
+                host.diagnostic("info", "Peer stream refused: the held one wins", mapOf(
+                    "address" to address,
+                ))
+                return false
+            }
             announcement.superseded?.let { older ->
                 // Closed without a loss report: `links` already moved the
                 // address here, so the older stream's end finds nothing.
@@ -331,6 +345,26 @@ internal class PeerStreamSockets(
         openStreams.remove(stream)
         stream.abort()
         stream.shutdownWriter()
+    }
+
+    /**
+     * Keepalive at 15 s idle, 5 s between probes, 3 probes, the iOS and
+     * Python timers. The higher address's reconnect past a half-open stream
+     * is refused until the held one ends, and with the OS default (two hours
+     * idle) an idle dead stream would hold the address that long. Best
+     * effort: a socket that refuses the options keeps the default.
+     */
+    private fun tuneKeepalive(socket: Socket) {
+        try {
+            // A duplicate of the socket's descriptor: options set on it apply
+            // to the socket, and closing it leaves the socket open.
+            ParcelFileDescriptor.fromSocket(socket).use { pfd ->
+                val fd = pfd.fileDescriptor
+                Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, TCP_KEEPIDLE, 15)
+                Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, TCP_KEEPINTVL, 5)
+                Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, TCP_KEEPCNT, 3)
+            }
+        } catch (_: Throwable) {}
     }
 
     private fun closeQuietly(socket: Socket) {
@@ -417,3 +451,8 @@ internal class PeerStreamSockets(
         }
     }
 }
+
+// Linux <netinet/tcp.h>; `OsConstants` does not publish them.
+private const val TCP_KEEPIDLE = 4
+private const val TCP_KEEPINTVL = 5
+private const val TCP_KEEPCNT = 6

@@ -722,13 +722,12 @@ the stream chapter's one-stream-per-address rule it gains one more thing: its
 close is reported as the peer's loss, which evicts the real peer's link until
 it reconnects. That is why the rule is normative rather than policy. Which
 stream the rule keeps is policy, and each choice leaves the replayer something.
-The Android manager keeps the newer stream, so a replayer chooses when a real
-stream ends: its copy supersedes the real one, the real peer reconnects past
-it, and each round costs both sides a signature check, while the core sees no
-loss because the address never stopped being held. The Python and iOS
-managers keep the stream opened by the lower address, and the newer of two
-such, so the same replay works only against a receiver whose address is
-higher than the peer it copies; a lower receiver refuses the copy. The price
+Every manager keeps the stream opened by the lower address, and the newer of
+two such. Against a receiver whose address is higher than the peer it copies,
+a replayer chooses when a real stream ends: its copy supersedes the real one,
+the real peer reconnects past it, and each round costs both sides a signature
+check, while the core sees no loss because the address never stopped being
+held. A lower receiver refuses the copy. The price
 is that a stale stream can block the higher address's reconnect until
 keepalive notices. A receiver MUST NOT read a verified
 assertion as evidence that the peer is live, recent, or the only holder of the

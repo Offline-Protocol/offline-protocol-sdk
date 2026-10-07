@@ -331,8 +331,9 @@ class PeerStreamSocketsTest {
     // --- one announced stream per address ---------------------------------------------
 
     @Test
-    fun `a newer stream supersedes the older with one announcement and one loss`() {
-        val host = Host("peer-a")
+    fun `a newer stream the lower address opened supersedes the older with one announcement and one loss`() {
+        // peer-b is lower than us, so its inbound streams are the winning kind.
+        val host = Host("peer-c")
         val port = listen(PeerStreamSockets(host, fast))
         val older = raw(port)
         older.readBody()
@@ -351,6 +352,29 @@ class PeerStreamSocketsTest {
         assertEquals("message:peer-b:10", host.next())
 
         newer.close()
+        assertEquals("lost:peer-b", host.next())
+        assertNull(host.quiet())
+    }
+
+    @Test
+    fun `a second stream the higher address opened is refused and the held one stays`() {
+        // peer-b is higher than us: we keep its first stream until it ends.
+        val host = Host("peer-a")
+        val port = listen(PeerStreamSockets(host, fast))
+        val held = raw(port)
+        held.readBody()
+        held.send(assertion("peer-b"))
+        assertEquals("connected:peer-b", host.next())
+
+        val second = raw(port)
+        second.readBody()
+        second.send(assertion("peer-b"))
+        assertTrue(second.closedByPeer())
+        assertNull(host.quiet())
+
+        held.send("still here".toByteArray())
+        assertEquals("message:peer-b:10", host.next())
+        held.close()
         assertEquals("lost:peer-b", host.next())
         assertNull(host.quiet())
     }

@@ -150,12 +150,18 @@ class PeerStreamPreamble(
  * preamble is enough to open a second stream for a live address, so the count
  * has to be kept here, where the streams are.
  *
- * Policy: the newer stream supersedes the older. On a phone the duplicate is
- * almost always the same peer reconnecting past a stream that went half-open
- * (a group client that re-joined), and
- * refusing the newer one would leave that peer unreachable until the stale
- * stream's socket noticed. The cost, recorded in R16, is that a replayer can
- * choose when a real stream ends; it cannot use the stream it gets.
+ * Policy: the stream the lower address opened is kept, and between two of
+ * those the newer supersedes the older. Both ends compute it alike, which is
+ * the point: on a shared network both ends of a pair dial, and so do an iPhone
+ * and a Python host, so without a shared rule each end would keep the stream
+ * the other closes, and the pair would reconnect forever. It is the iOS
+ * `newStreamWins` and the Python manager's `_new_stream_wins`, and
+ * `every_peer_stream_manager_keeps_the_same_stream` pins the three copies
+ * together (ADR 0028). "Newer" among winners is what lets the lower address
+ * reconnect past its own half-open stream; the higher address's reconnect
+ * waits for keepalive to end the stale one. The cost, recorded in R16, is that
+ * a replayer can end a real stream when its copy is the winning kind; it
+ * cannot use the stream it gets.
  *
  * Thread-safe, and deliberately knows nothing of the protocol: the send path
  * reads it from a thread the core may be calling from while holding its global
@@ -168,13 +174,46 @@ class PeerStreamLinks<H : Any> {
         val firstForAddress: Boolean,
         /** The older stream for the same address, to close without a loss report. */
         val superseded: H?,
+        /**
+         * True when an older stream holds the address and wins: close this
+         * one without a report, and leave the older untouched.
+         */
+        val refused: Boolean = false,
     )
+
+    companion object {
+        /**
+         * Whether a new stream for [peer] takes the address over from the one
+         * that holds it. [outbound] is whether this device opened the new
+         * stream. Addresses compare by their UTF-8 bytes, which is the code
+         * point order Python's `<` uses; `String.compareTo` compares UTF-16
+         * units and orders differently past the BMP. With no address of our
+         * own there is nothing to order by, and the announced stream stays.
+         */
+        fun newStreamWins(outbound: Boolean, localAddress: String?, peer: String): Boolean {
+            val local = localAddress ?: return false
+            val weOpen = utf8Precedes(local, peer)
+            return outbound == weOpen
+        }
+
+        private fun utf8Precedes(a: String, b: String): Boolean {
+            val x = a.encodeToByteArray()
+            val y = b.encodeToByteArray()
+            for (i in 0 until minOf(x.size, y.size)) {
+                val d = (x[i].toInt() and 0xff) - (y[i].toInt() and 0xff)
+                if (d != 0) return d < 0
+            }
+            return x.size < y.size
+        }
+    }
 
     private val byAddress = HashMap<String, H>()
     private val byHandle = HashMap<H, String>()
 
     @Synchronized
-    fun announce(handle: H, address: String): Announcement<H> {
+    fun announce(
+        handle: H, address: String, outbound: Boolean, localAddress: String?,
+    ): Announcement<H> {
         if (byHandle.containsKey(handle)) {
             // A stream proves one address, once. A second announcement, for
             // the same address or another, is a caller bug answered as a
@@ -182,6 +221,11 @@ class PeerStreamLinks<H : Any> {
             // Not a check(), so the Swift copy, where a trap would take the
             // host app down, and this one behave the same.
             return Announcement(firstForAddress = false, superseded = null)
+        }
+        if (byAddress.containsKey(address) &&
+            !newStreamWins(outbound, localAddress, address)
+        ) {
+            return Announcement(firstForAddress = false, superseded = null, refused = true)
         }
         val older = byAddress.put(address, handle)
         byHandle[handle] = address
