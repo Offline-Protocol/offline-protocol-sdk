@@ -64,7 +64,7 @@ can run, once the engine has an address to prove:
 | Transport | Enabled by | Started when |
 |---|---|---|
 | Peer stream | `wifi_direct_enabled` | Always. `--listen`, `--peer` and `--lan` configure it. |
-| Bluetooth LE central and peripheral | `ble_enabled` | The platform has a backend (BlueZ on Linux). The peripheral advertises this device to phones. |
+| Bluetooth LE central and peripheral | `ble_enabled` | The central always; the peripheral where `bless` has a backend (macOS, and Linux through BlueZ). The peripheral advertises this device to phones. |
 | Internet relay | `internet_enabled` | `--relay URL` names the relay; the token, if any, is read from `OFFLINE_PROTOCOL_RELAY_TOKEN` (`--relay-token-env` names another variable). |
 | Gateway | `reticulum_enabled` | Always once configured; `--gateway` names the daemon. |
 
@@ -78,7 +78,9 @@ hint; the stream's preamble proves the peer.
 **A transport that fails to start is logged and stays stopped, and the
 others run; the server fails only when none starts.** The failure this
 prevents is a Bluetooth adapter another process holds, or a refused
-advertisement, taking the LAN path down with it. A flag the configuration
+advertisement, taking the LAN path down with it. A transport that has not
+started within 30 seconds counts as failed, so a Bluetooth backend that
+hangs cannot keep the API socket from opening. A flag the configuration
 cannot honour (`--lan` without `wifi_direct_enabled`, `--relay` without
 `internet_enabled`) is refused at start rather than ignored, and so is a
 value the transport could never use: `--relay` must be a `ws://` or `wss://`

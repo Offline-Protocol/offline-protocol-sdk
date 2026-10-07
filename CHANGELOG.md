@@ -42,7 +42,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   failed connect for as long as it runs, so a mis-typed relay was a service
   that reported the relay running and passed `/health`. A variable named
   with `--relay-token-env` and left unset is refused rather than read as
-  "no token".
+  "no token", and each transport has 30 seconds to start before it counts
+  as failed.
 
 ## [0.28.0] — 2026-10-06
 

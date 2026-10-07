@@ -9,6 +9,7 @@ honour instead of ignoring it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import pytest
@@ -22,9 +23,12 @@ from .conftest import make_config
 from .test_local_api_server import _cli_args
 
 
-def _bluetooth_present(monkeypatch, started: list[str], *, central_fails=False, peripheral_fails=False):
+def _bluetooth_present(
+    monkeypatch, started: list[str], *, central_fails=False, peripheral_fails=False, peripheral_hangs=False
+):
     """Stands in for the radio: both roles report available, and start()
-    records itself or raises the way a refused adapter does."""
+    records itself, raises the way a refused adapter does, or never returns
+    the way a wedged backend does."""
 
     async def central_start(self):
         if central_fails:
@@ -32,6 +36,8 @@ def _bluetooth_present(monkeypatch, started: list[str], *, central_fails=False, 
         started.append("central")
 
     async def peripheral_start(self):
+        if peripheral_hangs:
+            await asyncio.Event().wait()
         if peripheral_fails:
             raise TransportError("org.bluez.Error.Failed: Maximum advertisements reached")
         started.append("peripheral")
@@ -74,6 +80,19 @@ async def test_a_refused_advertiser_leaves_the_peer_stream_running(harness, monk
     assert (await client.hello("notes"))["state"] == "Running"
     assert started == ["central"]
     assert manager.peer_stream.listen_port
+
+
+async def test_a_transport_that_never_starts_counts_as_failed(harness, monkeypatch, caplog):
+    """A wedged backend must not keep the API socket from opening."""
+    started: list[str] = []
+    _bluetooth_present(monkeypatch, started, peripheral_hangs=True)
+    manager = ProtocolManager(make_config(profile="wedged-ble-user", ble_enabled=True))
+    with caplog.at_level(logging.ERROR, logger="offline_protocol_sdk.local_api.server"):
+        server = await asyncio.wait_for(harness.server(manager=manager, carrier_start_timeout=0.2), 10)
+    client = await harness.client(server)
+    assert (await client.hello("notes"))["state"] == "Running"
+    assert started == ["central"]
+    assert any("Bluetooth LE peripheral" in r.getMessage() and "within" in r.getMessage() for r in caplog.records)
 
 
 async def test_the_server_fails_when_no_transport_starts(harness, monkeypatch):

@@ -58,6 +58,12 @@ POLICY_VIOLATION = 1008
 #: The engine's own rule for an application id (``ProtocolConfig`` validation).
 APP_ID_MAX_BYTES = 256
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
+#: Seconds one transport may take to start before it counts as failed. The
+#: Bluetooth backends go through D-Bus or CoreBluetooth with no deadline of
+#: their own, and the API socket opens only after every transport has had
+#: its turn: without this, a backend that hangs is a server that never
+#: serves and a supervisor that restarts it forever.
+CARRIER_START_TIMEOUT = 30.0
 
 
 def _package_version() -> str:
@@ -129,6 +135,9 @@ class LocalApiServer:
         Serve ``GET /health`` through the request hook.
     max_size:
         The inbound frame limit.
+    carrier_start_timeout:
+        Seconds one transport may take to start before it is logged as
+        failed and left stopped.
     """
 
     def __init__(
@@ -142,6 +151,7 @@ class LocalApiServer:
         token_path: str | Path | None = None,
         health: bool = True,
         max_size: int = MAX_MESSAGE_SIZE,
+        carrier_start_timeout: float = CARRIER_START_TIMEOUT,
     ) -> None:
         if (socket_path is None) == (tcp_port is None):
             raise ValueError("pass exactly one of socket_path or tcp_port")
@@ -160,6 +170,7 @@ class LocalApiServer:
         self.token_path = Path(token_path) if token_path is not None else None
         self._health = health
         self._max_size = max_size
+        self._carrier_start_timeout = carrier_start_timeout
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server: Server | None = None
         self._dispatcher: Dispatcher | None = None
@@ -300,12 +311,20 @@ class LocalApiServer:
         anyone and the first failure is raised.
         """
         carriers = self._configured_carriers()
-        failures: list[BaseException] = []
+        failures: list[Exception] = []
         for name, transport in carriers:
             try:
-                await transport.start()
+                # A start cut off by the deadline leaves the transport in
+                # STARTING, which every transport's stop() accepts, so the
+                # manager's teardown still closes what it opened.
+                await asyncio.wait_for(transport.start(), self._carrier_start_timeout)
             except asyncio.CancelledError:
                 raise
+            except asyncio.TimeoutError:
+                logger.error(
+                    "the %s did not start within %s s and stays stopped", name, self._carrier_start_timeout
+                )
+                failures.append(TimeoutError(f"the {name} did not start within {self._carrier_start_timeout} s"))
             except Exception as exc:
                 logger.error("the %s did not start and stays stopped: %s", name, exc)
                 failures.append(exc)
