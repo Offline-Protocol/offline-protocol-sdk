@@ -137,9 +137,12 @@ keep the OS defaults (two hours idle). The core's acknowledgements are still the
 is gone, as P9 says for the same reason.
 
 A redial ladder starts over only after a stream that carried its peer: a
-body after the preamble. A proof alone is not enough, because a stream refused
-for the one already held proves its peer too, and a ladder that reset on it
-redialed every second while that stream lived. A group client whose dial is
+body after the preamble, or the address held for the keepalive window (30
+seconds). A proof alone is not enough, because a stream refused for the one
+already held proves its peer too, and a ladder that reset on it redialed every
+second while that stream lived. A body alone is too narrow: two peers with a
+session may reconnect and send nothing, and every ordinary drop of such a
+stream climbed the ladder for good. A group client whose dial is
 refused because another stream (a LAN one) holds its owner's address does not
 redial at all; it dials the owner again when that stream is lost.
 

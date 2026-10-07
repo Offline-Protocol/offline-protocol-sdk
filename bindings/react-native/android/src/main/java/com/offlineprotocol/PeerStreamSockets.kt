@@ -105,6 +105,12 @@ internal class PeerStreamSockets(
          */
         val maxInboundPerHost: Int = 4,
         /**
+         * How long an announced stream must hold its address to count as
+         * having carried its peer with no body: the keepalive window. A
+         * refused stream ends within moments of its proof.
+         */
+        val carriedAfterMs: Long = 30_000L,
+        /**
          * Queued bytes toward one peer beyond which a body is dropped (the
          * core retries it), and only while that peer's writer is stalled. The
          * core hands a burst over in one tick, before the writer has run, so
@@ -119,14 +125,18 @@ internal class PeerStreamSockets(
      * What [run] saw. [proved] is the address the preamble proved, also when
      * the stream then lost to the one already held; [heard] is whether the
      * peer sent anything at all, which tells a liar from a silent socket;
-     * [delivered] is whether a body reached the host after the preamble.
+     * [carried] is whether the stream carried the peer: a body reached the
+     * host after the preamble, or the stream held its address for
+     * [Limits.carriedAfterMs].
      *
-     * Only [delivered] says the stream carried the peer. A stream refused
-     * here because another holds the address, or closed by a peer whose
-     * stale stream wins there, proves the peer and carries nothing, and a
-     * redial ladder that reset on proof alone redialed it every second.
+     * Only [carried] starts a redial ladder over. A stream refused here
+     * because another holds the address, or closed by a peer whose stale
+     * stream wins there, proves the peer and carries nothing, and a ladder
+     * that reset on proof alone redialed it every second. A body alone was
+     * too narrow: two peers with a session may reconnect and send nothing,
+     * and every ordinary drop of such a stream climbed the ladder for good.
      */
-    data class Ran(val proved: String?, val heard: Boolean, val delivered: Boolean = false)
+    data class Ran(val proved: String?, val heard: Boolean, val carried: Boolean = false)
 
     /** The link a stream rides, so one going down ends only its own streams. */
     enum class Carrier { P2P, LAN }
@@ -186,6 +196,14 @@ internal class PeerStreamSockets(
         var proved: String? = null
         var heard = false
         var delivered = false
+        var announcedAtNs = 0L
+        fun ran() = Ran(
+            proved, heard,
+            carried = delivered || (
+                announcedAtNs != 0L &&
+                    (System.nanoTime() - announcedAtNs) / 1_000_000 >= limits.carriedAfterMs
+                ),
+        )
         val remoteHost = if (outbound) null else socket.inetAddress?.hostAddress
         val refusal = when {
             !accepting() -> "not running"
@@ -199,7 +217,7 @@ internal class PeerStreamSockets(
                 "reason" to refusal,
             ))
             closeQuietly(socket)
-            return Ran(proved, heard, delivered)
+            return ran()
         }
         // The slot is released by endStream, which runs once per stream.
         val stream = Stream(socket, outbound, remoteHost, carrier)
@@ -209,7 +227,7 @@ internal class PeerStreamSockets(
         // accepting before it closes everything.
         if (!accepting()) {
             endStream(stream)
-            return Ran(proved, heard, delivered)
+            return ran()
         }
 
         var why = "ended"
@@ -224,7 +242,7 @@ internal class PeerStreamSockets(
                 host.identityAssertion()
             } catch (e: Exception) {
                 why = "no identity to present: ${e.message ?: "unknown"}"
-                return Ran(proved, heard, delivered)
+                return ran()
             }
             stream.enqueue(PeerStreamFraming.frame(assertion))
 
@@ -245,11 +263,11 @@ internal class PeerStreamSockets(
                     is PeerStreamPreamble.Outcome.Announce -> outcome.address
                     is PeerStreamPreamble.Outcome.Refuse -> {
                         why = "preamble refused: ${outcome.reason}"
-                        return Ran(proved, heard, delivered)
+                        return ran()
                     }
                     is PeerStreamPreamble.Outcome.Deliver -> {
                         why = "preamble state out of order"
-                        return Ran(proved, heard, delivered)
+                        return ran()
                     }
                 }
             } finally {
@@ -260,8 +278,9 @@ internal class PeerStreamSockets(
             proved = address
             if (!announce(stream, address, outbound)) {
                 why = "ended or refused before the announcement"
-                return Ran(proved, heard, delivered)
+                return ran()
             }
+            announcedAtNs = System.nanoTime()
             host.diagnostic("info", "Peer stream proved", mapOf(
                 "address" to address,
                 "outbound" to outbound,
@@ -271,7 +290,7 @@ internal class PeerStreamSockets(
                 val body = PeerStreamFraming.readBody(input, preamble = false)
                 if (!deliver(stream, address, body)) {
                     why = "superseded or ended"
-                    return Ran(proved, heard, delivered)
+                    return ran()
                 }
                 delivered = true
             }
@@ -288,7 +307,7 @@ internal class PeerStreamSockets(
                 "reason" to why,
             ))
         }
-        return Ran(proved, heard, delivered)
+        return ran()
     }
 
     /**

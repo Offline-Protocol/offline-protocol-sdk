@@ -48,7 +48,10 @@ internal class PeerStreamDialPolicy {
      */
     fun noSlot(address: String): Long? = ended(address, advertised = true, held = false)
 
-    /** An outbound stream toward [address] proved it: the ladder starts over. */
+    /**
+     * An outbound stream toward [address] carried it (a body, or the address
+     * held through the keepalive window): the ladder starts over.
+     */
     fun proved(address: String) {
         redialDelayMs.remove(address)
     }

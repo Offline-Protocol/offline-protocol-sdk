@@ -18115,13 +18115,17 @@ mod tests {
     }
 
     /// A peer-stream redial ladder starts over only after a stream that
-    /// carried its peer, on iOS and Android alike.
+    /// carried its peer (a body after the preamble, or the address held
+    /// through the keepalive window), on iOS and Android alike.
     ///
     /// A stream the peer refuses for its own held one proves the address all
     /// the same, so a ladder that reset on proof redialed every second, with a
     /// connect and a loss reported each round, until the peer's stale stream
-    /// died. Each platform holds its copy of the rule in its own words, so the
-    /// lines are pinned here (docs/bridges C5, ADR 0028).
+    /// died. A body alone is too narrow the other way: two peers with a
+    /// session may reconnect and send nothing, and each ordinary drop of such
+    /// a stream climbed the ladder for good. Each platform holds its copy of
+    /// the rule in its own words, so the lines are pinned here (docs/bridges
+    /// C5, ADR 0028).
     #[test]
     fn peer_stream_redial_ladders_reset_only_on_a_carried_stream() {
         let swift = rn_source_code_only("ios/WifiDirectManager.swift");
@@ -18129,16 +18133,22 @@ mod tests {
             rn_source_code_only("android/src/main/java/com/offlineprotocol/LanPeerDiscovery.kt");
         let manager =
             rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        let sockets =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/PeerStreamSockets.kt");
         for (code, needed) in [
+            (&swift, "if stream.proved { stream.carried = true }"),
             (
                 &swift,
-                "if stream.proved { stream.carried = true self.dialPolicy.proved(address) }",
+                "stream.carried || stream.provedAt.map({ \
+                 ProcessInfo.processInfo.systemUptime - $0 >= Self.CARRIED_AFTER \
+                 }) == true { dialPolicy.proved(address) }",
             ),
-            (&lan, "if (ran.proved == address && ran.delivered) {"),
-            (&manager, "delivered = ran.delivered,"),
+            (&sockets, "carried = delivered || ("),
+            (&lan, "if (ran.proved == address && ran.carried) {"),
+            (&manager, "carried = ran.carried,"),
             (
                 &manager,
-                "if (ran.delivered) reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)",
+                "if (ran.carried) reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)",
             ),
         ] {
             assert!(

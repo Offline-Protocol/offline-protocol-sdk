@@ -1453,7 +1453,7 @@ class WifiDirectManager(
         }
         val plan = GroupOwnerRedial.next(
             ended = ended,
-            delivered = ran.delivered,
+            carried = ran.carried,
             held = held,
             running = state == TransportState.RUNNING,
             isGroupOwner = isGroupOwner,
@@ -1463,7 +1463,7 @@ class WifiDirectManager(
             maxDelayMs = RECONNECT_MAX_DELAY_MS,
         )
         if (plan == null) {
-            if (ran.delivered) reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)
+            if (ran.carried) reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)
             return
         }
         reconnectDelayMs.set(plan.nextDelayMs)
@@ -1729,15 +1729,15 @@ internal object GroupOwnerRedial {
         applicationGroup && unprovedAtCeiling >= LEAVE_AFTER_UNPROVED_AT_CEILING
 
     /**
-     * The next dial toward the owner, or null for none. [delivered] is
-     * whether the stream that ended carried the owner (a body after the
-     * preamble), which starts the ladder over; a proof alone does not, since
-     * a stream the owner refused proves it too. [held] is whether another
+     * The next dial toward the owner, or null for none. [carried] is
+     * whether the stream that ended carried the owner
+     * ([PeerStreamSockets.Ran.carried]), which starts the ladder over; a
+     * proof alone does not, since a stream the owner refused proves it too. [held] is whether another
      * stream holds the owner's address now: then nothing is redialed.
      */
     fun next(
         ended: String,
-        delivered: Boolean,
+        carried: Boolean,
         held: Boolean,
         running: Boolean,
         isGroupOwner: Boolean,
@@ -1747,7 +1747,7 @@ internal object GroupOwnerRedial {
         maxDelayMs: Long,
     ): Plan? {
         if (!running || isGroupOwner || owner == null || held) return null
-        val delay = if (delivered || owner != ended) initialDelayMs else currentDelayMs
+        val delay = if (carried || owner != ended) initialDelayMs else currentDelayMs
         return Plan(owner, delay, minOf(delay * 2, maxDelayMs))
     }
 }

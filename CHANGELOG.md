@@ -59,8 +59,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   unacknowledged data, where the OS defaults were two hours and about fifteen
   minutes.
 - **A peer-stream redial ladder starts over only after a stream that carried
-  its peer**, on iOS and Android: a body after the preamble, not the proof
-  alone. A stream the peer refused for its own stale one proved the address
+  its peer**, on iOS and Android: a body after the preamble, or the address
+  held for thirty seconds, not the proof alone. A stream the peer refused for its own stale one proved the address
   too, so the dialer was announced and lost every second until that stream
   died, and a Wi-Fi Direct client whose owner was held by a LAN stream
   redialed it every second. Such a client now waits for that stream to end.

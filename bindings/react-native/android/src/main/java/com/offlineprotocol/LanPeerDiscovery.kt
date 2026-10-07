@@ -443,7 +443,7 @@ internal class LanPeerDiscovery(
      * and keep the real record for the address undialed.
      */
     private fun ended(address: String, name: String, ran: PeerStreamSockets.Ran) {
-        if (ran.proved == address && ran.delivered) {
+        if (ran.proved == address && ran.carried) {
             // Carried the peer: the ladder starts over. A proof the peer then
             // refused (its stale stream holds us) climbs it like a miss, or
             // the dialer would be announced and lost every second.

@@ -79,6 +79,10 @@ public class WifiDirectManager: NSObject, TransportManager {
     /// it is ended and left to the redial ladder. Python's `CONNECT_TIMEOUT`
     /// and Android's connect timeout bound the whole connect the same way.
     private static let DIAL_TIMEOUT: TimeInterval = 10.0
+    /// How long a dialed stream must hold its address after its proof to
+    /// count as having carried its peer with no body: the keepalive window.
+    /// Android's `Limits.carriedAfterMs`.
+    private static let CARRIED_AFTER: TimeInterval = 30.0
     /// Android's `Limits`: queued bytes toward one peer beyond which a body
     /// is dropped (the core retries it), and only while that peer's oldest
     /// write has been outstanding for `WRITE_STALL_MS`. The core hands a burst
@@ -130,9 +134,11 @@ public class WifiDirectManager: NSObject, TransportManager {
         /// mid-preamble has not been heard.
         var heard = false
         var proved = false
-        /// Whether a body followed the preamble: the stream carried the
-        /// peer. Only this starts the redial ladder over; see `receive(on:)`.
+        /// Whether a body followed the preamble, and when a dialed stream
+        /// proved its address: together they say whether the stream carried
+        /// the peer, which is what starts the redial ladder over (`end(_:)`).
         var carried = false
+        var provedAt: TimeInterval?
 
         init(connection: NWConnection, outbound: Bool, dialed: String?) {
             self.connection = connection
@@ -668,19 +674,13 @@ public class WifiDirectManager: NSObject, TransportManager {
                     case .success(let frame):
                         stream.heard = true
                         self.peers.received(frame, from: stream)
-                        if !stream.carried, let address = stream.dialed,
-                           self.peers.provedAddress(of: stream) == address {
+                        if !stream.carried, stream.dialed != nil,
+                           self.peers.provedAddress(of: stream) == stream.dialed {
                             if stream.proved {
-                                // A body after the preamble. A proof alone does
-                                // not start the ladder over: a stream the peer
-                                // refuses for its own held one (a stale stream
-                                // there) proves the address too, and resetting
-                                // on it redialed every second until that stream
-                                // died. Android's `Ran.delivered` is the same rule.
                                 stream.carried = true
-                                self.dialPolicy.proved(address)
                             } else {
                                 stream.proved = true
+                                stream.provedAt = ProcessInfo.processInfo.systemUptime
                             }
                         }
                     case .failure(let refusal):
@@ -716,6 +716,19 @@ public class WifiDirectManager: NSObject, TransportManager {
            let local = protocolInstance.localAddress() {
             unprovable.insert(stream.connection.endpoint)
             recordAdverts(browser?.browseResults ?? [], fresh: [], local: local)
+        }
+        // The ladder starts over only after a stream that carried its peer: a
+        // body after the preamble, or the address held through the keepalive
+        // window. A proof alone is not enough: a stream the peer refuses for
+        // its own held one (a stale stream there) proves the address too, and
+        // resetting on it redialed every second until that stream died. A body
+        // alone is too narrow: two peers with a session may reconnect and send
+        // nothing. Android's `Ran.carried` is the same rule.
+        if let address = stream.dialed,
+           stream.carried || stream.provedAt.map({
+               ProcessInfo.processInfo.systemUptime - $0 >= Self.CARRIED_AFTER
+           }) == true {
+            dialPolicy.proved(address)
         }
         guard let address = stream.dialed,
               let delay = dialPolicy.ended(
