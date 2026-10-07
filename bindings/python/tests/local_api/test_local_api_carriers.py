@@ -10,9 +10,12 @@ honour instead of ignoring it.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import sys
 
 import pytest
+from websockets.asyncio.server import serve
 
 from offline_protocol_sdk.ble_manager import BleManager
 from offline_protocol_sdk.ble_peripheral import BlePeripheral
@@ -69,17 +72,23 @@ async def test_both_bluetooth_roles_start_with_the_server(harness, monkeypatch):
     assert started == ["central", "peripheral"]
 
 
-async def test_a_refused_advertiser_leaves_the_peer_stream_running(harness, monkeypatch):
+async def test_a_refused_advertiser_leaves_the_peer_stream_running(harness, monkeypatch, caplog):
     """The failure this rule prevents: a radio another process holds taking
     the LAN path down with it."""
     started: list[str] = []
     _bluetooth_present(monkeypatch, started, peripheral_fails=True)
     manager = _peer_stream_manager("half-ble-user", ble_enabled=True)
-    server = await harness.server(manager=manager)
+    with caplog.at_level(logging.ERROR, logger="offline_protocol_sdk.local_api.server"):
+        server = await harness.server(manager=manager)
     client = await harness.client(server)
     assert (await client.hello("notes"))["state"] == "Running"
     assert started == ["central"]
     assert manager.peer_stream.listen_port
+    # The log is the one place the operator learns why: it names the
+    # transport and carries the backend's own refusal.
+    [record] = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert "Bluetooth LE peripheral" in record.getMessage()
+    assert "Maximum advertisements reached" in record.getMessage()
 
 
 async def test_a_transport_that_never_starts_counts_as_failed(harness, monkeypatch, caplog):
@@ -93,6 +102,28 @@ async def test_a_transport_that_never_starts_counts_as_failed(harness, monkeypat
     assert (await client.hello("notes"))["state"] == "Running"
     assert started == ["central"]
     assert any("Bluetooth LE peripheral" in r.getMessage() and "within" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_configured_relay_is_started_with_the_server(harness):
+    """The relay `--relay` names is dialled and authenticated with the token."""
+    first_frame: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
+
+    async def relay(websocket):
+        frame = json.loads(await websocket.recv())
+        if not first_frame.done():
+            first_frame.set_result(frame)
+        async for _ in websocket:
+            pass
+
+    async with serve(relay, "127.0.0.1", 0) as fake_relay:
+        port = fake_relay.sockets[0].getsockname()[1]
+        manager = ProtocolManager(make_config(profile="relay-user"))
+        manager.internet.configure(server_url=f"ws://127.0.0.1:{port}", auto_reconnect=False)
+        manager.internet.set_auth_token("relay-secret")
+        await harness.server(manager=manager)
+        frame = await asyncio.wait_for(first_frame, 5)
+        assert frame == {"type": "Authenticate", "token": "relay-secret"}
+        await manager.stop()
 
 
 async def test_the_server_fails_when_no_transport_starts(harness, monkeypatch):
@@ -126,6 +157,16 @@ async def test_lan_switches_on_advertising_and_discovery(tmp_path):
         assert manager.peer_stream.discover is True
     finally:
         await manager.close()
+
+
+async def test_lan_without_the_extra_is_refused_naming_it(tmp_path, monkeypatch):
+    """Refused here rather than by the transport: under the start rule a
+    missing extra would be one logged error while Bluetooth carried the
+    server, and the LAN the operator asked for would never appear."""
+    monkeypatch.setitem(sys.modules, "zeroconf", None)
+    cli, args = _cli_args(tmp_path, "--lan", wifi_direct_enabled=True)
+    with pytest.raises(SystemExit, match=r"offline-protocol-sdk\[lan\]"):
+        cli.build_manager(args)
 
 
 async def test_without_lan_the_peer_stream_stays_off_the_lan(tmp_path):
