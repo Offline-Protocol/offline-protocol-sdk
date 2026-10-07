@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -19,7 +20,9 @@ import signal
 import sys
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+
+from websockets.exceptions import InvalidURI
+from websockets.uri import parse_uri
 
 from ..gateway_manager import DEFAULT_DAEMON_ADDRESS
 from ..protocol_manager import ProtocolManager
@@ -29,7 +32,6 @@ from .server import LocalApiServer
 
 DEFAULT_STORE_KEY_ENV = "OFFLINE_PROTOCOL_STORE_KEY"
 DEFAULT_RELAY_TOKEN_ENV = "OFFLINE_PROTOCOL_RELAY_TOKEN"
-LOOPBACK_RELAY_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 logger = logging.getLogger(__name__)
 
@@ -179,10 +181,14 @@ def configure_relay(args: argparse.Namespace, manager: ProtocolManager) -> None:
         return
     if manager.internet is None:
         raise SystemExit("--relay needs internet_enabled in the config")
-    parts = urlsplit(args.relay)
-    if parts.scheme not in ("ws", "wss") or not parts.hostname:
-        raise SystemExit(f"--relay takes a ws:// or wss:// URL with a host, not {args.relay!r}")
-    if parts.scheme == "ws" and parts.hostname not in LOOPBACK_RELAY_HOSTS:
+    # The parser the transport's connect runs, so the CLI refuses exactly
+    # what the transport could never dial: a port that is not a number or
+    # out of range passes a looser check and is then retried forever.
+    try:
+        uri = parse_uri(args.relay)
+    except (InvalidURI, ValueError) as exc:
+        raise SystemExit(f"--relay takes a ws:// or wss:// URL with a host, not {args.relay!r}: {exc}") from None
+    if not uri.secure and not _is_loopback(uri.host):
         logger.warning("--relay %s is not TLS: the relay token and traffic metadata cross the network in clear", args.relay)
     token = os.environ.get(args.relay_token_env)
     if not token and args.relay_token_env != DEFAULT_RELAY_TOKEN_ENV:
@@ -193,6 +199,15 @@ def configure_relay(args: argparse.Namespace, manager: ProtocolManager) -> None:
     manager.internet.configure(server_url=args.relay)
     if token:
         manager.internet.set_auth_token(token)
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def build_server(args: argparse.Namespace, manager: ProtocolManager) -> LocalApiServer:

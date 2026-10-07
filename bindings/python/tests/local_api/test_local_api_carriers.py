@@ -229,7 +229,20 @@ async def test_the_relay_flag_without_internet_is_refused(tmp_path):
         cli.build_manager(args)
 
 
-@pytest.mark.parametrize("url", ["https://relay.example.test", "relay.example.test:443", "wss://", "wss:///path"])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://relay.example.test",
+        "relay.example.test:443",
+        "wss://",
+        "wss:///path",
+        # A looser check passes these, and the transport then retries them
+        # for as long as it runs.
+        "wss://relay.example.test:abc",
+        "wss://relay.example.test:70000",
+        "wss://[::1",
+    ],
+)
 async def test_a_relay_that_is_not_a_websocket_url_is_refused(tmp_path, url):
     """The transport retries a failed connect for as long as it runs, so a
     mis-typed relay would otherwise be a service that reports the relay
@@ -249,7 +262,17 @@ async def test_a_named_token_variable_that_is_unset_is_refused(tmp_path, monkeyp
         cli.build_manager(args)
 
 
-@pytest.mark.parametrize(("url", "warned"), [("ws://relay.example.test", True), ("ws://127.0.0.1:9000", False)])
+@pytest.mark.parametrize(
+    ("url", "warned"),
+    [
+        ("ws://relay.example.test", True),
+        ("ws://127.0.0.1:9000", False),
+        ("ws://127.0.0.2:9000", False),
+        ("ws://[::1]:9000", False),
+        ("ws://localhost:9000", False),
+        ("wss://relay.example.test", False),
+    ],
+)
 async def test_a_cleartext_relay_off_loopback_is_warned_about(tmp_path, caplog, url, warned):
     cli, args = _cli_args(tmp_path, "--relay", url)
     with caplog.at_level(logging.WARNING, logger="offline_protocol_sdk.local_api.cli"):
