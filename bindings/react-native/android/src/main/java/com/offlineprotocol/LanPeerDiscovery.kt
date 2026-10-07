@@ -231,6 +231,9 @@ internal class LanPeerDiscovery(
             port = this@LanPeerDiscovery.port
             setAttribute(WifiDirectGroupFormation.KEY_VERSION, "1")
             setAttribute(WifiDirectGroupFormation.KEY_ADDRESS, address)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                setNetwork(this@LanPeerDiscovery.network)
+            }
         }
         val listener = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(info: NsdServiceInfo) {
@@ -281,12 +284,20 @@ internal class LanPeerDiscovery(
             }
 
             override fun onServiceLost(info: NsdServiceInfo) {
-                handler.post { if (discovery === this) lost(info.serviceName) }
+                handler.post { if (discovery === this) lost(info) }
             }
         }
         discovery = listener
         try {
-            nsd.discoverServices(WifiDirectGroupFormation.SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+            val network = network
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && network != null) {
+                nsd.discoverServices(
+                    WifiDirectGroupFormation.SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD,
+                    network, { it.run() }, listener,
+                )
+            } else {
+                nsd.discoverServices(WifiDirectGroupFormation.SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+            }
         } catch (e: Exception) {
             discoveryFailed(mapOf("error" to (e.message ?: e.javaClass.simpleName)))
         }
@@ -320,7 +331,21 @@ internal class LanPeerDiscovery(
         try { multicastLock?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
     }
 
+    /**
+     * Whether [info] was found on the Wi-Fi network dials are bound to. The
+     * same instance can be reported on more than one interface (a Wi-Fi
+     * Direct group, a tethering downstream with no Network at all), and
+     * records are keyed by name: a copy from elsewhere overwrote the Wi-Fi
+     * record with a host no bound dial reaches, and its loss deleted it.
+     * From API 33 the advert and the browse are scoped to the network too.
+     * Below it NSD carries no network, every interface is browsed, and a
+     * record from another one fails its dial and climbs the ladder.
+     */
+    private fun onOurNetwork(info: NsdServiceInfo): Boolean =
+        Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || info.network == network
+
     private fun found(info: NsdServiceInfo) {
+        if (!onOurNetwork(info)) return
         if (info.serviceName == registeredName) return
         services[info.serviceName] = info
         pendingResolves.add(info)
@@ -334,7 +359,9 @@ internal class LanPeerDiscovery(
         resolveNext()
     }
 
-    private fun lost(name: String) {
+    private fun lost(info: NsdServiceInfo) {
+        if (!onOurNetwork(info)) return
+        val name = info.serviceName
         services.remove(name)
         pendingResolves.removeAll { it.serviceName == name }
         if (records.remove(name) == null) return
@@ -399,6 +426,7 @@ internal class LanPeerDiscovery(
     }
 
     private fun resolved(info: NsdServiceInfo) {
+        if (!onOurNetwork(info)) return
         val address = lanAdvertAddress(info.attributes) ?: return
         val local = localAddress() ?: return
         if (address == local) return

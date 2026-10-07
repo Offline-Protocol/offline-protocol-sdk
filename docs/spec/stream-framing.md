@@ -258,8 +258,9 @@ local-network privacy blocks discovery. The iOS manager once used
 MultipeerConnectivity, which published the same type in front of its own
 protocol, so a host on the same LAN found an iPhone it could not speak to.
 The Android manager publishes and browses the same record through
-`NsdManager` on the Wi-Fi network it is on, with the same instance name (a
-digest of the address), and binds its dials to that network, since a socket
+`NsdManager` on the Wi-Fi network it is on (scoped to that network from
+Android 13; below it NSD browses every interface), with the same instance
+name (a digest of the address), and binds its dials to that network, since a socket
 left to the default network goes out over cellular on a Wi-Fi network with
 no internet ([ADR 0028](../adr/0028-android-peer-streams-join-the-lan.md)).
 
