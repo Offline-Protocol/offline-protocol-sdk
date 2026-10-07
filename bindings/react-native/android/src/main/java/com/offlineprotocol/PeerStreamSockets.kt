@@ -114,6 +114,9 @@ internal class PeerStreamSockets(
 
     enum class SendResult { QUEUED, NO_STREAM, OUT_OF_BOUNDS, QUEUE_FULL }
 
+    /** The link a stream rides, so one going down ends only its own streams. */
+    enum class Carrier { P2P, LAN }
+
     private val openStreams: MutableSet<Stream> = ConcurrentHashMap.newKeySet()
     // Slots taken against [Limits], decided and taken under one lock, not by
     // reading the set's size and adding afterwards: two sockets accepted at
@@ -145,7 +148,12 @@ internal class PeerStreamSockets(
      * [accepting] is the owner's "still running": a socket that arrives while
      * it is false, or past [Limits.maxStreams], is closed unread.
      */
-    fun run(socket: Socket, outbound: Boolean, accepting: () -> Boolean): String? {
+    fun run(
+        socket: Socket,
+        outbound: Boolean,
+        carrier: Carrier = Carrier.P2P,
+        accepting: () -> Boolean,
+    ): String? {
         val endpoint = socket.remoteSocketAddress?.toString() ?: "unknown"
         val remoteHost = if (outbound) null else socket.inetAddress?.hostAddress
         val refusal = when {
@@ -163,7 +171,7 @@ internal class PeerStreamSockets(
             return null
         }
         // The slot is released by endStream, which runs once per stream.
-        val stream = Stream(socket, outbound, remoteHost)
+        val stream = Stream(socket, outbound, remoteHost, carrier)
         openStreams.add(stream)
         // Re-checked after the add: a closeAll() that snapshotted the set just
         // before it cannot miss this stream, because the owner stops
@@ -271,6 +279,13 @@ internal class PeerStreamSockets(
     fun closeAll() {
         for (stream in openStreams.toList()) {
             endStream(stream)
+        }
+    }
+
+    /** Ends every stream on [carrier], reporting each announced one lost. */
+    fun closeCarrier(carrier: Carrier) {
+        for (stream in openStreams.toList()) {
+            if (stream.carrier == carrier) endStream(stream)
         }
     }
 
@@ -413,6 +428,7 @@ internal class PeerStreamSockets(
         val outbound: Boolean,
         /** The remote host an inbound socket came from, for [Limits.maxInboundPerHost]. */
         val remoteHost: String?,
+        val carrier: Carrier,
     ) {
         /** Guards [closed] and the stream's calls into the host. */
         val lock = Any()

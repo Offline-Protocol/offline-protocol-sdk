@@ -83,14 +83,18 @@ class PeerStreamSocketsTest {
     )
 
     /** A listener whose accepted sockets [sockets] runs, as the group owner's does. */
-    private fun listen(sockets: PeerStreamSockets, running: () -> Boolean = { true }): Int {
+    private fun listen(
+        sockets: PeerStreamSockets,
+        carrier: PeerStreamSockets.Carrier = PeerStreamSockets.Carrier.P2P,
+        running: () -> Boolean = { true },
+    ): Int {
         val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
         cleanup.add(server)
         thread(isDaemon = true) {
             while (!server.isClosed) {
                 val s = try { server.accept() } catch (_: IOException) { return@thread }
                 cleanup.add(s)
-                thread(isDaemon = true) { sockets.run(s, outbound = false, accepting = running) }
+                thread(isDaemon = true) { sockets.run(s, outbound = false, carrier, accepting = running) }
             }
         }
         return server.localPort
@@ -394,6 +398,26 @@ class PeerStreamSocketsTest {
         held.close()
         assertEquals("lost:peer-b", host.next())
         assertNull(host.quiet())
+    }
+
+    @Test
+    fun `closing one carrier ends only its streams`() {
+        val host = Host("peer-a")
+        val a = PeerStreamSockets(host, fast)
+        val group = raw(listen(a, PeerStreamSockets.Carrier.P2P)).also { it.readBody() }
+        group.send(assertion("peer-b"))
+        assertEquals("connected:peer-b", host.next())
+        val lan = raw(listen(a, PeerStreamSockets.Carrier.LAN)).also { it.readBody() }
+        lan.send(assertion("peer-c"))
+        assertEquals("connected:peer-c", host.next())
+
+        a.closeCarrier(PeerStreamSockets.Carrier.P2P)
+        assertEquals("lost:peer-b", host.next())
+        assertTrue(group.closedByPeer())
+        assertNull(host.quiet())
+
+        lan.send("still here".toByteArray())
+        assertEquals("message:peer-c:10", host.next())
     }
 
     @Test

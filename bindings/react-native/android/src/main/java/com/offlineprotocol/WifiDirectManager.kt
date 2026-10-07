@@ -19,6 +19,7 @@ import androidx.core.content.ContextCompat
 import uniffi.offline_protocol.OfflineProtocol
 import uniffi.offline_protocol.verifyIdentityAssertion
 import java.io.*
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -271,10 +272,18 @@ class WifiDirectManager(
     // State tracking. Volatile: written on the transport thread, read by the
     // socket thread that decides whether a client reconnects.
     @Volatile private var isGroupOwner = false
-    // Whether the core was last told the stream layer is up. Wi-Fi P2P going
-    // off reports it down; coming back on has to report it up again, or the
-    // core keeps the slot down while streams prove peers over it.
+    // Whether the core was last told the stream layer is up: while either
+    // carrier is ([reportLayer]). Wi-Fi P2P going off with no LAN reports it
+    // down; coming back on has to report it up again, or the core keeps the
+    // slot down while streams prove peers over it.
     @Volatile private var layerUp = false
+    // Whether Wi-Fi P2P is on, and whether this device is on a Wi-Fi network
+    // it can find LAN peers on.
+    @Volatile private var p2pUp = false
+    @Volatile private var lanUp = false
+    // The Wi-Fi network's own addresses: a socket accepted on one of them is
+    // a LAN stream, any other a group stream.
+    @Volatile private var lanAddresses: Set<InetAddress> = emptySet()
     @Volatile private var groupOwnerAddress: String? = null
     // The client's next reconnect delay; see [RECONNECT_INITIAL_DELAY_MS].
     private val reconnectDelayMs = AtomicLong(RECONNECT_INITIAL_DELAY_MS)
@@ -428,13 +437,10 @@ class WifiDirectManager(
 
         updateState(TransportState.RUNNING)
 
-        // Notify protocol
-        layerUp = true
-        try {
-            protocol.wifiDirectStatusChanged(true)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error notifying protocol of start", e)
-        }
+        // Notify protocol. Wi-Fi P2P off at start arrives next as the
+        // sticky state broadcast, which reports it.
+        p2pUp = true
+        reportLayer()
 
         // Start message polling
         transportHandler.post(messagePollingRunnable)
@@ -512,6 +518,9 @@ class WifiDirectManager(
         channel = null
 
         // Notify protocol
+        p2pUp = false
+        lanUp = false
+        lanAddresses = emptySet()
         layerUp = false
         try {
             protocol.wifiDirectStatusChanged(false)
@@ -673,14 +682,11 @@ class WifiDirectManager(
                 // Streams first, so each announced peer is reported lost
                 // while the core still holds its link. A stream left open
                 // across the flip would keep delivering, and every body
-                // re-adds a neighbour the flip just cleared.
-                closeAllConnections()
-                layerUp = false
-                try {
-                    protocol.wifiDirectStatusChanged(false)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error notifying protocol", e)
-                }
+                // re-adds a neighbour the flip just cleared. LAN streams do
+                // not ride P2P and stay.
+                sockets.closeCarrier(PeerStreamSockets.Carrier.P2P)
+                p2pUp = false
+                reportLayer()
             }
         } else if (enabled && state == TransportState.RUNNING) {
             // Wi-Fi P2P came back (Wi-Fi turned on, or the app started with it
@@ -690,13 +696,9 @@ class WifiDirectManager(
             // Posted for the same reason as above; the flag makes a broadcast
             // that repeats the current state a no-op.
             transportHandler.post {
-                if (state != TransportState.RUNNING || layerUp) return@post
-                layerUp = true
-                try {
-                    protocol.wifiDirectStatusChanged(true)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error notifying protocol", e)
-                }
+                if (state != TransportState.RUNNING || p2pUp) return@post
+                p2pUp = true
+                reportLayer()
                 startPeerDiscovery()
                 resumeGroupFormationAfterP2pReturned()
             }
@@ -811,8 +813,9 @@ class WifiDirectManager(
             ownerIdleSinceMs = 0L
             // Posted: this is the broadcast receiver's onReceive, and ending
             // an announced stream is an FFI call. Same reasoning as the post
-            // in [handleWifiP2pStateChanged].
-            transportHandler.post { closeAllConnections() }
+            // in [handleWifiP2pStateChanged]. Leaving the group ends only the
+            // group's streams.
+            transportHandler.post { sockets.closeCarrier(PeerStreamSockets.Carrier.P2P) }
         }
     }
 
@@ -961,7 +964,7 @@ class WifiDirectManager(
         val p2p = wifiP2pManager ?: return
         // Nothing to form over while Wi-Fi P2P is off: every call would fail
         // BUSY, and a join attempted then is refused with no group to find.
-        if (!layerUp) return
+        if (!p2pUp) return
         val now = SystemClock.elapsedRealtime()
         adverts.values.removeAll { now - it.seenAtMs > ADVERT_TTL_MS }
         deadOwners.values.removeAll { now - it >= WifiDirectGroupFormation.DEAD_OWNER_TTL_MS }
@@ -1320,7 +1323,12 @@ class WifiDirectManager(
 
     private fun handleClientConnection(socket: Socket) {
         socketExecutor.execute {
-            sockets.run(socket, outbound = false) { state == TransportState.RUNNING }
+            val carrier = if (socket.localAddress in lanAddresses) {
+                PeerStreamSockets.Carrier.LAN
+            } else {
+                PeerStreamSockets.Carrier.P2P
+            }
+            sockets.run(socket, outbound = false, carrier) { state == TransportState.RUNNING }
         }
     }
 
@@ -1418,6 +1426,21 @@ class WifiDirectManager(
      */
     private fun closeAllConnections() {
         sockets.closeAll()
+    }
+
+    /**
+     * Tells the core the stream layer is up while either carrier is, once
+     * per edge. Runs on the transport thread: it is an FFI call.
+     */
+    private fun reportLayer() {
+        val up = p2pUp || lanUp
+        if (up == layerUp) return
+        layerUp = up
+        try {
+            protocol.wifiDirectStatusChanged(up)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error notifying protocol", e)
+        }
     }
 
     // MARK: - Message Handling (Event-Driven)
