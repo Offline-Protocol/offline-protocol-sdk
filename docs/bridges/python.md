@@ -397,7 +397,9 @@ is what tells a central apart from a peripheral the central role connected
 to: both are connected `Device1` objects, and only a central reads our
 identity. It is announced to the core only while the Message characteristic
 has a subscriber, because BlueZ reports subscriptions per characteristic and
-not per device. Each inbound write is attributed to its own caller, so two
+not per device, and only while one of its centrals is still connected: bless
+forgets a subscription only on `StopNotify`, which BlueZ sends when an
+unpaired central disconnects but not a bonded one. Each inbound write is attributed to its own caller, so two
 centrals no longer collapse into `ble-peer`. Notifications go to every
 subscribed central: neither bless backend addresses one.
 
@@ -407,7 +409,9 @@ role pops is gone. Two drains running at once split a message's fragments
 across two links. With both roles present, `ProtocolManager` runs one drain
 that pops each fragment once and writes it on the central's link to its
 recipient, else notifies it when the peripheral has a subscriber, else drops
-and counts it; the core's retry of the message re-sends it. The peripheral on
+and counts it; the core's retry of the message re-sends it. A write or notify
+that fails is reported and the drain goes on, so one failure never strands the
+fragments behind it. The peripheral on
 its own takes nothing while nobody is subscribed. `test_ble_peripheral.py`
 pins both with a fake bus. Nothing here has run on a board.
 

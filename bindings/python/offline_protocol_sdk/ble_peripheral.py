@@ -194,6 +194,10 @@ class _BlueZCentrals:
             self._seen.pop(path, None)
         return set(self._seen.values()) if subscribed else set()
 
+    def any_seen(self) -> bool:
+        """Whether a central of ours was connected at the last poll."""
+        return bool(self._seen)
+
 
 class BlePeripheral(TransportManager):
     """BLE transport — peripheral (advertiser / GATT server) role.
@@ -736,18 +740,25 @@ class BlePeripheral(TransportManager):
         """Whether a notification sent now reaches any central.
 
         BlueZ: bless records the characteristics a central has subscribed
-        to. CoreBluetooth: the delegate's per-central subscriptions.
+        to, and a central of ours must still be connected. bless forgets a
+        subscription only on ``StopNotify``, which BlueZ sends on disconnect
+        for an unpaired central but not for a bonded one, so the list alone
+        can name a subscriber that left. CoreBluetooth: the delegate's
+        per-central subscriptions.
         """
         server = self._server
         if server is None:
             return False
-        if self._bluez_centrals is not None:
+        tracker = self._bluez_centrals
+        if tracker is not None:
             try:
                 subscribed = server.app.subscribed_characteristics
             except AttributeError:
                 with self._lock:
                     return bool(self._connected_centrals)
-            return MESSAGE_CHAR_UUID.lower() in {str(u).lower() for u in subscribed}
+            return tracker.any_seen() and MESSAGE_CHAR_UUID.lower() in {
+                str(u).lower() for u in subscribed
+            }
         try:
             return bool(server.peripheral_manager_delegate._central_subscriptions)
         except (AttributeError, TypeError):
@@ -760,15 +771,24 @@ class BlePeripheral(TransportManager):
         Every subscribed central receives it: neither backend of bless
         addresses a notification to one central, so a peripheral with more
         than one central fans every fragment out to all of them.
+
+        A notify that raises is reported and still returns True, as
+        ``BleManager.write_fragment`` does for a failed write: the fragment
+        was this role's, the core's retry re-sends the message, and a drain
+        that stopped here would strand every fragment behind this one.
         """
         server = self._server
         if server is None:
             return False
-        char = server.get_characteristic(MESSAGE_CHAR_UUID)
-        if char is None:
-            return False
-        char.value = data
-        server.update_value(SERVICE_UUID, MESSAGE_CHAR_UUID)
+        try:
+            char = server.get_characteristic(MESSAGE_CHAR_UUID)
+            if char is None:
+                return False
+            char.value = data
+            server.update_value(SERVICE_UUID, MESSAGE_CHAR_UUID)
+        except Exception as exc:
+            self._emit_diagnostic("warning", f"Failed to notify a fragment: {exc}")
+            return True
         with self._lock:
             self._bytes_sent += len(data)
             self._fragments_sent += 1

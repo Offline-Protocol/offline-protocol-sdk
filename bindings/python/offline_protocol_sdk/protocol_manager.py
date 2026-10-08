@@ -115,7 +115,8 @@ class _BleTransportCallbackImpl(BleTransportCallback):
 
     async def _drain_shared_inner(self) -> None:
         ble, peripheral = self._ble, self._peripheral
-        assert ble is not None and peripheral is not None
+        if ble is None or peripheral is None:
+            return
         protocol = ble._protocol
         while True:
             try:
@@ -136,8 +137,14 @@ class _BleTransportCallbackImpl(BleTransportCallback):
             elif peripheral.has_subscriber():
                 await peripheral.notify_fragment(data)
             else:
+                # Rare: the core queues a fragment only for a peer it holds.
+                # A drop means the message waits for the core's retry, which
+                # is what a board run wants to see.
                 self.fragments_dropped += 1
-                logger.debug("no BLE link for a fragment to %s", recipient)
+                logger.info(
+                    "no BLE link for a fragment to %s (%d dropped)",
+                    recipient, self.fragments_dropped,
+                )
             try:
                 protocol.ble_return_fragment()
             except Exception:

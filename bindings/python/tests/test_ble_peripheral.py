@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from offline_protocol_sdk.ble_manager import MESSAGE_CHAR_UUID
 from offline_protocol_sdk.ble_peripheral import BlePeripheral
 from offline_protocol_sdk.transport_manager import TransportError, TransportState
 
@@ -224,6 +225,11 @@ class TestOutgoingFragments:
         mock_char = MagicMock()
         mock_server.get_characteristic = MagicMock(return_value=mock_char)
         mock_server.update_value = MagicMock(return_value=True)
+        # A subscribed central, set explicitly: a bare MagicMock attribute is
+        # truthy, which would pass the drain's gate without reading it.
+        mock_server.peripheral_manager_delegate._central_subscriptions = {
+            "central-1": [MESSAGE_CHAR_UUID]
+        }
         peripheral._server = mock_server
         return peripheral, mock_server, mock_char
 
@@ -247,6 +253,38 @@ class TestOutgoingFragments:
         mock_protocol.ble_return_fragment.assert_called_once()
         assert peripheral._fragments_sent == 1
         assert peripheral._bytes_sent == 4
+
+    @pytest.mark.asyncio
+    async def test_drain_takes_nothing_without_a_subscribed_central(
+        self, started_peripheral, mock_protocol
+    ):
+        """CoreBluetooth: a popped fragment is gone, and with no subscriber
+        a notification reaches no one."""
+        peripheral, mock_server, _ = started_peripheral
+        mock_server.peripheral_manager_delegate._central_subscriptions = {}
+        await peripheral._drain_outgoing_fragments()
+        mock_protocol.ble_get_next_fragment.assert_not_called()
+        mock_server.update_value.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_notify_does_not_stop_the_drain(
+        self, started_peripheral, mock_protocol
+    ):
+        """The fragments behind a failed one still go out."""
+        peripheral, mock_server, _ = started_peripheral
+        mock_server.update_value = MagicMock(
+            side_effect=[RuntimeError("bus gone"), True]
+        )
+        first, second = MagicMock(), MagicMock()
+        first.data, second.data = [1], [2]
+        first.recipient_id = second.recipient_id = "phone-1"
+        mock_protocol.ble_get_next_fragment = MagicMock(
+            side_effect=[first, second, None]
+        )
+        await peripheral._drain_outgoing_fragments()
+        assert mock_server.update_value.call_count == 2
+        assert peripheral._fragments_sent == 1
+        assert await peripheral.notify_fragment(b"\x03") is True
 
     @pytest.mark.asyncio
     async def test_drain_no_fragments(self, started_peripheral, mock_protocol):
@@ -568,7 +606,6 @@ from types import SimpleNamespace  # noqa: E402
 from offline_protocol_sdk import ble_peripheral as ble_peripheral_module  # noqa: E402
 from offline_protocol_sdk.ble_manager import (  # noqa: E402
     DEVICE_ID_CHAR_UUID,
-    MESSAGE_CHAR_UUID,
 )
 from offline_protocol_sdk.ble_peripheral import _BlueZCentrals  # noqa: E402
 
@@ -743,11 +780,27 @@ class TestPeripheralOnBlueZ:
 
     def test_subscription_is_read_from_the_message_characteristic(self, mock_protocol, fake_bus):
         peripheral = bluez_peripheral(mock_protocol, fake_bus, [])
+        fake_bus.deliver(gatt_call("ReadValue", PHONE))
         assert not peripheral.has_subscriber()
         peripheral._server.app.subscribed_characteristics = [DEVICE_ID_CHAR_UUID]
         assert not peripheral.has_subscriber()
         peripheral._server.app.subscribed_characteristics = [MESSAGE_CHAR_UUID.upper()]
         assert peripheral.has_subscriber()
+
+    @pytest.mark.asyncio
+    async def test_a_subscription_left_by_a_departed_central_is_not_a_subscriber(
+        self, mock_protocol, fake_bus
+    ):
+        """bless forgets a subscription only on StopNotify, which BlueZ
+        does not send when a bonded central disconnects."""
+        peripheral = bluez_peripheral(mock_protocol, fake_bus, [MESSAGE_CHAR_UUID])
+        assert not peripheral.has_subscriber()
+        fake_bus.connected = {PHONE: True}
+        fake_bus.deliver(gatt_call("ReadValue", PHONE))
+        assert peripheral.has_subscriber()
+        fake_bus.connected[PHONE] = False
+        assert await peripheral._current_centrals() == set()
+        assert not peripheral.has_subscriber()
 
     @pytest.mark.asyncio
     async def test_the_drain_takes_nothing_while_nobody_subscribes(self, mock_protocol, fake_bus):
