@@ -492,6 +492,29 @@ class TestFragmentHandling:
         assert manager._bytes_sent == 0
 
     @pytest.mark.asyncio
+    async def test_write_fragment_says_whether_this_role_holds_the_peer(
+        self, manager, mock_protocol
+    ):
+        """The shared drain hands a fragment to the peripheral only on False,
+        so False must mean "no link here", never "the write failed"."""
+        assert await manager.write_fragment("phone-1", b"\x01") is False
+
+        mock_client = AsyncMock()
+        mock_client.is_connected = False
+        manager._clients["AA:BB"] = mock_client
+        manager._device_id_to_addr["phone-1"] = "AA:BB"
+        assert await manager.write_fragment("phone-1", b"\x01") is False
+
+        mock_client.is_connected = True
+        mock_client.write_gatt_char.side_effect = RuntimeError("link dropped")
+        assert await manager.write_fragment("phone-1", b"\x01") is True
+        assert manager._fragments_sent == 0
+
+        mock_client.write_gatt_char.side_effect = None
+        assert await manager.write_fragment("phone-1", b"\x01") is True
+        assert manager._fragments_sent == 1
+
+    @pytest.mark.asyncio
     async def test_concurrent_drain_is_serialised(self, manager, mock_protocol):
         """A second _drain_outgoing_fragments call while one is running returns immediately."""
         frag = MagicMock()

@@ -765,6 +765,33 @@ class TestPeripheralOnBlueZ:
         assert fake_bus.handlers == []
         assert peripheral._bluez_centrals is None
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("platform, hooked", [("linux", 1), ("darwin", 0)])
+    async def test_start_hooks_the_bus_on_linux_only(
+        self, mock_protocol, fake_bus, monkeypatch, platform, hooked
+    ):
+        """The tests above build the tracker by hand; this is the wiring
+        that makes start() build it, and only where bless runs on BlueZ."""
+        monkeypatch.setattr(sys, "platform", platform)
+        server = MagicMock()
+        server.bus = fake_bus
+        server.app.base_path = APP_BASE
+        server.add_new_service = AsyncMock()
+        server.add_new_characteristic = AsyncMock()
+        server.start = AsyncMock()
+        server.stop = AsyncMock()
+        peripheral = BlePeripheral(mock_protocol, device_id="coordinator")
+        with patch.object(
+            ble_peripheral_module, "BlessServer", return_value=server
+        ), patch.object(BlePeripheral, "is_available", return_value=True):
+            await peripheral.start()
+        try:
+            assert len(fake_bus.handlers) == hooked
+            assert (peripheral._bluez_centrals is not None) == bool(hooked)
+        finally:
+            await peripheral.stop()
+        assert fake_bus.handlers == []
+
 
 # ---------------------------------------------------------------------------
 # One drain for both roles: the core's fragment queue cannot be peeked or
