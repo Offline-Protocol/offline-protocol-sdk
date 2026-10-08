@@ -964,7 +964,10 @@ whether that sender may make it.
 
 **What bounds it:** bodies never leave the host in the clear (invariant 1 of
 the chapter), the sender a provider is told is the MLS-authenticated one,
-and off loopback the token is required. **What application teams must do:**
+off loopback the token is required, and a request from a browser page
+(one carrying `Origin`, or reaching a tokenless front under a name other
+than loopback or the domain) is refused, so a web page the user opens is not
+a local process. **What application teams must do:**
 run the front where only the operator's applications can reach it, and
 authorize in the provider by reading `X-Offline-Protocol-Sender`. A host
 that can identify the calling container should pass that identity to the

@@ -228,7 +228,16 @@ loopback, which is the default, that is the host's own processes; bound to
 any other address, the front requires a token: a fresh 32-byte value at every
 launch, written to a file with mode `0600` in the same call that creates it,
 presented in `X-Offline-Protocol-Token`. A wrong or missing token is
-`unauthorized` (401). Telling one local application from another is the
+`unauthorized` (401). A request carrying an `Origin` header is
+`unauthorized` (401) on any binding: a browser sends one on every
+cross-origin request and on every method other than `GET` and `HEAD`, and no
+other client does, so this is what stops a web page the user opens from
+sending a request as this device or registering a callback of its choosing
+through a wildcard route to the domain or DNS rebinding. Without a token,
+the front's own endpoints answer only a host that is the domain, `localhost`
+or a loopback address, and refuse any other with `bad_host` (400): a
+rebinding page reaches the front under its own name, and a same-origin `GET`
+carries no `Origin`. Telling one local application from another is the
 host's to provide (a per-application network namespace, or a header the
 host's own router adds), and is recorded as
 [R23](../security/threat-model.md#r23-the-http-front-trusts-every-process-that-can-reach-it).
@@ -237,7 +246,7 @@ host's own router adds), and is recorded as
 
 | Token | Status | Raised by | Means |
 |---|---|---|---|
-| `bad_host` | 400 | requester | The host is under the domain but not `<service>.<device>` |
+| `bad_host` | 400 | requester | The host is under the domain but not `<service>.<device>`, or, without a token, names neither the domain nor loopback |
 | `bad_request` | 400 | requester | Headers or path over their limit |
 | `unknown_device` | 404 | requester | The label is neither an address nor an alias |
 | `body_too_large` | 413 | requester | The request body is over the limit |
@@ -245,7 +254,7 @@ host's own router adds), and is recorded as
 | `recipient_unreachable` | 502 | requester | The engine reported the device unreachable |
 | `send_failed` | 502 | requester | The engine gave up on the request message |
 | `not_connected` | 503 | either | The front has no connection to the local API |
-| `unauthorized` | 401 | either | The token is missing or wrong |
+| `unauthorized` | 401 | either | The token is missing or wrong, or the request carries `Origin` |
 | `unknown_service` | 404 | provider | Nothing registered under that name |
 | `callback_failed` | 502 | provider | The callback refused the connection, failed or timed out |
 | `response_too_large` | 502 | provider | The callback's body is over the limit |

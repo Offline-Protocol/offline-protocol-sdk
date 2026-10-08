@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import json
+import ipaddress
 import logging
 import os
 import secrets
@@ -52,7 +53,7 @@ from .envelope import (
     decode,
     header_bytes,
 )
-from .hostname import DEFAULT_DOMAIN, Aliases, HostError, is_label, parse_host
+from .hostname import DEFAULT_DOMAIN, Aliases, HostError, bare_host, is_label, parse_host
 from .registry import Registration, Registry
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,15 @@ BROWSE_KEEPALIVE_SECONDS = 15.0
 #: Failure events for a message whose id the send call has not returned yet.
 EARLY_EVENTS_CAPACITY = 1024
 SUBSCRIPTIONS = ["message_received", "message_failed", "message_undeliverable", "service_discovered"]
+
+
+def _is_loopback_name(name: str) -> bool:
+    if name == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
 
 
 class _Failed(Exception):
@@ -274,13 +284,33 @@ class HttpFront:
             request.headers.get(TOKEN_HEADER, "").encode(), self.token.encode()
         ):
             return self._error("unauthorized")
+        if "Origin" in request.headers:
+            # A browser sends Origin on every cross-origin request and every
+            # request that is not a GET or HEAD; no other client does. Without
+            # this, any page the user opens can POST through the front as this
+            # device, or PUT a callback of its choosing, by DNS rebinding or a
+            # wildcard route to the domain.
+            return self._error("unauthorized", "a request from a browser page is refused")
+        host = request.headers.get("Host")
         try:
-            target = parse_host(request.headers.get("Host"), self.domain)
+            target = parse_host(host, self.domain)
         except HostError as exc:
             return self._error("bad_host", str(exc))
         if target is None:
+            if self.token is None and not self._own_host(host):
+                # DNS rebinding: a page that resolved its own name to loopback
+                # reaches the front with that name as the host, and a GET
+                # carries no Origin. Without a token only names that cannot be
+                # rebound reach the front's own endpoints.
+                return self._error("bad_host", "the front's own endpoints answer only a loopback host or the domain")
             return await self._control(request)
         return await self._invoke(request, target.service, target.device)
+
+    def _own_host(self, host: str | None) -> bool:
+        if not host:
+            return True  # HTTP/1.0 with no Host: no browser sends one
+        bare = bare_host(host)
+        return bare == self.domain or _is_loopback_name(bare)
 
     async def _invoke(self, request: Any, service: str, device: str) -> Any:
         web = self._aiohttp.web

@@ -40,10 +40,12 @@ def is_label(label: str) -> bool:
     return LABEL.fullmatch(label) is not None
 
 
-def _bare_host(host: str) -> str:
+def bare_host(host: str) -> str:
+    """The host in lower case, without its port or trailing dot, and an IPv6
+    literal without its brackets."""
     host = host.strip().lower()
     if host.startswith("["):
-        return host  # an IPv6 literal: never under the domain
+        return host[1:].partition("]")[0]  # an IPv6 literal: never under the domain
     name, sep, port = host.rpartition(":")
     if sep and port.isdigit():
         host = name
@@ -55,7 +57,7 @@ def parse_host(host: str | None, domain: str = DEFAULT_DOMAIN) -> Target | None:
     front's own endpoints (the domain itself, or any host not under it)."""
     if not host:
         return None
-    bare = _bare_host(host)
+    bare = bare_host(host)
     suffix = "." + domain
     if bare == domain or not bare.endswith(suffix):
         return None

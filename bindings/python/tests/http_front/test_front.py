@@ -358,3 +358,39 @@ async def test_a_response_from_another_device_is_ignored(hosts):
     )
     assert not future.done()
     hosts.a._pending.pop("req1")
+
+
+@pytest.mark.parametrize("method, path, host", [("POST", "/now", None), ("PUT", "/services/timeofday", "127.0.0.1")])
+async def test_a_request_from_a_browser_page_is_refused(hosts, method, path, host):
+    """A page can reach a loopback front by DNS rebinding or a wildcard
+    route; the Origin header only a browser sends is what tells it apart."""
+    await hosts.register(hosts.b)
+    calls = len(hosts.provider.calls)
+    async with hosts.http.request(
+        method,
+        f"http://127.0.0.1:{hosts.a.port}{path}",
+        json={"callback": "http://127.0.0.1:1"},
+        headers={
+            "Host": host or host_for("timeofday", hosts.manager_b.local_address),
+            "Origin": "http://evil.example",
+        },
+    ) as reply:
+        assert (reply.status, reply.headers["X-Offline-Protocol-Error"]) == (401, "unauthorized")
+    assert len(hosts.provider.calls) == calls
+    assert hosts.a.registry.get("timeofday") is None
+
+
+@pytest.mark.parametrize("host, status", [("evil.example:8080", 400), ("localhost:1", 200), ("[::1]:1", 200), (DOMAIN, 200)])
+async def test_without_a_token_the_own_endpoints_answer_only_names_that_cannot_be_rebound(hosts, host, status):
+    async with hosts.http.get(f"http://127.0.0.1:{hosts.a.port}/health", headers={"Host": host}) as reply:
+        assert reply.status == status
+
+
+async def test_with_a_token_the_own_endpoints_answer_any_host(hosts):
+    front = await hosts.front(hosts.server_a, token=hosts.tmp_path / "front.token")
+    token = (hosts.tmp_path / "front.token").read_text().strip()
+    async with hosts.http.get(
+        f"http://127.0.0.1:{front.port}/health", headers={"Host": "front.lan:8080", "X-Offline-Protocol-Token": token}
+    ) as reply:
+        assert reply.status == 200
+
