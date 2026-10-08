@@ -115,6 +115,24 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   is removed, the control); a message crosses a middle device to one the
   sender cannot hear, and the recipient's receipt comes back the same way.
 
+- **An offline-first demo on three devices.** `examples/offline-first` runs
+  three services from the container image on two bridge networks, so the
+  middle one is the only way between the other two, and `run.py` runs the
+  scenarios with `offline-protocol-verify` and prints a table: store and
+  forward, the sender killed and restarted while its message is queued, and
+  a message carried through the middle device. Its README is the runbook for
+  the legs that need hardware (the LAN between hosts, the carrier changing
+  under a stream of messages, the relay, a gateway daemon, a phone), with a
+  record of what has been run: scenarios 1, 2 and 4 in containers on one
+  machine, nothing on hardware yet. Scenario 4 fails unless the sender's
+  receipt comes back across the hop. The image gains `OP_GATEWAY` (the
+  gateway daemon, for a configuration with `reticulum_enabled`), two baked
+  configurations beside the default (`config-ble.json`, `config-relay.json`),
+  and the verifier, and its build fails when the installed package has none.
+  Found while running it: a message that a direct stream took and then lost
+  (a device that went away without closing the stream) is retried over
+  direct carriers only and never handed to the mesh (#541).
+
 ### Changed
 
 - **A peer-stream or relay flag the configuration cannot honour is refused.**

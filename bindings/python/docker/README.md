@@ -31,8 +31,19 @@ the service these, and the failure each one prevents:
 `config.json` is the engine's `ProtocolConfig`, baked into the image; mount
 another at `/etc/offline-protocol/config.json` or point `OP_CONFIG` at one.
 The default enables the peer stream with encryption required, and leaves
-Bluetooth LE and the internet relay off. `profile` is this host's label and
-part of its storage namespace: change it before the first start, never after.
+Bluetooth LE and the internet relay off. Two more are baked beside it and
+differ from it in one field each: `OP_CONFIG=/etc/offline-protocol/config-ble.json`
+turns Bluetooth LE on (and needs the D-Bus grant above), and
+`config-relay.json` turns the internet transport on for `OP_RELAY`. `profile`
+is this host's label and part of its storage namespace: change it before the
+first start, never after.
+
+The image also has `offline-protocol-verify`, which drives the service in
+the same container and waits for the events that prove a message was held,
+carried and delivered: `docker exec <container> offline-protocol-verify
+--socket /run/offline-protocol/api.sock state`. The
+[offline-first demo](../../../examples/offline-first) runs its scenarios
+with it.
 
 `entrypoint.sh` maps environment variables to flags:
 
@@ -47,6 +58,7 @@ part of its storage namespace: change it before the first start, never after.
 | `OP_HTTP_TOKEN_FILE` | none | `--http-token-file`: the front writes a per-launch token there and requires it; needed off loopback, and on a host where a browser runs (R23 in the threat model). The file is replaced at every start and readable by the container's user only: bind-mount its directory, never the file, and read it as that user |
 | `OP_HTTP_ALIASES` | none | `--http-aliases` |
 | `OP_RELAY` | none | `--relay`, token in `OFFLINE_PROTOCOL_RELAY_TOKEN`; the config must set `internet_enabled`, which the default leaves off, or the service refuses to start |
+| `OP_GATEWAY` | none | `--gateway`, a gateway daemon's `HOST:PORT`; the config must set `reticulum_enabled`, or the service refuses to start |
 | `OP_SOCKET` | `/run/offline-protocol/api.sock` | `--socket` |
 
 Arguments after the image name come after every flag the environment sets,
@@ -73,7 +85,8 @@ docker build bindings/python/docker
 
 Wheels for several architectures may sit there together; pip takes the one
 that matches the image. The build fails if the installed service has no HTTP
-front, which is the case for every release before the `http` extra.
+front or the package has no `offline-protocol-verify`, which is the case for
+every release so far.
 
 The build context is this directory only. Never build from the repository
 root or mount the checkout: `target/` alone fills the build VM.
