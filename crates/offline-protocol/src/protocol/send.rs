@@ -588,9 +588,9 @@ impl OfflineProtocol {
     /// 2. **Pinned to [`TransportType::Internet`].** These frames are
     ///    self-addressed, and DORS demotes Internet below every mesh transport
     ///    (`INTERNET_FALLBACK_DEMOTION`), so ordinary routing hands them to
-    ///    BLE/Wi-Fi Direct first. BLE fails closed (self is never a connected
-    ///    peer), but Wi-Fi Direct and Reticulum enqueue unconditionally and
-    ///    return `Ok` — swallowing the frame while reporting success, which on
+    ///    the mesh carriers first. BLE and Wi-Fi Direct fail closed (self is
+    ///    never a connected peer), but Reticulum enqueues unconditionally and
+    ///    returns `Ok`, swallowing the frame while reporting success, which on
     ///    the broadcast path means the group message is delivered to nobody.
     ///
     /// Errors propagate to the caller rather than routing through
@@ -3606,11 +3606,11 @@ impl OfflineProtocol {
         self.ensure_ack_registration(message)?;
 
         // A transport reporting success is not always evidence the frame can
-        // arrive. Wi-Fi Direct and Reticulum accept any recipient and return
-        // `Ok`, so a send to someone we hold no link to is queued for a link
-        // that never drains — and because the mesh hand-off used to hang off
-        // the *failure* path, a device with either carrier up would swallow the
-        // frame instead of asking its neighbors to carry it. That is precisely
+        // arrive. The internet transport and Reticulum accept any recipient
+        // and return `Ok`, so a send to someone neither can reach is reported
+        // as sent and never arrives, and because the mesh hand-off used to hang
+        // off the *failure* path, a device with either carrier up would swallow
+        // the frame instead of asking its neighbors to carry it. That is precisely
         // the out-of-range case forwarding exists for, so the question is asked
         // directly rather than inferred from an error that never comes.
         //
@@ -4986,14 +4986,14 @@ impl OfflineProtocol {
     /// ack handling already absorbs. When nothing reaches the sender directly
     /// the mesh remains the whole answer and step 3 is skipped, as before.
     ///
-    /// Step 1 is *gated on addressability* rather than on a send error, and
-    /// that gate is load-bearing. A transport returning `Ok` is not evidence
-    /// the frame can arrive: Wi-Fi Direct enqueues for any recipient, and it is
-    /// the preferred mesh carrier — so on the last hop of a forwarded frame the
-    /// answer would be queued for a link that never drains, reported as sent,
-    /// and step 2 would never run. The sender's retransmissions would take the
-    /// same path every time, ending in a failure report for a delivered
-    /// message.
+    /// Step 1 is *gated on addressability* as well as on the send result. A
+    /// transport returning `Ok` is not evidence the frame can arrive: a mesh
+    /// carrier that enqueued for any recipient (Wi-Fi Direct did, before it
+    /// refused a recipient no stream had proved) would, on the last hop of a
+    /// forwarded frame, report the answer as sent toward a sender it holds no
+    /// link to, and step 2 would never run. The sender's retransmissions would
+    /// take the same path every time, ending in a failure report for a
+    /// delivered message.
     ///
     /// An acknowledgement no route takes is held, not dropped
     /// ([`Self::hold_unrouted_ack`]): it was owed the moment the message was

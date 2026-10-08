@@ -78,8 +78,9 @@ should be:
   non-terminal deferral event. Terminal failure comes only from retry-budget
   exhaustion or expiry. **A resend asks the same question.** The retry queue
   and both outbox flushes offer the frame to the mesh when no carrier takes
-  it, and when a carrier takes it for a recipient it cannot reach (Wi-Fi
-  Direct and Reticulum accept anyone). Without that, a message whose first
+  it, and when a carrier takes it for a recipient it cannot reach (the
+  internet transport and Reticulum accept any recipient; BLE and Wi-Fi Direct
+  refuse one they hold no link to). Without that, a message whose first
   attempt went into a link that was already dead waited out its whole outbox
   lifetime for that link to return, while a neighbour that could reach the
   recipient was never asked.
