@@ -93,6 +93,27 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   peer's next key package. The device in between carries frames it cannot
   read. The threat model gains R24 (a session can be started from anywhere
   the mesh reaches, and what bounds it).
+- **`offline-protocol-verify`: drive a service and read the proof.** A
+  command for the device a service runs on: `send` a message, `await` its
+  delivery receipt on the sender or its arrival on the recipient, `pair`
+  (wait for the session with a peer), `ping` (a message on a cadence, each
+  reported with the carrier it arrived over), `watch` (every event as a JSON
+  line, across restarts of the service) and `state` (address, carriers,
+  queues, relay counters, sessions). Each prints JSON lines and
+  exits 0 when what it waited for happened, 2 when its time ran out and 1
+  when the engine gave the message up. It matches events by the identifier
+  they carry, so it works on a sender restarted since the send. A receipt
+  the engine emits while no client of the application is connected is not
+  held, so `send --await` waits for it on the connection it sent on, and a
+  separate `await` or `watch` on the sender must start before the recipient
+  can answer; both print `subscribed` on standard error once they are
+  listening, which a script waits for instead of sleeping. New scenario
+  tests run the networking properties end to end over loopback peer streams
+  with encryption on: a message to a device that is off arrives when it
+  returns and the sender gets the receipt; a queued
+  message survives the sender restarting (and is lost when the saved state
+  is removed, the control); a message crosses a middle device to one the
+  sender cannot hear, and the recipient's receipt comes back the same way.
 
 ### Changed
 

@@ -149,6 +149,78 @@ model. [examples/http-front](../examples/http-front) has a provider and a
 client, and [the container image](../bindings/python/docker) runs one
 service per host with the front on.
 
+## Checking what the network did: `offline-protocol-verify`
+
+The engine reports every networking fact as an event: `message_deferred`
+while a recipient is away, `message_relayed` on a device that carries a
+frame for someone else, `message_received` with its `hop_count` and
+`transport` on the far side, and `message_delivered` back on the sender,
+which is the recipient's own acknowledgement and names the carrier it
+arrived over. `offline-protocol-verify` sends through the service on the
+device it runs on and waits for those events, so a check passes or fails on
+what the engine says:
+
+```bash
+# on A: send, and wait for B's acknowledgement on the same connection
+# (up to 10 minutes)
+id=$(offline-protocol-verify send off1...B "hello" --await --timeout 600 \
+     | jq -r 'select(.sent) | .sent.message_id')
+# on B: wait for the message itself
+offline-protocol-verify await "$id" --until received
+```
+
+A separate `await --until delivered` connects only after `send` has closed
+its connection, and a receipt that arrives in between reaches no client: to
+a recipient that is reachable now that is most receipts. Use it for a
+message whose recipient is away, started before the recipient returns.
+
+| Command | Waits for | Passes on |
+|---|---|---|
+| `state [--peer ADDR]` | nothing | always; prints address, carriers, queues, relay counters, the session with each peer; it never takes a held message |
+| `send ADDR TEXT [--await]` | nothing, or with `--await` the receipt | prints the message id; with `--await`, as `await --until delivered`, on the connection the send used |
+| `await ID --until delivered` | the receipt on the sender | `message_delivered` naming the id; `message_failed` is a failure, `message_deferred`, `message_retrying` and `message_undeliverable` print as status |
+| `await ID --until received` | the message on the recipient | `message_received` naming the id |
+| `pair ADDR` | the session with a peer | `get_establishment_state` reaching `SessionConfirmed` |
+| `ping ADDR --every S --count N` | each message's receipt | every message delivered within `--timeout` of its send; each line names the carrier |
+| `watch [--log FILE]` | until stopped or `--duration` | every event as `{"at_ms", "event"}`, reconnecting across restarts of the service; fails if it never connected |
+
+Each command prints JSON lines on standard output and a summary on standard
+error, and exits 0 on a pass, 2 when its time ran out, and 1 on a terminal
+failure (the engine gave the message up, refused a call, or the service went
+away). `await` and `watch` print the line `subscribed`, alone, on standard
+error once their subscription to every event is confirmed (`watch` again
+after each reconnect). An event emitted after that line is seen, and one
+emitted before it may not be, so a script that starts either in the
+background and then brings a recipient back or sends from another device
+waits for that line instead of sleeping. Every verifier declares the
+application id `offline-protocol-verify` unless told otherwise with
+`--app-id`, and the sending and receiving devices must declare the same
+one: a received message is routed to the clients of the application its
+sender stamped, and held for that
+application, 256 deep, while none is connected. The first connection of the
+application takes everything held, so on the recipient run `await --until
+received` before `send`, `ping` or `watch`; `state` and `pair` only read,
+and connect as `<app id>.observer` so they never take a held message.
+
+Two things about events decide how a check is written. A verifier matches
+events by the identifier they carry rather than relying on the server's
+correlation, which knows only the identifiers its own clients were handed
+by this process; so `await` works on a sender restarted since the send. And
+an event the engine emits while no client of the application is connected
+is gone, except a received message: use `send --await`, or start `await`
+or `watch` on the sender before the recipient can answer, which for a
+restart test means restarting the sender while the recipient is still away.
+Two devices that reach each other only through a third need not have met:
+while a message waits for a peer no carrier reaches directly, the key
+package and the Welcome cross the mesh like every frame after them, and the
+recipient's acknowledgement comes back the same way, so `message_delivered`
+on the sender proves the crossing end to end. One gap remains: only a send
+no carrier takes is handed to the mesh. A message a direct link took and
+then lost (a stream to a device that went away without closing it, until
+keepalive ends it in about 30 seconds) is retried over direct carriers
+only, so it never crosses the mesh; it waits for a direct link to the
+recipient.
+
 ## The policy file
 
 With no policy, any well-formed application id is accepted and nothing is
