@@ -156,6 +156,7 @@ class ServerHarness:
         tcp: bool = False,
         health: bool = True,
         manager: ProtocolManager | None = None,
+        **options: Any,
     ) -> LocalApiServer:
         n = next(self._count)
         # The release runs this suite on Windows, against the wheel it ships
@@ -173,6 +174,7 @@ class ServerHarness:
                 tcp_port=0,
                 token_path=self._tmp / f"token-{n}",
                 health=health,
+                **options,
             )
         else:
             server = LocalApiServer(
@@ -180,6 +182,7 @@ class ServerHarness:
                 policy=policy,
                 socket_path=self._tmp / f"run-{n}" / "api.sock",
                 health=health,
+                **options,
             )
         await server.start()
         self._servers.append(server)

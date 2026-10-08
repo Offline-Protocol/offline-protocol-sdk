@@ -54,7 +54,45 @@ offline-protocol-service --config config.json \
 [Configuration](configuration.md)); `--listen` and `--peer` drive the
 peer-stream transport when the configuration enables it, and `--gateway
 HOST:PORT` names the gateway daemon when it enables `reticulum` (default
-`localhost:4242`, see [the gateway contract](spec/gateway-contract.md)). Two carriers:
+`localhost:4242`, see [the gateway contract](spec/gateway-contract.md)).
+
+### Which transports run
+
+The server starts every transport the configuration enables and the host
+can run, once the engine has an address to prove:
+
+| Transport | Enabled by | Started when |
+|---|---|---|
+| Peer stream | `wifi_direct_enabled` | Always. `--listen`, `--peer` and `--lan` configure it. |
+| Bluetooth LE central and peripheral | `ble_enabled` | The central always; the peripheral where `bless` has a backend (macOS, and Linux through BlueZ). The peripheral advertises this device to phones. |
+| Internet relay | `internet_enabled` | `--relay URL` names the relay; the token, if any, is read from `OFFLINE_PROTOCOL_RELAY_TOKEN` (`--relay-token-env` names another variable). |
+| Gateway | `reticulum_enabled` | Always once configured; `--gateway` names the daemon. |
+
+`--lan` advertises this host on the LAN over DNS-SD and dials every other
+host that advertises the same service type, so two hosts on one segment find
+each other with no `--peer` list. It needs the optional dependency
+(`pip install 'offline-protocol-sdk[lan]'`), and multicast DNS, so a
+container must share the host's network. An address a record carries is a
+hint; the stream's preamble proves the peer.
+
+**A transport that fails to start is logged and stays stopped, and the
+others run; the server fails only when none starts.** The failure this
+prevents is a Bluetooth adapter another process holds, or a refused
+advertisement, taking the LAN path down with it. A transport that has not
+started within 30 seconds counts as failed and is stopped then, not at
+shutdown, so a Bluetooth backend that hangs cannot keep the API socket from
+opening, nor finish starting later with nothing watching it. Transports start
+one after another, so the socket can take up to 30 seconds per configured
+transport to open. A flag the configuration
+cannot honour (`--lan` without `wifi_direct_enabled`, `--relay` without
+`internet_enabled`) is refused at start rather than ignored, and so is a
+value the transport could never use: `--relay` must be a `ws://` or `wss://`
+URL with a host, because the internet transport retries a failed connect
+for as long as it runs and would never report the mistake, and a variable
+named with `--relay-token-env` must be set. A `ws://` relay that is not on
+loopback is accepted with a warning: the token crosses the network in clear.
+
+Two carriers serve the API itself:
 
 | Carrier | How | Credential |
 |---|---|---|
@@ -69,6 +107,118 @@ plain HTTP: the
 pinned WebSocket library accepts only `GET` and drops any other method
 before the server sees it, so a `POST` would fail silently rather than with
 an error.
+
+## The HTTP front
+
+An application that should not know the SDK exists can still reach a service
+on another device: `--http 127.0.0.1:8080` (with the `http` extra) starts the
+[HTTP front](spec/http-front.md) in the same process, as a client of this
+server under the application id `offline-protocol-http-front`. A policy
+file that names any application must list that id too.
+
+A provider registers its HTTP endpoint with the front on its own host:
+
+```bash
+curl -X PUT http://127.0.0.1:8080/services/timeofday \
+    -H 'Content-Type: application/json' \
+    -d '{"callback": "http://127.0.0.1:9000", "version": "1"}'
+```
+
+A requester on another host calls it by device address, or by an alias from
+`--http-aliases`:
+
+```bash
+curl http://127.0.0.1:8080/now \
+    -H 'Host: timeofday.bob.offline.protocol.internal'
+```
+
+The request travels inside an end-to-end encrypted message, the far front
+calls `http://127.0.0.1:9000/now` with `X-Offline-Protocol-Sender` set to the
+caller's authenticated address, and the answer comes back as the response.
+`GET /browse/timeofday` streams the devices that offer a service, as
+server-sent events. Registrations are kept beside the state root and
+registered again at every start. A host that resolves
+`*.offline.protocol.internal` to the front removes the need for the manual
+`Host` header; until then, setting it by hand exercises the same path. The
+front runs apart from the service as `offline-protocol-http-front`, never
+beside `--http` on the same service: both would receive every request and
+call the callback twice. Off loopback it requires `--http-token-file`, and
+on a host where a browser runs it should have one on loopback too; the
+residual risk of a front any local process can reach is R23 in the threat
+model. [examples/http-front](../examples/http-front) has a provider and a
+client, and [the container image](../bindings/python/docker) runs one
+service per host with the front on.
+
+## Checking what the network did: `offline-protocol-verify`
+
+The engine reports every networking fact as an event: `message_deferred`
+while a recipient is away, `message_relayed` on a device that carries a
+frame for someone else, `message_received` with its `hop_count` and
+`transport` on the far side, and `message_delivered` back on the sender,
+which is the recipient's own acknowledgement and names the carrier it
+arrived over. `offline-protocol-verify` sends through the service on the
+device it runs on and waits for those events, so a check passes or fails on
+what the engine says:
+
+```bash
+# on A: send, and wait for B's acknowledgement on the same connection
+# (up to 10 minutes)
+id=$(offline-protocol-verify send off1...B "hello" --await --timeout 600 \
+     | jq -r 'select(.sent) | .sent.message_id')
+# on B: wait for the message itself
+offline-protocol-verify await "$id" --until received
+```
+
+A separate `await --until delivered` connects only after `send` has closed
+its connection, and a receipt that arrives in between reaches no client: to
+a recipient that is reachable now that is most receipts. Use it for a
+message whose recipient is away, started before the recipient returns.
+
+| Command | Waits for | Passes on |
+|---|---|---|
+| `state [--peer ADDR]` | nothing | always; prints address, carriers, queues, relay counters, the session with each peer; it never takes a held message |
+| `send ADDR TEXT [--await]` | nothing, or with `--await` the receipt | prints the message id; with `--await`, as `await --until delivered`, on the connection the send used |
+| `await ID --until delivered` | the receipt on the sender | `message_delivered` naming the id; `message_failed` is a failure, `message_deferred`, `message_retrying` and `message_undeliverable` print as status |
+| `await ID --until received` | the message on the recipient | `message_received` naming the id |
+| `pair ADDR` | the session with a peer | `get_establishment_state` reaching `SessionConfirmed` |
+| `ping ADDR --every S --count N` | each message's receipt | every message delivered within `--timeout` of its send; each line names the carrier |
+| `watch [--log FILE]` | until stopped or `--duration` | every event as `{"at_ms", "event"}`, reconnecting across restarts of the service; fails if it never connected |
+
+Each command prints JSON lines on standard output and a summary on standard
+error, and exits 0 on a pass, 2 when its time ran out, and 1 on a terminal
+failure (the engine gave the message up, refused a call, or the service went
+away). `await` and `watch` print the line `subscribed`, alone, on standard
+error once their subscription to every event is confirmed (`watch` again
+after each reconnect). An event emitted after that line is seen, and one
+emitted before it may not be, so a script that starts either in the
+background and then brings a recipient back or sends from another device
+waits for that line instead of sleeping. Every verifier declares the
+application id `offline-protocol-verify` unless told otherwise with
+`--app-id`, and the sending and receiving devices must declare the same
+one: a received message is routed to the clients of the application its
+sender stamped, and held for that
+application, 256 deep, while none is connected. The first connection of the
+application takes everything held, so on the recipient run `await --until
+received` before `send`, `ping` or `watch`; `state` and `pair` only read,
+and connect as `<app id>.observer` so they never take a held message.
+
+Two things about events decide how a check is written. A verifier matches
+events by the identifier they carry rather than relying on the server's
+correlation, which knows only the identifiers its own clients were handed
+by this process; so `await` works on a sender restarted since the send. And
+an event the engine emits while no client of the application is connected
+is gone, except a received message: use `send --await`, or start `await`
+or `watch` on the sender before the recipient can answer, which for a
+restart test means restarting the sender while the recipient is still away.
+Two devices that reach each other only through a third need not have met:
+while a message waits for a peer no carrier reaches directly, the key
+package and the Welcome cross the mesh like every frame after them, and the
+recipient's acknowledgement comes back the same way, so `message_delivered`
+on the sender proves the crossing end to end. A message a direct link took
+and then lost (a stream to a device that went away without closing it)
+crosses the mesh too, but late: while the stream still looks open its
+retries go down it, and only once keepalive ends it (about 30 seconds) is
+the next retry handed to the neighbours.
 
 ## The policy file
 
@@ -117,7 +267,10 @@ definition gives them. `send_message` returns the message id; the
 `message_sent` and `message_delivered` events that name it come back to the
 connection that sent it and to no other, while the server that issued the
 id is running. A message the engine gives up on is reported the same way,
-as `message_undeliverable`, so a client watches for both.
+as `message_failed`, so a client watches for both. A recipient that is
+away is reported as `message_undeliverable`, which is a status and not an
+outcome: the engine keeps the message, may say so again, and delivers it
+when the recipient is back, so a client keeps waiting past it.
 
 ```json
 {"jsonrpc":"2.0","id":2,"method":"send_message","params":{"recipient":"off1…","content":"hi","priority":"Medium"}}

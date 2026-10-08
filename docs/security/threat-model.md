@@ -370,7 +370,9 @@ of closing them is paid on every peer forever; the harm is a stale restatement
 inside a bounded window.
 
 **What stands in front of it:** the receive deduplicator refuses an exact repeat
-for an hour, so a replay must wait out that window to land at all.
+for the redelivery window (seven days by default, while the id is among the
+5000 most recent it tracks), so a replay must wait out that window to land at
+all.
 
 **Two exposures that are not in the window at all.** A peer that has never
 presented a freshness-bound signature is where it always was, since holding it
@@ -949,6 +951,85 @@ changes its address captures the device again, a few minutes per change,
 and a squatter whose signal is stronger than the honest owner's keeps
 winning the join until the takeover. The same rule covers an owner whose
 application died, since the group can outlive the process. Formation is opt-in and Android-only.
+
+### R23. The HTTP front trusts every process that can reach it
+
+The [HTTP front](../spec/http-front.md) lets any process that can open its
+port register a service, unregister one, or send a request as this device.
+Bound to loopback, that is every process on the host; bound elsewhere, every
+process that holds the launch token. It cannot tell one local application
+from another, so the local API's per-application rules (space scoping,
+method denials, service ownership) separate the front, as one application,
+from the others, and do nothing between the applications behind it. A
+registered callback is called as given, so a process that can register
+chooses which local URL remote devices reach.
+
+On the remote side, any device whose message this engine decrypts can call
+any registered service: MLS proves who sent a request, and nothing decides
+whether that sender may make it.
+
+**What bounds it:** bodies never leave the host in the clear (invariant 1 of
+the chapter), the sender a provider is told is the MLS-authenticated one,
+off loopback the token is required, and a request from a browser page
+(one carrying `Origin`, or reaching a tokenless front under a name other
+than loopback or the domain) is refused. That does not cover a `GET` a page
+makes by loading a resource, which carries no `Origin`: with a wildcard
+route to the domain on a host where a browser runs, any page can make a
+blind `GET` to a service as this device. A token closes it, since such a
+load cannot set a header. A peer cannot steer a callback outside the path
+its provider registered (dot segments are refused), cannot choose the source
+address a proxy in front of the callback reports (the forwarding headers are
+dropped), and cannot hold more than 32 callback connections at once.
+That limit bounds the callback's load, not fairness: one peer with a
+session can hold all 32 for the maximum deadline, and every other peer is
+refused with `callback_failed` until it lets go.
+**What application teams must do:**
+run the front where only the operator's applications can reach it, with a
+token on any host where a browser runs, and
+authorize in the provider by reading `X-Offline-Protocol-Sender`. A host
+that can identify the calling container should pass that identity to the
+front; until then, one front is one application to every rule.
+
+### R24. A session can be started from anywhere the mesh reaches
+
+A key package that arrives across the mesh is admitted, and answered with a
+session and a Welcome that the receiving device hands to its neighbours to
+carry back, followed by the fresh key package every new session sends for
+group invites. So anyone a mesh path connects to this device can make it build
+an MLS group, store a key package, and put two frames on its links, by signing
+a key package under an address of their own. Addresses cost nothing to mint,
+so an A2 adversary several hops away can do it once per address. Until the
+handshake crossed the mesh, the answer had no route back unless the sender was
+a neighbour or reached by the relay, so a distant sender cost the device the
+group and the stored package but nothing on the air.
+
+**Why it stands:** a device two hops away is indistinguishable from an
+adversary two hops away until the handshake completes, and the handshake is
+what the mesh exists to carry for a pair that has never met. Refusing a
+package from a sender this device cannot see would refuse exactly that pair.
+
+**What bounds it:** the package's signature must verify against the key its
+claimed address derives from, so it cannot be made on another device's
+behalf, and the session it opens is with the attacker's own address only.
+Every device in between applies its per-neighbour forwarding allowance to the
+attacker's link before the package goes further, and its per-second budget
+after, so the rate at which packages reach this device is the forwarding
+rate, not the attacker's. The receiving device sends its two frames from the
+share of its own budget that its own traffic uses, so a flood delays this
+device's own frames rather than putting more on the air than the budget
+allows. Stored packages are capped at 1000, evicting the soonest to expire,
+the push pool stops minting at 64 and shares a package past that, and a
+Welcome's lifecycle expires after 300 seconds of retries. A device does not
+answer a package from a sender only the mesh reaches with one of its own
+first, so a package buys one Welcome, not a second group. A later package from
+the same mesh-only address re-arms that Welcome only while it has stalled or
+expired, so a replayed package buys at most one more Welcome per stall, from
+the same budget share; the receive deduplicator absorbs a replay of the same
+frame for the redelivery window (seven days by default, while the id is among
+the 5000 most recent it tracks). A device that declines to carry
+(`allowRelay` off) carries none of this for others. The
+same flood from a direct neighbour or over the relay was possible before and
+is unchanged.
 
 ## Network egress
 

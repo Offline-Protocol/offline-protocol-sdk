@@ -543,7 +543,7 @@ jobs:
         run: |
           cd bindings/python
           pip install pip-audit
-          pip install bleak websockets keyring zeroconf ifaddr
+          pip install bleak websockets keyring zeroconf ifaddr aiohttp
           pip-audit --strict
 
   # One wheel per desktop library, tagged for the platform it was built for

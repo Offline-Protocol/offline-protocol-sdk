@@ -527,31 +527,40 @@ class BleManager(TransportManager):
             if frag is None:
                 break
 
-            recipient = frag.recipient_id
-            data = bytes(frag.data)
-
-            # Find the client for this recipient
-            client = self._find_client_for_peer(recipient)
-            if client is not None and client.is_connected:
-                try:
-                    await client.write_gatt_char(
-                        MESSAGE_CHAR_UUID,
-                        data,
-                        response=False,
-                    )
-                    with self._lock:
-                        self._bytes_sent += len(data)
-                        self._fragments_sent += 1
-                except Exception as exc:
-                    self._emit_diagnostic(
-                        "warning", f"Failed to send fragment to {recipient}: {exc}"
-                    )
+            await self.write_fragment(frag.recipient_id, bytes(frag.data))
 
             # Return fragment to pool regardless of send outcome
             try:
                 self._protocol.ble_return_fragment()
             except Exception:
                 logger.debug("ble_return_fragment failed", exc_info=True)
+
+    async def write_fragment(self, recipient: str, data: bytes) -> bool:
+        """Write one fragment to ``recipient`` over our client link to it.
+
+        Returns False only when this role holds no connected link to the
+        recipient, so a caller that popped the fragment can hand it to the
+        peripheral role instead. A write that was attempted and failed
+        returns True: the fragment was this role's, and the core's
+        message-level retry is what re-sends it.
+        """
+        client = self._find_client_for_peer(recipient)
+        if client is None or not client.is_connected:
+            return False
+        try:
+            await client.write_gatt_char(
+                MESSAGE_CHAR_UUID,
+                data,
+                response=False,
+            )
+            with self._lock:
+                self._bytes_sent += len(data)
+                self._fragments_sent += 1
+        except Exception as exc:
+            self._emit_diagnostic(
+                "warning", f"Failed to send fragment to {recipient}: {exc}"
+            )
+        return True
 
     def _find_client_for_peer(self, peer_id: str) -> BleakClient | None:
         """Find the BleakClient for a given device ID (O(1) via reverse map)."""

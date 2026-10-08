@@ -76,7 +76,14 @@ should be:
 - **No transport is not terminal.** A send with nowhere to go persists to the
   outbox, offers the frame to the mesh, schedules a retry, and emits a
   non-terminal deferral event. Terminal failure comes only from retry-budget
-  exhaustion or expiry.
+  exhaustion or expiry. **A resend asks the same question.** The retry queue
+  and both outbox flushes offer the frame to the mesh when no carrier takes
+  it, and when a carrier takes it for a recipient it cannot reach (the
+  internet transport and Reticulum accept any recipient; BLE and Wi-Fi Direct
+  refuse one they hold no link to). Without that, a message whose first
+  attempt went into a link that was already dead waited out its whole outbox
+  lifetime for that link to return, while a neighbour that could reach the
+  recipient was never asked.
 - **Parking is entered from `Pending`, not from `Queued`.** The unreachable
   verdict is an asynchronous relay report about a message the transport already
   accepted, which is why there is a pending acknowledgement for the park to
@@ -267,15 +274,24 @@ Removing it is only half the change. The park also **offers the frame to the
 mesh**, because the relay has just supplied a fact no local transport status
 can, that this specific peer is not on the relay, and a neighbour may still be
 able to carry it. An offered copy can therefore arrive and be acknowledged while
-no pending acknowledgement exists to match it against, so parked messages are
-**settleable without one**: an arriving acknowledgement settles a parked message
+no pending acknowledgement exists to match it against, so a message in the
+outbox is **settleable without one**: the recipient's acknowledgement settles it
 `Delivered` directly, emits the delivery event, and flushes the rest of that
-peer's parked traffic.
+peer's waiting traffic.
+
+The park is not the only such offer. A direct send that no carrier takes also
+hands the frame to the mesh, and registers no pending acknowledgement, because
+nothing accepted the frame. The settle arm covers it too: it requires the id to
+be a plain DM still in the outbox and the answer to come from its recipient,
+and nothing about a park. It once also required a live park counter, and every
+message the mesh carried to a peer two hops away was then delivered, read, and
+kept in the sender's outbox until its lifetime failed it.
 
 **The offer and the settle arm are one change; neither is correct alone.** An
 offer without the settle arm delivers messages the sender never learns about,
-which is worse than leaving the message parked. Any future path that hands a
-parked message to another carrier inherits this obligation.
+which is worse than leaving the message waiting. Any future path that hands a
+message to another carrier without a pending acknowledgement inherits this
+obligation.
 
 The probe itself re-enters the acknowledgement machinery but may never earn a
 relay verdict, since a mesh carrier cannot produce one. A probe that exhausts

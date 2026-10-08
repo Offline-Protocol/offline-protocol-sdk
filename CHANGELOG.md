@@ -46,6 +46,124 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   Bluetooth LE or the relays
   ([ADR 0028](docs/adr/0028-android-peer-streams-join-the-lan.md)).
 
+- **The service starts every transport its configuration enables.**
+  `offline-protocol-service` started only the peer stream and the gateway
+  client, so a configuration with `ble_enabled` built both Bluetooth LE
+  managers and never ran either, and `internet_enabled` had no way to name a
+  relay. The server now starts the Bluetooth LE central and peripheral where
+  the platform has a backend, and the internet transport once `--relay URL`
+  names one (the token from `OFFLINE_PROTOCOL_RELAY_TOKEN`, or the variable
+  `--relay-token-env` names). A transport that fails to start is logged and
+  left stopped while the others run, and the server fails only when none
+  starts: a Bluetooth adapter another process holds no longer takes the LAN
+  path down with it.
+- **`--lan` finds the other hosts on the LAN.** The peer-stream transport's
+  DNS-SD advertising and discovery existed in the library and could not be
+  switched on from the command; `--lan` switches on both (it needs the `lan`
+  extra and fails at start, naming it, without).
+
+- **The HTTP front.** An application that does not use the SDK can call a
+  service on another device with a plain HTTP request to
+  `<service>.<device>.offline.protocol.internal`. `offline-protocol-service
+  --http HOST:PORT` (with the new `http` extra) starts the front in the
+  service's process, as a client of the local API; `offline-protocol-http-front`
+  runs it apart. A request and its response travel as the content of an end
+  to end encrypted direct message, never on the service request path, whose
+  bodies are signed plaintext, and a front acts only on a message the engine
+  reports as encrypted, so the provider's callback is told the caller's
+  MLS-authenticated address in `X-Offline-Protocol-Sender`. A device is named
+  by its address, which is a DNS label as it stands, or by an operator alias,
+  never by one learned from the LAN. `PUT /services/<name>` registers a
+  callback (kept across restarts, and registered with the engine so signed
+  discovery finds it), and `GET /browse/<name>` streams the devices that
+  offer a service. Bodies are limited to 128 KiB each way, and a request
+  waits 30 seconds by default and at most 300. Off loopback the front
+  requires a per-launch token, and on any binding it refuses a request
+  carrying `Origin`, so a web page cannot send a body or register a callback
+  through it by DNS rebinding; a page can still make a blind `GET` by loading
+  a resource, which only a token stops, so a host where a browser runs
+  should use one. A request path with a `.` or `..` segment is refused, so a
+  peer cannot reach a path outside the one a provider registered, and
+  forwarding headers such as `X-Forwarded-For` never cross. A carried
+  header value that is not UTF-8 is a `400`, and a token that is not UTF-8
+  a `401`. A callback answer the requester would refuse, such as a status
+  past 599, is `callback_failed` at once rather than a wait for the
+  deadline. A provider runs
+  at most 32 callbacks at once. Run one front per service.
+  `docs/spec/http-front.md` is the contract;
+  the threat model gains R23 (the front trusts every process that can reach
+  it) and the Python bridge rules gain P13.
+
+- **A container image for the service, and an HTTP demo.**
+  `bindings/python/docker` builds one service per host on `python:3.12-slim`
+  with the `lan` and `http` extras, configured from environment variables;
+  an argument after the image name wins over the variable for that flag. A
+  wheel built from a checkout is installed in place of PyPI's, and the build
+  fails when the installed service has no HTTP front. Its README lists what
+  a host's container manifest must grant (host networking for multicast DNS,
+  inbound TCP 7878, a persistent volume, the store key from a secret store,
+  and the system D-Bus socket for Bluetooth LE) and the failure each grant
+  prevents. `examples/http-front` has a provider with no SDK import and a
+  `curl` client, both able to send the front's token. Two containers from
+  the image, on one bridge network, found each other over multicast DNS with
+  no peer list and served a request through the front, and the address and
+  registrations survived a restart. Bluetooth LE from a container is
+  untested on hardware.
+
+- **Two devices that have never been in range of each other start a session
+  through a third.** With encryption required, a message to a peer the
+  sender had never been next to waited in the pending queue for its whole
+  lifetime when the only path ran through another device: the key package and
+  the Welcome were the two frames that never crossed the mesh, and every frame
+  after them is sealed. While a message waits for a peer that no carrier
+  reaches directly, the sender now hands its key package to its neighbours to
+  carry, and the recipient's Welcome takes the same route back; confirmation,
+  the message and its acknowledgement already did. Both are offered to the
+  mesh even when the relay accepted them for a peer it has said is not on it,
+  and a Welcome that expired while the path was down is sent again on the
+  peer's next key package. The device in between carries frames it cannot
+  read. The threat model gains R24 (a session can be started from anywhere
+  the mesh reaches, and what bounds it).
+- **`offline-protocol-verify`: drive a service and read the proof.** A
+  command for the device a service runs on: `send` a message, `await` its
+  delivery receipt on the sender or its arrival on the recipient, `pair`
+  (wait for the session with a peer), `ping` (a message on a cadence, each
+  reported with the carrier it arrived over), `watch` (every event as a JSON
+  line, across restarts of the service) and `state` (address, carriers,
+  queues, relay counters, sessions). Each prints JSON lines and
+  exits 0 when what it waited for happened, 2 when its time ran out and 1
+  when the engine gave the message up. It matches events by the identifier
+  they carry, so it works on a sender restarted since the send. A receipt
+  the engine emits while no client of the application is connected is not
+  held, so `send --await` waits for it on the connection it sent on, and a
+  separate `await` or `watch` on the sender must start before the recipient
+  can answer; both print `subscribed` on standard error once they are
+  listening, which a script waits for instead of sleeping. New scenario
+  tests run the networking properties end to end over loopback peer streams
+  with encryption on: a message to a device that is off arrives when it
+  returns and the sender gets the receipt; a queued
+  message survives the sender restarting (and is lost when the saved state
+  is removed, the control); a message crosses a middle device to one the
+  sender cannot hear, and the recipient's receipt comes back the same way.
+
+- **An offline-first demo on three devices.** `examples/offline-first` runs
+  three services from the container image on two bridge networks, so the
+  middle one is the only way between the other two, and `run.py` runs the
+  scenarios with `offline-protocol-verify` and prints a table: store and
+  forward, the sender killed and restarted while its message is queued, and
+  a message carried through the middle device. Its README is the runbook for
+  the legs that need hardware (the LAN between hosts, the carrier changing
+  under a stream of messages, the relay, a gateway daemon, a phone), with a
+  record of what has been run: scenarios 1, 2 and 4 in containers on one
+  machine, nothing on hardware yet. Scenario 4 fails unless the sender's
+  receipt comes back across the hop. The image gains `OP_GATEWAY` (the
+  gateway daemon, for a configuration with `reticulum_enabled`), two baked
+  configurations beside the default (`config-ble.json`, `config-relay.json`),
+  and the verifier, and its build fails when the installed package has none.
+  Found while running it: a message that a direct stream took and then lost
+  (a device that went away without closing the stream) is retried over
+  direct carriers only and never handed to the mesh (#541).
+
 ### Changed
 
 - **Android keeps the stream the lower address opened.** Of two streams for
@@ -72,6 +190,76 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   interface, so any device on a shared network could take all sixteen slots.
   At most twelve are inbound now, and four from one remote address, iOS's
   bounds.
+
+- **A peer-stream or relay flag the configuration cannot honour is refused.**
+  `--listen` and `--peer` without `wifi_direct_enabled` were ignored, which
+  left a service that reached nobody and said nothing; they, `--lan`, and
+  `--relay` without `internet_enabled`, now stop the command at start with
+  the configuration field named. A `--relay` that is not a `ws://` or
+  `wss://` URL with a host is refused too: the internet transport retries a
+  failed connect for as long as it runs, so a mis-typed relay was a service
+  that reported the relay running and passed `/health`. A variable named
+  with `--relay-token-env` and left unset is refused rather than read as
+  "no token", and each transport has 30 seconds to start before it counts
+  as failed and is stopped.
+
+### Fixed
+
+- **A message the mesh carried settles when its recipient answers.** A direct
+  message to a peer no carrier could reach was handed to neighbours to carry,
+  but registered no pending acknowledgement, and an acknowledgement with none
+  to match settled only a message the relay had declared unreachable. So a
+  message to a peer two hops away arrived, was read, and stayed in the
+  sender's outbox, retried on its backoff, until the outbox lifetime failed it
+  with `message_failed` seven days later; `message_delivered` never fired. The
+  recipient's acknowledgement now settles any direct message still in the
+  outbox, parked or not, with `message_delivered`.
+- **The local API keeps a parked message's events with the client that
+  sent it.** The service forgot a message id on `message_undeliverable`,
+  which the engine emits when a recipient is away and repeats on every
+  reachability probe while it keeps the message. Every later event for that
+  message, its delivery receipt included, was broadcast to every connected
+  application. A connection request had the same fault on
+  `connection_request_undeliverable`, and the one the engine emits right
+  after the `message_failed` of a request it gives up on was broadcast
+  too. The id is now kept until `message_delivered` or `message_failed`,
+  and a settled id still reaches its client for the next 1024
+  settlements, so an event that trails the settling one is not
+  broadcast. Both example clients (`examples/local_api_client.py`
+  and `examples/local-api/client.mjs`) print a `message_undeliverable` as a
+  status line and keep waiting for the delivery, where they used to stop at
+  it; each takes `--deliver-timeout SECONDS` (30 by default).
+- **The Python Bluetooth LE peripheral knows its centrals on Linux.** It
+  read the list of subscribed centrals from a structure only bless's macOS
+  backend has, so on BlueZ it never announced a central to the core,
+  attributed every inbound fragment to the placeholder `ble-peer`, and gave
+  the core no route back to a phone that had connected to it. It now reads
+  the device BlueZ names in each read and write of its characteristics and
+  asks BlueZ when that device disconnects. A peripheral our own central
+  connected to is not counted, since it never calls into our server. With
+  several centrals connected, each write is attributed to its writer;
+  notifications still reach every subscribed central, which bless offers no
+  way around.
+- **The two Bluetooth LE roles no longer split a message between them.**
+  The central and the peripheral took fragments from the core's one queue
+  at the same time, so a message's fragments could leave on two links and
+  never reassemble. With both roles running, one drain now takes each
+  fragment and gives it to the central's link to that peer, else to the
+  peripheral when a central is subscribed. The peripheral alone takes
+  nothing while no central is subscribed, where a notification reached no
+  one. No board run has been done yet.
+- **A resend is offered to the mesh when no carrier reaches the recipient.**
+  Only a message's first send was handed to neighbours when no carrier took
+  it. A message whose first attempt went into a direct link that had already
+  died (a half-open stream accepts frames until its keepalive notices) was
+  therefore never carried: by the time its acknowledgement timed out the link
+  was gone, every resend was refused and went back on the retry queue, and a
+  neighbour that could reach the recipient was never asked, for the life of
+  the outbox entry. The retry queue and both outbox flushes now make the same
+  offer the first send does, when no carrier takes the frame and when a
+  carrier takes it for a recipient it cannot reach. A resend over a link that
+  still reaches the recipient is not offered, so an ordinary retransmission
+  costs one copy.
 
 ## [0.28.0] — 2026-10-06
 
