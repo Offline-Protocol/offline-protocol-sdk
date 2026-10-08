@@ -64,14 +64,26 @@ async def test_without_the_saved_state_the_message_is_gone(network):
     """The control for the test above: the same restart over an empty
     protocol-state directory (the identity and the sessions are in the MLS
     store and survive) delivers nothing, so it is the saved queue that
-    carries the message across the restart, not anything in memory."""
+    carries the message across the restart, not anything in memory.
+
+    A message sent after the restart is delivered first: without it the
+    control would also pass if wiping the state broke sending altogether,
+    and the absence of the queued message would prove nothing."""
     a, b, message_id = await _queue_while_b_is_off(network)
 
     await a.switch_off()
     await a.switch_on(state_root=a.root / "state-empty")
     after = Recorder(await network.client(a))
     await b.switch_on()
+    received = Recorder(await network.client(b))
     await until(lambda: a.linked_to(b), SESSION_TIMEOUT, "A and B linked again")
+
+    fresh_id = await after.client.call(
+        "send_message", {"recipient": b.address, "content": "sent after the restart", "priority": "Medium"}
+    )
+    await after.wait("message_delivered", DELIVERY_TIMEOUT, message_id=fresh_id)
+    await received.wait("message_received", DELIVERY_TIMEOUT, message_id=fresh_id)
 
     with pytest.raises(AssertionError, match="no message_delivered"):
         await after.wait("message_delivered", 5.0, message_id=message_id)
+    assert message_id not in {e.get("message_id") for e in received.events if e.get("type") == "message_received"}
