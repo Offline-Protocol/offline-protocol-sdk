@@ -119,6 +119,40 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   with `message_failed` seven days later; `message_delivered` never fired. The
   recipient's acknowledgement now settles any direct message still in the
   outbox, parked or not, with `message_delivered`.
+- **The local API keeps a parked message's events with the client that
+  sent it.** The service forgot a message id on `message_undeliverable`,
+  which the engine emits when a recipient is away and repeats on every
+  reachability probe while it keeps the message. Every later event for that
+  message, its delivery receipt included, was broadcast to every connected
+  application. A connection request had the same fault on
+  `connection_request_undeliverable`, and the one the engine emits right
+  after the `message_failed` of a request it gives up on was broadcast
+  too. The id is now kept until `message_delivered` or `message_failed`,
+  and a settled id still reaches its client for the next 1024
+  settlements, so an event that trails the settling one is not
+  broadcast. Both example clients (`examples/local_api_client.py`
+  and `examples/local-api/client.mjs`) print a `message_undeliverable` as a
+  status line and keep waiting for the delivery, where they used to stop at
+  it; each takes `--deliver-timeout SECONDS` (30 by default).
+- **The Python Bluetooth LE peripheral knows its centrals on Linux.** It
+  read the list of subscribed centrals from a structure only bless's macOS
+  backend has, so on BlueZ it never announced a central to the core,
+  attributed every inbound fragment to the placeholder `ble-peer`, and gave
+  the core no route back to a phone that had connected to it. It now reads
+  the device BlueZ names in each read and write of its characteristics and
+  asks BlueZ when that device disconnects. A peripheral our own central
+  connected to is not counted, since it never calls into our server. With
+  several centrals connected, each write is attributed to its writer;
+  notifications still reach every subscribed central, which bless offers no
+  way around.
+- **The two Bluetooth LE roles no longer split a message between them.**
+  The central and the peripheral took fragments from the core's one queue
+  at the same time, so a message's fragments could leave on two links and
+  never reassemble. With both roles running, one drain now takes each
+  fragment and gives it to the central's link to that peer, else to the
+  peripheral when a central is subscribed. The peripheral alone takes
+  nothing while no central is subscribed, where a notification reached no
+  one. No board run has been done yet.
 
 ## [0.28.0] — 2026-10-06
 
