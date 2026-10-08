@@ -17,7 +17,7 @@
 #                               internet_enabled; its token in OFFLINE_PROTOCOL_RELAY_TOKEN
 #   OP_GATEWAY                  gateway daemon HOST:PORT, with a config that sets
 #                               reticulum_enabled
-#   OP_SOCKET                  local API socket (default /run/offline-protocol/api.sock)
+#   OP_SOCKET                   local API socket (default /run/offline-protocol/api.sock)
 #
 # Any arguments come after every flag the environment sets, so an explicit
 # flag wins over its variable.
