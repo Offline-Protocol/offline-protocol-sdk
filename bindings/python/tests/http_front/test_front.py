@@ -394,3 +394,21 @@ async def test_with_a_token_the_own_endpoints_answer_any_host(hosts):
     ) as reply:
         assert reply.status == 200
 
+
+@pytest.mark.parametrize("value", ["nan", "soon"])
+async def test_a_timeout_that_is_not_a_number_is_a_bad_request(hosts, value):
+    status, headers, _ = await hosts.request(
+        hosts.a, host_for("timeofday", "bob"), headers={"X-Offline-Protocol-Timeout": value}
+    )
+    assert (status, headers["X-Offline-Protocol-Error"]) == (400, "bad_request")
+
+
+async def test_an_absolute_form_target_is_a_bad_request(hosts):
+    reader, writer = await asyncio.open_connection("127.0.0.1", hosts.a.port)
+    host = host_for("timeofday", "bob")
+    writer.write(f"GET http://{host}/now HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode())
+    await writer.drain()
+    reply = await asyncio.wait_for(reader.read(), 10)
+    writer.close()
+    assert reply.startswith(b"HTTP/1.1 400"), reply[:200]
+    assert b"bad_request" in reply

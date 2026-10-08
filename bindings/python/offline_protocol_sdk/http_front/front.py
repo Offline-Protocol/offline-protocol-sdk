@@ -28,6 +28,7 @@ import collections
 import json
 import ipaddress
 import logging
+import math
 import os
 import secrets
 import time
@@ -318,6 +319,11 @@ class HttpFront:
         if address is None:
             return self._error("unknown_device", f"{device} is neither an address nor a configured alias")
         path = request.raw_path
+        if not path.startswith("/"):
+            # An absolute-form target (``GET http://x/ HTTP/1.1``): the far
+            # front refuses a path without the slash and would leave this
+            # request waiting out its deadline.
+            return self._error("bad_request", "the target must be a path")
         if len(path.encode()) > MAX_PATH_BYTES:
             return self._error("bad_request", "path over the limit")
         headers = carried(request.headers)
@@ -330,9 +336,13 @@ class HttpFront:
         raw_timeout = request.headers.get(TIMEOUT_HEADER)
         if raw_timeout is not None:
             try:
-                timeout = min(max(float(raw_timeout), 1.0), float(MAX_DEADLINE_SECONDS))
+                requested = float(raw_timeout)
             except ValueError:
+                requested = math.nan
+            if math.isnan(requested):
+                # nan passes both clamps and fails int() below as a 500.
                 return self._error("bad_request", f"{TIMEOUT_HEADER} must be a number of seconds")
+            timeout = min(max(requested, 1.0), float(MAX_DEADLINE_SECONDS))
         envelope = Request(
             id=uuid.uuid4().hex,
             service=service,
