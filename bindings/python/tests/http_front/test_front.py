@@ -332,6 +332,22 @@ async def test_with_a_token_every_request_must_carry_it(hosts):
         assert reply.status == 200
 
 
+async def test_a_token_header_that_is_not_utf8_is_unauthorized(hosts):
+    """The server hands such a byte over as a lone surrogate; encoding it for
+    the comparison raised, and the front answered a bare 500 to a client the
+    token exists to keep out."""
+    front = await hosts.front(hosts.server_a, token=hosts.tmp_path / "front.token")
+    reader, writer = await asyncio.open_connection("127.0.0.1", front.port)
+    writer.write(
+        b"GET /health HTTP/1.1\r\nHost: localhost\r\nX-Offline-Protocol-Token: caf\xe9\r\nConnection: close\r\n\r\n"
+    )
+    await writer.drain()
+    reply = await asyncio.wait_for(reader.read(), 10)
+    writer.close()
+    assert reply.startswith(b"HTTP/1.1 401"), reply[:200]
+    assert b"unauthorized" in reply
+
+
 def test_off_loopback_the_front_refuses_to_run_without_a_token():
     with pytest.raises(ValueError, match="token"):
         HttpFront(socket_path="/tmp/x.sock", host="0.0.0.0")
@@ -525,6 +541,30 @@ async def test_a_header_value_that_is_not_utf8_is_a_bad_request(hosts):
     assert reply.startswith(b"HTTP/1.1 400"), reply[:200]
     assert b"bad_request" in reply
     assert hosts.provider.calls == []
+
+
+async def test_a_callback_header_that_is_not_utf8_is_a_callback_failure(hosts, caplog):
+    """A callback is any HTTP server; one that answers such a byte is
+    answered ``callback_failed``, not logged as a refused request."""
+
+    async def answer(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 OK\r\nX-Note: caf\xe9\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        await writer.drain()
+        writer.close()
+
+    callback = await asyncio.start_server(answer, "127.0.0.1", 0)
+    try:
+        port = callback.sockets[0].getsockname()[1]
+        await hosts.register(hosts.b, callback=f"http://127.0.0.1:{port}")
+        status, headers, _ = await hosts.request(hosts.a, host_for("timeofday", "bob"), method="GET", body=None)
+        assert (status, headers["X-Offline-Protocol-Error"]) == (502, "callback_failed")
+        # Named for what it is, not swallowed by the catch-all with a traceback.
+        assert any("not UTF-8" in r.getMessage() for r in caplog.records)
+        assert not any(r.levelname == "ERROR" for r in caplog.records if r.name == front_module.__name__)
+    finally:
+        callback.close()
+        await callback.wait_closed()
 
 
 async def test_stopping_ends_an_open_browse(hosts):

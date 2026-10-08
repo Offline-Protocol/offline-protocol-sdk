@@ -135,8 +135,11 @@ HTTP client normalizes dot segments away, `/api/%2e%2e/admin` included, so
 joined to the callback URL such a path reaches one outside the path the
 provider registered. A 1xx written as the answer leaves the client waiting
 for the real one. A string with no UTF-8 form (a JSON `\udcff` escape) is
-not processed either. On the requester, a header value that is not UTF-8,
-which HTTP allows, is `bad_request`: the far side could not decode it.
+not processed either. On the requester, a carried header value that is not
+UTF-8, which HTTP allows, is `bad_request`: the far side could not decode it.
+A token header that is not UTF-8 is `unauthorized`, like any wrong token. On
+the provider, a callback that answers such a header value is
+`callback_failed`.
 
 ### Limits
 

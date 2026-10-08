@@ -53,8 +53,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   a resource, which only a token stops, so a host where a browser runs
   should use one. A request path with a `.` or `..` segment is refused, so a
   peer cannot reach a path outside the one a provider registered, and
-  forwarding headers such as `X-Forwarded-For` never cross. A header value
-  that is not UTF-8 is a `400`. A provider runs
+  forwarding headers such as `X-Forwarded-For` never cross. A carried
+  header value that is not UTF-8 is a `400`, and a token that is not UTF-8
+  a `401`. A provider runs
   at most 32 callbacks at once. Run one front per service.
   `docs/spec/http-front.md` is the contract;
   the threat model gains R23 (the front trusts every process that can reach

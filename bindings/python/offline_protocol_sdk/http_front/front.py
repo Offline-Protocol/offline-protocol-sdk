@@ -55,6 +55,7 @@ from .envelope import (
     decode,
     has_dot_segment,
     header_bytes,
+    utf8,
 )
 from .hostname import DEFAULT_DOMAIN, Aliases, HostError, bare_host, is_label, parse_host
 from .registry import Registration, Registry
@@ -306,8 +307,11 @@ class HttpFront:
     async def _dispatch(self, request: Any) -> Any:
         if self._closing:
             return self._error("not_connected", "the front is stopping")
+        # surrogateescape: the server hands a header byte that is not UTF-8
+        # over as a lone surrogate, which a plain encode refuses with a 500.
+        # Mapped back to its byte, it never matches a hex token.
         if self.token is not None and not secrets.compare_digest(
-            request.headers.get(TOKEN_HEADER, "").encode(), self.token.encode()
+            request.headers.get(TOKEN_HEADER, "").encode("utf-8", "surrogateescape"), self.token.encode()
         ):
             return self._error("unauthorized")
         if "Origin" in request.headers:
@@ -353,17 +357,19 @@ class HttpFront:
             # The far front refuses it: joined to the callback URL, a dot
             # segment would reach a path outside the registered one.
             return self._error("bad_request", "the path must hold no . or .. segment")
-        if len(path.encode()) > MAX_PATH_BYTES:
-            return self._error("bad_request", "path over the limit")
         headers = carried(request.headers)
         try:
+            if len(utf8(path)) > MAX_PATH_BYTES:
+                return self._error("bad_request", "path over the limit")
             if header_bytes(headers) > MAX_HEADER_BYTES:
                 return self._error("bad_request", "headers over the limit")
         except EnvelopeError:
-            # A header byte that is not UTF-8 (obs-text, which HTTP allows):
-            # the server hands it over as a lone surrogate, and the far
-            # front could not decode the envelope it would go in.
-            return self._error("bad_request", "a carried header value must be UTF-8")
+            # A byte that is not UTF-8 (obs-text, which HTTP allows in a
+            # header value): the server hands it over as a lone surrogate,
+            # and the far front could not decode the envelope it would go
+            # in. The parser refuses one in the target today; this does not
+            # rely on it.
+            return self._error("bad_request", "the path and carried header values must be UTF-8")
         body = await _read_limited(request.content, MAX_BODY_BYTES)
         if body is None:
             return self._error("body_too_large")
@@ -672,8 +678,12 @@ class HttpFront:
                     if body is None:
                         return Response.failure(envelope.id, "response_too_large")
                     reply_headers = carried(reply.headers)
-                    if header_bytes(reply_headers) > MAX_HEADER_BYTES:
-                        return Response.failure(envelope.id, "response_too_large")
+                    try:
+                        if header_bytes(reply_headers) > MAX_HEADER_BYTES:
+                            return Response.failure(envelope.id, "response_too_large")
+                    except EnvelopeError:
+                        logger.warning("callback for %s answered a header value that is not UTF-8", envelope.service)
+                        return Response.failure(envelope.id, "callback_failed")
                     return Response(envelope.id, reply.status, reply_headers, body)
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                 logger.warning("callback for %s failed: %s", envelope.service, exc)
