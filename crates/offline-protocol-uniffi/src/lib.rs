@@ -13921,6 +13921,53 @@ mod tests {
         );
     }
 
+    /// The hello's length bounds are written down in three languages, and a
+    /// central and a peripheral that disagree fail silently: a peripheral
+    /// refuses a hello shorter than its floor before verifying, and a central
+    /// whose bound is wider spends a write that can only be refused. The
+    /// floor is the codec's ([`offline_protocol_sealed::IDENTITY_ASSERTION_MIN_LEN`]);
+    /// the ceiling is one attribute value, held by the Android server, which
+    /// was the first to serve Hello.
+    #[test]
+    fn ble_hello_length_bounds_agree_in_every_binding() {
+        let floor = offline_protocol_sealed::IDENTITY_ASSERTION_MIN_LEN;
+        let server = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/PeripheralGattServer.kt",
+        );
+        let marker = "const val MAX_HELLO_WRITE_BYTES = ";
+        let at = server
+            .find(marker)
+            .expect("PeripheralGattServer.kt must declare MAX_HELLO_WRITE_BYTES")
+            + marker.len();
+        let ceiling: usize = server[at..]
+            .split_whitespace()
+            .next()
+            .and_then(|v| v.parse().ok())
+            .expect("MAX_HELLO_WRITE_BYTES must be an integer literal");
+
+        let python = python_module_constants("offline_protocol_sdk/ble_manager.py");
+        assert_eq!(
+            python("HELLO_MIN_LEN"),
+            floor.to_string(),
+            "ble_manager.py HELLO_MIN_LEN must equal IDENTITY_ASSERTION_MIN_LEN"
+        );
+        assert_eq!(
+            python("HELLO_MAX_LEN"),
+            ceiling.to_string(),
+            "ble_manager.py HELLO_MAX_LEN must equal Android's MAX_HELLO_WRITE_BYTES"
+        );
+
+        let swift = rn_source_code_only("ios/BleHelloPolicy.swift");
+        assert!(
+            swift.contains(&format!("static let minLength = {floor}")),
+            "BleHelloPolicy.swift minLength must equal IDENTITY_ASSERTION_MIN_LEN ({floor})"
+        );
+        assert!(
+            swift.contains(&format!("static let maxLength = {ceiling}")),
+            "BleHelloPolicy.swift maxLength must equal Android's MAX_HELLO_WRITE_BYTES ({ceiling})"
+        );
+    }
+
     /// A phone running several SDK apps presents one instance of the service
     /// per app behind one BLE link, and each central binds exactly one of them.
     ///
