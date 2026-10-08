@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -19,6 +20,9 @@ import signal
 import sys
 from pathlib import Path
 from typing import Any
+
+from websockets.exceptions import InvalidURI
+from websockets.uri import parse_uri
 
 from ..gateway_manager import DEFAULT_DAEMON_ADDRESS
 from ..http_front.cli import add_front_arguments, front_options
@@ -29,6 +33,8 @@ from .server import LocalApiServer
 
 DEFAULT_STORE_KEY_ENV = "OFFLINE_PROTOCOL_STORE_KEY"
 DEFAULT_RELAY_TOKEN_ENV = "OFFLINE_PROTOCOL_RELAY_TOKEN"
+
+logger = logging.getLogger(__name__)
 
 
 def default_socket_path() -> Path:
@@ -157,23 +163,53 @@ def configure_peer_stream(args: argparse.Namespace, manager: ProtocolManager) ->
             listen_host=listen_host,
             listen_port=listen_port,
             peers=args.peer or None,
-            advertise=True if args.lan else None,
-            discover=True if args.lan else None,
+            advertise=args.lan or None,
+            discover=args.lan or None,
         )
     except ValueError as exc:
         raise SystemExit(f"--peer: {exc}") from None
 
 
 def configure_relay(args: argparse.Namespace, manager: ProtocolManager) -> None:
-    """Applies ``--relay``: the internet transport's server and token."""
+    """Applies ``--relay``: the internet transport's server and token.
+
+    The URL is checked here because the transport never refuses one: a
+    connect that fails, for a malformed URL as for an unreachable relay, is
+    retried for as long as the transport runs. A mis-typed ``--relay`` would
+    otherwise be a service that reports the relay running, answers
+    ``/health``, and logs the same failure every thirty seconds.
+    """
     if not args.relay:
         return
     if manager.internet is None:
         raise SystemExit("--relay needs internet_enabled in the config")
-    manager.internet.configure(server_url=args.relay)
+    # The parser the transport's connect runs, so the CLI refuses exactly
+    # what the transport could never dial: a port that is not a number or
+    # out of range passes a looser check and is then retried forever.
+    try:
+        uri = parse_uri(args.relay)
+    except (InvalidURI, ValueError) as exc:
+        raise SystemExit(f"--relay takes a ws:// or wss:// URL with a host, not {args.relay!r}: {exc}") from None
+    if not uri.secure and not _is_loopback(uri.host):
+        logger.warning("--relay %s is not TLS: the relay token and traffic metadata cross the network in clear", args.relay)
     token = os.environ.get(args.relay_token_env)
+    if not token and args.relay_token_env != DEFAULT_RELAY_TOKEN_ENV:
+        # A variable the operator named and left unset is a mistake, not an
+        # open relay: without a token the transport authenticates with the
+        # profile name.
+        raise SystemExit(f"--relay-token-env: {args.relay_token_env} is not set")
+    manager.internet.configure(server_url=args.relay)
     if token:
         manager.internet.set_auth_token(token)
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def build_server(args: argparse.Namespace, manager: ProtocolManager) -> LocalApiServer:

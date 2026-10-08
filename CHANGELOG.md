@@ -57,7 +57,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `--listen` and `--peer` without `wifi_direct_enabled` were ignored, which
   left a service that reached nobody and said nothing; they, `--lan`, and
   `--relay` without `internet_enabled`, now stop the command at start with
-  the configuration field named.
+  the configuration field named. A `--relay` that is not a `ws://` or
+  `wss://` URL with a host is refused too: the internet transport retries a
+  failed connect for as long as it runs, so a mis-typed relay was a service
+  that reported the relay running and passed `/health`. A variable named
+  with `--relay-token-env` and left unset is refused rather than read as
+  "no token", and each transport has 30 seconds to start before it counts
+  as failed and is stopped.
 
 ## [0.28.0] — 2026-10-06
 

@@ -9,9 +9,13 @@ honour instead of ignoring it.
 
 from __future__ import annotations
 
-import os
+import asyncio
+import json
+import logging
+import sys
 
 import pytest
+from websockets.asyncio.server import serve
 
 from offline_protocol_sdk.ble_manager import BleManager
 from offline_protocol_sdk.ble_peripheral import BlePeripheral
@@ -22,9 +26,18 @@ from .conftest import make_config
 from .test_local_api_server import _cli_args
 
 
-def _bluetooth_present(monkeypatch, started: list[str], *, central_fails=False, peripheral_fails=False):
+def _bluetooth_present(
+    monkeypatch,
+    started: list[str],
+    *,
+    central_fails=False,
+    peripheral_fails=False,
+    peripheral_hangs=False,
+    stopped: list[str] | None = None,
+):
     """Stands in for the radio: both roles report available, and start()
-    records itself or raises the way a refused adapter does."""
+    records itself, raises the way a refused adapter does, or never returns
+    the way a wedged backend does. stop() records itself in ``stopped``."""
 
     async def central_start(self):
         if central_fails:
@@ -32,19 +45,25 @@ def _bluetooth_present(monkeypatch, started: list[str], *, central_fails=False, 
         started.append("central")
 
     async def peripheral_start(self):
+        if peripheral_hangs:
+            await asyncio.Event().wait()
         if peripheral_fails:
             raise TransportError("org.bluez.Error.Failed: Maximum advertisements reached")
         started.append("peripheral")
 
-    async def stop(self):
-        return None
+    def recording_stop(role):
+        async def stop(self):
+            if stopped is not None:
+                stopped.append(role)
+
+        return stop
 
     monkeypatch.setattr(BleManager, "is_available", lambda self: True)
     monkeypatch.setattr(BlePeripheral, "is_available", lambda self: True)
     monkeypatch.setattr(BleManager, "start", central_start)
     monkeypatch.setattr(BlePeripheral, "start", peripheral_start)
-    monkeypatch.setattr(BleManager, "stop", stop)
-    monkeypatch.setattr(BlePeripheral, "stop", stop)
+    monkeypatch.setattr(BleManager, "stop", recording_stop("central"))
+    monkeypatch.setattr(BlePeripheral, "stop", recording_stop("peripheral"))
 
 
 def _peer_stream_manager(profile: str, **config) -> ProtocolManager:
@@ -63,17 +82,62 @@ async def test_both_bluetooth_roles_start_with_the_server(harness, monkeypatch):
     assert started == ["central", "peripheral"]
 
 
-async def test_a_refused_advertiser_leaves_the_peer_stream_running(harness, monkeypatch):
+async def test_a_refused_advertiser_leaves_the_peer_stream_running(harness, monkeypatch, caplog):
     """The failure this rule prevents: a radio another process holds taking
     the LAN path down with it."""
     started: list[str] = []
     _bluetooth_present(monkeypatch, started, peripheral_fails=True)
     manager = _peer_stream_manager("half-ble-user", ble_enabled=True)
-    server = await harness.server(manager=manager)
+    with caplog.at_level(logging.ERROR, logger="offline_protocol_sdk.local_api.server"):
+        server = await harness.server(manager=manager)
     client = await harness.client(server)
     assert (await client.hello("notes"))["state"] == "Running"
     assert started == ["central"]
     assert manager.peer_stream.listen_port
+    # The log is the one place the operator learns why: it names the
+    # transport and carries the backend's own refusal.
+    [record] = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert "Bluetooth LE peripheral" in record.getMessage()
+    assert "Maximum advertisements reached" in record.getMessage()
+
+
+async def test_a_transport_that_never_starts_counts_as_failed(harness, monkeypatch, caplog):
+    """A wedged backend must not keep the API socket from opening, and is
+    torn down at the deadline rather than left half-started until shutdown:
+    a backend that finishes late would otherwise run with nothing watching."""
+    started: list[str] = []
+    stopped: list[str] = []
+    _bluetooth_present(monkeypatch, started, peripheral_hangs=True, stopped=stopped)
+    manager = ProtocolManager(make_config(profile="wedged-ble-user", ble_enabled=True))
+    with caplog.at_level(logging.ERROR, logger="offline_protocol_sdk.local_api.server"):
+        server = await asyncio.wait_for(harness.server(manager=manager, carrier_start_timeout=0.2), 10)
+    client = await harness.client(server)
+    assert (await client.hello("notes"))["state"] == "Running"
+    assert started == ["central"]
+    assert stopped == ["peripheral"]
+    assert any("Bluetooth LE peripheral" in r.getMessage() and "within" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_configured_relay_is_started_with_the_server(harness):
+    """The relay `--relay` names is dialled and authenticated with the token."""
+    first_frame: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
+
+    async def relay(websocket):
+        frame = json.loads(await websocket.recv())
+        if not first_frame.done():
+            first_frame.set_result(frame)
+        async for _ in websocket:
+            pass
+
+    async with serve(relay, "127.0.0.1", 0) as fake_relay:
+        port = fake_relay.sockets[0].getsockname()[1]
+        manager = ProtocolManager(make_config(profile="relay-user"))
+        manager.internet.configure(server_url=f"ws://127.0.0.1:{port}", auto_reconnect=False)
+        manager.internet.set_auth_token("relay-secret")
+        await harness.server(manager=manager)
+        frame = await asyncio.wait_for(first_frame, 5)
+        assert frame == {"type": "Authenticate", "token": "relay-secret"}
+        await manager.stop()
 
 
 async def test_the_server_fails_when_no_transport_starts(harness, monkeypatch):
@@ -107,6 +171,16 @@ async def test_lan_switches_on_advertising_and_discovery(tmp_path):
         assert manager.peer_stream.discover is True
     finally:
         await manager.close()
+
+
+async def test_lan_without_the_extra_is_refused_naming_it(tmp_path, monkeypatch):
+    """Refused here rather than by the transport: under the start rule a
+    missing extra would be one logged error while Bluetooth carried the
+    server, and the LAN the operator asked for would never appear."""
+    monkeypatch.setitem(sys.modules, "zeroconf", None)
+    cli, args = _cli_args(tmp_path, "--lan", wifi_direct_enabled=True)
+    with pytest.raises(SystemExit, match=r"offline-protocol-sdk\[lan\]"):
+        cli.build_manager(args)
 
 
 async def test_without_lan_the_peer_stream_stays_off_the_lan(tmp_path):
@@ -167,3 +241,57 @@ async def test_the_relay_flag_without_internet_is_refused(tmp_path):
     )
     with pytest.raises(SystemExit, match="internet_enabled"):
         cli.build_manager(args)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://relay.example.test",
+        "relay.example.test:443",
+        "wss://",
+        "wss:///path",
+        # A looser check passes these, and the transport then retries them
+        # for as long as it runs.
+        "wss://relay.example.test:abc",
+        "wss://relay.example.test:70000",
+        "wss://[::1",
+    ],
+)
+async def test_a_relay_that_is_not_a_websocket_url_is_refused(tmp_path, url):
+    """The transport retries a failed connect for as long as it runs, so a
+    mis-typed relay would otherwise be a service that reports the relay
+    running and never reaches it."""
+    cli, args = _cli_args(tmp_path, "--relay", url)
+    with pytest.raises(SystemExit, match="--relay takes a ws:// or wss:// URL"):
+        cli.build_manager(args)
+
+
+async def test_a_named_token_variable_that_is_unset_is_refused(tmp_path, monkeypatch):
+    """Without a token the transport authenticates with the profile name."""
+    monkeypatch.delenv("OP_TEST_UNSET_RELAY_TOKEN", raising=False)
+    cli, args = _cli_args(
+        tmp_path, "--relay", "wss://relay.example.test", "--relay-token-env", "OP_TEST_UNSET_RELAY_TOKEN"
+    )
+    with pytest.raises(SystemExit, match="OP_TEST_UNSET_RELAY_TOKEN is not set"):
+        cli.build_manager(args)
+
+
+@pytest.mark.parametrize(
+    ("url", "warned"),
+    [
+        ("ws://relay.example.test", True),
+        ("ws://127.0.0.1:9000", False),
+        ("ws://127.0.0.2:9000", False),
+        ("ws://[::1]:9000", False),
+        ("ws://localhost:9000", False),
+        ("wss://relay.example.test", False),
+    ],
+)
+async def test_a_cleartext_relay_off_loopback_is_warned_about(tmp_path, caplog, url, warned):
+    cli, args = _cli_args(tmp_path, "--relay", url)
+    with caplog.at_level(logging.WARNING, logger="offline_protocol_sdk.local_api.cli"):
+        manager = cli.build_manager(args)
+    try:
+        assert any("not TLS" in r.getMessage() for r in caplog.records) is warned
+    finally:
+        await manager.close()
