@@ -182,7 +182,7 @@ message whose recipient is away, started before the recipient returns.
 | `await ID --until received` | the message on the recipient | `message_received` naming the id |
 | `pair ADDR` | the session with a peer | `get_establishment_state` reaching `SessionConfirmed` |
 | `ping ADDR --every S --count N` | each message's receipt | every message delivered within `--timeout` of its send; each line names the carrier |
-| `watch [--log FILE]` | until stopped or `--duration` | every event as `{"at_ms", "event"}`, reconnecting across restarts of the service |
+| `watch [--log FILE]` | until stopped or `--duration` | every event as `{"at_ms", "event"}`, reconnecting across restarts of the service; fails if it never connected |
 
 Each command prints JSON lines on standard output and a summary on standard
 error, and exits 0 on a pass, 2 when its time ran out, and 1 on a terminal

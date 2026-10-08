@@ -283,6 +283,62 @@ async def test_watch_reconnects_when_the_service_comes_back(harness, tmp_path, m
         await asyncio.gather(watcher, return_exceptions=True)
 
 
+async def test_watch_retries_a_service_that_drops_the_handshake(harness, monkeypatch):
+    """A service that is stopping or starting can accept a connection and
+    close it before the WebSocket handshake answers. That raises a
+    websockets error rather than an ``OSError``, and is a restart's gap
+    like any other: ``watch`` keeps retrying and connects once it is up."""
+    monkeypatch.setattr(commands, "WATCH_RECONNECT_DELAY", 0.05)
+    first = await harness.server(config=make_config(profile="first"))
+    socket_path = first.socket_path
+    await first.stop()
+    if socket_path.exists():
+        socket_path.unlink()
+    attempts = 0
+
+    def drop(reader, writer):
+        nonlocal attempts
+        attempts += 1
+        writer.close()
+
+    dropping = await asyncio.start_unix_server(drop, str(socket_path))
+    out = _output()
+    watcher = asyncio.ensure_future(commands.watch(commands.Target(socket_path=str(socket_path)), None, 30.0, out))
+    try:
+        for _ in range(100):
+            if attempts >= 2 or watcher.done():
+                break
+            await asyncio.sleep(0.05)
+        assert not watcher.done(), watcher.exception()
+        assert attempts >= 2
+        dropping.close()
+        await dropping.wait_closed()
+        if socket_path.exists():
+            socket_path.unlink()
+        second = LocalApiServer(ProtocolManager(make_config(profile="second")), socket_path=socket_path, health=False)
+        await second.start()
+        try:
+            for _ in range(200):
+                if "watch: connected" in out.err.getvalue():
+                    break
+                await asyncio.sleep(0.05)
+            assert "watch: connected" in out.err.getvalue(), out.err.getvalue()
+        finally:
+            await second.stop()
+    finally:
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+
+
+async def test_watch_that_never_connected_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(commands, "WATCH_RECONNECT_DELAY", 0.05)
+    out = _output()
+    status = await commands.watch(commands.Target(socket_path=str(tmp_path / "absent.sock")), None, 0.3, out)
+    assert status == commands.FAILED
+    assert out.out.getvalue() == ""
+    assert "never connected" in out.err.getvalue()
+
+
 async def test_the_tcp_carrier_reads_the_token_file(harness):
     server = await harness.server(config=make_config(profile="over-tcp"), tcp=True)
     target = commands.Target(tcp_port=server.port, token_file=str(server.token_path))

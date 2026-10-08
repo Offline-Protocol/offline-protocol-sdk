@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, Callable
 
+from websockets.exceptions import WebSocketException
+
 from .client import DEFAULT_APP_ID, RpcFailure, VerifyClient
 
 PASS = 0
@@ -330,22 +332,35 @@ async def watch(
     and appends it to ``log`` when given. Reconnects when the service goes
     away and comes back, so one watcher spans a restart; events the engine
     emits while no client is connected are not seen, except the received
-    messages the service holds for the application."""
+    messages the service holds for the application.
+
+    Passes when ``duration`` runs out having been connected at some point,
+    and fails when it never was: an empty watch log is otherwise
+    indistinguishable from a quiet network."""
     loop = asyncio.get_running_loop()
     deadline = None if duration is None else loop.time() + duration
     handle = log.open("a", encoding="utf-8") if log is not None else None
     connected = False
+    ever_connected = False
+    waiting_said = False
     try:
         while deadline is None or loop.time() < deadline:
             try:
                 client = await target.open()
-            except (OSError, ConnectionError, RpcFailure) as exc:
+            except (OSError, ConnectionError, RpcFailure, WebSocketException, asyncio.TimeoutError) as exc:
+                # A service that is stopping or starting can refuse the
+                # connection, drop it inside the handshake (a websockets
+                # error, not an OSError) or close it during ``hello``; each
+                # is the gap a restart leaves, so each is retried.
                 if connected:
                     output.say(f"watch: service gone ({exc}); reconnecting")
                     connected = False
+                elif not ever_connected and not waiting_said:
+                    output.say(f"watch: waiting for the service ({exc or type(exc).__name__})")
+                    waiting_said = True
                 await asyncio.sleep(WATCH_RECONNECT_DELAY)
                 continue
-            connected = True
+            connected = ever_connected = True
             output.say(f"watch: connected to {client.local_address}")
             try:
                 while True:
@@ -368,6 +383,9 @@ async def watch(
                 connected = False
             finally:
                 await client.close()
+        if not ever_connected:
+            output.say("watch: never connected to the service")
+            return FAILED
         return PASS
     finally:
         if handle is not None:
