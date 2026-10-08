@@ -13,6 +13,10 @@ services:
     environment:
       OFFLINE_PROTOCOL_STORE_KEY: ${OFFLINE_PROTOCOL_STORE_KEY:?set OFFLINE_PROTOCOL_STORE_KEY}
       OP_LAN: "1"
+      # This host's LAN address. On 0.0.0.0 the multicast DNS record also names
+      # docker0 (172.17.0.1), which every other Docker host holds as its own;
+      # see README.md.
+      # OP_LISTEN: 192.168.1.10:7878
       OP_HTTP: 127.0.0.1:8080
     volumes:
       - offline-protocol-data:/var/lib/offline-protocol

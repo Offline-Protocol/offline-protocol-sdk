@@ -19,7 +19,7 @@ the service these, and the failure each one prevents:
 
 | Grant | Why |
 |---|---|
-| The host's network namespace | Multicast DNS (UDP 5353) does not leave a container bridge: on one, `--lan` finds only containers on the same bridge, never another host. It also puts the front on the host's loopback, where the host's applications reach it. |
+| The host's network namespace | Multicast DNS (UDP 5353) does not leave a container bridge: on one, `--lan` finds only containers on the same bridge, never another host. It also puts the front on the host's loopback, where the host's applications reach it. Set `OP_LISTEN` to the host's LAN address (`192.168.1.10:7878`): on `0.0.0.0` the multicast DNS record names every interface the host has, and on a Docker host that includes `docker0`'s `172.17.0.1`, which every other Docker host holds as its own. A peer that dials that entry first reaches itself, refuses the stream, and backs off for up to ten minutes before it tries the record again. |
 | Inbound TCP 7878 | Other hosts open their peer streams here. Every host also dials, but a pair where neither accepts never connects. |
 | A persistent volume at `/var/lib/offline-protocol` | The identity and every queued message. Without it the device has a new address after every recreate, and its peers' sessions and queued messages go to an address nobody holds. |
 | `OFFLINE_PROTOCOL_STORE_KEY` from the host's secret store | Everything on the volume is sealed under it. A volume shared with another application is readable by it, so the key must not sit beside the data. Losing the key loses the identity. |
@@ -38,9 +38,11 @@ part of its storage namespace: change it before the first start, never after.
 
 | Variable | Default | Flag |
 |---|---|---|
-| `OP_LISTEN` | `0.0.0.0:7878` | `--listen` |
+| `OP_LISTEN` | `0.0.0.0:7878` | `--listen`; under host networking, the host's LAN address (see the grants) |
 | `OP_PEERS` | none | `--peer`, one per space-separated entry, for hosts multicast cannot reach |
 | `OP_LAN` | `1` | `--lan` when `1`, none when `0`; anything else is refused |
+| `OP_CONFIG` | `/etc/offline-protocol/config.json` | `--config` |
+| `OP_DATA` | `/var/lib/offline-protocol` | `--mls-root` and `--state-root` beneath it |
 | `OP_HTTP` | `127.0.0.1:8080` | `--http`; empty for no front |
 | `OP_HTTP_TOKEN_FILE` | none | `--http-token-file`: the front writes a per-launch token there and requires it; needed off loopback, and on a host where a browser runs (R23 in the threat model). The file is replaced at every start and readable by the container's user only: bind-mount its directory, never the file, and read it as that user |
 | `OP_HTTP_ALIASES` | none | `--http-aliases` |
@@ -84,5 +86,6 @@ other under their proved addresses, and served a request through the HTTP
 front from one to the demo provider in
 [examples/http-front](../../../examples/http-front) on the other, end to end
 encrypted, in 35 ms. The address and the front's registrations survived a
-restart of the container. Bluetooth LE from a container has not been run on
-hardware.
+restart of the container. Host networking, the deployment this README
+recommends, has not been run between two hosts, and neither has Bluetooth
+LE from a container on hardware.
