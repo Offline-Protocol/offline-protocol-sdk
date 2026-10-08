@@ -7,7 +7,8 @@ so a scenario passes on the engine's own events, not on a log read by eye:
   1 store and forward   B off, A sends, B on: B receives it, A gets B's receipt
   2 sender restarts     B off, A sends, A killed and restarted, B on: same
   4 through the middle  A and C meet once, then share no network: C receives
-                        A's message one hop away and B reports carrying it
+                        A's message one hop away, B reports carrying it, and
+                        A gets C's receipt back the same way
 
 Without --ssh the devices are the containers of compose.yml in
 this directory, and switching a device off is `docker stop`. With --ssh each
@@ -44,9 +45,10 @@ PROJECT = "offline-first"
 #: and for a peer-stream redial ladder that may be part-way up.
 DELIVERY_AFTER_RETURN_S = 60
 HOP_RECEIVED_S = 30
-#: How long to wait for the sender's receipt across the hop. It does not come
-#: back on an engine without #537 (docs/local-api.md), so by default its
-#: absence is reported and does not fail the run.
+#: How much longer than HOP_RECEIVED_S the sender's watch waits for the
+#: receipt across the hop. An engine without #537 (0.28.0 and earlier) never
+#: settles it, and --allow-missing-hop-receipt lets an image built from such
+#: a wheel pass.
 HOP_RECEIPT_S = 20
 #: Session formation after devices first hear each other, and a restarted
 #: service answering on its socket.
@@ -258,14 +260,17 @@ class DockerRunner(Runner):
     def kill(self, device: str) -> None:
         self._docker("kill", "--signal", "KILL", f"{PROJECT}-{device}")
 
-    def join_a_and_c(self) -> None:
-        # A run that stopped between this and part_a_and_c leaves C on net-ab,
-        # where `compose up` does not take it off; connecting it again fails.
+    def _c_on_net_ab(self) -> bool:
         networks = subprocess.run(
             ["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", f"{PROJECT}-c"],
             check=True, capture_output=True, text=True,
         ).stdout
-        if f"{PROJECT}_net-ab" not in json.loads(networks):
+        return f"{PROJECT}_net-ab" in json.loads(networks)
+
+    def join_a_and_c(self) -> None:
+        # A run that stopped between this and part_a_and_c leaves C on net-ab,
+        # where `compose up` does not take it off; connecting it again fails.
+        if not self._c_on_net_ab():
             self._docker("network", "connect", f"{PROJECT}_net-ab", f"{PROJECT}-c")
 
     def part_a_and_c(self) -> None:
@@ -273,12 +278,19 @@ class DockerRunner(Runner):
         # the network first, C would leave A a stream that looks open until
         # keepalive ends it (about 30 s), and a message A sends in that window
         # goes down it, is retried over direct carriers only, and never
-        # reaches the mesh (docs/local-api.md).
+        # reaches the mesh (#541).
         self._docker("stop", f"{PROJECT}-c")
         self._docker("network", "disconnect", f"{PROJECT}_net-ab", f"{PROJECT}-c")
         self._docker("start", f"{PROJECT}-c")
 
     def restore(self) -> None:
+        # A scenario 4 that failed between join_a_and_c and part_a_and_c
+        # leaves C on net-ab, linked to A: every later scenario would run on
+        # a graph where B is not the only way between them. Parted the same
+        # way part_a_and_c does it, stopped first so A sees the stream close.
+        if self._c_on_net_ab():
+            self._docker("stop", f"{PROJECT}-c")
+            self._docker("network", "disconnect", f"{PROJECT}_net-ab", f"{PROJECT}-c")
         # `docker start` leaves a running container as it is.
         self._docker("start", *(f"{PROJECT}-{d}" for d in "abc"))
 
@@ -361,7 +373,7 @@ class Lab:
             return Result(name, False, elapsed, f"receipt came back but B has no message: {err}")
         return Result(name, True, elapsed, f"receipt over {event['transport']}, latency {event['latency_ms']} ms")
 
-    def through_the_middle(self, require_receipt: bool) -> Result:
+    def through_the_middle(self, allow_missing_receipt: bool) -> Result:
         name = "4 through the middle"
         self.runner.join_a_and_c()
         self.c.wait_ready()
@@ -393,9 +405,9 @@ class Lab:
         receipt = _saw(watched_a, "message_delivered", message_id)
         if receipt is not None:
             return Result(name, True, elapsed, detail + f"; A's receipt at hop {receipt['hop_count']}")
-        if require_receipt:
-            return Result(name, False, elapsed, detail + "; A's receipt never came back")
-        return Result(name, True, elapsed, detail + "; A's receipt did not come back (known, #537)")
+        if allow_missing_receipt:
+            return Result(name, True, elapsed, detail + "; A's receipt did not come back (allowed)")
+        return Result(name, False, elapsed, detail + "; A's receipt never came back")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -411,11 +423,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-build", action="store_true",
                         help="Docker: use the image offline-protocol-service:offline-first as it is")
     parser.add_argument("--scenario", action="append", type=int, choices=(1, 2, 4), help="run only these")
-    parser.add_argument("--require-hop-receipt", action="store_true",
-                        help="fail scenario 4 when A's receipt does not come back")
+    parser.add_argument("--allow-missing-hop-receipt", action="store_true",
+                        help="pass scenario 4 without A's receipt, for an image whose engine predates "
+                             "the receipt crossing the mesh (#537)")
     args = parser.parse_args(argv)
 
     if args.ssh:
+        if any("=" not in item for item in args.ssh):
+            parser.error("--ssh takes NAME=HOST, e.g. a=pi@10.0.0.11")
         hosts = dict(item.split("=", 1) for item in args.ssh)
         if set(hosts) != {"a", "b", "c"}:
             parser.error("--ssh needs a=..., b=... and c=...")
@@ -433,7 +448,7 @@ def main(argv: list[str] | None = None) -> int:
     for number, name, run in (
         (1, "1 store and forward", lambda: lab.store_and_forward(restart_sender=False)),
         (2, "2 sender restarts", lambda: lab.store_and_forward(restart_sender=True)),
-        (4, "4 through the middle", lambda: lab.through_the_middle(args.require_hop_receipt)),
+        (4, "4 through the middle", lambda: lab.through_the_middle(args.allow_missing_hop_receipt)),
     ):
         if number not in wanted:
             continue

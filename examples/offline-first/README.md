@@ -13,7 +13,7 @@ read on the device by
 | 1 | Store and forward: B off, A sends, B on | B receives it, and A gets `message_delivered` within 60 s of B coming back |
 | 2 | The sender restarts: B off, A sends, A killed (`SIGKILL`) and started, B on | the same, from the restarted A: the queue was on disk |
 | 3 | The carrier changes: the link A and B were using goes away | every message of a `ping` run is delivered, and `message_delivered.transport` names the new carrier (hardware only, below) |
-| 4 | Through the middle: A and C meet once, then only B hears both | C receives A's message at `hop_count` 1 within 30 s, and B reports `message_relayed` |
+| 4 | Through the middle: A and C meet once, then only B hears both | C receives A's message at `hop_count` 1 within 30 s, B reports `message_relayed`, and A gets `message_delivered` back the same way |
 
 ## In containers, on one machine
 
@@ -30,7 +30,7 @@ DNS's.
 ```bash
 python3 run.py            # builds the image, starts the devices, runs 1, 2 and 4
 python3 run.py --fresh    # new identities first
-python3 run.py --scenario 4 --require-hop-receipt
+python3 run.py --scenario 4
 ```
 
 The image installs the package from PyPI unless a Linux wheel built from a
@@ -113,25 +113,24 @@ each:
 
 ## Known gaps
 
-- **The sender's receipt does not come back across a hop.** In scenario 4,
-  C's acknowledgement is carried back by B and dropped by A: a message whose
-  only route is the mesh has no pending acknowledgement on A to settle.
-  `run.py` reports it and passes unless `--require-hop-receipt`. The engine
-  fix is #537.
-- **A message a direct link took and then lost never crosses the mesh.**
-  Only a send that no carrier takes is handed to neighbours; a retry that
-  the carriers refuse is queued again for direct carriers only. So a message
-  sent down a stream to a device that went away without closing it waits
-  for a direct link to that device.
-- **Bluetooth LE on a Linux box as the peripheral** does not learn which
-  phone wrote to it, so replies to a phone go over the box's central role.
-  One Bluetooth LE peer per box until that is fixed.
+- **A message a direct link took and then lost never crosses the mesh**
+  (#541): a message sent down a stream to a device that went away without
+  closing it waits for a direct link to that device.
+- **One phone per Linux box over Bluetooth LE.** The box's peripheral learns
+  which phone wrote to it, but it maps a phone to its user id only while that
+  phone is the one central connected, so with two a reply has no route back
+  through the peripheral.
+- **An image built from 0.28.0 or earlier** never gets the receipt in
+  scenario 4: the engine drops an acknowledgement for a message whose only
+  route was the mesh (#537). Pass `--allow-missing-hop-receipt` to run the
+  rest of the scenario on such an image.
 
 ## What has been run
 
 | When | Where | Scenarios | Result |
 |---|---|---|---|
-| 2026-10-08 | `run.py`, Docker 28.3 on one arm64 laptop, the image built from the 0.28.0 Linux wheel with this branch's Python sources (no native change since 0.28.0) | 1, 2, 4 | pass, twice in a row (receipt latency 29 to 45 ms; 4 without A's receipt, as above) |
+| 2026-10-08 | `run.py`, Docker 28.3 on one arm64 laptop, the image built from the 0.28.0 Linux wheel with this branch's Python sources, so an engine without #537 | 1, 2, 4 | pass, twice in a row (receipt latency 29 to 45 ms; 4 without A's receipt, which that engine never sends) |
+| 2026-10-08 | `run.py --fresh` then `run.py`, the same machine, the image with the native library built from `main` after #537 and this branch's Python sources | 1, 2, 4 | pass, twice in a row, A's receipt required in 4 and back at hop 1 (latency 33 to 36 ms in 1 and 2) |
 
 Nothing on this page has been run between separate hosts, over Bluetooth
 LE, over a relay, through a gateway daemon, or with a phone.

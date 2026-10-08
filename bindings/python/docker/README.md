@@ -85,7 +85,8 @@ docker build bindings/python/docker
 
 Wheels for several architectures may sit there together; pip takes the one
 that matches the image. The build fails if the installed service has no HTTP
-front, which is the case for every release before the `http` extra.
+front or the package has no `offline-protocol-verify`, which is the case for
+every release so far.
 
 The build context is this directory only. Never build from the repository
 root or mount the checkout: `target/` alone fills the build VM.
