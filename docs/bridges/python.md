@@ -399,7 +399,11 @@ identity. It is announced to the core only while the Message characteristic
 has a subscriber, because BlueZ reports subscriptions per characteristic and
 not per device, and only while one of its centrals is still connected: bless
 forgets a subscription only on `StopNotify`, which BlueZ sends when an
-unpaired central disconnects but not a bonded one. Each inbound write is attributed to its own caller, so two
+unpaired central disconnects but not a bonded one. The caller the hook reads
+is the caller of the call bless dispatches next only because bless's
+`ReadValue` and `WriteValue` are plain methods, which dbus_next runs inline;
+a coroutine method would be scheduled after the next call's hook, so a test
+reads the method dbus_next dispatches and refuses a coroutine. Each inbound write is attributed to its own caller, so two
 centrals no longer collapse into `ble-peer`. Notifications go to every
 subscribed central: neither bless backend addresses one.
 

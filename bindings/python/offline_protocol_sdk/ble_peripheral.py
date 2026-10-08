@@ -129,7 +129,11 @@ class _BlueZCentrals:
         self._seen: dict[str, str] = {}  # device path -> central id
         #: The central behind the read or write being dispatched right now.
         #: The hook and the dispatch run back to back on the bus's loop, so
-        #: a write handler reading this sees its own caller.
+        #: a write handler reading this sees its own caller. That holds only
+        #: because bless's ReadValue and WriteValue are plain methods, which
+        #: dbus_next runs inline after the hook; a coroutine method would be
+        #: scheduled, and the next call's hook would run first.
+        #: ``test_bless_dispatches_gatt_calls_synchronously`` pins it.
         self.current: str | None = None
 
     def attach(self, bus: Any) -> None:

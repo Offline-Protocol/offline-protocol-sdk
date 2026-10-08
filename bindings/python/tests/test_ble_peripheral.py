@@ -917,3 +917,21 @@ class TestSharedFragmentDrain:
         router.on_fragments_available()
         central.on_fragments_available.assert_not_called()
         peripheral.on_fragments_available.assert_not_called()
+
+
+def test_bless_dispatches_gatt_calls_synchronously():
+    """``_BlueZCentrals.current`` names the caller of the call being
+    dispatched only because bless's ReadValue and WriteValue are plain
+    methods: dbus_next runs those inline after the message hook, and would
+    schedule a coroutine method so that the next call's hook ran first."""
+    pytest.importorskip("dbus_next")
+    from bless.backends.bluezdbus.dbus.characteristic import (
+        BlueZGattCharacteristic,
+    )
+
+    for name in ("ReadValue", "WriteValue"):
+        # The method dbus_next dispatches, not the decorator's wrapper: the
+        # wrapper is a plain function whatever it wraps, so testing it would
+        # pass for a coroutine too.
+        dispatched = getattr(BlueZGattCharacteristic, name).__dict__["__DBUS_METHOD"]
+        assert not inspect.iscoroutinefunction(dispatched.fn), name
