@@ -17149,7 +17149,7 @@ mod tests {
             ),
             (
                 "the question and what an answer does",
-                "private fun adoptExistingGroup() { \
+                "private fun adoptExistingGroup() { if (channel == null) return \
                  wifiP2pManager?.requestConnectionInfo(channel) { info -> if \
                  (info?.groupFormed == true && state == TransportState.RUNNING) {",
             ),
@@ -18052,20 +18052,21 @@ mod tests {
         );
     }
 
-    /// The iOS and Python peer-stream managers keep the same one of two
-    /// streams for an address.
+    /// The iOS, Android and Python peer-stream managers keep the same one of
+    /// two streams for an address.
     ///
-    /// Both ends of a pair may dial, and a Python host on a LAN dials every
-    /// peer it discovers, so the choice of which stream to keep is a
+    /// Both ends of a pair may dial, and every manager on a LAN dials the
+    /// peers it discovers, so the choice of which stream to keep is a
     /// hand-mirrored policy (docs/bridges C5): the stream the lower address
-    /// opened wins. If the two copies drift, an iPhone and a Python host each
-    /// keep the stream the other closes, and the pair reconnects forever,
-    /// with no error on either side (ADR 0027). Pinned as the two lines each
-    /// rule is made of. Android keeps the newer stream instead, because a
-    /// Wi-Fi Direct group has one dialer.
+    /// opened wins, addresses ordered by their UTF-8 bytes. If two copies
+    /// drift, a pair each keeps the stream the other closes and reconnects
+    /// forever, with no error on either side (ADR 0027, ADR 0028). Pinned as
+    /// the lines each rule is made of.
     #[test]
-    fn ios_and_python_peer_streams_keep_the_same_stream() {
+    fn every_peer_stream_manager_keeps_the_same_stream() {
         let swift = rn_source_code_only("ios/PeerStreamFraming.swift");
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/PeerStreamFraming.kt");
         let python_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../bindings/python/offline_protocol_sdk/peer_stream_manager.py");
         let python = std::fs::read_to_string(&python_path)
@@ -18086,6 +18087,22 @@ mod tests {
             );
         }
         for needed in [
+            "val local = localAddress ?: return false",
+            "val weOpen = utf8Precedes(local, peer) return outbound == weOpen",
+            "val x = a.encodeToByteArray() val y = b.encodeToByteArray()",
+            "val d = (x[i].toInt() and 0xff) - (y[i].toInt() and 0xff) \
+             if (d != 0) return d < 0 } return x.size < y.size",
+            "if (byAddress.containsKey(address) && \
+             !newStreamWins(outbound, localAddress, address) ) { \
+             return Announcement(firstForAddress = false, superseded = null, refused = true) }",
+        ] {
+            assert!(
+                kotlin.contains(needed),
+                "android PeerStreamFraming.kt: the stream the lower address opened must win, \
+                 by UTF-8 bytes, as on iOS and in Python. Expected to find:\n  {needed}"
+            );
+        }
+        for needed in [
             "if local is None:\n            # No address of our own to order by; keep what is announced.\n            return False",
             "we_open = local < peer\n        return new.outbound == we_open",
         ] {
@@ -18093,6 +18110,103 @@ mod tests {
                 python.contains(needed),
                 "peer_stream_manager.py: the stream the lower address opened must win, as in \
                  ios/PeerStreamFraming.swift. Expected to find:\n  {needed}"
+            );
+        }
+    }
+
+    /// A peer-stream redial ladder starts over only after a stream that
+    /// carried its peer (a body after the preamble, or the address held
+    /// through the keepalive window), on iOS and Android alike.
+    ///
+    /// A stream the peer refuses for its own held one proves the address all
+    /// the same, so a ladder that reset on proof redialed every second, with a
+    /// connect and a loss reported each round, until the peer's stale stream
+    /// died. A body alone is too narrow the other way: two peers with a
+    /// session may reconnect and send nothing, and each ordinary drop of such
+    /// a stream climbed the ladder for good. Each platform holds its copy of
+    /// the rule in its own words, so the lines are pinned here (docs/bridges
+    /// C5, ADR 0028).
+    #[test]
+    fn peer_stream_redial_ladders_reset_only_on_a_carried_stream() {
+        let swift = rn_source_code_only("ios/WifiDirectManager.swift");
+        let lan =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/LanPeerDiscovery.kt");
+        let manager =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        let sockets =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/PeerStreamSockets.kt");
+        for (code, needed) in [
+            (&swift, "if stream.proved { stream.carried = true }"),
+            (
+                &swift,
+                "stream.carried || stream.provedAt.map({ \
+                 ProcessInfo.processInfo.systemUptime - $0 >= Self.CARRIED_AFTER \
+                 }) == true { dialPolicy.proved(address) }",
+            ),
+            (&sockets, "carried = delivered || ("),
+            (&lan, "if (ran.proved == address && ran.carried) {"),
+            (&manager, "carried = ran.carried,"),
+            (
+                &manager,
+                "if (ran.carried) reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)",
+            ),
+        ] {
+            assert!(
+                code.contains(needed),
+                "a redial ladder must start over only on a stream that carried its peer. \
+                 Expected to find:\n  {needed}"
+            );
+        }
+        assert_eq!(
+            swift.matches("dialPolicy.proved(").count(),
+            1,
+            "ios/WifiDirectManager.swift: the ladder starts over in one place"
+        );
+    }
+
+    /// Android's LAN carrier publishes and reads the record iOS and Python do.
+    ///
+    /// A browser finds a peer only by the service type, names its record by
+    /// the address's digest so a restarted advert replaces the stale one, and
+    /// dials with the record's `addr` as the address the preamble must prove.
+    /// Each is a hand-mirrored literal (docs/bridges C5) whose drift fails
+    /// silently: an Android phone and an iPhone on one network that never
+    /// find each other, or two records for one peer (ADR 0028).
+    #[test]
+    fn android_lan_peer_streams_publish_the_ios_and_python_record() {
+        let formation = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/WifiDirectGroupFormation.kt",
+        );
+        let lan =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/LanPeerDiscovery.kt");
+        let swift = rn_source_code_only("ios/WifiDirectManager.swift");
+        for (code, needed) in [
+            (
+                &formation,
+                "const val SERVICE_TYPE = \"_offlineprotocol._tcp\"",
+            ),
+            (&swift, "static let SERVICE_TYPE = \"_offlineprotocol._tcp\""),
+            (&formation, "const val KEY_VERSION = \"txtvers\""),
+            (&formation, "const val KEY_ADDRESS = \"addr\""),
+            (
+                &lan,
+                "setAttribute(WifiDirectGroupFormation.KEY_VERSION, \"1\") \
+                 setAttribute(WifiDirectGroupFormation.KEY_ADDRESS, address)",
+            ),
+            (
+                &lan,
+                "\"op-\" + WifiDirectGroupFormation.hex(WifiDirectGroupFormation.sha256(address), 8)",
+            ),
+            (
+                &lan,
+                "sockets.run(socket, outbound = true, PeerStreamSockets.Carrier.LAN, \
+                 expected = address)",
+            ),
+        ] {
+            assert!(
+                code.contains(needed),
+                "the Android LAN record must match the iOS and Python one. \
+                 Expected to find:\n  {needed}"
             );
         }
     }
@@ -18223,7 +18337,10 @@ mod tests {
                 ],
                 &[
                     "is PeerStreamPreamble.Outcome.Announce -> outcome.address",
-                    "if (!announce(stream, address)) {",
+                    "if (!announce(stream, address, outbound)) {",
+                    "PeerStreamDialPolicy.admitsInbound(host, inboundHosts, reserved, limits)",
+                    "val announcement = links.announce(stream, address, outbound, local) \
+                     if (announcement.refused) {",
                     "if (!deliver(stream, address, body)) {",
                     "links.remove(stream)?.let { address -> try { host.peerDisconnected(address)",
                     "if (announcement.firstForAddress) { try { host.peerConnected(address)",

@@ -38,6 +38,7 @@ silently undo it. Decisions that follow from the obvious default do not need one
 | [0025](0025-native-packages-are-assembled-in-place.md) | Native packages are assembled from the bridge sources in place | Accepted |
 | [0026](0026-the-backbone-is-a-gateway-property.md) | The backbone is a gateway property | Accepted |
 | [0027](0027-ios-peer-streams-ride-network-framework.md) | iOS peer streams ride Network framework and keep the lower-opened stream | Accepted |
+| [0028](0028-android-peer-streams-join-the-lan.md) | Android peer streams join the LAN and keep the lower-opened stream | Accepted |
 
 ## Format
 

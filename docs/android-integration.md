@@ -225,6 +225,9 @@ Add to `AndroidManifest.xml`:
 <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
 <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+<!-- The same slot on the Wi-Fi network (LAN peers) -->
+<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+<uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
 <!-- Internet -->
 <uses-permission android:name="android.permission.INTERNET" />

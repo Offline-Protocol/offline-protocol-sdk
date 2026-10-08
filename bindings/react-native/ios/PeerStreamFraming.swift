@@ -237,7 +237,7 @@ final class PeerStreamPreamble {
 /// the point: both ends of a pair may dial, and so does a Python host on the
 /// same LAN, so without a shared rule each end would keep the stream the other
 /// closes, and the pair would reconnect forever. It is the Python manager's
-/// `_new_stream_wins`, and `ios_and_python_peer_streams_keep_the_same_stream`
+/// `_new_stream_wins`, and `every_peer_stream_manager_keeps_the_same_stream`
 /// pins the two copies together (ADR 0027). "Newer" among winners is what
 /// lets the lower address reconnect past its own half-open stream; the higher
 /// address's reconnect waits for keepalive to end the stale one. The cost,

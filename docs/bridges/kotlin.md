@@ -104,10 +104,12 @@ exemption list, pinned in `RelayAnswerPrefixesTest.kt`.
 
 See [C5](README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language).
 
-## K8. A Wi-Fi Direct socket's verdict is its preamble, not its connect
+## K8. A peer stream's verdict is its preamble, not its connect
 
 `WifiDirectManager` fills the peer-stream slot with Wi-Fi Direct group
-sockets, framed as [the chapter](../spec/stream-framing.md) specifies. A
+sockets and, through `LanPeerDiscovery`, with TCP sockets on the Wi-Fi
+network the device is on, framed as [the chapter](../spec/stream-framing.md)
+specifies. A
 socket's peer is announced to the core only under the address
 `verifyIdentityAssertion` derived from its first frame: never on connect, and
 never under the socket endpoint or `"go:<ip>"`, which is what this manager
@@ -124,17 +126,45 @@ from asyncio's single thread: a stream's announcement, deliveries and loss
 report run under that stream's lock, so no body reaches the core after its
 loss report.
 
-One limit is stated rather than fixed. A client that vanishes without a
-FIN stays announced until the stream notices: Java cannot set the keepalive
-interval, so `SO_KEEPALIVE` runs on the platform default (commonly two
-hours), and the write deadline sees no stall until both kernel buffers are
-full. The core's acknowledgements are the real signal that a peer is gone,
-as P9 says for the same reason.
+A peer that vanishes without a FIN stays announced until keepalive notices:
+15 seconds idle, 5 between probes, 3 probes, and a 30-second
+`TCP_USER_TIMEOUT` for a stream holding unacknowledged data, where keepalive
+sends no probe. These are the iOS and Python timers, set through
+`Os.setsockoptInt` because `java.net.Socket` cannot set them, and only on
+Android 10 and later: before API 29 `ParcelFileDescriptor.fromSocket` takes
+the socket's own descriptor, so closing it closed the socket. Older versions
+keep the OS defaults (two hours idle). The core's acknowledgements are still the real signal that a peer
+is gone, as P9 says for the same reason.
 
-Local policy differs from P9 on purpose. The newer of two streams for one
-address supersedes the older, because only the client dials its group owner,
-so the two-dialler tie that the lower-address rule settles cannot occur. A
-client whose stream ends while the group is up reconnects on a doubling
+A redial ladder starts over only after a stream that carried its peer: a
+body after the preamble, or the address held for the keepalive window (30
+seconds). A proof alone is not enough, because a stream refused for the one
+already held proves its peer too, and a ladder that reset on it redialed every
+second while that stream lived. A body alone is too narrow: two peers with a
+session may reconnect and send nothing, and every ordinary drop of such a
+stream climbed the ladder for good. A group client whose dial is
+refused because another stream (a LAN one) holds its owner's address does not
+redial at all; it dials the owner again when that stream is lost.
+
+`NsdManager`'s `DiscoveryListener` reports a record found and lost, never
+changed. A peer that restarts and publishes the same instance name on a new
+port, with no goodbye in between, is an update the listener never delivers,
+where iOS hears a changed record and dials. So the LAN carrier dials back any
+peer whose announced stream ends while its record is still advertised, on the
+usual policy, and a dial that nothing answers resolves the record again
+before the redial, which returns the cache's current port. Without both, an
+Android phone left the restarted peer to dial it, and dialed the dead port
+itself (seen on devices against an advertise-only Python host).
+
+Of two streams for one address, the manager keeps the one the lower address
+opened, and the newer of two such: P9's rule, compared by UTF-8 bytes, and
+`every_peer_stream_manager_keeps_the_same_stream` pins it to the iOS and
+Python copies. Inside a group only the client dials, so the rule reduces to
+"newer wins" there, except that a client that is the higher address cannot
+supersede its own half-open stream: its reconnect is refused until keepalive
+ends the stale one, about thirty seconds (two hours on Android 7 to 9). That is the price of the rule being
+one rule; a pair that shares a group and a LAN has two dialers on one link
+table (ADR 0028). A client whose stream ends while the group is up reconnects on a doubling
 delay, always to the owner the group has at that moment: on a group switch
 the new owner's first dial can lose to the old stream still closing, and the
 redial is then the only one left. The manager joins a group the system formed, including one that

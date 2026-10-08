@@ -3,9 +3,9 @@
 ## What this chapter is for
 
 A peer stream is a byte stream the platform established to exactly one other
-device: a Wi-Fi Direct group socket on Android, a TCP connection over a LAN
-or over AWDL (Apple's peer-to-peer Wi-Fi) on iOS, a TCP connection over a LAN
-or over a routed mesh on a host. To the protocol
+device: a Wi-Fi Direct group socket or a TCP connection over a LAN on
+Android, a TCP connection over a LAN or over AWDL (Apple's peer-to-peer Wi-Fi)
+on iOS, a TCP connection over a LAN or over a routed mesh on a host. To the protocol
 engine these are one transport, registered in the slot the FFI names
 `wifi_direct` for historical reasons, and this chapter is what makes them one:
 it specifies the only two things a stream does not get from its platform for
@@ -222,17 +222,20 @@ is at most one body in flight, `DEFAULT_MAX_MESSAGE_SIZE + 4` bytes, because a
 frame is read whole before the next prefix. The number of streams a receiver
 accepts, and the preamble deadline, are local policy, and a conforming
 implementation chooses its own. The mobile managers use ten seconds and
-sixteen open streams; the Python manager's choices are in its bridge rules.
-Which of two streams for one address to keep is policy too, and the
-implementations differ for a reason. The Python and iOS managers keep the
-stream opened by the lower address, and the newer of two such, because both
-ends of a pair dial and must agree without talking: a host dials every peer
-it lists or discovers, and an iPhone dials every peer it discovers
-([ADR 0027](../adr/0027-ios-peer-streams-ride-network-framework.md)). The two
-must compute the rule alike, or an iPhone and a host each keep the stream the
-other closes and reconnect forever. The Android manager keeps the newer,
-because a Wi-Fi Direct group has one dialer, and on a phone the duplicate is
-almost always the same peer reconnecting past a half-open stream.
+sixteen open streams, of which at most twelve are inbound and four come from
+one remote address, because a listener on a shared network is open to every
+device on it; the Python manager's choices are in its bridge rules.
+Which of two streams for one address to keep is policy too, but every
+implementation in this repository keeps the same one: the stream opened by
+the lower address (addresses compared by their UTF-8 bytes), and the newer of
+two such. Both ends of a pair dial and must agree without talking: a host
+dials every peer it lists or discovers, and so do an iPhone and an Android
+phone ([ADR 0027](../adr/0027-ios-peer-streams-ride-network-framework.md),
+[ADR 0028](../adr/0028-android-peer-streams-join-the-lan.md)). Two ends that
+compute the rule differently each keep the stream the other closes and
+reconnect forever. The rule costs the higher address an immediate reconnect
+past its own half-open stream: the lower end refuses the new one until
+keepalive ends the old.
 
 ## Finding a peer on a LAN
 
@@ -240,8 +243,11 @@ Nothing in this chapter requires discovery: a stream opened to a configured
 host and port is complete as specified. Where a LAN offers DNS-SD
 (RFC 6763), an implementation that advertises MUST use the service type
 `_offlineprotocol._tcp` (fifteen characters, the maximum a service label
-allows) and a TXT record whose first entry is `txtvers=1` and which carries
-`addr=<off1…>`, the advertiser's canonical address.
+allows) and a TXT record that carries `txtvers=1`, first where the
+advertiser controls the order (RFC 6763 section 6.7), and
+`addr=<off1…>`, the advertiser's canonical address. A browser MUST look
+entries up by key and MUST NOT depend on their order: Android's `NsdManager`
+keeps a record's attributes in a map and does not promise one.
 
 A framework that publishes DNS-SD on the implementation's behalf is bound by
 the same rule, and MUST NOT publish `_offlineprotocol._tcp` for a service
@@ -251,6 +257,12 @@ app's `NSBonjourServices` must list `_offlineprotocol._tcp`, or iOS
 local-network privacy blocks discovery. The iOS manager once used
 MultipeerConnectivity, which published the same type in front of its own
 protocol, so a host on the same LAN found an iPhone it could not speak to.
+The Android manager publishes and browses the same record through
+`NsdManager` on the Wi-Fi network it is on (scoped to that network from
+Android 13; below it NSD browses every interface), with the same instance
+name (a digest of the address), and binds its dials to that network, since a socket
+left to the default network goes out over cellular on a Wi-Fi network with
+no internet ([ADR 0028](../adr/0028-android-peer-streams-join-the-lan.md)).
 
 The `addr` entry is a hint the preamble proves. It tells a browser which
 device it is about to connect to, so the derived address of the preamble can
@@ -262,7 +274,7 @@ and carries no meaning; an implementation SHOULD NOT put the address there,
 since the TXT entry already carries it and one copy is one place to get it
 wrong.
 
-On Android, Wi-Fi Direct carries the same record over Wi-Fi P2P service
+On Android, Wi-Fi Direct also carries the record over Wi-Fi P2P service
 discovery when an application lets the SDK form the group
 (`wifiDirect.autoAccept`). The record adds one entry for that use: `app`, a
 tag of the application id that keeps applications' devices apart. The `addr` entry

@@ -51,7 +51,10 @@ and an exhaustive TypeScript `switch` over `SecurityWarningCode` needs a case
 for the new member. It also breaks one thing at run time: iOS's peer-stream
 slot moves from MultipeerConnectivity to Network framework, so an iPhone on
 `v0.28` does not see one on `v0.27` or earlier over that slot
-([§26](#26-behaviour-that-changes-without-a-compile-error-v0280)).
+([§26](#26-behaviour-that-changes-without-a-compile-error-v0280)). The
+unreleased changes break no build; Android's peer-stream slot joins the Wi-Fi
+network it is on
+([§27](#27-behaviour-that-changes-without-a-compile-error-unreleased)).
 
 Otherwise, where a later section documents an
 addition or a behaviour change, it is labelled inline with the release that
@@ -2497,6 +2500,39 @@ short throttle while the user edits, and once more when editing stops.
 **Python: `InternetManager` requires `app_id`.** It is keyword-only with no
 default. `ProtocolManager` already passes it; only code that builds an
 `InternetManager` directly needs `app_id=`.
+
+---
+
+## 27. Behaviour that changes without a compile error *(unreleased)*
+
+Everything compiles unchanged. Each paragraph says what to check.
+
+**Android: the peer-stream slot joins the Wi-Fi network.** With
+`wifiDirect: { enabled: true }`, an Android phone now advertises its address
+on the Wi-Fi network it is on and opens streams to iPhones, Python hosts and
+other Android phones it finds there, as an iPhone already did. Every device on
+that network can see the address, the same exposure as a Bluetooth LE
+advertisement. There is no switch for the LAN alone: turn `wifiDirect` off if
+you do not want either. The module adds `ACCESS_NETWORK_STATE` and
+`CHANGE_WIFI_MULTICAST_STATE`, install-time permissions with no prompt; the
+second lets Android 12 and lower hold the multicast lock mDNS needs there.
+When you move your app to target Android 17 (API 37), it must declare `ACCESS_LOCAL_NETWORK` and request it before `start()`, or the LAN carrier stays off with a warning diagnostic. The SDK does not declare it, because a declaration revokes the grant apps targeting 36 and lower hold by default.
+
+**Android: the transport starts without the Wi-Fi Direct grant.** Without
+`NEARBY_WIFI_DEVICES` (or fine location on 12 and lower), `start()` used to
+leave the slot off. It now runs on the Wi-Fi network only, and Wi-Fi Direct
+stays off until `enableTransport('wifiDirect')` after the grant.
+
+**Android: of two streams for one address, the lower-opened one is kept.**
+Inside a Wi-Fi Direct group this changes one thing: a client whose address is
+higher than its group owner's reconnects past a half-open stream after
+keepalive ends it, about thirty seconds on Android 10 and later (up to two
+hours on 7 to 9, which keep the OS defaults), instead of at once. Bluetooth LE
+and the relays carry traffic meanwhile.
+
+**Android peers on an older release** neither advertise nor browse on the
+LAN, so they meet a phone on this release only inside a Wi-Fi Direct group,
+as before.
 
 ---
 

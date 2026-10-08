@@ -106,8 +106,11 @@ Add to `AndroidManifest.xml`:
 ```
 
 Wi-Fi Direct and the internet need nothing in your manifest: the SDK's own
-manifest declares `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE`, `INTERNET` and
-`NEARBY_WIFI_DEVICES`, and the build merges them into your app. It declares
+manifest declares `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE`, `INTERNET`,
+`ACCESS_NETWORK_STATE`, `CHANGE_WIFI_MULTICAST_STATE` and `NEARBY_WIFI_DEVICES`, and the build merges them
+into your app. The peer-stream slot also finds iPhones and hosts on the Wi-Fi
+network the phone is on, which needs no runtime grant unless your app
+targets Android 17 (API 37): then an app targeting Android 17 (API 37) must declare `ACCESS_LOCAL_NETWORK` and request it before `start()`, or the LAN carrier stays off with a warning diagnostic. The SDK does not declare it, because a declaration revokes the grant apps targeting 36 and lower hold by default. The SDK's manifest declares
 `NEARBY_WIFI_DEVICES` with `android:usesPermissionFlags="neverForLocation"`,
 and that flag reaches your merged manifest too: the transport derives no
 location from Wi-Fi, so on Android 13+ it needs `NEARBY_WIFI_DEVICES` alone.
@@ -519,7 +522,7 @@ interface TransportsConfig {
     reconnectDelay?: number;    // ms
   };
   wifiDirect?: {
-    enabled: boolean;           // default: false (Android only)
+    enabled: boolean;           // default: false. Android: Wi-Fi Direct and the Wi-Fi network; iOS: the LAN and AWDL
     deviceName?: string;
     autoAccept?: boolean;       // Android 10+: form the group without the system settings
     groupOwnerIntent?: number;  // deprecated, not used

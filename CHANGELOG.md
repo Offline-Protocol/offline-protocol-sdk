@@ -13,7 +13,38 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ## [Unreleased]
 
+> **Android and iOS meet on a shared Wi-Fi network.** The Android
+> peer-stream slot now finds iPhones and Python hosts on the Wi-Fi network
+> it is on, and they find it, with no Wi-Fi Direct group.
+> [§27](docs/UPGRADING.md#27-behaviour-that-changes-without-a-compile-error-unreleased)
+> lists what changes without a compile error.
+
 ### Added
+
+- **Android peer streams on the Wi-Fi network.** With
+  `wifiDirect: { enabled: true }`, the Android manager advertises and browses
+  DNS-SD `_offlineprotocol._tcp` through `NsdManager` on the Wi-Fi network it
+  is on, with the record iOS and Python publish (`txtvers=1`, `addr`, the same
+  instance name), and dials what it finds on iOS's policy: the lower address
+  at once, the higher after five seconds, a redial ladder up to a minute, and
+  a record whose dial is answered by another address left out. Dials are bound
+  to the Wi-Fi network (a socket left to the default network goes out over
+  cellular on a Wi-Fi with no internet) and carry the record's `addr` as the
+  address the preamble must prove. A Wi-Fi network with no internet counts.
+  The slot stays up while either the group or the network is, and Wi-Fi P2P
+  going off, or leaving the group, ends only the group's streams. It needs
+  `ACCESS_NETWORK_STATE` and `CHANGE_WIFI_MULTICAST_STATE` (a multicast lock
+  while advertising or browsing on Android 12 and lower, where mDNS needs one), which the
+  module declares, and no runtime grant until the app targets Android 17
+  (API 37), so it also runs on a phone that has not granted
+  `NEARBY_WIFI_DEVICES`. From API 37 the app must declare
+  `ACCESS_LOCAL_NETWORK` and request it before `start()`, or the LAN carrier
+  stays off with a warning diagnostic; the SDK does not declare it, because a
+  declaration revokes the grant apps targeting 36 and lower hold by default. A network
+  that blocks multicast or isolates clients (many guest and office networks)
+  finds nothing, and Android to iOS with no shared network still goes over
+  Bluetooth LE or the relays
+  ([ADR 0028](docs/adr/0028-android-peer-streams-join-the-lan.md)).
 
 - **The service starts every transport its configuration enables.**
   `offline-protocol-service` started only the peer stream and the gateway
@@ -134,6 +165,31 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   direct carriers only and never handed to the mesh (#541).
 
 ### Changed
+
+- **Android keeps the stream the lower address opened.** Of two streams for
+  one address, Android kept the newer; iOS and Python keep the one the lower
+  address opened, and the newer of two such. On a shared network both ends
+  dial, and two different rules keep opposite streams and reconnect forever.
+  Android now computes the same rule, comparing addresses by their UTF-8
+  bytes, and `every_peer_stream_manager_keeps_the_same_stream` (renamed from
+  `ios_and_python_peer_streams_keep_the_same_stream`) pins all three copies.
+  Inside a Wi-Fi Direct group a client that is the higher address can no
+  longer supersede its own half-open stream: its reconnect waits for keepalive,
+  about thirty seconds on Android 10 and later.
+- **Android peer streams use the iOS and Python keepalive** on Android 10 and
+  later: 15 seconds idle, 5 between probes, 3 probes, and 30 seconds for
+  unacknowledged data, where the OS defaults were two hours and about fifteen
+  minutes.
+- **A peer-stream redial ladder starts over only after a stream that carried
+  its peer**, on iOS and Android: a body after the preamble, or the address
+  held for thirty seconds, not the proof alone. A stream the peer refused for its own stale one proved the address
+  too, so the dialer was announced and lost every second until that stream
+  died, and a Wi-Fi Direct client whose owner was held by a LAN stream
+  redialed it every second. Such a client now waits for that stream to end.
+- **Android's peer-stream listener bounds inbound streams.** It binds every
+  interface, so any device on a shared network could take all sixteen slots.
+  At most twelve are inbound now, and four from one remote address, iOS's
+  bounds.
 
 - **A peer-stream or relay flag the configuration cannot honour is refused.**
   `--listen` and `--peer` without `wifi_direct_enabled` were ignored, which

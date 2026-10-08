@@ -139,8 +139,13 @@ Python host all speak plain TCP, which the
 part of the trust argument. A device on the path is A1 for those frames. It
 reads what an envelope leaves in clear, such as the application id
 ([R17](#r17-the-application-id-on-every-frame-is-cleartext-and-unsigned)),
-and never a payload. The iOS manager's hop was encrypted while it used
-MultipeerConnectivity
+and never a payload. On a shared Wi-Fi network the path is every device on
+it, for Android since it joined the LAN
+([ADR 0028](../adr/0028-android-peer-streams-join-the-lan.md)) as for iOS and
+hosts before; a listener open to that network takes at most twelve inbound
+streams of its sixteen, and four from one remote address, so strangers'
+sockets cannot stop it dialing. The iOS manager's hop was encrypted while it
+used MultipeerConnectivity
 ([ADR 0027](../adr/0027-ios-peer-streams-ride-network-framework.md)).
 
 ### Boundary 5: end to end
@@ -724,13 +729,12 @@ the stream chapter's one-stream-per-address rule it gains one more thing: its
 close is reported as the peer's loss, which evicts the real peer's link until
 it reconnects. That is why the rule is normative rather than policy. Which
 stream the rule keeps is policy, and each choice leaves the replayer something.
-The Android manager keeps the newer stream, so a replayer chooses when a real
-stream ends: its copy supersedes the real one, the real peer reconnects past
-it, and each round costs both sides a signature check, while the core sees no
-loss because the address never stopped being held. The Python and iOS
-managers keep the stream opened by the lower address, and the newer of two
-such, so the same replay works only against a receiver whose address is
-higher than the peer it copies; a lower receiver refuses the copy. The price
+Every manager keeps the stream opened by the lower address, and the newer of
+two such. Against a receiver whose address is higher than the peer it copies,
+a replayer chooses when a real stream ends: its copy supersedes the real one,
+the real peer reconnects past it, and each round costs both sides a signature
+check, while the core sees no loss because the address never stopped being
+held. A lower receiver refuses the copy. The price
 is that a stale stream can block the higher address's reconnect until
 keepalive notices. A receiver MUST NOT read a verified
 assertion as evidence that the peer is live, recent, or the only holder of the

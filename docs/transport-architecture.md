@@ -183,7 +183,12 @@ transport.
   (or by another app) is used. Either way the group is joined when
   `WIFI_P2P_CONNECTION_CHANGED_ACTION` reports it, or at start when it
   already exists (the broadcast is not sticky since Android 10), and a client
-  reconnects to its group owner while the group lasts.
+  reconnects to its group owner while the group lasts. On the Wi-Fi network
+  the device is on, `LanPeerDiscovery` advertises and browses the same
+  `_offlineprotocol._tcp` record as iOS and hosts through `NsdManager` and
+  dials what it finds, so Android reaches both there. Of two streams for one
+  address it keeps the one the lower address opened, as they do
+  ([ADR 0028](adr/0028-android-peer-streams-join-the-lan.md)).
 - iOS: Network framework TCP streams, on the LAN or over AWDL, with
   `PeerStreamReader` cutting frames and `PeerStreamSession` for the
   per-stream rules. It advertises and browses `_offlineprotocol._tcp` with

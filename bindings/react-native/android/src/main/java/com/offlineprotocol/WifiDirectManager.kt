@@ -19,6 +19,7 @@ import androidx.core.content.ContextCompat
 import uniffi.offline_protocol.OfflineProtocol
 import uniffi.offline_protocol.verifyIdentityAssertion
 import java.io.*
+import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
@@ -47,8 +48,8 @@ import java.util.concurrent.atomic.AtomicLong
  * this manager hands each socket and each outbound body: the preamble under
  * one deadline, the frame bounds (the ceiling is inclusive, and a refused
  * length closes the socket rather than reading on; the reader this replaced
- * got both wrong), one announced stream per address with the newer
- * superseding, a per-stream writer, and the ordering that keeps a delivery
+ * got both wrong), one announced stream per address with the one the lower
+ * address opened kept, a per-stream writer, and the ordering that keeps a delivery
  * from landing after a loss report. It is framework-free and tested on real
  * loopback sockets. What stays here is the group: the listener, the one
  * outbound socket a client opens to its owner, and reconnecting that socket
@@ -271,11 +272,24 @@ class WifiDirectManager(
     // State tracking. Volatile: written on the transport thread, read by the
     // socket thread that decides whether a client reconnects.
     @Volatile private var isGroupOwner = false
-    // Whether the core was last told the stream layer is up. Wi-Fi P2P going
-    // off reports it down; coming back on has to report it up again, or the
-    // core keeps the slot down while streams prove peers over it.
+    // Whether the core was last told the stream layer is up: while either
+    // carrier is ([reportLayer]). Wi-Fi P2P going off with no LAN reports it
+    // down; coming back on has to report it up again, or the core keeps the
+    // slot down while streams prove peers over it.
     @Volatile private var layerUp = false
+    // Whether Wi-Fi P2P is on, and whether this device is on a Wi-Fi network
+    // it can find LAN peers on.
+    @Volatile private var p2pUp = false
+    @Volatile private var lanUp = false
+    // The Wi-Fi network's own addresses: a socket accepted on one of them is
+    // a LAN stream, any other a group stream.
+    @Volatile private var lanAddresses: Set<InetAddress> = emptySet()
+    // The LAN carrier, between start and stop. Transport thread only.
+    private var lan: LanPeerDiscovery? = null
     @Volatile private var groupOwnerAddress: String? = null
+    // The owner's proved address while another stream holds it and this
+    // client's own dial is parked; see [scheduleReconnect].
+    @Volatile private var heldOwnerAddress: String? = null
     // The client's next reconnect delay; see [RECONNECT_INITIAL_DELAY_MS].
     private val reconnectDelayMs = AtomicLong(RECONNECT_INITIAL_DELAY_MS)
 
@@ -355,9 +369,13 @@ class WifiDirectManager(
 
     // MARK: - TransportManager Implementation
 
-    override fun isAvailable(): Boolean {
-        return wifiP2pManager != null && hasRequiredPermissions()
-    }
+    override fun isAvailable(): Boolean = p2pAllowed() || hasWifi()
+
+    /** Wi-Fi P2P is usable. The LAN carrier needs none of its permissions. */
+    private fun p2pAllowed(): Boolean = wifiP2pManager != null && hasRequiredPermissions()
+
+    private fun hasWifi(): Boolean =
+        context.packageManager.hasSystemFeature(PackageManager.FEATURE_WIFI)
 
     @SuppressLint("MissingPermission")
     override fun start() {
@@ -371,8 +389,9 @@ class WifiDirectManager(
         }
 
         if (!isAvailable()) {
-            throw TransportException.NotAvailable("WiFi P2P is not available on this device")
+            throw TransportException.NotAvailable("Neither Wi-Fi P2P nor Wi-Fi is available on this device")
         }
+        val p2p = p2pAllowed()
 
         Log.i(TAG, "Starting WiFi Direct transport for device: $deviceId")
         emitDiagnostic("info", "Starting WiFi Direct transport", mapOf(
@@ -391,8 +410,12 @@ class WifiDirectManager(
         // callback is delivered on, and those callbacks share this manager's
         // state with the drain and the poll. Passing the main looper here was
         // what put the framework's half of this transport on the UI thread.
-        channel = wifiP2pManager?.initialize(context, confinement.looper) {
-            emitDiagnostic("warning", "WiFi P2P channel disconnected")
+        if (p2p) {
+            channel = wifiP2pManager?.initialize(context, confinement.looper) {
+                emitDiagnostic("warning", "WiFi P2P channel disconnected")
+            }
+        } else {
+            emitDiagnostic("warning", "Wi-Fi P2P unavailable or not permitted: LAN only")
         }
 
         // Register broadcast receiver. The scheduler overload delivers
@@ -408,7 +431,9 @@ class WifiDirectManager(
             addAction(WifiP2pManager.WIFI_P2P_THIS_DEVICE_CHANGED_ACTION)
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        if (!p2p) {
+            // Nothing to hear: no channel to act on what it would say.
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             context.registerReceiver(
                 p2pReceiver,
                 intentFilter,
@@ -428,12 +453,28 @@ class WifiDirectManager(
 
         updateState(TransportState.RUNNING)
 
-        // Notify protocol
-        layerUp = true
-        try {
-            protocol.wifiDirectStatusChanged(true)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error notifying protocol of start", e)
+        // Notify protocol. Wi-Fi P2P off at start arrives next as the
+        // sticky state broadcast, which reports it. With no P2P the layer
+        // comes up when the LAN does.
+        p2pUp = p2p
+        reportLayer()
+
+        lan = LanPeerDiscovery(
+            context = context,
+            handler = transportHandler,
+            executor = socketExecutor,
+            sockets = sockets,
+            port = SERVER_PORT,
+            localAddress = ::localAddressOrNull,
+            running = { state == TransportState.RUNNING },
+            networkChanged = ::lanNetworkChanged,
+            diagnostic = ::emitDiagnostic,
+        ).also { it.start() }
+        sockets.onLost = { address ->
+            transportHandler.post {
+                lan?.peerLost(address)
+                ownerStreamLost(address)
+            }
         }
 
         // Start message polling
@@ -458,6 +499,7 @@ class WifiDirectManager(
      */
     @SuppressLint("MissingPermission")
     private fun adoptExistingGroup() {
+        if (channel == null) return
         wifiP2pManager?.requestConnectionInfo(channel) { info ->
             if (info?.groupFormed == true && state == TransportState.RUNNING) {
                 emitDiagnostic("info", "Joining a group formed before start")
@@ -486,6 +528,9 @@ class WifiDirectManager(
         // Stop server socket
         stopServerSocket()
 
+        lan?.stop()
+        lan = null
+
         // Close all connections
         closeAllConnections()
         stopGroupFormation()
@@ -493,6 +538,7 @@ class WifiDirectManager(
         // dial and a later start() waits for its own CONNECTION_CHANGED.
         isGroupOwner = false
         groupOwnerAddress = null
+        heldOwnerAddress = null
         reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)
 
         // Unregister receiver
@@ -512,6 +558,9 @@ class WifiDirectManager(
         channel = null
 
         // Notify protocol
+        p2pUp = false
+        lanUp = false
+        lanAddresses = emptySet()
         layerUp = false
         try {
             protocol.wifiDirectStatusChanged(false)
@@ -531,6 +580,7 @@ class WifiDirectManager(
             isPaused = true
             transportHandler.removeCallbacks(messagePollingRunnable)
             stopPeerDiscovery()
+            lan?.pause()
         }
     }
 
@@ -538,6 +588,7 @@ class WifiDirectManager(
         confinement.runSync {
             isPaused = false
             if (state == TransportState.RUNNING) {
+                lan?.resume()
                 startPeerDiscovery()
                 // Drain what queued during the pause. Unlike the other three
                 // managers, restarting the timer is not enough here: a poll
@@ -614,6 +665,8 @@ class WifiDirectManager(
 
     @SuppressLint("MissingPermission")
     private fun startPeerDiscovery() {
+        // No channel: Wi-Fi P2P was unusable at start, and every call would throw.
+        if (channel == null) return
         if (!hasRequiredPermissions()) {
             emitDiagnostic("warning", "Missing permissions for peer discovery")
             return
@@ -633,6 +686,7 @@ class WifiDirectManager(
     }
 
     private fun stopPeerDiscovery() {
+        if (channel == null) return
         wifiP2pManager?.stopPeerDiscovery(channel, object : WifiP2pManager.ActionListener {
             override fun onSuccess() {
                 emitDiagnostic("info", "Peer discovery stopped")
@@ -673,14 +727,11 @@ class WifiDirectManager(
                 // Streams first, so each announced peer is reported lost
                 // while the core still holds its link. A stream left open
                 // across the flip would keep delivering, and every body
-                // re-adds a neighbour the flip just cleared.
-                closeAllConnections()
-                layerUp = false
-                try {
-                    protocol.wifiDirectStatusChanged(false)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error notifying protocol", e)
-                }
+                // re-adds a neighbour the flip just cleared. LAN streams do
+                // not ride P2P and stay.
+                sockets.closeCarrier(PeerStreamSockets.Carrier.P2P)
+                p2pUp = false
+                reportLayer()
             }
         } else if (enabled && state == TransportState.RUNNING) {
             // Wi-Fi P2P came back (Wi-Fi turned on, or the app started with it
@@ -690,13 +741,9 @@ class WifiDirectManager(
             // Posted for the same reason as above; the flag makes a broadcast
             // that repeats the current state a no-op.
             transportHandler.post {
-                if (state != TransportState.RUNNING || layerUp) return@post
-                layerUp = true
-                try {
-                    protocol.wifiDirectStatusChanged(true)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error notifying protocol", e)
-                }
+                if (state != TransportState.RUNNING || p2pUp) return@post
+                p2pUp = true
+                reportLayer()
                 startPeerDiscovery()
                 resumeGroupFormationAfterP2pReturned()
             }
@@ -802,6 +849,7 @@ class WifiDirectManager(
         } else {
             isGroupOwner = false
             groupOwnerAddress = null
+            heldOwnerAddress = null
             ownerClients = 0
             createdNetwork = null
             ownsFormationGroup = false
@@ -811,8 +859,9 @@ class WifiDirectManager(
             ownerIdleSinceMs = 0L
             // Posted: this is the broadcast receiver's onReceive, and ending
             // an announced stream is an FFI call. Same reasoning as the post
-            // in [handleWifiP2pStateChanged].
-            transportHandler.post { closeAllConnections() }
+            // in [handleWifiP2pStateChanged]. Leaving the group ends only the
+            // group's streams.
+            transportHandler.post { sockets.closeCarrier(PeerStreamSockets.Carrier.P2P) }
         }
     }
 
@@ -838,7 +887,7 @@ class WifiDirectManager(
 
     @SuppressLint("MissingPermission")
     private fun startGroupFormation() {
-        if (!formGroups) return
+        if (!formGroups || channel == null) return
         if (!formationSupported) {
             emitDiagnostic("info", "Wi-Fi Direct group formation needs Android 10; join a group from the system settings")
             return
@@ -961,7 +1010,7 @@ class WifiDirectManager(
         val p2p = wifiP2pManager ?: return
         // Nothing to form over while Wi-Fi P2P is off: every call would fail
         // BUSY, and a join attempted then is refused with no group to find.
-        if (!layerUp) return
+        if (!p2pUp) return
         val now = SystemClock.elapsedRealtime()
         adverts.values.removeAll { now - it.seenAtMs > ADVERT_TTL_MS }
         deadOwners.values.removeAll { now - it >= WifiDirectGroupFormation.DEAD_OWNER_TTL_MS }
@@ -1320,7 +1369,12 @@ class WifiDirectManager(
 
     private fun handleClientConnection(socket: Socket) {
         socketExecutor.execute {
-            sockets.run(socket, outbound = false) { state == TransportState.RUNNING }
+            val carrier = if (socket.localAddress in lanAddresses) {
+                PeerStreamSockets.Carrier.LAN
+            } else {
+                PeerStreamSockets.Carrier.P2P
+            }
+            sockets.run(socket, outbound = false, carrier) { state == TransportState.RUNNING }
         }
     }
 
@@ -1330,7 +1384,7 @@ class WifiDirectManager(
         // open another socket to the same owner.
         if (!outboundOpen.compareAndSet(false, true)) return
         socketExecutor.execute {
-            var proved = false
+            var ran = PeerStreamSockets.Ran(proved = null, heard = false)
             try {
                 val socket = Socket()
                 try {
@@ -1349,10 +1403,10 @@ class WifiDirectManager(
                 // No claim to compare against: the owner's IP says nothing
                 // about who it is, so the address its preamble derives is its
                 // id (stream-framing.md, "The preamble").
-                proved = sockets.run(socket, outbound = true) { state == TransportState.RUNNING } != null
+                ran = sockets.run(socket, outbound = true) { state == TransportState.RUNNING }
             } finally {
                 outboundOpen.set(false)
-                scheduleReconnect(address, proved)
+                scheduleReconnect(address, ran)
             }
         }
     }
@@ -1367,11 +1421,23 @@ class WifiDirectManager(
      * then the only dial left, so a check that the owner is still [ended]
      * would leave the client with no stream for the whole of the new group.
      */
-    private fun scheduleReconnect(ended: String, proved: Boolean) {
+    private fun scheduleReconnect(ended: String, ran: PeerStreamSockets.Ran) {
+        // Another stream (a LAN one, say) holds the owner's address: this
+        // dial was refused for it, or superseded by it. The owner is alive
+        // and reachable, so there is nothing to redial until that stream is
+        // lost ([ownerStreamLost]). Published before the check, because the
+        // loss is handled on the transport thread: a stream lost between a
+        // check and a later write found nothing to redial, and parked this
+        // client with no stream until the group changed. In this order a
+        // loss either lands before the check, which then sees nothing held
+        // and redials below, or after it, and finds the address.
+        ran.proved?.let { heldOwnerAddress = it }
+        val held = ran.proved?.let { sockets.holds(it) } == true
+        if (!held && ran.proved != null && heldOwnerAddress == ran.proved) heldOwnerAddress = null
         val unproved = unprovedAtCeiling.updateAndGet {
             GroupOwnerRedial.unprovedAtCeilingAfter(
                 count = it,
-                proved = proved,
+                proved = ran.proved != null,
                 sameOwner = groupOwnerAddress == ended,
                 currentDelayMs = reconnectDelayMs.get(),
                 maxDelayMs = RECONNECT_MAX_DELAY_MS,
@@ -1387,7 +1453,8 @@ class WifiDirectManager(
         }
         val plan = GroupOwnerRedial.next(
             ended = ended,
-            proved = proved,
+            carried = ran.carried,
+            held = held,
             running = state == TransportState.RUNNING,
             isGroupOwner = isGroupOwner,
             owner = groupOwnerAddress,
@@ -1396,7 +1463,7 @@ class WifiDirectManager(
             maxDelayMs = RECONNECT_MAX_DELAY_MS,
         )
         if (plan == null) {
-            if (proved) reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)
+            if (ran.carried) reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)
             return
         }
         reconnectDelayMs.set(plan.nextDelayMs)
@@ -1418,6 +1485,53 @@ class WifiDirectManager(
      */
     private fun closeAllConnections() {
         sockets.closeAll()
+    }
+
+    /**
+     * An announced stream to [address] ended. If it was the one that held the
+     * group owner's address when this client's own dial was refused, the
+     * client dials its owner again. Transport thread.
+     */
+    private fun ownerStreamLost(address: String) {
+        if (address != heldOwnerAddress) return
+        heldOwnerAddress = null
+        val owner = groupOwnerAddress
+        if (state == TransportState.RUNNING && !isGroupOwner && owner != null) {
+            connectToGroupOwner(owner)
+        }
+    }
+
+    /**
+     * The LAN carrier's Wi-Fi network came up ([addresses] its own) or went
+     * (null). Going ends the LAN streams before the layer is reported, so
+     * each announced peer is reported lost while the core still holds it.
+     */
+    private fun lanNetworkChanged(addresses: Set<InetAddress>?) {
+        if (state != TransportState.RUNNING) return
+        if (addresses == null) {
+            lanAddresses = emptySet()
+            sockets.closeCarrier(PeerStreamSockets.Carrier.LAN)
+            lanUp = false
+        } else {
+            lanAddresses = addresses
+            lanUp = true
+        }
+        reportLayer()
+    }
+
+    /**
+     * Tells the core the stream layer is up while either carrier is, once
+     * per edge. Runs on the transport thread: it is an FFI call.
+     */
+    private fun reportLayer() {
+        val up = p2pUp || lanUp
+        if (up == layerUp) return
+        layerUp = up
+        try {
+            protocol.wifiDirectStatusChanged(up)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error notifying protocol", e)
+        }
     }
 
     // MARK: - Message Handling (Event-Driven)
@@ -1614,9 +1728,17 @@ internal object GroupOwnerRedial {
     fun shouldLeave(unprovedAtCeiling: Int, applicationGroup: Boolean): Boolean =
         applicationGroup && unprovedAtCeiling >= LEAVE_AFTER_UNPROVED_AT_CEILING
 
+    /**
+     * The next dial toward the owner, or null for none. [carried] is
+     * whether the stream that ended carried the owner
+     * ([PeerStreamSockets.Ran.carried]), which starts the ladder over; a
+     * proof alone does not, since a stream the owner refused proves it too. [held] is whether another
+     * stream holds the owner's address now: then nothing is redialed.
+     */
     fun next(
         ended: String,
-        proved: Boolean,
+        carried: Boolean,
+        held: Boolean,
         running: Boolean,
         isGroupOwner: Boolean,
         owner: String?,
@@ -1624,8 +1746,8 @@ internal object GroupOwnerRedial {
         initialDelayMs: Long,
         maxDelayMs: Long,
     ): Plan? {
-        if (!running || isGroupOwner || owner == null) return null
-        val delay = if (proved || owner != ended) initialDelayMs else currentDelayMs
+        if (!running || isGroupOwner || owner == null || held) return null
+        val delay = if (carried || owner != ended) initialDelayMs else currentDelayMs
         return Plan(owner, delay, minOf(delay * 2, maxDelayMs))
     }
 }

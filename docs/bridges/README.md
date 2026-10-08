@@ -118,7 +118,7 @@ in the uniffi crate pins the mobile call sites, which no CI job executes.
 ## C5. Hand-mirrored constants must be pinned in every language
 
 Some constants exist in several places no single compiler sees together.
-Fourteen sets do today, and they are pinned by **two different** mechanisms, so
+Fifteen sets do today, and they are pinned by **two different** mechanisms, so
 knowing which one you are touching matters.
 
 **The relay-answer prefix exemption list** is the canonical example: the core,
@@ -286,12 +286,20 @@ the inclusive 1 MiB ceiling and the 96-byte preamble floor of
 `peer_stream_manager.py`, beside the transport crate's constants. Every
 language pins them the per-language way, as literals in a suite CI executes,
 and each suite also replays the chapter's vector file, so a drift on one side
-fails that side's tests. The iOS service type `_offlineprotocol._tcp` is the
-one piece pinned by a Rust guard instead,
+fails that side's tests. The service type `_offlineprotocol._tcp` is pinned
+by Rust guards instead: the iOS copy by
 `react_native_wifi_direct_announces_only_proved_addresses`, because the iOS
-manager that holds it is excluded from the SwiftPM harness. A drifted
+manager that holds it is excluded from the SwiftPM harness, and the Android
+copy, with the record's keys, instance name and dial claim, by
+`android_lan_peer_streams_publish_the_ios_and_python_record`. A drifted
 ceiling reads in the field as the largest messages vanishing; a drifted
-service type reads as two iPhones that never find each other.
+service type reads as two phones that never find each other.
+
+**The duplicate-stream rule** is the fifteenth: keep the stream the lower
+address opened, by UTF-8 bytes, and the newer of two such, written in
+`PeerStreamFraming.swift`, `PeerStreamFraming.kt` and `peer_stream_manager.py`
+and pinned by `every_peer_stream_manager_keeps_the_same_stream`. A drift
+reads as a pair that reconnects forever with no error on either side.
 
 ## C6. Config parsers must not default to literals
 
@@ -625,7 +633,7 @@ found by the first application to update.
 | Binding | Owes |
 |---------|------|
 | Swift | The manual Objective-C bridge kept in step with every `@objc` method; secure storage backed by Keychain; a live-instance check before emitting; the telemetry session boundary inside a background task (C12); a Network-framework peer-stream manager that announces a peer only under the address its preamble proved, one per address (S8) |
-| Kotlin | Secure storage backed by Keystore; no blocking work on the main looper; awareness that platform callbacks arrive on binder threads; the telemetry session boundary from an `Application.ActivityLifecycleCallbacks` watcher, never `onHostPause` (C12); a Wi-Fi Direct manager that announces a peer only under the address its preamble proved, one per address (K8) |
+| Kotlin | Secure storage backed by Keystore; no blocking work on the main looper; awareness that platform callbacks arrive on binder threads; the telemetry session boundary from an `Application.ActivityLifecycleCallbacks` watcher, never `onHostPause` (C12); a peer-stream manager, over a Wi-Fi Direct group and the Wi-Fi network, that announces a peer only under the address its preamble proved, one per address, by the lower-opened rule (K8) |
 | Python | Nothing platform-specific; it is the thinnest binding and therefore the best place to smoke-test an ABI change; a re-entrant lock on the generated callback handle map, installed at import, because the collector can free a core object inside a callback lookup and the core's drop then asks for that lock again (P10); the host platform for telemetry from `platform`; a BLE peripheral that serves the address and the core-built identity assertion, and a central that verifies before it announces (P8); a peer-stream manager that announces a host only under the address its preamble proved, and keeps one announced stream per address (P9); a gateway-daemon client that announces a session only once the gateway bound it to this device's address, and settles a frame only on the gateway's verdict, never on the write (P11) |
 | TypeScript | Config normalization, event typing kept in step with the core, no assumption that a native method exists in an older binary, and no telemetry lifecycle code of its own |
 
