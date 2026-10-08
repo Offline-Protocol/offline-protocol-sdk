@@ -13733,6 +13733,95 @@ mod tests {
         );
     }
 
+    /// The iOS central writes its hello: once per connection, after the
+    /// Message subscription and before the handshake reads.
+    ///
+    /// Without it a peripheral that cannot otherwise name the link (the Python
+    /// service's) attributes our writes to a connection id, and the core
+    /// refuses our key package, whose sender must be the link's identity: an
+    /// iPhone could find and verify a Python box and never start a session
+    /// through that link. `BleHelloPolicy` is unit-tested, but a policy nobody
+    /// calls passes its own tests, and `BleManager` sits behind CoreBluetooth,
+    /// so the call site is pinned here:
+    ///
+    /// 1. The UUID is the Rust constant, and Hello is discovered on every path
+    ///    that discovers the handshake characteristics.
+    /// 2. The write goes through the policy, with response, and sits below the
+    ///    announce gate (one-shot per connection) and above the first handshake
+    ///    read (so before any Message write, in CoreBluetooth's GATT order).
+    /// 3. The per-connection record is cleared wherever `announcedPeripherals`
+    ///    is, or a reconnect would never say hello again.
+    #[test]
+    fn react_native_ios_central_writes_its_hello() {
+        use offline_protocol_transport::constants::BLE_HELLO_CHAR_UUID;
+
+        let swift = rn_source_code_only("ios/BleManager.swift");
+        assert!(
+            swift.contains(&format!("CBUUID(string: \"{BLE_HELLO_CHAR_UUID}\")")),
+            "BleManager.swift must declare the Hello characteristic as {BLE_HELLO_CHAR_UUID}"
+        );
+        assert_eq!(
+            swift
+                .matches("[MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID]")
+                .count(),
+            0,
+            "every discoverCharacteristics call that discovers the handshake characteristics must \
+             also discover HELLO_CHAR_UUID: a path that omits it hands the discovery delegate no \
+             Hello characteristic, and that link never says hello"
+        );
+
+        let body_start = swift
+            .find(
+                "public func peripheral(_ peripheral: CBPeripheral, \
+                 didDiscoverCharacteristicsFor service: CBService, error: Error?) {",
+            )
+            .expect("BleManager.swift must implement didDiscoverCharacteristicsFor");
+        let body_end = swift
+            .find(
+                "public func peripheral(_ peripheral: CBPeripheral, \
+                 didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {",
+            )
+            .expect("BleManager.swift must implement didUpdateValueFor");
+        let body = &swift[body_start..body_end];
+
+        let gate = body
+            .find("guard !announcedPeripherals.contains(peripheral.identifier) else { return }")
+            .expect("the discovery delegate must keep its announce gate");
+        let policy = body.find("BleHelloPolicy.helloToWrite(").expect(
+            "the hello must be decided by BleHelloPolicy.helloToWrite in the discovery delegate",
+        );
+        let write = body
+            .find("peripheral.writeValue(hello, for: helloCharacteristic, type: .withResponse)")
+            .expect("the hello must be written with response in the discovery delegate");
+        let first_read = body
+            .find("peripheral.readValue(for: characteristic)")
+            .expect("the discovery delegate must issue the handshake reads");
+        assert!(
+            gate < policy && policy < write && write < first_read,
+            "the hello must sit below the announce gate (one per connection) and above the first \
+             handshake read (so it precedes every Message write in CoreBluetooth's GATT order)"
+        );
+        assert!(
+            body.contains("alreadyWritten: helloWritten.contains(peripheral.identifier)")
+                && body.contains("helloWritten.insert(peripheral.identifier)"),
+            "the hello must be recorded per connection, or a discovery replay writes it again"
+        );
+        assert_eq!(
+            swift.matches("helloWritten.removeAll()").count(),
+            swift.matches("announcedPeripherals.removeAll()").count(),
+            "helloWritten must be cleared wherever announcedPeripherals is cleared"
+        );
+        assert_eq!(
+            swift
+                .matches("helloWritten.remove(peripheral.identifier)")
+                .count(),
+            swift
+                .matches("announcedPeripherals.remove(peripheral.identifier)")
+                .count(),
+            "helloWritten must be cleared wherever announcedPeripherals is cleared for one link"
+        );
+    }
+
     /// A phone running several SDK apps presents one instance of the service
     /// per app behind one BLE link, and each central binds exactly one of them.
     ///

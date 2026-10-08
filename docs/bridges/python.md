@@ -453,6 +453,8 @@ The pieces, each of which the failure needs only one of to come back:
   binding: it proves nothing.
 - **The central writes its hello** after its Message subscription and before
   its first write, when the peer serves Hello and the assertion fits one write.
+  So do the Android and iOS centrals, which is what lets a phone start a
+  session with this peripheral at all.
 - **One client link per peer.** A second link that verifies as a peer already
   held is closed unannounced, on Android and in `BleManager`. Kept, two such
   peers fill Android's four connection slots, and the cap then refuses every

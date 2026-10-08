@@ -257,9 +257,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   The Python peripheral now names the central behind each write on macOS too,
   serves the optional Hello characteristic, binds a central to the address its
   hello proves and hands the core that central's fragments under that address.
-  The Python central writes its hello to a peer that serves one. A link bound
-  by a hello is never rebound, and a message's `sender` field never replaces
-  the binding. Two Macs and a Galaxy M36 (Android 16) were run.
+  The Python central writes its hello to a peer that serves one, and so does
+  the iOS central now, once per connection, after its Message subscription and
+  before its handshake reads (`BleHelloPolicy`). Without it an iPhone could
+  verify a Python box and never start a session through the link it opened. A
+  link bound by a hello is never rebound, and a message's `sender` field never
+  replaces the binding. Two Macs and a Galaxy M36 (Android 16) were run; no
+  iPhone was.
 - **Android and the Python central keep one client link per peer.** A second
   link that verifies as a peer already held (a peripheral advertising under an
   old and a new address) is closed unannounced, and Android leaves that address
