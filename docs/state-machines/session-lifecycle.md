@@ -82,7 +82,9 @@ Four bounds keep it cheap and correct:
 
 Only a peer already pushed to qualifies. The first push stays discovery's,
 and a first push that failed to send is still not recorded, so the next
-discovery makes it.
+discovery makes it. The one exception is a peer only the mesh reaches, which
+discovery never names: the tick makes its first push (see
+[A peer only the mesh reaches is pushed to from the tick](#a-peer-only-the-mesh-reaches-is-pushed-to-from-the-tick)).
 
 **A lost reset push is not healed by this rule.** The repeat push always
 carries `session_reset = false`, so a receiver only refreshes its stored copy

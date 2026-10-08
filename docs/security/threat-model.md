@@ -365,7 +365,9 @@ of closing them is paid on every peer forever; the harm is a stale restatement
 inside a bounded window.
 
 **What stands in front of it:** the receive deduplicator refuses an exact repeat
-for an hour, so a replay must wait out that window to land at all.
+for the redelivery window (seven days by default, while the id is among the
+5000 most recent it tracks), so a replay must wait out that window to land at
+all.
 
 **Two exposures that are not in the window at all.** A peer that has never
 presented a freshness-bound signature is where it always was, since holding it
@@ -1019,8 +1021,9 @@ first, so a package buys one Welcome, not a second group. A later package from
 the same mesh-only address re-arms that Welcome only while it has stalled or
 expired, so a replayed package buys at most one more Welcome per stall, from
 the same budget share; the receive deduplicator absorbs a replay of the same
-frame for an hour. A device that
-declines to carry (`allowRelay` off) carries none of this for others. The
+frame for the redelivery window (seven days by default, while the id is among
+the 5000 most recent it tracks). A device that declines to carry
+(`allowRelay` off) carries none of this for others. The
 same flood from a direct neighbour or over the relay was possible before and
 is unchanged.
 

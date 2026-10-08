@@ -1432,7 +1432,8 @@ impl OfflineProtocol {
     /// lifecycle and the confirmation probes, which own that half.
     ///
     /// Only a peer already pushed to qualifies; the first push belongs to
-    /// discovery. The stamp is taken before the send, so a send that fails
+    /// discovery, except for a peer only the mesh reaches, which discovery
+    /// never names (see [`Self::push_key_package_across_mesh`]). The stamp is taken before the send, so a send that fails
     /// still waits out the interval instead of being retried on every tick.
     /// A send that fails does not count as a repeat, though: the backoff is
     /// for a peer that was asked and did not answer, and a peer whose frame
