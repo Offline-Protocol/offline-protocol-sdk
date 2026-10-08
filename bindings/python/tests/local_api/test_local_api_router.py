@@ -219,6 +219,28 @@ async def test_a_terminal_event_forgets_its_identifier_after_routing_it(router):
     assert [e["type"] for e in drain(other)] == ["message_failed"]
 
 
+async def test_an_undeliverable_message_stays_correlated_until_it_settles(router):
+    # The engine parks a message the relay could not deliver and keeps it:
+    # `message_undeliverable` repeats on each reachability probe and
+    # `message_delivered` settles it. Every one of them is the sender's alone.
+    notes = attached(router, "notes")
+    other = attached(router, "other")
+    router.note_ids("notes", ["m1"])
+    undeliverable = {
+        "type": "message_undeliverable",
+        "message_id": "m1",
+        "recipient": "r",
+        "reason": "recipient_unreachable",
+    }
+    router.route(undeliverable)
+    router.route(dict(undeliverable))
+    assert router.knows("m1")
+    router.route({"type": "message_delivered", "message_id": "m1", "latency_ms": 5, "hop_count": 0, "transport": "ble"})
+    assert [e["type"] for e in drain(notes)] == ["message_undeliverable", "message_undeliverable", "message_delivered"]
+    assert drain(other) == []
+    assert not router.knows("m1")
+
+
 async def test_a_loop_event_naming_the_calls_own_id_waits_for_the_id_and_reaches_only_the_caller(router):
     notes = attached(router, "notes")
     other = attached(router, "other")

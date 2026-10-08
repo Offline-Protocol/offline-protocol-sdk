@@ -38,10 +38,13 @@ CORRELATION_KEYS: tuple[str, ...] = ("message_id", "file_id", "query_id", "reque
 ISSUED_CAPACITY = 65536
 
 #: The last event that names an identifier, after which it is forgotten.
+#: ``message_undeliverable`` is not one: the engine parks the message, may
+#: repeat the event on every reachability probe, and settles it later with
+#: ``message_delivered`` or ``message_failed``. Forgetting the id on it
+#: broadcast the delivery receipt of a parked message to every client.
 TERMINAL_TAGS: dict[str, str] = {
     "message_delivered": "message_id",
     "message_failed": "message_id",
-    "message_undeliverable": "message_id",
     "connection_request_undeliverable": "message_id",
     "media_sent": "file_id",
     "media_send_failed": "file_id",

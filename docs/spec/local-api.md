@@ -576,6 +576,17 @@ server's; they never change an event and they never reach the mesh.
    client and not its neighbours, and a `message_delivered` for a message the
    relay re-sent after a restart reaches everyone.
 
+   The server forgets an identifier on the event that settles it, and only
+   then: `message_delivered` or `message_failed` for a message id,
+   `connection_request_undeliverable` for a connection request,
+   `media_sent` or `media_send_failed` for a file id, and
+   `service_response_received` for a request id. `message_undeliverable`
+   settles nothing: the engine keeps the message, may repeat the event on
+   every reachability probe, and later delivers it or gives up. A message a
+   client sent to a recipient that is away therefore reports
+   `message_undeliverable` to that client, as often as the engine says so,
+   and its `message_delivered` reaches that client too.
+
    The engine emits synchronously, on the thread that is inside its call, so
    some events fire before the call that caused them has returned:
    `message_sent` is emitted inside the send when a transport takes the

@@ -196,7 +196,10 @@ definition gives them. `send_message` returns the message id; the
 `message_sent` and `message_delivered` events that name it come back to the
 connection that sent it and to no other, while the server that issued the
 id is running. A message the engine gives up on is reported the same way,
-as `message_undeliverable`, so a client watches for both.
+as `message_failed`, so a client watches for both. A recipient that is
+away is reported as `message_undeliverable`, which is a status and not an
+outcome: the engine keeps the message, may say so again, and delivers it
+when the recipient is back, so a client keeps waiting past it.
 
 ```json
 {"jsonrpc":"2.0","id":2,"method":"send_message","params":{"recipient":"off1…","content":"hi","priority":"Medium"}}

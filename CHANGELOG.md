@@ -93,6 +93,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   "no token", and each transport has 30 seconds to start before it counts
   as failed and is stopped.
 
+### Fixed
+
+- **The local API keeps a parked message's events with the client that
+  sent it.** The service forgot a message id on `message_undeliverable`,
+  which the engine emits when a recipient is away and repeats on every
+  reachability probe while it keeps the message. Every later event for that
+  message, its delivery receipt included, was broadcast to every connected
+  application. The id is now kept until `message_delivered` or
+  `message_failed`. Both example clients (`examples/local_api_client.py`
+  and `examples/local-api/client.mjs`) print a `message_undeliverable` as a
+  status line and keep waiting for the delivery, where they used to stop at
+  it; each takes `--deliver-timeout SECONDS` (30 by default).
+
 ## [0.28.0] — 2026-10-06
 
 > **The peer-stream slot carries traffic on phones.** The mobile managers
