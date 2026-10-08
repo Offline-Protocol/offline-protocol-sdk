@@ -967,7 +967,11 @@ the chapter), the sender a provider is told is the MLS-authenticated one,
 off loopback the token is required, and a request from a browser page
 (one carrying `Origin`, or reaching a tokenless front under a name other
 than loopback or the domain) is refused, so a web page the user opens is not
-a local process. **What application teams must do:**
+a local process. A peer cannot steer a callback outside the path its
+provider registered (dot segments are refused), cannot choose the source
+address a proxy in front of the callback reports (the forwarding headers are
+dropped), and cannot hold more than 32 callback connections at once.
+**What application teams must do:**
 run the front where only the operator's applications can reach it, and
 authorize in the provider by reading `X-Offline-Protocol-Sender`. A host
 that can identify the calling container should pass that identity to the

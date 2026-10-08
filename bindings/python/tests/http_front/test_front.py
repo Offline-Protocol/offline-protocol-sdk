@@ -16,6 +16,7 @@ aiohttp = pytest.importorskip("aiohttp")
 from aiohttp import web  # noqa: E402
 
 from offline_protocol_sdk.http_front import FRONT_APP_ID, Aliases, HttpFront  # noqa: E402
+from offline_protocol_sdk.http_front.envelope import Request  # noqa: E402
 from offline_protocol_sdk.offline_protocol import derive_address  # noqa: E402
 from offline_protocol_sdk.protocol_manager import ProtocolManager  # noqa: E402
 
@@ -294,7 +295,14 @@ async def test_unregistering_makes_the_service_unknown(hosts):
 
 @pytest.mark.parametrize(
     "doc",
-    [{"callback": "ftp://x"}, {"callback": 3}, {"callback": "http://x", "extra": 1}, {"callback": "http://x", "capabilities": {"a": 1}}],
+    [
+        {"callback": "ftp://x"},
+        {"callback": 3},
+        {"callback": "http://x", "extra": 1},
+        {"callback": "http://x", "capabilities": {"a": 1}},
+        {"callback": "http://x/api?k=v"},
+        {"callback": "http://x/api#f"},
+    ],
 )
 async def test_a_malformed_registration_is_refused(hosts, doc):
     async with hosts.http.put(f"http://127.0.0.1:{hosts.b.port}/services/timeofday", json=doc) as reply:
@@ -412,6 +420,56 @@ async def test_an_absolute_form_target_is_a_bad_request(hosts):
     writer.close()
     assert reply.startswith(b"HTTP/1.1 400"), reply[:200]
     assert b"bad_request" in reply
+
+
+async def raw_request(port: int, target: str, host: str) -> bytes:
+    """A request line written by hand: an HTTP client normalizes the target."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(f"GET {target} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode())
+    await writer.drain()
+    reply = await asyncio.wait_for(reader.read(), 10)
+    writer.close()
+    return reply
+
+
+@pytest.mark.parametrize("target", ["/api/../now", "/api/%2e%2e/now", "/./now"])
+async def test_a_dot_segment_never_leaves(hosts, target):
+    """Joined to the callback URL, the client would normalize it to a path
+    outside the one the provider registered."""
+    await hosts.register(hosts.b)
+    reply = await raw_request(hosts.a.port, target, host_for("timeofday", "bob"))
+    assert reply.startswith(b"HTTP/1.1 400"), reply[:200]
+    assert b"bad_request" in reply
+    assert hosts.provider.calls == []
+
+
+@pytest.mark.parametrize(
+    "method, headers",
+    [("GET /x HTTP/1.1\r\nX: y", {}), ("GET", {"x-a": "v\r\nInjected: 1"}), ("GET", {"x-a": "v\x00"})],
+)
+async def test_a_request_the_http_library_refuses_is_still_answered(hosts, method, headers):
+    """aiohttp refuses these with a ValueError, not a ClientError; the
+    provider answers rather than lose the task and leave the requester
+    waiting out its deadline."""
+    await hosts.register(hosts.b)
+    envelope = Request("r1", "timeofday", method, "/now", headers, b"", int(time.time()) + 30)
+    response = await hosts.b._serve(envelope, hosts.manager_a.local_address)
+    assert (response.status, response.error) == (502, "callback_failed")
+    assert hosts.provider.calls == []
+
+
+async def test_a_request_past_the_callback_limit_is_refused_at_once(hosts):
+    await hosts.register(hosts.b)
+    hosts.b._callback_slots = asyncio.Semaphore(1)
+    await hosts.b._callback_slots.acquire()
+    started = time.monotonic()
+    status, headers, _ = await hosts.request(hosts.a, host_for("timeofday", hosts.manager_b.local_address))
+    assert (status, headers["X-Offline-Protocol-Error"]) == (502, "callback_failed")
+    assert time.monotonic() - started < 10
+    assert hosts.provider.calls == []
+    hosts.b._callback_slots.release()
+    status, _, _ = await hosts.request(hosts.a, host_for("timeofday", hosts.manager_b.local_address))
+    assert status == 201
 
 
 async def test_stopping_does_not_wait_for_a_request_in_flight(hosts):

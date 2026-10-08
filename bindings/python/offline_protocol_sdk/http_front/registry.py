@@ -39,6 +39,10 @@ class Registration:
         parts = urlsplit(callback)
         if parts.scheme not in ("http", "https") or not parts.netloc:
             raise ValueError("callback must be an http or https URL")
+        if parts.query or parts.fragment or "?" in callback or "#" in callback:
+            # The request's path is appended to the callback as a string,
+            # which would land it inside the query or the fragment.
+            raise ValueError("callback must have no query or fragment")
         version = doc.get("version", "")
         if not isinstance(version, str):
             raise ValueError("version must be a string")

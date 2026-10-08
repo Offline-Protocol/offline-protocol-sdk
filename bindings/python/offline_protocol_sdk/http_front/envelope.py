@@ -15,8 +15,10 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
+from urllib.parse import unquote
 
 #: The application id every front declares and stamps on what it sends.
 FRONT_APP_ID = "offline-protocol-http-front"
@@ -36,6 +38,10 @@ MAX_DEADLINE_SECONDS = 300
 CLOCK_SLACK_SECONDS = 60
 #: The least time a provider gives a callback, whatever the deadline says.
 MIN_CALLBACK_SECONDS = 5
+#: Callbacks a provider runs at once. Any device with a session can send
+#: requests, and each holds a connection to the callback for up to the
+#: maximum deadline; past this a request is refused at once, not queued.
+MAX_CONCURRENT_CALLBACKS = 32
 
 #: Headers that cross, in either direction, besides ``x-*`` (below).
 CARRIED_HEADERS = frozenset(
@@ -55,6 +61,13 @@ CARRIED_HEADERS = frozenset(
 )
 #: The front's own headers; never carried from one host to the other.
 OWN_HEADER_PREFIX = "x-offline-protocol-"
+#: ``x-*`` names a reverse proxy in front of a callback reads as the client's
+#: address or the original target. The front calls the callback from
+#: loopback, which such proxies trust most, so a requester that could set
+#: these would choose the source a callback sees, or a path outside the
+#: registered one.
+FORWARDING_HEADER_PREFIX = "x-forwarded-"
+FORWARDING_HEADERS = frozenset({"x-real-ip", "x-original-url", "x-rewrite-url"})
 
 #: Error token -> HTTP status.
 ERRORS: dict[str, int] = {
@@ -89,7 +102,7 @@ def carried(headers: Mapping[str, str] | Any) -> dict[str, str]:
     items = headers.items() if hasattr(headers, "items") else headers
     for name, value in items:
         lower = name.lower()
-        if lower.startswith(OWN_HEADER_PREFIX):
+        if lower.startswith((OWN_HEADER_PREFIX, FORWARDING_HEADER_PREFIX)) or lower in FORWARDING_HEADERS:
             continue
         if lower in CARRIED_HEADERS or lower.startswith("x-"):
             out[lower] = f"{out[lower]}, {value}" if lower in out else str(value)
@@ -98,6 +111,22 @@ def carried(headers: Mapping[str, str] | Any) -> dict[str, str]:
 
 def header_bytes(headers: Mapping[str, str]) -> int:
     return sum(len(k.encode()) + len(v.encode()) for k, v in headers.items())
+
+
+#: An HTTP token (RFC 9110 section 5.6.2): a method or a header name.
+TOKEN = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+#: A control character other than horizontal tab: CR and LF split a header,
+#: and NUL ends one in some parsers.
+_CONTROL = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
+
+
+def has_dot_segment(path: str) -> bool:
+    """Whether the path part holds a ``.`` or ``..`` segment, raw or
+    percent-encoded. The HTTP client normalizes both away before it writes
+    the request, so ``/api/../admin`` and ``/api/%2e%2e/admin`` both reach
+    ``/admin``: joined to a callback URL, such a path escapes the path the
+    provider registered."""
+    return any(unquote(segment) in (".", "..") for segment in path.split("?", 1)[0].split("/"))
 
 
 @dataclass(frozen=True)
@@ -161,6 +190,12 @@ def _headers(doc: Mapping[str, Any]) -> dict[str, str]:
     raw = doc.get("h", {})
     if not isinstance(raw, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in raw.items()):
         raise EnvelopeError("h must be an object of strings")
+    # The HTTP library refuses both at write time with a ValueError, on the
+    # provider as the callback is called and on the requester as the answer
+    # is written, where it drops the client's connection.
+    for name, value in raw.items():
+        if not TOKEN.fullmatch(name) or _CONTROL.search(value):
+            raise EnvelopeError("h holds a name that is not a token or a value with a control character")
     headers = carried(raw)
     if header_bytes(headers) > MAX_HEADER_BYTES:
         raise EnvelopeError("headers over the limit")
@@ -201,13 +236,18 @@ def decode(content: str) -> Request | Response:
         path = _str(doc, "p")
         if not path.startswith("/") or len(path.encode()) > MAX_PATH_BYTES:
             raise EnvelopeError("p must be a path within the limit")
+        if has_dot_segment(path) or _CONTROL.search(path):
+            raise EnvelopeError("p must hold no dot segment and no control character")
+        method = _str(doc, "m")
+        if not TOKEN.fullmatch(method):
+            raise EnvelopeError("m must be an HTTP token")
         deadline = doc.get("dl")
         if not isinstance(deadline, int) or isinstance(deadline, bool):
             raise EnvelopeError("dl must be an integer")
         return Request(
             request_id,
             _str(doc, "svc"),
-            _str(doc, "m").upper(),
+            method.upper(),
             path,
             _headers(doc),
             _body(doc),
@@ -217,8 +257,10 @@ def decode(content: str) -> Request | Response:
         if version != ENVELOPE_VERSION:
             raise EnvelopeError(f"unsupported version {version}")
         status = doc.get("s")
-        if not isinstance(status, int) or isinstance(status, bool) or not 100 <= status <= 599:
-            raise EnvelopeError("s must be an HTTP status")
+        # A final status only: an interim 1xx written as the answer would
+        # leave the client waiting for the real one.
+        if not isinstance(status, int) or isinstance(status, bool) or not 200 <= status <= 599:
+            raise EnvelopeError("s must be a final HTTP status")
         error = doc.get("e")
         if error is not None and not isinstance(error, str):
             raise EnvelopeError("e must be a string")

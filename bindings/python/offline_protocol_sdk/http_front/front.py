@@ -43,6 +43,7 @@ from .envelope import (
     ERRORS,
     FRONT_APP_ID,
     MAX_BODY_BYTES,
+    MAX_CONCURRENT_CALLBACKS,
     MAX_DEADLINE_SECONDS,
     MAX_HEADER_BYTES,
     MAX_PATH_BYTES,
@@ -52,6 +53,7 @@ from .envelope import (
     Response,
     carried,
     decode,
+    has_dot_segment,
     header_bytes,
 )
 from .hostname import DEFAULT_DOMAIN, Aliases, HostError, bare_host, is_label, parse_host
@@ -197,6 +199,8 @@ class HttpFront:
         self._early: collections.OrderedDict[str, str] = collections.OrderedDict()
         self._browses: dict[str, _Browse] = {}
         self._tasks: set[asyncio.Task[Any]] = set()
+        self._callback_slots = asyncio.Semaphore(MAX_CONCURRENT_CALLBACKS)
+        self._closing = False
         self._runner: Any = None
         self._session: Any = None
         self._aiohttp: Any = None
@@ -344,6 +348,10 @@ class HttpFront:
             # front refuses a path without the slash and would leave this
             # request waiting out its deadline.
             return self._error("bad_request", "the target must be a path")
+        if has_dot_segment(path):
+            # The far front refuses it: joined to the callback URL, a dot
+            # segment would reach a path outside the registered one.
+            return self._error("bad_request", "the path must hold no . or .. segment")
         if len(path.encode()) > MAX_PATH_BYTES:
             return self._error("bad_request", "path over the limit")
         headers = carried(request.headers)
@@ -615,6 +623,16 @@ class HttpFront:
         session = self._session
         if self._closing or session is None:
             return Response.failure(envelope.id, "not_connected")
+        if self._callback_slots.locked():
+            # Refused, not queued: a queue would hold every later request,
+            # from every device, behind whoever filled it.
+            logger.warning(
+                "refused request %s from %s: %d callbacks already running",
+                envelope.id,
+                sender,
+                MAX_CONCURRENT_CALLBACKS,
+            )
+            return Response.failure(envelope.id, "callback_failed")
         timeout = min(max(remaining, MIN_CALLBACK_SECONDS), MAX_DEADLINE_SECONDS)
         headers = dict(envelope.headers)
         headers[SENDER_HEADER] = sender
@@ -622,25 +640,34 @@ class HttpFront:
         headers[SERVICE_HEADER] = envelope.service
         url = registration.callback.rstrip("/") + envelope.path
         aiohttp = self._aiohttp
-        try:
-            async with session.request(
-                envelope.method,
-                url,
-                headers=headers,
-                data=envelope.body or None,
-                timeout=aiohttp.ClientTimeout(total=timeout),
-                allow_redirects=False,
-            ) as reply:
-                body = await _read_limited(reply.content, MAX_BODY_BYTES)
-                if body is None:
-                    return Response.failure(envelope.id, "response_too_large")
-                reply_headers = carried(reply.headers)
-                if header_bytes(reply_headers) > MAX_HEADER_BYTES:
-                    return Response.failure(envelope.id, "response_too_large")
-                return Response(envelope.id, reply.status, reply_headers, body)
-        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
-            logger.warning("callback for %s failed: %s", envelope.service, exc)
-            return Response.failure(envelope.id, "callback_failed")
+        async with self._callback_slots:
+            try:
+                async with session.request(
+                    envelope.method,
+                    url,
+                    headers=headers,
+                    data=envelope.body or None,
+                    timeout=aiohttp.ClientTimeout(total=timeout),
+                    allow_redirects=False,
+                ) as reply:
+                    if reply.status < 200:
+                        return Response.failure(envelope.id, "callback_failed")
+                    body = await _read_limited(reply.content, MAX_BODY_BYTES)
+                    if body is None:
+                        return Response.failure(envelope.id, "response_too_large")
+                    reply_headers = carried(reply.headers)
+                    if header_bytes(reply_headers) > MAX_HEADER_BYTES:
+                        return Response.failure(envelope.id, "response_too_large")
+                    return Response(envelope.id, reply.status, reply_headers, body)
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+                logger.warning("callback for %s failed: %s", envelope.service, exc)
+                return Response.failure(envelope.id, "callback_failed")
+            except Exception:
+                # The HTTP library refuses some input with a ValueError rather
+                # than a ClientError. Whatever the envelope held, the request
+                # is answered and the task does not die with it.
+                logger.exception("callback for %s refused the request", envelope.service)
+                return Response.failure(envelope.id, "callback_failed")
 
 
 def _package_version() -> str:

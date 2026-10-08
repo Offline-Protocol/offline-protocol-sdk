@@ -26,6 +26,7 @@ def test_the_limits_are_the_chapters():
     assert envelope.MAX_DEADLINE_SECONDS == 300
     assert envelope.CLOCK_SLACK_SECONDS == 60
     assert envelope.MIN_CALLBACK_SECONDS == 5
+    assert envelope.MAX_CONCURRENT_CALLBACKS == 32
 
 
 def test_the_carried_headers_are_the_chapters():
@@ -43,6 +44,8 @@ def test_the_carried_headers_are_the_chapters():
         "location",
     }
     assert envelope.OWN_HEADER_PREFIX == "x-offline-protocol-"
+    assert envelope.FORWARDING_HEADER_PREFIX == "x-forwarded-"
+    assert envelope.FORWARDING_HEADERS == {"x-real-ip", "x-original-url", "x-rewrite-url"}
 
 
 def test_the_error_tokens_are_the_chapters():
@@ -89,9 +92,37 @@ def test_only_listed_and_x_headers_cross():
             ("X-Trace", "2"),
             ("X-Offline-Protocol-Token", "t"),
             ("Authorization", "Bearer x"),
+            ("X-Forwarded-For", "10.0.0.1"),
+            ("X-Forwarded-Host", "admin.internal"),
+            ("X-Real-IP", "10.0.0.1"),
+            ("X-Original-URL", "/admin"),
+            ("X-Rewrite-URL", "/admin"),
         ]
     )
     assert headers == {"content-type": "text/plain", "x-trace": "1, 2", "authorization": "Bearer x"}
+
+
+@pytest.mark.parametrize(
+    "path, dotted",
+    [
+        ("/api/../admin", True),
+        ("/api/%2e%2e/admin", True),
+        ("/api/%2E%2e/admin", True),
+        ("/./x", True),
+        ("/api/%2e/x", True),
+        ("/api/..", True),
+        ("/a..b/..c/c..", False),
+        ("/x?next=/../admin", False),
+        ("/", False),
+    ],
+)
+def test_a_dot_segment_is_found_raw_or_encoded(path, dotted):
+    assert envelope.has_dot_segment(path) is dotted
+
+
+def test_a_tab_in_a_header_value_is_allowed():
+    doc = {"op": "req", "v": 1, "id": "x", "svc": "s", "m": "GET", "p": "/", "dl": 1, "h": {"x-a": "a\tb"}}
+    assert decode(json.dumps(doc)).headers == {"x-a": "a\tb"}
 
 
 def test_a_request_and_a_response_round_trip():
@@ -124,11 +155,23 @@ def test_a_request_with_another_version_comes_back_for_refusal():
             "b": base64.b64encode(b"x" * 131073).decode(),
         },
         {"op": "resp", "v": 1, "id": "x", "s": 99},
+        {"op": "resp", "v": 1, "id": "x", "s": 101},
+        {"op": "req", "v": 1, "id": "x", "svc": "s", "m": "GET", "p": "/api/../admin", "dl": 1},
+        {"op": "req", "v": 1, "id": "x", "svc": "s", "m": "GET", "p": "/api/%2e%2e/admin", "dl": 1},
+        {"op": "req", "v": 1, "id": "x", "svc": "s", "m": "GET", "p": "/a\r\nb", "dl": 1},
+        {"op": "req", "v": 1, "id": "x", "svc": "s", "m": "GET /x HTTP/1.1\r\nX: y", "p": "/", "dl": 1},
+        {"op": "req", "v": 1, "id": "x", "svc": "s", "m": "", "p": "/", "dl": 1},
+        {"op": "req", "v": 1, "id": "x", "svc": "s", "m": "GET", "p": "/", "dl": 1, "h": {"x-a": "v\r\nInjected: 1"}},
+        {"op": "req", "v": 1, "id": "x", "svc": "s", "m": "GET", "p": "/", "dl": 1, "h": {"x-a": "v\u0000"}},
+        {"op": "req", "v": 1, "id": "x", "svc": "s", "m": "GET", "p": "/", "dl": 1, "h": {"x-a b": "v"}},
+        {"op": "resp", "v": 1, "id": "x", "s": 200, "h": {"x-a": "v\nInjected: 1"}},
         {"op": "resp", "v": 1, "id": "x", "s": True},
         {"op": "resp", "v": 2, "id": "x", "s": 200},
         {"op": "resp", "v": 1, "id": "x", "s": 200, "h": {"x-big": "v" * 8200}},
     ],
 )
 def test_what_is_not_an_envelope_is_refused(doc):
+    """Including what the HTTP library would refuse with a ValueError later,
+    and a path that would escape the callback's."""
     with pytest.raises(EnvelopeError):
         decode(doc if isinstance(doc, str) else json.dumps(doc))

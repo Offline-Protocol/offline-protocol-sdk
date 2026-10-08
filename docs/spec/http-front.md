@@ -110,17 +110,28 @@ the front and holds it while the front is away.
 | `v` | both | Envelope version, `1` |
 | `id` | both | A random identifier the requester chose; the response repeats it |
 | `svc` | req | The service label |
-| `m` | req | The HTTP method, upper case |
-| `p` | req | The path and query, starting with `/` |
+| `m` | req | The HTTP method, an HTTP token, upper case |
+| `p` | req | The path and query, starting with `/`, with no `.` or `..` segment |
 | `h` | both | Carried headers, names in lower case |
 | `b` | both | The body as standard base64; absent or empty for none |
 | `dl` | req | The deadline, Unix seconds |
-| `s` | resp | The HTTP status, 100 to 599 |
+| `s` | resp | The HTTP status, 200 to 599 |
 | `e` | resp | An error token (below), present only when the front failed |
 
 An envelope with an unknown `op` or a version other than `1` is not
 processed. A request with an unknown version is answered with
 `unsupported_version` when its `id` can be read.
+
+An envelope is not processed either when `m` or a header name is not an
+HTTP token, a header value or `p` holds a control character other than
+horizontal tab, `p` holds a `.` or `..` segment in its path part, raw or
+percent-encoded, or `s` is an interim 1xx status. An HTTP client refuses the
+first two at write time, which would leave the far side unable to answer,
+and a requester that relayed a CR or LF would split its own response. An
+HTTP client normalizes dot segments away, `/api/%2e%2e/admin` included, so
+joined to the callback URL such a path reaches one outside the path the
+provider registered. A 1xx written as the answer leaves the client waiting
+for the real one.
 
 ### Limits
 
@@ -132,6 +143,7 @@ processed. A request with an unknown version is answered with
 | Deadline, default | 30 s from the request | |
 | Deadline, maximum | 300 s from the request | clamped |
 | Provider clock slack | 60 s | a request older than this past its deadline is dropped |
+| Callbacks running at once, per provider | 32 | `callback_failed` (502), at once |
 
 The body limit keeps a base64 body and its envelope under the engine's
 256 KiB content limit with room to spare. It does not fit every carrier: a sealed
@@ -148,9 +160,15 @@ A header crosses only if it is on this list, in either direction:
 `accept`, `accept-language`, `authorization`, `cache-control`,
 `content-language`, `content-type`, `etag`, `if-match`, `if-none-match`,
 `last-modified`, `location`, and any name starting `x-` except those
-starting `x-offline-protocol-`. Everything else, and every hop-by-hop
+starting `x-offline-protocol-` or `x-forwarded-`, and `x-real-ip`,
+`x-original-url` and `x-rewrite-url`. Everything else, and every hop-by-hop
 header, is dropped. `host` and `content-length` are never carried: the
-first is the requester's routing and the second is recomputed.
+first is the requester's routing and the second is recomputed. The
+forwarding names are dropped because a reverse proxy in front of a callback
+reads them as the client's address or the original target, and the front
+calls the callback from loopback, which such a proxy trusts most: a
+requester that could set them would choose the source the callback sees, or
+a path outside the registered one.
 
 ## The requester
 
@@ -190,7 +208,11 @@ On a `message_received` stamped with the front's application id and with
    `X-Offline-Protocol-Sender` (the authenticated sender's address),
    `X-Offline-Protocol-Request-Id` and `X-Offline-Protocol-Service`. The
    callback's timeout is the time left before the deadline, at least 5 s
-   and at most the maximum deadline.
+   and at most the maximum deadline. With 32 callbacks already running the
+   request is answered `callback_failed` at once rather than queued: any
+   device with a session can send requests, each can hold a connection to
+   the callback for the whole maximum deadline, and a queue would hold every
+   later request, from every device, behind whoever filled it.
 4. Send a `resp` with the callback's status, carried headers and body to the
    sender. A callback that fails or times out is `callback_failed` (502),
    and a body over the limit is `response_too_large` (502).
@@ -213,7 +235,8 @@ Requests whose host is not under the domain, or is the domain itself:
 
 A registration goes to the engine's service registry as well, so signed
 discovery finds it, and the front keeps its registrations in a file so a
-restart registers them again. The callback is an `http` or `https` URL; the
+restart registers them again. The callback is an `http` or `https` URL
+with no query or fragment, since the request's path is appended to it; the
 front calls it as given.
 
 **Browse** streams `added` and `gone` events, each with `device`, `alias`
@@ -251,7 +274,7 @@ host's own router adds), and is recorded as
 | Token | Status | Raised by | Means |
 |---|---|---|---|
 | `bad_host` | 400 | requester | The host is under the domain but not `<service>.<device>`, or, without a token, names neither the domain nor loopback |
-| `bad_request` | 400 | requester | Headers or path over their limit |
+| `bad_request` | 400 | requester | Headers or path over their limit, a path with a dot segment, or a timeout that is not a number |
 | `unknown_device` | 404 | requester | The label is neither an address nor an alias |
 | `body_too_large` | 413 | requester | The request body is over the limit |
 | `deadline_exceeded` | 504 | requester | No response before the deadline |
@@ -260,14 +283,14 @@ host's own router adds), and is recorded as
 | `not_connected` | 503 | either | The front has no connection to the local API, or is stopping |
 | `unauthorized` | 401 | either | The token is missing or wrong, or the request carries `Origin` |
 | `unknown_service` | 404 | provider | Nothing registered under that name |
-| `callback_failed` | 502 | provider | The callback refused the connection, failed or timed out |
+| `callback_failed` | 502 | provider | The callback refused the connection, failed, timed out or answered a 1xx, or 32 callbacks were already running |
 | `response_too_large` | 502 | provider | The callback's body is over the limit |
 | `unsupported_version` | 400 | provider | The envelope version is not 1 |
 
 ## What a guard pins
 
-The limits, the application id, the domain default, the carried-header list
-and the error tokens are literals in the reference front
+The limits, the application id, the domain default, the carried-header list,
+the dropped forwarding names and the error tokens are literals in the reference front
 (`offline_protocol_sdk.http_front`), pinned as literals in its tests rather
 than read from the module, so an edit to either side is a failing test
 ([C5](../bridges/README.md#c5-hand-mirrored-constants-must-be-pinned-in-every-language)).
