@@ -13733,6 +13733,241 @@ mod tests {
         );
     }
 
+    /// The iOS central writes its hello: once per connection, after the
+    /// Message subscription and before the handshake reads.
+    ///
+    /// Without it a peripheral that cannot otherwise name the link (the Python
+    /// service's) attributes our writes to a connection id, and the core
+    /// refuses our key package, whose sender must be the link's identity: an
+    /// iPhone could find and verify a Python box and never start a session
+    /// through that link. `BleHelloPolicy` is unit-tested, but a policy nobody
+    /// calls passes its own tests, and `BleManager` sits behind CoreBluetooth,
+    /// so the call site is pinned here:
+    ///
+    /// 1. The UUID is the Rust constant, and Hello is discovered on every path
+    ///    that discovers the handshake characteristics.
+    /// 2. The write goes through the policy, with response, and sits below the
+    ///    announce gate (one-shot per connection) and above the first handshake
+    ///    read (so before any Message write, in CoreBluetooth's GATT order).
+    /// 3. The per-connection record is cleared wherever `announcedPeripherals`
+    ///    is, or a reconnect would never say hello again.
+    #[test]
+    fn react_native_ios_central_writes_its_hello() {
+        use offline_protocol_transport::constants::BLE_HELLO_CHAR_UUID;
+
+        let swift = rn_source_code_only("ios/BleManager.swift");
+        assert!(
+            swift.contains(&format!("CBUUID(string: \"{BLE_HELLO_CHAR_UUID}\")")),
+            "BleManager.swift must declare the Hello characteristic as {BLE_HELLO_CHAR_UUID}"
+        );
+        let discoveries: Vec<&str> = swift
+            .split("discoverCharacteristics(")
+            .skip(1)
+            .map(|rest| &rest[..rest.find(']').unwrap_or(rest.len())])
+            .filter(|list| list.contains("IDENTITY_CHAR_UUID"))
+            .collect();
+        assert!(
+            !discoveries.is_empty(),
+            "BleManager.swift must discover the handshake characteristics somewhere"
+        );
+        for list in &discoveries {
+            assert!(
+                list.contains("HELLO_CHAR_UUID"),
+                "every discoverCharacteristics call that discovers the handshake characteristics \
+                 must also discover HELLO_CHAR_UUID: a path that omits it hands the discovery \
+                 delegate no Hello characteristic, and that link never says hello ({list}])"
+            );
+        }
+
+        let body_start = swift
+            .find(
+                "public func peripheral(_ peripheral: CBPeripheral, \
+                 didDiscoverCharacteristicsFor service: CBService, error: Error?) {",
+            )
+            .expect("BleManager.swift must implement didDiscoverCharacteristicsFor");
+        let body_end = swift
+            .find(
+                "public func peripheral(_ peripheral: CBPeripheral, \
+                 didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {",
+            )
+            .expect("BleManager.swift must implement didUpdateValueFor");
+        let body = &swift[body_start..body_end];
+
+        let gate = body
+            .find("guard !announcedPeripherals.contains(peripheral.identifier) else { return }")
+            .expect("the discovery delegate must keep its announce gate");
+        let policy = body.find("BleHelloPolicy.helloToWrite(").expect(
+            "the hello must be decided by BleHelloPolicy.helloToWrite in the discovery delegate",
+        );
+        let write = body
+            .find("peripheral.writeValue(hello, for: helloCharacteristic, type: .withResponse)")
+            .expect("the hello must be written with response in the discovery delegate");
+        let first_read = body
+            .find("peripheral.readValue(for: characteristic)")
+            .expect("the discovery delegate must issue the handshake reads");
+        assert!(
+            gate < policy && policy < write && write < first_read,
+            "the hello must sit below the announce gate (one per connection) and above the first \
+             handshake read (so it precedes every Message write in CoreBluetooth's GATT order)"
+        );
+        assert!(
+            body.contains(
+                "maximumWriteLength: peripheral.maximumWriteValueLength(for: .withoutResponse)"
+            ),
+            "the hello must be bounded by one packet's payload: iOS reports 512 for \
+             .withResponse and sends anything longer than one packet as a prepared write, which \
+             a peripheral refuses for a hello"
+        );
+        assert!(
+            body.contains("alreadyWritten: helloWritten.contains(peripheral.identifier)")
+                && body.contains("helloWritten.insert(peripheral.identifier)"),
+            "the hello must be recorded per connection, or a discovery replay writes it again"
+        );
+        assert_eq!(
+            swift.matches("helloWritten.removeAll()").count(),
+            swift.matches("announcedPeripherals.removeAll()").count(),
+            "helloWritten must be cleared wherever announcedPeripherals is cleared"
+        );
+        assert_eq!(
+            swift
+                .matches("helloWritten.remove(peripheral.identifier)")
+                .count(),
+            swift
+                .matches("announcedPeripherals.remove(peripheral.identifier)")
+                .count(),
+            "helloWritten must be cleared wherever announcedPeripherals is cleared for one link"
+        );
+    }
+
+    /// The Android central refuses a second client link to a peer it already
+    /// holds, before announcing it, and leaves the address undialed.
+    ///
+    /// A macOS peripheral rotates its address and advertises under both, so
+    /// the scanner dials both and both verify as one peer. Two such links per
+    /// peer filled the four connection slots, and the cap then refused every
+    /// inbound central. `MeshConnectionRegistry` is unit-tested; the order in
+    /// `handleIdentityRead` and the dial-time check are not reachable from a
+    /// JVM test, so they are pinned here:
+    ///
+    /// 1. The duplicate check runs on the verified arm, before
+    ///    `announceVerifiedPeer`: an announce first would re-point the peer's
+    ///    address at the duplicate and register a second mesh connection.
+    /// 2. The refusal records the peer with the deadline, so it lapses with
+    ///    the kept link.
+    /// 3. `connectToDevice` consults the refusal before the connection cap.
+    #[test]
+    fn react_native_android_central_refuses_a_second_client_link_to_one_peer() {
+        let central = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/CentralGattClient.kt",
+        );
+        let facade = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+        let section = |source: &str, start: &str| -> String {
+            let from = source
+                .find(start)
+                .unwrap_or_else(|| panic!("missing {start}"));
+            let rest = &source[from + start.len()..];
+            rest[..rn_kotlin_body_end(rest)].to_string()
+        };
+
+        let identity = section(&central, "private fun handleIdentityRead(");
+        let verified = identity
+            .find("is PeerIdentityBinding.Outcome.Verified ->")
+            .expect("handleIdentityRead must have a verified arm");
+        let check = identity
+            .find("if (host.connections.hasOtherClientLink(outcome.peerId, address)) {")
+            .expect("the verified arm must check for another client link to the peer");
+        let refuse = identity
+            .find("refuseDuplicateLink(gatt, outcome.peerId)")
+            .expect("a duplicate must be refused through refuseDuplicateLink");
+        let announce = identity
+            .find("announceVerifiedPeer(gatt, outcome.peerId)")
+            .expect("the verified arm must announce the peer");
+        assert!(
+            verified < check && check < refuse && refuse < announce,
+            "the duplicate check must run on the verified arm before announceVerifiedPeer"
+        );
+
+        let refusal = section(&central, "private fun refuseDuplicateLink(");
+        assert!(
+            refusal.contains("host.connections.suppressDuplicate( address, peerId,"),
+            "the refusal must record the peer it duplicated, so it lapses with the kept link"
+        );
+        assert!(
+            refusal.contains("closeGattClient(gatt, \"duplicate_identity\")"),
+            "the duplicate link must be closed"
+        );
+        assert!(
+            !refusal.contains("blePeerDiscovered"),
+            "a duplicate link is closed unannounced"
+        );
+
+        let dial = section(&facade, "private fun connectToDevice(");
+        let suppressed = dial
+            .find(
+                "connections.isSuppressedDuplicate(device.address, SystemClock.elapsedRealtime())",
+            )
+            .expect("connectToDevice must consult the duplicate refusal");
+        let cap = dial
+            .find("if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {")
+            .expect("connectToDevice must keep its connection cap");
+        let connect = dial
+            .find("device.connectGatt(")
+            .expect("connectToDevice must dial");
+        assert!(
+            suppressed < cap && cap < connect,
+            "a refused duplicate address must be skipped before the cap and the dial"
+        );
+    }
+
+    /// The hello's length bounds are written down in three languages, and a
+    /// central and a peripheral that disagree fail silently: a peripheral
+    /// refuses a hello shorter than its floor before verifying, and a central
+    /// whose bound is wider spends a write that can only be refused. The
+    /// floor is the codec's ([`offline_protocol_sealed::IDENTITY_ASSERTION_MIN_LEN`]);
+    /// the ceiling is one attribute value, held by the Android server, which
+    /// was the first to serve Hello.
+    #[test]
+    fn ble_hello_length_bounds_agree_in_every_binding() {
+        let floor = offline_protocol_sealed::IDENTITY_ASSERTION_MIN_LEN;
+        let server = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/PeripheralGattServer.kt",
+        );
+        let marker = "const val MAX_HELLO_WRITE_BYTES = ";
+        let at = server
+            .find(marker)
+            .expect("PeripheralGattServer.kt must declare MAX_HELLO_WRITE_BYTES")
+            + marker.len();
+        let ceiling: usize = server[at..]
+            .split_whitespace()
+            .next()
+            .and_then(|v| v.parse().ok())
+            .expect("MAX_HELLO_WRITE_BYTES must be an integer literal");
+
+        let python = python_module_constants("offline_protocol_sdk/ble_manager.py");
+        assert_eq!(
+            python("HELLO_MIN_LEN"),
+            floor.to_string(),
+            "ble_manager.py HELLO_MIN_LEN must equal IDENTITY_ASSERTION_MIN_LEN"
+        );
+        assert_eq!(
+            python("HELLO_MAX_LEN"),
+            ceiling.to_string(),
+            "ble_manager.py HELLO_MAX_LEN must equal Android's MAX_HELLO_WRITE_BYTES"
+        );
+
+        let swift = rn_source_code_only("ios/BleHelloPolicy.swift");
+        assert!(
+            swift.contains(&format!("static let minLength = {floor}")),
+            "BleHelloPolicy.swift minLength must equal IDENTITY_ASSERTION_MIN_LEN ({floor})"
+        );
+        assert!(
+            swift.contains(&format!("static let maxLength = {ceiling}")),
+            "BleHelloPolicy.swift maxLength must equal Android's MAX_HELLO_WRITE_BYTES ({ceiling})"
+        );
+    }
+
     /// A phone running several SDK apps presents one instance of the service
     /// per app behind one BLE link, and each central binds exactly one of them.
     ///

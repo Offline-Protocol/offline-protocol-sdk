@@ -45,6 +45,12 @@ SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 MESSAGE_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 DEVICE_ID_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
 IDENTITY_CHAR_UUID = "6e400004-b5a3-f393-e0a9-e50e24dcca9e"
+# Optional: a central writes its identity assertion here so the peripheral
+# can bind the link to its address (docs/spec/ble-framing.md, Hello).
+HELLO_CHAR_UUID = "6e400006-b5a3-f393-e0a9-e50e24dcca9e"
+# The chapter's bounds on a hello value, checked by both roles.
+HELLO_MIN_LEN = 96
+HELLO_MAX_LEN = 512
 
 MAX_FRAGMENT_SIZE = 185
 CONNECTION_TIMEOUT = 10.0  # seconds
@@ -59,6 +65,21 @@ ADAPTIVE_COOLDOWN_PER_PERIPHERAL = 30.0  # seconds
 # the global per-minute connection budget that verifiable peers need.
 REFUSAL_BACKOFF_MAX = 600.0  # seconds
 PEER_LOST_TIMEOUT = 30.0  # seconds since last seen
+# How often each connected link is read back, and how long the read may take.
+# CoreBluetooth can keep a link "connected" for minutes after the peer's
+# process (and its GATT service) is gone, and fragments are written without
+# response, so nothing else ever fails on such a link.
+LIVENESS_INTERVAL = 15.0  # seconds
+# How long an address refused as a second link to a peer already held is left
+# undialed, unless the kept link dies first. A rotating peripheral advertises
+# under both addresses for a while, and without this the address was redialed,
+# verified and refused again every cooldown.
+DUPLICATE_LINK_SUPPRESS = 60.0  # seconds
+LIVENESS_READ_TIMEOUT = 5.0  # seconds
+# How long the hello's write response may take. The announce waits on it, so
+# a peer that never answers must not hold the link unannounced; Android's
+# hello watchdog has the same bound.
+HELLO_WRITE_TIMEOUT = 3.0  # seconds
 SCAN_RESTART_INTERVAL = 30.0
 
 
@@ -116,6 +137,12 @@ class BleManager(TransportManager):
         self._connecting: set[str] = set()
         # address -> consecutive identity refusals; each doubles the cooldown
         self._refusals: dict[str, int] = {}
+        # address -> (peer it duplicated, monotonic time the refusal lapses)
+        self._duplicates: dict[str, tuple[str, float]] = {}
+        # Set by ProtocolManager: whether another link (a central bound on our
+        # own peripheral) still reaches a peer, so a client link going away
+        # does not report lost a peer the core can still route to.
+        self.peer_linked_elsewhere: Any = None
 
         # Metrics
         self._bytes_sent: int = 0
@@ -214,6 +241,7 @@ class BleManager(TransportManager):
             self._device_id_to_addr.clear()
             self._last_seen.clear()
             self._connecting.clear()
+            self._duplicates.clear()
 
         try:
             self._protocol.ble_status_changed(is_available=False)
@@ -288,6 +316,9 @@ class BleManager(TransportManager):
 
     def _should_connect_locked(self, addr: str, now: float) -> bool:
         """Adaptive rate-limiting. Caller must hold ``_lock``."""
+        if self._suppressed_duplicate_locked(addr, now):
+            return False
+
         # Per-peripheral cooldown
         last_attempt = self._connection_attempts.get(addr, 0)
         if now - last_attempt < self._cooldown_locked(addr):
@@ -300,6 +331,21 @@ class BleManager(TransportManager):
             return False
 
         return True
+
+    def _suppressed_duplicate_locked(self, addr: str, now: float) -> bool:
+        """Whether ``addr`` is inside a duplicate-link refusal. Caller must
+        hold ``_lock``. Lapses early once the kept link is gone, so a peer
+        whose kept link died is redialed at the address it still advertises."""
+        entry = self._duplicates.get(addr)
+        if entry is None:
+            return False
+        peer, until = entry
+        held = self._device_id_to_addr.get(peer)
+        kept = held is not None and held != addr and held in self._clients
+        if now < until and kept:
+            return True
+        self._duplicates.pop(addr, None)
+        return False
 
     def _cooldown_locked(self, addr: str) -> float:
         """Per-peripheral cooldown, doubled per consecutive identity refusal
@@ -357,11 +403,48 @@ class BleManager(TransportManager):
                 await client.disconnect()
                 return
 
+            # A peripheral that rotates its address (macOS) advertises under
+            # the old and the new one at once, and both verify as one peer. A
+            # second client link to it buys nothing and makes the address map
+            # point at whichever verified last, so the first link is kept.
+            with self._lock:
+                held = self._device_id_to_addr.get(device_id)
+                duplicate = (
+                    held is not None
+                    and held != addr
+                    and held in self._clients
+                    and self._clients[held].is_connected
+                )
+            if duplicate:
+                with self._lock:
+                    self._duplicates[addr] = (
+                        device_id,
+                        time.monotonic() + DUPLICATE_LINK_SUPPRESS,
+                    )
+                self._emit_diagnostic("info", "Closed a second link to a peer already held", {
+                    "address": addr,
+                    "device_id": device_id,
+                    "held_at": held,
+                })
+                await client.disconnect()
+                return
+
             with self._lock:
                 self._refusals.pop(addr, None)
                 self._clients[addr] = client
                 self._peer_device_ids[addr] = device_id
                 self._device_id_to_addr[device_id] = addr
+
+            # Subscribe to message notifications
+            await self._subscribe_to_messages(client, addr, device_id)
+
+            # Say who we are on this link, after the subscription and before
+            # any Message write, as the chapter orders it. The announce below
+            # is what makes the core queue for this peer (it pushes a key
+            # package on it), so the hello goes first: a key package written
+            # ahead of it reaches a peripheral that cannot name this link and
+            # is refused as a transport identity mismatch.
+            await self._write_hello(client, addr)
 
             # Announce the peer under the address it proved
             try:
@@ -369,9 +452,6 @@ class BleManager(TransportManager):
                 self._protocol.ble_peer_discovered(peer_id=device_id, rssi=rssi)
             except Exception:
                 logger.debug("ble_peer_discovered failed for %s", device_id)
-
-            # Subscribe to message notifications
-            await self._subscribe_to_messages(client, addr, device_id)
 
             self._emit_diagnostic("info", "Connected to peer", {
                 "address": addr,
@@ -456,6 +536,94 @@ class BleManager(TransportManager):
                 "warning", f"Failed to subscribe to messages from {device_id}: {exc}"
             )
 
+    async def _write_hello(self, client: BleakClient, addr: str) -> None:
+        """Write our identity assertion to the peer's Hello, when it has one.
+
+        Without it a peripheral receiving our Message writes has no way to
+        tell which address they come from, and it refuses our key package,
+        whose sender must match the link's. Best effort, as the chapter
+        requires: no Hello, an assertion that does not fit one write, or a
+        refused write all leave the link as it was.
+        """
+        try:
+            hello_char = client.services.get_characteristic(HELLO_CHAR_UUID)
+        except Exception:
+            return
+        if hello_char is None:
+            return
+        try:
+            assertion = bytes(self._protocol.identity_assertion([]))
+        except Exception as exc:
+            self._emit_diagnostic("debug", f"No identity assertion for a hello: {exc}")
+            return
+        if not HELLO_MIN_LEN <= len(assertion) <= HELLO_MAX_LEN:
+            return
+        # One ATT packet's payload, from the characteristic: bleak's BlueZ
+        # client reports a 23-byte MTU unless it was explicitly acquired, which
+        # bounded every Linux hello to 20 bytes so none was ever written. The
+        # characteristic reads BlueZ's MTU property (and on CoreBluetooth
+        # maximumWriteValueLength(.withoutResponse)), and a longer value would
+        # go out as a prepared write, which a peripheral refuses for a hello.
+        try:
+            payload_limit = int(hello_char.max_write_without_response_size)
+        except Exception:
+            payload_limit = 0
+        if payload_limit and len(assertion) > payload_limit:
+            self._emit_diagnostic("debug", "Hello does not fit the MTU; skipped", {
+                "address": addr,
+                "length": len(assertion),
+                "mtu_payload": payload_limit,
+            })
+            return
+        try:
+            await asyncio.wait_for(
+                client.write_gatt_char(HELLO_CHAR_UUID, assertion, response=True),
+                HELLO_WRITE_TIMEOUT,
+            )
+        except Exception as exc:
+            self._emit_diagnostic("debug", f"Hello write to {addr} refused: {exc!r}")
+
+    async def _probe_link(self, addr: str, client: BleakClient, device_id: str) -> bool:
+        """Read the peer's Device id back; False when the link is dead.
+
+        A link whose peer process restarted can stay connected in
+        CoreBluetooth for minutes while every write into it vanishes. A read
+        of a characteristic that no longer exists, or that now names another
+        address, fails or times out, which this turns into a disconnect.
+        """
+        try:
+            value = await asyncio.wait_for(
+                client.read_gatt_char(DEVICE_ID_CHAR_UUID), LIVENESS_READ_TIMEOUT
+            )
+            return bytes(value).decode("utf-8").strip("\x00") == device_id
+        except Exception:
+            return False
+
+    async def _check_liveness(self) -> None:
+        with self._lock:
+            links = [
+                (addr, client, self._peer_device_ids[addr])
+                for addr, client in self._clients.items()
+                if addr in self._peer_device_ids
+            ]
+        if not links:
+            return
+        results = await asyncio.gather(
+            *(self._probe_link(addr, client, device_id) for addr, client, device_id in links)
+        )
+        for (addr, client, device_id), alive in zip(links, results):
+            if alive:
+                continue
+            self._emit_diagnostic("info", "Link failed its liveness read; dropping it", {
+                "address": addr,
+                "device_id": device_id,
+            })
+            try:
+                await asyncio.wait_for(client.disconnect(), LIVENESS_READ_TIMEOUT)
+            except Exception:
+                logger.debug("disconnect after a failed liveness read failed", exc_info=True)
+            await self._on_peer_disconnected(addr)
+
     def _on_fragment_received(self, sender_id: str, fragment: bytes) -> None:
         """Handle an incoming BLE fragment from a peer."""
         with self._lock:
@@ -476,18 +644,31 @@ class BleManager(TransportManager):
             if device_id is not None:
                 self._device_id_to_addr.pop(device_id, None)
 
-        # A link that never proved a peer was never announced, so there is
-        # nothing to report lost.
+        # A link that never proved a peer was never announced, and one already
+        # torn down (a liveness drop runs this before the stack's own
+        # disconnect callback does) was reported then: nothing to report.
         if device_id is None:
-            self._emit_diagnostic("debug", f"Unverified link closed: {addr}")
+            self._emit_diagnostic("debug", f"Link closed with no proved peer on file: {addr}")
             return
 
+        self._emit_diagnostic("info", f"Peer disconnected: {device_id}")
+        if self._linked_elsewhere(device_id):
+            return
         try:
             self._protocol.ble_peer_lost(peer_id=device_id)
         except Exception:
             logger.debug("ble_peer_lost failed for %s", device_id)
 
-        self._emit_diagnostic("info", f"Peer disconnected: {device_id}")
+    def _linked_elsewhere(self, peer_id: str) -> bool:
+        """Whether another link of ours (the peripheral's) still reaches
+        ``peer_id``. Never raises: a probe that fails says no."""
+        probe = self.peer_linked_elsewhere
+        if probe is None:
+            return False
+        try:
+            return bool(probe(peer_id))
+        except Exception:
+            return False
 
     # -- outgoing fragment handling -------------------------------------------
 
@@ -562,6 +743,11 @@ class BleManager(TransportManager):
             )
         return True
 
+    def holds_peer(self, peer_id: str) -> bool:
+        """Whether a connected client link of ours has proved ``peer_id``."""
+        client = self._find_client_for_peer(peer_id)
+        return client is not None and bool(client.is_connected)
+
     def _find_client_for_peer(self, peer_id: str) -> BleakClient | None:
         """Find the BleakClient for a given device ID (O(1) via reverse map)."""
         with self._lock:
@@ -576,7 +762,11 @@ class BleManager(TransportManager):
         """Periodically remove stale peers that haven't been seen recently."""
         try:
             while True:
-                await asyncio.sleep(PEER_LOST_TIMEOUT / 2)
+                await asyncio.sleep(LIVENESS_INTERVAL)
+                try:
+                    await self._check_liveness()
+                except Exception:
+                    logger.debug("liveness check failed", exc_info=True)
                 now = time.monotonic()
                 stale_device_ids: list[str] = []
                 with self._lock:
@@ -596,6 +786,8 @@ class BleManager(TransportManager):
                         stale_device_ids.append(device_id)
                 # Notify protocol outside the lock
                 for device_id in stale_device_ids:
+                    if self._linked_elsewhere(device_id):
+                        continue
                     try:
                         self._protocol.ble_peer_lost(peer_id=device_id)
                     except Exception:

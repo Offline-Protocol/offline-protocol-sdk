@@ -31,7 +31,7 @@ import logging
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 # bless is not installed on Windows (pyproject.toml leaves it out there: it
 # has no Windows backend), and this module is imported by the package's
@@ -51,10 +51,14 @@ except ImportError:  # pragma: no cover - the Windows wheel test covers it
 
 from .ble_manager import (
     DEVICE_ID_CHAR_UUID,
+    HELLO_CHAR_UUID,
+    HELLO_MAX_LEN,
+    HELLO_MIN_LEN,
     IDENTITY_CHAR_UUID,
     MESSAGE_CHAR_UUID,
     SERVICE_UUID,
 )
+from .offline_protocol import verify_identity_assertion
 from .transport_manager import TransportError, TransportManager, TransportState
 
 logger = logging.getLogger(__name__)
@@ -66,6 +70,192 @@ _INTER_FRAME_DELAY = 0.005
 # How often to poll the bless delegate for subscription changes.
 _PEER_MONITOR_INTERVAL = 1.0
 
+# How long building the GATT server may take. bless's CoreBluetooth delegate
+# blocks in its constructor, with no deadline, until the adapter reports
+# powered on, which never happens when the process is not authorised to use
+# Bluetooth. The local API server gives each transport 30 s to start; this is
+# shorter so the refusal is this transport's own, with a reason.
+_SERVER_INIT_TIMEOUT = 20.0
+
+# ATT error codes a peripheral answers a refused write with (Core spec, Vol 3
+# Part F, 3.4.1.1). CoreBluetooth's CBATTError values are these numbers.
+_ATT_SUCCESS = 0
+_ATT_INVALID_OFFSET = 0x07
+_ATT_INVALID_ATTRIBUTE_VALUE_LENGTH = 0x0D
+
+# A notification CoreBluetooth refused because its transmit queue was full is
+# retried once the stack says it is ready again, this many times, waiting at
+# most this long each. bless drops the refusal on the floor.
+_NOTIFY_RETRIES = 4
+_NOTIFY_READY_TIMEOUT = 1.0
+
+# A central that said hello but is not subscribed is given this long to
+# subscribe before its binding is dropped and its peer reported lost. Without
+# it a central that writes a hello and disconnects without ever subscribing
+# (the monitor tracks subscribers only) left its binding, and a route to the
+# address it proved, behind for the life of the process.
+_UNSUBSCRIBED_HELLO_GRACE = 5.0
+
+_ATTRIBUTING_DELEGATE: Any = None
+
+
+def _prepared_hello_refusal(writes: list[tuple[str, int]]) -> int | None:
+    """The ATT code that refuses a batch carrying a hello, or None.
+
+    ``writes`` is each request's ``(characteristic UUID, offset)``.
+    CoreBluetooth hands a prepared (long) write to the delegate as one batch
+    of requests at rising offsets, and the chapter requires a peripheral to
+    refuse a prepared or offset hello before verifying anything. Handled
+    request by request, the batch's first chunk (offset 0, a plausible
+    length) reached the verifier before the second chunk's offset refused it.
+    """
+    hello = HELLO_CHAR_UUID.lower()
+    for char_uuid, offset in writes:
+        if char_uuid.lower() == hello and (len(writes) > 1 or offset != 0):
+            return _ATT_INVALID_OFFSET
+    return None
+_DELEGATE_SWAP_LOCK = threading.Lock()
+# How long a construction waits for another one's delegate swap. A swap is
+# held for a whole construction, and one that wedged (see
+# _SERVER_INIT_TIMEOUT) never releases it, so a later start says so instead
+# of waiting out the init deadline and blaming the adapter.
+_DELEGATE_SWAP_WAIT = 2.0
+
+
+def _attributing_delegate_class() -> Any:
+    """bless's CoreBluetooth delegate, made to say WHICH central did what.
+
+    bless hands a write to its callback as ``(characteristic, value)``,
+    dropping the ``CBCentral`` the request came from, and responds success
+    to every write. With two centrals connected (a phone, and a Mac's own
+    central, or the two addresses of one rotating peer) a write could not be
+    attributed, and the core refused the writer's key package because its
+    sender did not match the link. This subclass passes each request's
+    central, offset and value to ``attributed_write_func``, answers with the
+    ATT code that returns, keeps the ``CBCentral`` objects of subscribers so
+    a notification can be addressed to one of them, and reports the stack's
+    "ready to update subscribers" to ``ready_func``.
+
+    Built once per process: an Objective-C class name can be registered only
+    once. None where bless's CoreBluetooth backend is not importable.
+    """
+    global _ATTRIBUTING_DELEGATE
+    if _ATTRIBUTING_DELEGATE is not None:
+        return _ATTRIBUTING_DELEGATE
+    try:
+        import objc  # type: ignore[import-not-found]
+        from bless.backends.corebluetooth.peripheral_manager_delegate import (  # type: ignore[import-not-found]
+            PeripheralManagerDelegate,
+        )
+    except Exception:  # pragma: no cover - only reachable off macOS
+        return None
+
+    class OfflineProtocolPeripheralDelegate(PeripheralManagerDelegate):  # type: ignore[misc, valid-type]
+        def peripheralManager_didReceiveWriteRequests_(  # noqa: N802
+            self, peripheral_manager: Any, requests: Any
+        ) -> None:
+            handler = getattr(self, "attributed_write_func", None)
+            result = _ATT_SUCCESS
+            if handler is not None:
+                try:
+                    refusal = _prepared_hello_refusal([
+                        (str(r.characteristic().UUID().UUIDString()), int(r.offset()))
+                        for r in requests
+                    ])
+                except Exception:  # never let a raise skip the response
+                    refusal = None
+                if refusal is not None:
+                    peripheral_manager.respondToRequest_withResult_(requests[0], refusal)
+                    return
+            for request in requests:
+                char_uuid = str(request.characteristic().UUID().UUIDString())
+                raw = request.value()
+                value = bytes(raw) if raw is not None else b""
+                if handler is None:
+                    self.write_request_func(char_uuid, value)
+                    continue
+                central = str(request.central().identifier().UUIDString())
+                try:
+                    result = int(handler(central, char_uuid, value, int(request.offset())))
+                except Exception:  # never let a raise skip the response
+                    result = _ATT_SUCCESS
+                if result != _ATT_SUCCESS:
+                    break
+            peripheral_manager.respondToRequest_withResult_(requests[0], result)
+
+        def peripheralManager_central_didSubscribeToCharacteristic_(  # noqa: N802
+            self, peripheral_manager: Any, central: Any, characteristic: Any
+        ) -> None:
+            objc.super(
+                OfflineProtocolPeripheralDelegate, self
+            ).peripheralManager_central_didSubscribeToCharacteristic_(
+                peripheral_manager, central, characteristic
+            )
+            centrals = getattr(self, "subscribed_centrals", None)
+            if centrals is not None:
+                centrals[str(central.identifier().UUIDString())] = central
+
+        def peripheralManager_central_didUnsubscribeFromCharacteristic_(  # noqa: N802
+            self, peripheral_manager: Any, central: Any, characteristic: Any
+        ) -> None:
+            central_id = str(central.identifier().UUIDString())
+            try:
+                objc.super(
+                    OfflineProtocolPeripheralDelegate, self
+                ).peripheralManager_central_didUnsubscribeFromCharacteristic_(
+                    peripheral_manager, central, characteristic
+                )
+            except (KeyError, ValueError):
+                pass
+            centrals = getattr(self, "subscribed_centrals", None)
+            if centrals is not None and central_id not in self._central_subscriptions:
+                centrals.pop(central_id, None)
+
+        def peripheralManagerIsReadyToUpdateSubscribers_(  # noqa: N802
+            self, peripheral_manager: Any
+        ) -> None:
+            ready = getattr(self, "ready_func", None)
+            if ready is not None:
+                try:
+                    ready()
+                except Exception:
+                    pass
+
+    _ATTRIBUTING_DELEGATE = OfflineProtocolPeripheralDelegate
+    return _ATTRIBUTING_DELEGATE
+
+
+def _bluetooth_authorization_refusal() -> str | None:
+    """Why this process may not use Bluetooth on macOS, or None if it may.
+
+    A process macOS has denied (or one that cannot ask, such as a service
+    started over ssh) would otherwise block in bless's constructor forever.
+    ``NotDetermined`` is allowed through: building the manager is what makes
+    macOS ask, and the construction deadline bounds the wait for an answer.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        from CoreBluetooth import (  # type: ignore[import-not-found]
+            CBManager,
+            CBManagerAuthorizationDenied,
+            CBManagerAuthorizationRestricted,
+        )
+    except Exception:
+        return None
+    try:
+        state = CBManager.authorization()
+    except Exception:
+        return None
+    if state == CBManagerAuthorizationDenied:
+        return (
+            "Bluetooth is denied to this process: allow it in System Settings > "
+            "Privacy & Security > Bluetooth, or start the service from a GUI "
+            "session (macOS cannot ask a process started over ssh)"
+        )
+    if state == CBManagerAuthorizationRestricted:
+        return "Bluetooth is restricted on this Mac by a profile or parental control"
+    return None
 _BLUEZ_SERVICE = "org.bluez"
 _BLUEZ_DEVICE_IFACE = "org.bluez.Device1"
 _BLUEZ_CHAR_IFACE = "org.bluez.GattCharacteristic1"
@@ -296,7 +486,27 @@ class BlePeripheral(TransportManager):
         # _BlueZCentrals). None on CoreBluetooth, whose bless delegate
         # tracks them itself.
         self._bluez_centrals: _BlueZCentrals | None = None
-
+        # Central id -> the address its hello proved. A link bound here feeds
+        # its fragments to the core under that address, which is what lets a
+        # key package from it through the core's transport-sender check.
+        # Never rebound: a hello on a bound link is ignored.
+        self._hello_bindings: dict[str, str] = {}
+        # Central id -> when its bound hello was first seen without a
+        # subscription (see _UNSUBSCRIBED_HELLO_GRACE). Monitor loop only.
+        self._unsubscribed_since: dict[str, float] = {}
+        # Set by ProtocolManager: whether another link (our own central's)
+        # already announced an address, so a hello does not announce it twice
+        # and a central leaving does not report a peer lost that is still up.
+        self.peer_linked_elsewhere: Any = None
+        # CoreBluetooth only: the attributing delegate's subscriber map and
+        # the stack's "ready to update subscribers" signal.
+        self._subscribed_centrals: dict[str, Any] = {}
+        self._notify_ready: asyncio.Event | None = None
+        # The monitor loop's clock. A test substitutes one it advances itself:
+        # on Windows time.monotonic() ticks every 15.6 ms, and asyncio runs a
+        # timer due within that at once, so a test sleeping in milliseconds
+        # never saw a grace period elapse.
+        self._clock: Callable[[], float] = time.monotonic
     # -- TransportManager interface -------------------------------------------
 
     def is_available(self) -> bool:
@@ -355,13 +565,16 @@ class BlePeripheral(TransportManager):
         })
 
         try:
+            refusal = _bluetooth_authorization_refusal()
+            if refusal is not None:
+                raise TransportError(refusal)
             # Truncate name — CoreBluetooth limits advertisement data to ~28
             # bytes, and service UUIDs also consume space.
             name = self._device_id[:10]
-            self._server = BlessServer(name=name)
+            self._server = await self._build_server(name)
+            self._install_attribution()
 
             await self._setup_gatt_server()
-
             # Register read/write callbacks
             self._server.read_request_func = self._on_read
             self._server.write_request_func = self._on_write
@@ -437,8 +650,11 @@ class BlePeripheral(TransportManager):
             resolved_snapshot = dict(self._central_to_user_id)
             self._connected_centrals.clear()
             self._central_to_user_id.clear()
+            self._hello_bindings.clear()
+            self._unsubscribed_since.clear()
             self._last_known_central = None
-
+        self._subscribed_centrals = {}
+        self._notify_ready = None
         for central_uuid in centrals_snapshot:
             try:
                 self._protocol.ble_peer_lost(peer_id=central_uuid)
@@ -458,6 +674,107 @@ class BlePeripheral(TransportManager):
 
         self._update_state(TransportState.STOPPED)
         self._emit_diagnostic("info", "BLE peripheral stopped")
+
+    async def _build_server(self, name: str) -> Any:
+        """Construct the bless server off the event loop, with a deadline.
+
+        The CoreBluetooth constructor can block indefinitely (see
+        ``_SERVER_INIT_TIMEOUT``), and a block on the loop thread freezes the
+        whole service: no API socket, no other transport, and no deadline of
+        the caller's can fire. The thread is a daemon, so one that never
+        returns cannot hold the process open at exit. It is handed the running
+        loop, since bless otherwise looks one up in a thread that has none.
+
+        BlueZ's constructor does not block, and it schedules its setup as a
+        task on the loop, which is safe only from the loop's own thread, so
+        there it runs here.
+        """
+        loop = asyncio.get_running_loop()
+        if sys.platform != "darwin":
+            return self._construct_server(name, loop)
+        done: asyncio.Future[Any] = loop.create_future()
+
+        def settle(result: Any, exc: BaseException | None) -> None:
+            if done.done():
+                return
+            if exc is not None:
+                done.set_exception(exc)
+            else:
+                done.set_result(result)
+
+        def build() -> None:
+            try:
+                server = self._construct_server(name, loop)
+            except BaseException as exc:  # noqa: BLE001 - handed to the loop
+                result, error = None, exc
+            else:
+                result, error = server, None
+            try:
+                loop.call_soon_threadsafe(settle, result, error)
+            except RuntimeError:
+                pass  # the loop closed while the stack was deciding
+
+        threading.Thread(target=build, name="ble-peripheral-init", daemon=True).start()
+        try:
+            return await asyncio.wait_for(done, _SERVER_INIT_TIMEOUT)
+        except asyncio.TimeoutError as exc:
+            raise TransportError(
+                f"the Bluetooth stack did not come up within {_SERVER_INIT_TIMEOUT:.0f} s "
+                "(not authorised, or the adapter is off)"
+            ) from exc
+
+    @staticmethod
+    def _construct_server(name: str, loop: Any = None) -> Any:
+        """``BlessServer(name)``, with the attributing delegate on macOS.
+
+        bless's CoreBluetooth server builds its delegate from a name in its
+        own module; it is pointed at the subclass for this one construction,
+        under a lock, and put back.
+        """
+        if sys.platform != "darwin":
+            return BlessServer(name=name, loop=loop)
+        # The class is built under the lock too: an Objective-C class name can
+        # be registered once per process, and two constructions racing to
+        # build it would both try.
+        if not _DELEGATE_SWAP_LOCK.acquire(timeout=_DELEGATE_SWAP_WAIT):
+            raise TransportError(
+                "an earlier Bluetooth stack construction in this process never "
+                "returned; restart the service once Bluetooth is allowed"
+            )
+        try:
+            delegate_cls = _attributing_delegate_class()
+            if delegate_cls is None:
+                return BlessServer(name=name, loop=loop)
+            import bless.backends.corebluetooth.server as cb_server  # type: ignore[import-not-found]
+
+            original = cb_server.PeripheralManagerDelegate
+            cb_server.PeripheralManagerDelegate = delegate_cls
+            try:
+                return BlessServer(name=name, loop=loop)
+            finally:
+                cb_server.PeripheralManagerDelegate = original
+        finally:
+            _DELEGATE_SWAP_LOCK.release()
+
+    def _install_attribution(self) -> None:
+        """Point the attributing delegate, when present, at this peripheral."""
+        delegate = getattr(self._server, "peripheral_manager_delegate", None)
+        if delegate is None or not hasattr(delegate, "peripheralManagerIsReadyToUpdateSubscribers_"):
+            return
+        if _ATTRIBUTING_DELEGATE is None or not isinstance(delegate, _ATTRIBUTING_DELEGATE):
+            return
+        loop = self._loop
+        self._notify_ready = asyncio.Event()
+        ready = self._notify_ready
+        self._subscribed_centrals = {}
+        delegate.subscribed_centrals = self._subscribed_centrals
+        delegate.attributed_write_func = self._on_attributed_write
+
+        def on_ready() -> None:
+            if loop is not None and not loop.is_closed():
+                loop.call_soon_threadsafe(ready.set)
+
+        delegate.ready_func = on_ready
 
     def _attach_bluez_centrals(self) -> None:
         """Start observing who calls our GATT application on the bus.
@@ -539,6 +856,15 @@ class BlePeripheral(TransportManager):
             GATTAttributePermissions.readable,
         )
 
+        # HELLO characteristic: a central writes its assertion here, once,
+        # so its Message writes can be attributed to the address it proved.
+        await self._server.add_new_characteristic(
+            SERVICE_UUID,
+            HELLO_CHAR_UUID,
+            GATTCharacteristicProperties.write,
+            None,
+            GATTAttributePermissions.writeable,
+        )
     # -- GATT callbacks -------------------------------------------------------
 
     @staticmethod
@@ -580,33 +906,117 @@ class BlePeripheral(TransportManager):
         connection**.  Therefore the entire body is wrapped in try/except.
         """
         try:
-            resolved = self._resolve_char_uuid(char_uuid)
-            logger.debug(
-                "_on_write called: uuid=%s, value_type=%s, value_len=%d",
-                resolved, type(value).__name__, len(value) if value else 0,
+            self._handle_write(
+                self._resolve_sender(),
+                self._resolve_char_uuid(char_uuid),
+                bytes(value) if value is not None else b"",
+                0,
             )
-            if resolved != MESSAGE_CHAR_UUID.lower():
-                logger.debug("_on_write: ignoring write to %s", resolved)
-                return
-
-            fragment = bytes(value)
-            logger.debug(
-                "_on_write: %d bytes, sender=%s",
-                len(fragment), self._resolve_sender(),
-            )
-            with self._lock:
-                self._bytes_received += len(fragment)
-                self._fragments_received += 1
-
-            sender_id = self._resolve_sender()
-
-            self._protocol.ble_fragment_received(
-                sender_id=sender_id, fragment=list(fragment)
-            )
-            logger.debug("_on_write: fragment fed to protocol OK")
         except Exception as exc:
             logger.exception("_on_write failed: %s", exc)
 
+    def _on_attributed_write(
+        self, central: str, char_uuid: str, value: bytes, offset: int
+    ) -> int:
+        """A write the attributing delegate names the central of (macOS).
+
+        Returns the ATT code to answer the request with. Runs on
+        CoreBluetooth's queue, so it never raises.
+        """
+        try:
+            with self._lock:
+                self._last_known_central = central
+            return self._handle_write(central, char_uuid.lower(), value, offset)
+        except Exception as exc:
+            logger.exception("attributed write failed: %s", exc)
+            return _ATT_SUCCESS
+
+    def _handle_write(
+        self, central: str, char_uuid: str, value: bytes, offset: int
+    ) -> int:
+        """One write from ``central``: a hello, or a Message fragment."""
+        if char_uuid == HELLO_CHAR_UUID.lower():
+            return self._on_hello(central, value, offset)
+        if char_uuid != MESSAGE_CHAR_UUID.lower():
+            logger.debug("ignoring a write to %s", char_uuid)
+            return _ATT_SUCCESS
+        with self._lock:
+            sender_id = self._hello_bindings.get(central, central)
+            self._bytes_received += len(value)
+            self._fragments_received += 1
+        logger.debug("fragment of %d bytes from %s as %s", len(value), central, sender_id)
+        self._protocol.ble_fragment_received(sender_id=sender_id, fragment=list(value))
+        return _ATT_SUCCESS
+
+    def _on_hello(self, central: str, value: bytes, offset: int) -> int:
+        """Bind ``central``'s link to the address its hello proves.
+
+        The chapter's order: refuse a prepared or offset write and a value out
+        of bounds before verifying anything; verify with the one verifier; bind
+        to the derived address only; never rebind; announce the peer only if no
+        other link has. A value that fails is ignored, and the link stays as it
+        would have been without one.
+        """
+        if offset != 0:
+            return _ATT_INVALID_OFFSET
+        if not HELLO_MIN_LEN <= len(value) <= HELLO_MAX_LEN:
+            return _ATT_INVALID_ATTRIBUTE_VALUE_LENGTH
+        if central == "ble-peer":
+            # The writer could not be named, so there is no link to bind.
+            return _ATT_SUCCESS
+        try:
+            address = verify_identity_assertion(list(value))
+        except Exception as exc:
+            self._emit_diagnostic("warning", "A hello did not verify", {
+                "central": central,
+                "error": str(exc),
+            })
+            return _ATT_SUCCESS
+        with self._lock:
+            bound = self._hello_bindings.get(central)
+            if bound is not None:
+                if bound != address:
+                    logger.info("ignoring a hello naming %s on a link bound to %s", address, bound)
+                return _ATT_SUCCESS
+            self._hello_bindings[central] = address
+            self._central_to_user_id[central] = address
+            already = any(
+                other == address
+                for c, other in self._hello_bindings.items()
+                if c != central
+            )
+        self._emit_diagnostic("info", "Central said hello", {
+            "central": central,
+            "address": address,
+        })
+        if not already and not self._linked_elsewhere(address):
+            try:
+                self._protocol.ble_peer_discovered(peer_id=address, rssi=-50)
+            except Exception:
+                logger.debug("ble_peer_discovered failed for %s", address)
+        return _ATT_SUCCESS
+
+    def holds_peer(self, address: str) -> bool:
+        """Whether a subscribed central of ours carries ``address``.
+
+        ``BleManager`` asks this before reporting a peer lost when its client
+        link goes: a notification addressed to ``address`` still reaches that
+        central, so the core keeps a route it would otherwise drop.
+        """
+        with self._lock:
+            return any(
+                self._central_to_user_id.get(central) == address
+                for central in self._connected_centrals
+            )
+
+    def _linked_elsewhere(self, address: str) -> bool:
+        probe = self.peer_linked_elsewhere
+        if probe is None:
+            return False
+        try:
+            return bool(probe(address))
+        except Exception:
+            return False
     def _resolve_sender(self) -> str:
         """Best-effort identification of the writing central.
 
@@ -658,6 +1068,10 @@ class BlePeripheral(TransportManager):
                 )
                 return
             central_uuid = next(iter(self._connected_centrals))
+            # A hello proved this link's address; a message's sender field
+            # proves nothing, so it never replaces one.
+            if central_uuid in self._hello_bindings:
+                return
             # Avoid redundant re-registration.
             if self._central_to_user_id.get(central_uuid) == sender_user_id:
                 return
@@ -728,12 +1142,9 @@ class BlePeripheral(TransportManager):
                 break
 
             data = bytes(frag.data)
-            logger.info(
-                "OUTGOING fragment: %d bytes, recipient=%s",
-                len(data), getattr(frag, "recipient_id", None),
-            )
-            await self.notify_fragment(data)
-
+            recipient = getattr(frag, "recipient_id", None)
+            logger.debug("outgoing fragment: %d bytes, recipient=%s", len(data), recipient)
+            await self.notify_fragment(data, recipient)
             # Return fragment to pool regardless of send outcome
             try:
                 self._protocol.ble_return_fragment()
@@ -769,13 +1180,13 @@ class BlePeripheral(TransportManager):
             with self._lock:
                 return bool(self._connected_centrals)
 
-    async def notify_fragment(self, data: bytes) -> bool:
+    async def notify_fragment(self, data: bytes, recipient: str | None = None) -> bool:
         """Notify one fragment on the Message characteristic.
 
-        Every subscribed central receives it: neither backend of bless
-        addresses a notification to one central, so a peripheral with more
-        than one central fans every fragment out to all of them.
-
+        On macOS, a fragment for a recipient whose central said hello goes to
+        that central alone; anything else goes to every subscribed central.
+        BlueZ offers no per-central notification, so there every subscriber
+        receives every fragment.
         A notify that raises is reported and still returns True, as
         ``BleManager.write_fragment`` does for a failed write: the fragment
         was this role's, the core's retry re-sends the message, and a drain
@@ -789,7 +1200,10 @@ class BlePeripheral(TransportManager):
             if char is None:
                 return False
             char.value = data
-            server.update_value(SERVICE_UUID, MESSAGE_CHAR_UUID)
+            if self._notify_ready is not None:
+                await self._notify_corebluetooth(server, char, data, recipient)
+            else:
+                server.update_value(SERVICE_UUID, MESSAGE_CHAR_UUID)
         except Exception as exc:
             self._emit_diagnostic("warning", f"Failed to notify a fragment: {exc}")
             return True
@@ -800,8 +1214,51 @@ class BlePeripheral(TransportManager):
         await asyncio.sleep(_INTER_FRAME_DELAY)
         return True
 
-    # -- background tasks -----------------------------------------------------
+    def _centrals_for(self, recipient: str | None) -> list[Any] | None:
+        """The subscribed ``CBCentral`` objects bound to ``recipient``, or
+        None to notify every subscriber."""
+        if not recipient:
+            return None
+        with self._lock:
+            ids = [c for c, a in self._hello_bindings.items() if a == recipient]
+        # .get, not a membership test then an index: CoreBluetooth's queue
+        # removes an unsubscribing central between the two.
+        subscribed = self._subscribed_centrals
+        targets = [t for t in (subscribed.get(c) for c in ids) if t is not None]
+        return targets or None
 
+    async def _notify_corebluetooth(
+        self, server: Any, char: Any, data: bytes, recipient: str | None
+    ) -> None:
+        """``updateValue`` with CoreBluetooth's back-pressure honoured.
+
+        ``updateValue`` returns NO when the transmit queue is full, and the
+        fragment is not sent. bless ignores that, so a burst (a message, its
+        receipt, a key package) lost fragments silently and the message
+        waited for the core's next retry. Here a refusal waits for the
+        stack's "ready to update subscribers" and tries again.
+        """
+        manager = server.peripheral_manager_delegate.peripheral_manager
+        ready = self._notify_ready
+        targets = self._centrals_for(recipient)
+        for _ in range(_NOTIFY_RETRIES + 1):
+            if ready is not None:
+                ready.clear()
+            # PyObjC passes bytes where an NSData is expected.
+            if manager.updateValue_forCharacteristic_onSubscribedCentrals_(data, char.obj, targets):
+                return
+            if ready is None:
+                break
+            try:
+                await asyncio.wait_for(ready.wait(), _NOTIFY_READY_TIMEOUT)
+            except asyncio.TimeoutError:
+                pass
+        self._emit_diagnostic("warning", "CoreBluetooth kept refusing a notification", {
+            "recipient": recipient,
+            "length": len(data),
+        })
+
+    # -- background tasks -----------------------------------------------------
     async def _current_centrals(self) -> set[str] | None:
         """The centrals connected now, or None when they cannot be read."""
         server = self._server
@@ -846,10 +1303,11 @@ class BlePeripheral(TransportManager):
                 # Classify under the lock (the delegate thread races us on
                 # _connected_centrals / _central_to_user_id). FFI + diagnostic
                 # notifications happen afterward, outside the lock.
-                now = time.monotonic()
+                now = self._clock()
                 added: list[str] = []
                 rejected: list[str] = []
                 removed: list[tuple[str, str | None]] = []
+                dropped: list[tuple[str, str]] = []
 
                 with self._lock:
                     capacity = self._max_connections
@@ -865,8 +1323,28 @@ class BlePeripheral(TransportManager):
                         resolved_uid = self._central_to_user_id.pop(
                             central_uuid, None
                         )
+                        self._hello_bindings.pop(central_uuid, None)
+                        if resolved_uid is not None and resolved_uid in self._hello_bindings.values():
+                            resolved_uid = None  # another central of ours still carries it
                         removed.append((central_uuid, resolved_uid))
 
+                    # A central that said hello and never subscribed is not in
+                    # `known`, so the sweep above never sees it leave.
+                    orphans: list[str] = []
+                    for central_uuid in list(self._hello_bindings):
+                        if central_uuid in current or central_uuid in self._connected_centrals:
+                            self._unsubscribed_since.pop(central_uuid, None)
+                            continue
+                        since = self._unsubscribed_since.setdefault(central_uuid, now)
+                        if now - since >= _UNSUBSCRIBED_HELLO_GRACE:
+                            orphans.append(central_uuid)
+                    for central_uuid in orphans:
+                        self._unsubscribed_since.pop(central_uuid, None)
+                        address = self._hello_bindings.pop(central_uuid)
+                        self._central_to_user_id.pop(central_uuid, None)
+                        if address in self._hello_bindings.values():
+                            continue  # another central of ours still carries it
+                        dropped.append((central_uuid, address))
                 for central_uuid in rejected:
                     self._emit_diagnostic(
                         "warning",
@@ -890,7 +1368,7 @@ class BlePeripheral(TransportManager):
                         self._protocol.ble_peer_lost(peer_id=central_uuid)
                     except Exception:
                         logger.debug("ble_peer_lost failed for %s", central_uuid)
-                    if resolved_uid:
+                    if resolved_uid and not self._linked_elsewhere(resolved_uid):
                         try:
                             self._protocol.ble_peer_lost(peer_id=resolved_uid)
                         except Exception:
@@ -900,6 +1378,18 @@ class BlePeripheral(TransportManager):
                     self._emit_diagnostic(
                         "info", "Central disconnected", {"central": central_uuid}
                     )
+
+                for central_uuid, address in dropped:
+                    self._emit_diagnostic("info", "Dropped a hello from a central that never subscribed", {
+                        "central": central_uuid,
+                        "address": address,
+                    })
+                    if self._linked_elsewhere(address):
+                        continue
+                    try:
+                        self._protocol.ble_peer_lost(peer_id=address)
+                    except Exception:
+                        logger.debug("ble_peer_lost failed for %s", address)
 
                 known = current.copy()
 

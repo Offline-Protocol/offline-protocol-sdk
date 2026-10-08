@@ -48,6 +48,8 @@ public class BleManager: NSObject, TransportManager {
     private let DEVICE_ID_CHAR_UUID = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
     private let IDENTITY_CHAR_UUID = CBUUID(string: "6E400004-B5A3-F393-E0A9-E50E24DCCA9E")
     private let APP_TAG_CHAR_UUID = CBUUID(string: "6E400005-B5A3-F393-E0A9-E50E24DCCA9E")
+    /// Optional: written once by this central so the peer can name the link (see BleHelloPolicy).
+    private let HELLO_CHAR_UUID = CBUUID(string: "6E400006-B5A3-F393-E0A9-E50E24DCCA9E")
 
     // Fragment sizing is fully owned by the Rust transport now: it stores
     // a per-peer maximum usable payload seeded from
@@ -159,6 +161,9 @@ public class BleManager: NSObject, TransportManager {
     /// Peripherals already announced via `blePeerDiscovered`, so a re-read of
     /// either characteristic on a live link cannot announce twice.
     private var announcedPeripherals: Set<UUID> = []
+    /// Links that already wrote their hello this connection. Cleared with
+    /// `announcedPeripherals`, so a reconnect says hello again.
+    private var helloWritten: Set<UUID> = []
 
     // MARK: - Service instance selection
     //
@@ -789,6 +794,7 @@ public class BleManager: NSObject, TransportManager {
         advertisedDeviceIds.removeAll()
         verifiedPeerAddresses.removeAll()
         announcedPeripherals.removeAll()
+        helloWritten.removeAll()
         // The mesh counts the same links; without this it stays full.
         meshController.registerAllDisconnected()
         discoveredPeripherals.removeAll()
@@ -1212,7 +1218,7 @@ public class BleManager: NSObject, TransportManager {
             clearServiceInstanceSelection(for: peripheral.identifier)
             let instances = peripheral.services?.filter { $0.uuid == SERVICE_UUID } ?? []
             if instances.count == 1 {
-                peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID], for: instances[0])
+                peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID, HELLO_CHAR_UUID], for: instances[0])
             } else {
                 peripheral.discoverServices([SERVICE_UUID])
             }
@@ -3253,6 +3259,7 @@ extension BleManager: CBCentralManagerDelegate {
         advertisedDeviceIds.removeValue(forKey: peripheral.identifier)
         verifiedPeerAddresses.removeValue(forKey: peripheral.identifier)
         announcedPeripherals.remove(peripheral.identifier)
+        helloWritten.remove(peripheral.identifier)
         clearServiceInstanceSelection(for: peripheral.identifier)
         if logThrottler.shouldLog(key: "disconnect_\(peripheral.identifier.uuidString)", interval: 10) {
             let errorDescription = (error as NSError?)?.localizedDescription ?? "none"
@@ -3373,7 +3380,7 @@ extension BleManager: CBPeripheralDelegate {
                 // instance is ever handshaken; if it is gone, so is the app
                 // this link's identity came from.
                 if instances.contains(where: { $0 === bound }) {
-                    peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID], for: bound)
+                    peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID, HELLO_CHAR_UUID], for: bound)
                 } else {
                     dropLinkForVanishedServiceInstance(peripheral)
                 }
@@ -3385,7 +3392,7 @@ extension BleManager: CBPeripheralDelegate {
                 // make; for a link that never had several this clears nothing.
                 clearServiceInstanceSelection(for: peripheral.identifier)
                 for service in services where service.uuid == SERVICE_UUID {
-                    peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID], for: service)
+                    peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID, HELLO_CHAR_UUID], for: service)
                 }
             }
             emitDiagnostic("info", "Discovered BLE services", context: ["peripheral": peripheral.identifier.uuidString])
@@ -3467,6 +3474,30 @@ extension BleManager: CBPeripheralDelegate {
         // absence checks below from judging an established link on a cache
         // replay that came back partial.
         guard !announcedPeripherals.contains(peripheral.identifier) else { return }
+
+        // Say who we are, once per connection, before the handshake reads and
+        // so before any Message write: CoreBluetooth runs a peripheral's GATT
+        // requests in the order they are issued, after the subscribe above.
+        // A peer that cannot otherwise name this link (the Python service's
+        // peripheral) refuses our key package without it. See BleHelloPolicy.
+        if let helloCharacteristic = characteristics.first(where: { $0.uuid == HELLO_CHAR_UUID }),
+           let hello = BleHelloPolicy.helloToWrite(
+               identity: currentSignedIdentity()?.encode(),
+               peerServesHello: true,
+               alreadyWritten: helloWritten.contains(peripheral.identifier),
+               // `.withoutResponse` is the single-packet payload (MTU - 3).
+               // The `.withResponse` figure is 512 on iOS because CoreBluetooth
+               // turns a longer write into a prepared write, which the chapter
+               // forbids for a hello and a peripheral refuses.
+               maximumWriteLength: peripheral.maximumWriteValueLength(for: .withoutResponse)
+           ) {
+            helloWritten.insert(peripheral.identifier)
+            peripheral.writeValue(hello, for: helloCharacteristic, type: .withResponse)
+            emitDiagnostic("info", "BLE hello written", context: [
+                "peripheral": peripheral.identifier.uuidString,
+                "length": hello.count,
+            ])
+        }
 
         // Both reads are issued here and complete in either order; the peer is
         // announced by whichever one lands second, through
@@ -3802,7 +3833,7 @@ extension BleManager: CBPeripheralDelegate {
         ])
         for instance in instances {
             peripheral.discoverCharacteristics(
-                [MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID, APP_TAG_CHAR_UUID],
+                [MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID, HELLO_CHAR_UUID, APP_TAG_CHAR_UUID],
                 for: instance
             )
         }
@@ -3922,7 +3953,7 @@ extension BleManager: CBPeripheralDelegate {
             "tagged": probe.tags.count,
             "timedOut": timedOut,
         ])
-        peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID], for: chosen)
+        peripheral.discoverCharacteristics([MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID, HELLO_CHAR_UUID], for: chosen)
     }
 
     /// Drops everything selection holds for one link. A no-op for a link that
@@ -4024,6 +4055,16 @@ extension BleManager: CBPeripheralDelegate {
     }
     
     public func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
+        if characteristic.uuid == HELLO_CHAR_UUID {
+            // Best effort: a refused hello leaves the link as it was.
+            if let error = error {
+                emitDiagnostic("info", "BLE hello refused", context: [
+                    "peripheral": peripheral.identifier.uuidString,
+                    "error": error.localizedDescription,
+                ])
+            }
+            return
+        }
         if let error = error {
             print("[BleManager] Error writing characteristic: \(error)")
             emitDiagnostic("error", "Error writing characteristic", context: ["error": error.localizedDescription])
