@@ -1,0 +1,27 @@
+# One service per host. Run on each host with its own key:
+#
+#   export OFFLINE_PROTOCOL_STORE_KEY="$(openssl rand -hex 32)"   # once per host; keep it
+#   docker compose up -d
+#
+# Host networking puts the HTTP front on the host's 127.0.0.1:8080, where the
+# host's applications reach it, and lets multicast DNS reach the LAN.
+services:
+  offline-protocol:
+    build: .
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      OFFLINE_PROTOCOL_STORE_KEY: ${OFFLINE_PROTOCOL_STORE_KEY:?set OFFLINE_PROTOCOL_STORE_KEY}
+      OP_LAN: "1"
+      # This host's LAN address. On 0.0.0.0 the multicast DNS record also names
+      # docker0 (172.17.0.1), which every other Docker host holds as its own;
+      # see README.md.
+      # OP_LISTEN: 192.168.1.10:7878
+      OP_HTTP: 127.0.0.1:8080
+    volumes:
+      - offline-protocol-data:/var/lib/offline-protocol
+      # Bluetooth LE, for a configuration with ble_enabled: true. BlueZ is
+      # reached over the host's system bus; see README.md.
+      # - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
+volumes:
+  offline-protocol-data:
