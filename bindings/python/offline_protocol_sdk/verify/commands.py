@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, Callable
 
+from websockets.exceptions import WebSocketException
+
 from .client import DEFAULT_APP_ID, RpcFailure, VerifyClient
 
 PASS = 0
@@ -46,6 +48,14 @@ EARLY_CAPACITY = 256
 
 #: How long ``watch`` waits before reconnecting to a service that went away.
 WATCH_RECONNECT_DELAY = 0.5
+
+#: The stderr line ``await`` and ``watch`` print, alone, once their
+#: subscription to every event is confirmed. An event emitted after it is
+#: seen; one emitted before it may not be (only received messages are held).
+#: A caller that starts one of them and then triggers the event (brings a
+#: recipient back, sends from another device) waits for this line rather
+#: than sleeping. Part of the command line's contract: a script matches it.
+READY_LINE = "subscribed"
 
 
 @dataclass
@@ -114,17 +124,34 @@ async def state(target: Target, peers: list[str], output: Output) -> int:
     return PASS
 
 
-async def send(target: Target, recipient: str, content: str, output: Output) -> int:
-    """Sends one message and prints its id. The id is what ``await`` takes."""
+async def send(
+    target: Target,
+    recipient: str,
+    content: str,
+    output: Output,
+    *,
+    wait: bool = False,
+    timeout: float = 120.0,
+) -> int:
+    """Sends one message and prints its id. The id is what ``await`` takes.
+
+    With ``wait`` it then waits for the receipt as ``await --until
+    delivered`` does, on the same connection. That is the only race-free
+    way to see the receipt of a message to a recipient that is reachable
+    now: the connection is subscribed before ``send_message`` is called,
+    whereas a separate ``await`` connects only after this one closed, and
+    a receipt that fires in between reaches no client and is not held."""
     client = await target.open()
     try:
         message_id = await client.call(
             "send_message", {"recipient": recipient, "content": content, "priority": "Medium"}
         )
+        output.line({"sent": {"message_id": message_id, "recipient": recipient}})
+        output.say(f"sent {message_id} to {recipient}")
+        if wait:
+            return await _await_on(client, message_id, "delivered", timeout, output)
     finally:
         await client.close()
-    output.line({"sent": {"message_id": message_id, "recipient": recipient}})
-    output.say(f"sent {message_id} to {recipient}")
     return PASS
 
 
@@ -149,6 +176,7 @@ async def await_message(
     is not held: start this before the recipient can answer.
     """
     client = await target.open()
+    output.say(READY_LINE)
     try:
         return await _await_on(client, message_id, until, timeout, output)
     finally:
@@ -313,23 +341,37 @@ async def watch(
     and appends it to ``log`` when given. Reconnects when the service goes
     away and comes back, so one watcher spans a restart; events the engine
     emits while no client is connected are not seen, except the received
-    messages the service holds for the application."""
+    messages the service holds for the application.
+
+    Passes when ``duration`` runs out having been connected at some point,
+    and fails when it never was: an empty watch log is otherwise
+    indistinguishable from a quiet network."""
     loop = asyncio.get_running_loop()
     deadline = None if duration is None else loop.time() + duration
     handle = log.open("a", encoding="utf-8") if log is not None else None
     connected = False
+    ever_connected = False
+    waiting_said = False
     try:
         while deadline is None or loop.time() < deadline:
             try:
                 client = await target.open()
-            except (OSError, ConnectionError, RpcFailure) as exc:
+            except (OSError, ConnectionError, RpcFailure, WebSocketException, asyncio.TimeoutError) as exc:
+                # A service that is stopping or starting can refuse the
+                # connection, drop it inside the handshake (a websockets
+                # error, not an OSError) or close it during ``hello``; each
+                # is the gap a restart leaves, so each is retried.
                 if connected:
                     output.say(f"watch: service gone ({exc}); reconnecting")
                     connected = False
+                elif not ever_connected and not waiting_said:
+                    output.say(f"watch: waiting for the service ({exc or type(exc).__name__})")
+                    waiting_said = True
                 await asyncio.sleep(WATCH_RECONNECT_DELAY)
                 continue
-            connected = True
+            connected = ever_connected = True
             output.say(f"watch: connected to {client.local_address}")
+            output.say(READY_LINE)
             try:
                 while True:
                     remaining = None if deadline is None else deadline - loop.time()
@@ -351,6 +393,9 @@ async def watch(
                 connected = False
             finally:
                 await client.close()
+        if not ever_connected:
+            output.say("watch: never connected to the service")
+            return FAILED
         return PASS
     finally:
         if handle is not None:

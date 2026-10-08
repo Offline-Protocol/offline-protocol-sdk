@@ -74,7 +74,7 @@ async def test_a_message_to_a_device_that_is_off_arrives_when_it_comes_back(netw
 async def test_the_verifier_waits_out_the_absence_and_passes_on_the_receipt(network):
     """The same, through the commands an operator runs: ``await`` started on
     the sender while the recipient is still off, and passing once it is on."""
-    a =network.device("alpha", 0x11)
+    a = network.device("alpha", 0x11)
     b = network.device("bravo", 0x22)
     b.peers = [a]
     await a.switch_on()

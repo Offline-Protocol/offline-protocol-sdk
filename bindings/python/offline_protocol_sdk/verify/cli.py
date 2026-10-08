@@ -3,6 +3,7 @@
 Usage, on each device against its own service:
   offline-protocol-verify state --peer off1...
   offline-protocol-verify send off1... "hello"
+  offline-protocol-verify send off1... "hello" --await --timeout 120
   offline-protocol-verify await <message id> --until delivered --timeout 120
   offline-protocol-verify await <message id> --until received
   offline-protocol-verify pair off1... --timeout 60
@@ -61,6 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
     send = sub.add_parser("send", help="send one message and print its id")
     send.add_argument("recipient")
     send.add_argument("content")
+    send.add_argument(
+        "--await",
+        dest="wait",
+        action="store_true",
+        help="then wait for the receipt on the same connection, as `await --until delivered` does",
+    )
+    send.add_argument("--timeout", type=_positive, default=120.0, help="with --await")
 
     wait = sub.add_parser("await", help="wait for one message's delivery receipt, or its arrival")
     wait.add_argument("message_id")
@@ -94,7 +102,9 @@ async def run(args: argparse.Namespace) -> int:
     if args.command == "state":
         return await commands.state(target, args.peer, output)
     if args.command == "send":
-        return await commands.send(target, args.recipient, args.content, output)
+        return await commands.send(
+            target, args.recipient, args.content, output, wait=args.wait, timeout=args.timeout
+        )
     if args.command == "await":
         return await commands.await_message(target, args.message_id, args.until, args.timeout, output)
     if args.command == "pair":

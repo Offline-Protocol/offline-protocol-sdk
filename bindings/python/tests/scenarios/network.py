@@ -120,7 +120,7 @@ class Network:
         # Unix sockets; the verifier's TCP carrier is covered in tests/verify.
         if os.name == "nt":
             pytest.skip("the scenario devices serve the local API on a Unix socket")
-        self._tmp =Path(tempfile.mkdtemp(prefix="opnet-", dir="/tmp"))
+        self._tmp = Path(tempfile.mkdtemp(prefix="opnet-", dir="/tmp"))
         self.devices: list[Device] = []
         self._clients: list[VerifyClient] = []
 

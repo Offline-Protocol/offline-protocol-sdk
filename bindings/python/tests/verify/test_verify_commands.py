@@ -82,6 +82,38 @@ async def test_send_then_await_passes_on_the_receipt_and_the_arrival(harness):
     assert event["type"] == "message_received" and event["content"] == "checked"
 
 
+async def test_send_await_waits_for_the_receipt_on_its_own_connection(harness):
+    """``send --await`` is the race-free way to the receipt of a message to
+    a reachable recipient: a separate ``await`` connects after the send's
+    connection closed, and the receipt usually fires in between."""
+    server_a, server_b = await two_servers(harness)
+    out = _output()
+    status = await commands.send(
+        _target(server_a), server_b.manager.local_address, "and wait", out, wait=True, timeout=15.0
+    )
+    assert status == commands.PASS
+    sent, result = _lines(out)[0], _lines(out)[-1]
+    message_id = sent["sent"]["message_id"]
+    assert result["result"] == "pass"
+    assert result["event"]["type"] == "message_delivered"
+    assert result["event"]["message_id"] == message_id
+
+
+async def test_send_await_times_out_with_status_two(harness):
+    server = await harness.server(config=make_config(profile="alone", internet_enabled=False, wifi_direct_enabled=True))
+    out = _output()
+    status = await commands.send(_target(server), "off1nobody", "lost", out, wait=True, timeout=0.3)
+    assert status == commands.TIMED_OUT
+    assert _lines(out)[-1]["result"] == "timeout"
+
+
+def test_the_command_line_takes_send_await():
+    args = cli.build_parser().parse_args(["send", "off1x", "hi", "--await", "--timeout", "5"])
+    assert args.wait is True and args.timeout == 5.0
+    args = cli.build_parser().parse_args(["send", "off1x", "hi"])
+    assert args.wait is False
+
+
 async def test_send_prints_the_id_await_matches(harness):
     server_a, server_b = await two_servers(harness)
     out = _output()
@@ -118,6 +150,40 @@ async def test_await_times_out_with_status_two(harness):
     status = await commands.await_message(_target(server), "no-such-message", "delivered", 0.3, out)
     assert status == commands.TIMED_OUT
     assert _lines(out)[-1] == {"result": "timeout", "message_id": "no-such-message", "until": "delivered"}
+
+
+async def test_await_and_watch_say_subscribed_once_ready(harness):
+    """The readiness line is a contract with scripts (the offline-first
+    runner waits for it), so its exact text is pinned here."""
+    assert commands.READY_LINE == "subscribed"
+    server_a, server_b = await two_servers(harness)
+    out = _output()
+    waiting = asyncio.ensure_future(commands.await_message(_target(server_a), "m-ready", "delivered", 10.0, out))
+    try:
+        for _ in range(200):
+            if "subscribed\n" in out.err.getvalue():
+                break
+            await asyncio.sleep(0.02)
+        assert out.err.getvalue().splitlines()[0] == "subscribed"
+        # Anything emitted from here on is seen: the server pushes it to the
+        # subscribed connection, not to a hold.
+        server_a.router.route({"type": "message_delivered", "message_id": "m-ready", "transport": "x", "hop_count": 0})
+        assert await waiting == commands.PASS
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+    out = _output()
+    watcher = asyncio.ensure_future(commands.watch(_target(server_b), None, 10.0, out))
+    try:
+        for _ in range(200):
+            if "subscribed\n" in out.err.getvalue():
+                break
+            await asyncio.sleep(0.02)
+        assert "subscribed" in out.err.getvalue().splitlines()
+    finally:
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
 
 
 async def test_await_fails_on_message_failed_and_prints_status_events(harness):
@@ -249,6 +315,62 @@ async def test_watch_reconnects_when_the_service_comes_back(harness, tmp_path, m
     finally:
         watcher.cancel()
         await asyncio.gather(watcher, return_exceptions=True)
+
+
+async def test_watch_retries_a_service_that_drops_the_handshake(harness, monkeypatch):
+    """A service that is stopping or starting can accept a connection and
+    close it before the WebSocket handshake answers. That raises a
+    websockets error rather than an ``OSError``, and is a restart's gap
+    like any other: ``watch`` keeps retrying and connects once it is up."""
+    monkeypatch.setattr(commands, "WATCH_RECONNECT_DELAY", 0.05)
+    first = await harness.server(config=make_config(profile="first"))
+    socket_path = first.socket_path
+    await first.stop()
+    if socket_path.exists():
+        socket_path.unlink()
+    attempts = 0
+
+    def drop(reader, writer):
+        nonlocal attempts
+        attempts += 1
+        writer.close()
+
+    dropping = await asyncio.start_unix_server(drop, str(socket_path))
+    out = _output()
+    watcher = asyncio.ensure_future(commands.watch(commands.Target(socket_path=str(socket_path)), None, 30.0, out))
+    try:
+        for _ in range(100):
+            if attempts >= 2 or watcher.done():
+                break
+            await asyncio.sleep(0.05)
+        assert not watcher.done(), watcher.exception()
+        assert attempts >= 2
+        dropping.close()
+        await dropping.wait_closed()
+        if socket_path.exists():
+            socket_path.unlink()
+        second = LocalApiServer(ProtocolManager(make_config(profile="second")), socket_path=socket_path, health=False)
+        await second.start()
+        try:
+            for _ in range(200):
+                if "watch: connected" in out.err.getvalue():
+                    break
+                await asyncio.sleep(0.05)
+            assert "watch: connected" in out.err.getvalue(), out.err.getvalue()
+        finally:
+            await second.stop()
+    finally:
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+
+
+async def test_watch_that_never_connected_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(commands, "WATCH_RECONNECT_DELAY", 0.05)
+    out = _output()
+    status = await commands.watch(commands.Target(socket_path=str(tmp_path / "absent.sock")), None, 0.3, out)
+    assert status == commands.FAILED
+    assert out.out.getvalue() == ""
+    assert "never connected" in out.err.getvalue()
 
 
 async def test_the_tcp_carrier_reads_the_token_file(harness):
