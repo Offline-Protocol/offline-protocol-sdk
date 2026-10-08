@@ -192,6 +192,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   peripheral when a central is subscribed. The peripheral alone takes
   nothing while no central is subscribed, where a notification reached no
   one. No board run has been done yet.
+- **A resend is offered to the mesh when no carrier reaches the recipient.**
+  Only a message's first send was handed to neighbours when no carrier took
+  it. A message whose first attempt went into a direct link that had already
+  died (a half-open stream accepts frames until its keepalive notices) was
+  therefore never carried: by the time its acknowledgement timed out the link
+  was gone, every resend was refused and went back on the retry queue, and a
+  neighbour that could reach the recipient was never asked, for the life of
+  the outbox entry. The retry queue and both outbox flushes now make the same
+  offer the first send does, when no carrier takes the frame and when a
+  carrier takes it for a recipient it cannot reach. A resend over a link that
+  still reaches the recipient is not offered, so an ordinary retransmission
+  costs one copy.
 
 ## [0.28.0] — 2026-10-06
 

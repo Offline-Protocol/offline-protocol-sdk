@@ -1004,3 +1004,238 @@ fn a_device_with_custody_off_still_strips_the_request_and_holds_nothing() {
     assert_eq!(net.node("bob").custody_stats().held, 0);
     assert_eq!(net.node("bob").custody_stats().accepted, 0);
 }
+
+#[test]
+fn a_message_lost_on_a_dead_direct_link_is_carried_by_the_mesh_on_retry() {
+    // The first send took the direct link, which was already dead: the carrier
+    // accepted the frame and it never arrived (a half-open stream does exactly
+    // this until its keepalive notices). By the time the acknowledgement times
+    // out the link is gone, carol is reachable only through bob, and every
+    // carrier refuses the resend because none holds a link to her.
+    //
+    // A refused first send is offered to the neighbors; a refused resend has to
+    // be too, or the message waits in the outbox for a direct link that may
+    // never come back while a path through the crowd sits unused.
+    let mut alice_config = default_config("alice");
+    alice_config.reliability.ack.default_timeout_ms = 50;
+    alice_config.reliability.retry.initial_delay_ms = 10;
+
+    let mut net = Neighborhood::new(&["bob", "carol"]);
+    net.add_node("alice", alice_config);
+    net.link("alice", "bob");
+    net.link("bob", "carol");
+    net.link("alice", "carol");
+
+    let delivered = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = Arc::clone(&delivered);
+    net.node("alice").on_event(move |event| {
+        if let Event::MessageDelivered { message_id, .. } = event {
+            seen.lock().unwrap().push(message_id);
+        }
+    });
+
+    let msg_id = net.send("alice", "carol", "around the dead link");
+
+    // The direct link swallows the frame.
+    assert_eq!(
+        net.radios["alice"].sent_messages().len(),
+        1,
+        "the first send should have gone straight to carol"
+    );
+    assert!(net.radios["alice"].peer_sends().is_empty());
+    net.radios["alice"].clear_sent_messages();
+
+    // Then the link is gone; bob still hears both of them.
+    net.radios["alice"].remove_connected_peer("carol");
+    net.radios["carol"].remove_connected_peer("alice");
+    net.node("alice").on_neighbor_lost("carol");
+    net.node("carol").on_neighbor_lost("alice");
+    net.links.get_mut("alice").unwrap().retain(|p| p != "carol");
+    net.links.get_mut("carol").unwrap().retain(|p| p != "alice");
+
+    // Let the acknowledgement time out and the retry come due.
+    for _ in 0..50 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        net.step();
+        if !delivered.lock().unwrap().is_empty() {
+            break;
+        }
+    }
+
+    assert_eq!(
+        net.inbox("carol"),
+        vec!["around the dead link".to_string()],
+        "the resend must be carried through bob"
+    );
+    assert!(
+        net.transmissions
+            .iter()
+            .any(|(from, to, id)| from == "bob" && to == "carol" && id == &msg_id),
+        "bob must have carried it"
+    );
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        vec![msg_id],
+        "and alice must learn it was delivered"
+    );
+}
+
+#[test]
+fn a_flushed_message_no_carrier_takes_is_handed_to_the_neighbors() {
+    // A carrier coming up re-drives the whole outbox at once, ignoring the
+    // backoff. Alice was alone when she wrote to carol, so nothing took the
+    // message and nobody was there to carry it. Bob arrives, and he can reach
+    // carol; the flush that follows must offer him the message rather than
+    // putting it straight back on the retry queue to wait out its backoff.
+    let mut net = Neighborhood::new(&["alice", "bob", "carol"]);
+    net.link("bob", "carol");
+
+    let msg_id = net.send("alice", "carol", "carried on the flush");
+    assert_eq!(net.transmission_count(&msg_id), 0, "alice was alone");
+
+    net.link("alice", "bob");
+    net.node("alice").flush_outbox_all();
+    // Rounds only, no sleeping: the retry queue's own timer is a second away
+    // and must not be what delivers this.
+    for _ in 0..6 {
+        net.step();
+    }
+
+    assert_eq!(
+        net.inbox("carol"),
+        vec!["carried on the flush".to_string()],
+        "the flush must hand the message to bob"
+    );
+}
+
+#[test]
+fn a_resend_a_carrier_swallows_is_still_handed_to_the_neighbors() {
+    // Wi-Fi Direct and Reticulum take a frame for any recipient and report
+    // success, so a resend can "succeed" into a carrier that holds no link to
+    // the recipient. Alice's first attempt went that way while she was alone;
+    // bob has arrived since, and he can reach carol. The resend after the
+    // acknowledgement times out is swallowed the same way, and it has to be
+    // offered to bob as a first send would be, not counted as sent.
+    let mut alice_config = default_config("alice");
+    alice_config.reliability.ack.default_timeout_ms = 50;
+    alice_config.reliability.retry.initial_delay_ms = 10;
+
+    let mut net = Neighborhood::new(&["bob", "carol"]);
+    net.add_node("alice", alice_config);
+    let swallowing = MockTransport::new(TransportType::WiFiDirect);
+    swallowing.start().unwrap();
+    net.node("alice")
+        .transport_manager_mut()
+        .add_transport(TransportType::WiFiDirect, Box::new(swallowing.clone()));
+    net.link("bob", "carol");
+
+    let msg_id = net.send("alice", "carol", "past the swallowing carrier");
+    assert!(
+        swallowing
+            .sent_messages()
+            .iter()
+            .any(|m| m.id.as_str() == msg_id),
+        "the first attempt should have been swallowed"
+    );
+    assert_eq!(net.transmission_count(&msg_id), 0, "alice was alone");
+
+    net.link("alice", "bob");
+    for _ in 0..50 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        net.step();
+        if !net.inbox("carol").is_empty() {
+            break;
+        }
+    }
+
+    assert_eq!(
+        net.inbox("carol"),
+        vec!["past the swallowing carrier".to_string()],
+        "the swallowed resend must also be handed to bob"
+    );
+}
+
+#[test]
+fn a_flush_a_carrier_swallows_is_still_handed_to_the_neighbors() {
+    // The flush counterpart of the case above: the carrier that comes up and
+    // triggers the flush is one that takes any recipient, so the flushed
+    // message "succeeds" into it. Bob, who can reach carol, must still be
+    // offered it.
+    let mut net = Neighborhood::new(&["alice", "bob", "carol"]);
+    net.link("bob", "carol");
+
+    let msg_id = net.send("alice", "carol", "flushed past the swallowing carrier");
+    assert_eq!(net.transmission_count(&msg_id), 0, "alice was alone");
+
+    let swallowing = MockTransport::new(TransportType::WiFiDirect);
+    swallowing.start().unwrap();
+    net.node("alice")
+        .transport_manager_mut()
+        .add_transport(TransportType::WiFiDirect, Box::new(swallowing.clone()));
+    net.link("alice", "bob");
+    net.node("alice").flush_outbox_all();
+    assert!(
+        swallowing
+            .sent_messages()
+            .iter()
+            .any(|m| m.id.as_str() == msg_id),
+        "the flush should have gone to the carrier that accepts anyone"
+    );
+    for _ in 0..6 {
+        net.step();
+    }
+
+    assert_eq!(
+        net.inbox("carol"),
+        vec!["flushed past the swallowing carrier".to_string()],
+        "the swallowed flush must also be handed to bob"
+    );
+}
+
+#[test]
+fn a_resend_over_a_live_link_is_not_also_handed_to_the_mesh() {
+    // The cost side of the resend offer. Carol is in range and her first
+    // acknowledgement is lost, so alice resends over the link she still has.
+    // That resend reaches carol; offering it to the mesh as well would put a
+    // second copy on the air for every ordinary retransmission.
+    let mut alice_config = default_config("alice");
+    alice_config.reliability.ack.default_timeout_ms = 50;
+    alice_config.reliability.retry.initial_delay_ms = 10;
+
+    let mut net = Neighborhood::new(&["bob", "carol"]);
+    net.add_node("alice", alice_config);
+    net.link("alice", "bob");
+    net.link("alice", "carol");
+
+    let delivered = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = Arc::clone(&delivered);
+    net.node("alice").on_event(move |event| {
+        if let Event::MessageDelivered { message_id, .. } = event {
+            seen.lock().unwrap().push(message_id);
+        }
+    });
+
+    let msg_id = net.send("alice", "carol", "say again");
+    net.step();
+    assert_eq!(net.inbox("carol"), vec!["say again".to_string()]);
+    // Carol's acknowledgement is lost on the way back.
+    net.node("carol").process().unwrap();
+    net.radios["carol"].clear_sent_messages();
+    net.radios["carol"].clear_peer_sends();
+
+    for _ in 0..50 {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        net.step();
+        if !delivered.lock().unwrap().is_empty() {
+            break;
+        }
+    }
+
+    assert_eq!(*delivered.lock().unwrap(), vec![msg_id.clone()]);
+    assert_eq!(
+        net.deliveries_to("carol", &msg_id),
+        2,
+        "the first copy and one resend, nothing extra"
+    );
+    assert_eq!(net.deliveries_to("bob", &msg_id), 0);
+}

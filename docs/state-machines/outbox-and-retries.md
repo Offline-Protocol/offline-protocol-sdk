@@ -76,7 +76,13 @@ should be:
 - **No transport is not terminal.** A send with nowhere to go persists to the
   outbox, offers the frame to the mesh, schedules a retry, and emits a
   non-terminal deferral event. Terminal failure comes only from retry-budget
-  exhaustion or expiry.
+  exhaustion or expiry. **A resend asks the same question.** The retry queue
+  and both outbox flushes offer the frame to the mesh when no carrier takes
+  it, and when a carrier takes it for a recipient it cannot reach (Wi-Fi
+  Direct and Reticulum accept anyone). Without that, a message whose first
+  attempt went into a link that was already dead waited out its whole outbox
+  lifetime for that link to return, while a neighbour that could reach the
+  recipient was never asked.
 - **Parking is entered from `Pending`, not from `Queued`.** The unreachable
   verdict is an asynchronous relay report about a message the transport already
   accepted, which is why there is a pending acknowledgement for the park to

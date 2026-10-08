@@ -3677,6 +3677,45 @@ impl OfflineProtocol {
         Ok(next_retry_at)
     }
 
+    /// The mesh offer for a **resend**: the retry queue and both outbox
+    /// flushes. A resend asks the same question a first send does, so it gets
+    /// the same answer as [`Self::handle_send_success`] and
+    /// [`Self::handle_send_failure`]: a send no carrier took is offered to the
+    /// neighbors, and so is one a carrier took for a recipient it cannot
+    /// reach.
+    ///
+    /// Without this a message whose first attempt a carrier accepted and lost
+    /// (a stream that was already dead and had not noticed) never reached the
+    /// mesh at all: by the time its acknowledgement timed out the direct link
+    /// was gone, every resend was refused, and each refusal only went back on
+    /// the retry queue while a neighbor that could reach the recipient sat
+    /// unused for the life of the outbox entry.
+    ///
+    /// Re-offering on every resend is cheap for the reasons the park path
+    /// gives: a neighbor that took the frame refuses another copy of the id
+    /// for the whole `RelaySeenCache` retention window, the retry backoff
+    /// bounds how often we ask, and each offer spends the own-send tokens any
+    /// other frame of ours does. Excluding neighbors we already handed it to
+    /// would be wrong, because a neighbor records an id only when it *accepts*
+    /// the frame, and one that refused it (rate limit, full queue) is exactly
+    /// the one a later offer should reach.
+    pub(super) fn offer_resend_to_mesh(&mut self, message: &Message, accepted: bool) -> usize {
+        if accepted && self.can_reach_recipient(message.recipient.as_str()) {
+            return 0;
+        }
+        let handed_to_mesh = self.offer_to_mesh(message);
+        if handed_to_mesh > 0 {
+            debug!(
+                message_id = %message.id,
+                recipient = %message.recipient,
+                accepted,
+                handed_to_mesh,
+                "Resend could not reach the recipient directly; handed it to neighbors"
+            );
+        }
+        handed_to_mesh
+    }
+
     /// Hands a locally-originated frame to nearby devices so it can travel
     /// toward a recipient we cannot reach ourselves.
     ///
