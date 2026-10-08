@@ -492,7 +492,7 @@ def test_a_construction_behind_a_wedged_one_says_so(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _client(reads, *, hello=True, mtu=247, connected=True):
+def _client(reads, *, hello=True, mtu=247, room=244, connected=True):
     client = MagicMock()
     client.connect = AsyncMock()
     client.disconnect = AsyncMock()
@@ -500,8 +500,9 @@ def _client(reads, *, hello=True, mtu=247, connected=True):
     client.write_gatt_char = AsyncMock()
     client.is_connected = connected
     client.mtu_size = mtu
+    hello_char = MagicMock(max_write_without_response_size=room)
     client.services.get_characteristic = MagicMock(
-        side_effect=lambda uuid: object() if (uuid == HELLO_CHAR_UUID and hello) else None
+        side_effect=lambda uuid: hello_char if (uuid == HELLO_CHAR_UUID and hello) else None
     )
 
     async def read_gatt_char(uuid):
@@ -547,10 +548,49 @@ class TestCentralHello:
         client.disconnect.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_a_hello_that_does_not_fit_the_mtu_is_skipped(self, manager):
-        client = _client(PEER_READS, mtu=23)
+    async def test_a_hello_that_does_not_fit_one_packet_is_skipped(self, manager):
+        client = _client(PEER_READS, room=20)
         await _connect(manager, client, "AA:01")
         client.write_gatt_char.assert_not_awaited()
+        client.disconnect.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_bound_is_the_characteristics_not_the_clients_mtu(self, manager):
+        """bleak's BlueZ client reports a 23-byte MTU until it is explicitly
+        acquired, which skipped every hello on Linux. The characteristic
+        reads BlueZ's negotiated MTU."""
+        client = _client(PEER_READS, mtu=23, room=244)
+        await _connect(manager, client, "AA:01")
+        client.write_gatt_char.assert_awaited_once_with(HELLO_CHAR_UUID, HELLO, response=True)
+
+    @pytest.mark.asyncio
+    async def test_the_hello_lands_before_the_peer_is_announced(self, manager, protocol):
+        """The announce makes the core push a key package. Written ahead of
+        the hello, it reached a peripheral that could not name the link, and
+        was refused as a transport identity mismatch."""
+        order = []
+        client = _client(PEER_READS)
+        client.start_notify = AsyncMock(side_effect=lambda *a: order.append("subscribe"))
+        client.write_gatt_char = AsyncMock(side_effect=lambda *a, **k: order.append("hello"))
+        protocol.ble_peer_discovered.side_effect = lambda **k: order.append("announce")
+        await _connect(manager, client, "AA:01")
+        assert order == ["subscribe", "hello", "announce"]
+
+    @pytest.mark.asyncio
+    async def test_a_hello_that_is_never_answered_does_not_hold_the_announce(
+        self, manager, protocol, monkeypatch
+    ):
+        monkeypatch.setattr(ble_manager_module, "HELLO_WRITE_TIMEOUT", 0.01)
+        client = _client(PEER_READS)
+
+        async def hang(*args, **kwargs):
+            await asyncio.sleep(10)
+
+        client.write_gatt_char = AsyncMock(side_effect=hang)
+        # Bounded here too, so a central with no deadline fails rather than
+        # passing once the hang ends.
+        await asyncio.wait_for(_connect(manager, client, "AA:01"), 2.0)
+        protocol.ble_peer_discovered.assert_called_once_with(peer_id=PHONE, rssi=-70)
         client.disconnect.assert_not_awaited()
 
     @pytest.mark.asyncio

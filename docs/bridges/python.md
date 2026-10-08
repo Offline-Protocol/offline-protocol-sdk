@@ -461,7 +461,15 @@ The pieces, each of which the failure needs only one of to come back:
   session with this peripheral at all. "Fits one write" means one ATT packet:
   iOS bounds it by `maximumWriteValueLength(for: .withoutResponse)`, because
   the `.withResponse` figure is 512 there and a longer write goes out as a
-  prepared write, which this peripheral refuses.
+  prepared write, which this peripheral refuses. `BleManager` takes the bound
+  from the Hello characteristic's `max_write_without_response_size`, never from
+  the client's `mtu_size`: bleak's BlueZ client reports 23 until the MTU is
+  explicitly acquired, which skipped every hello from Linux. `BleManager` also
+  announces the peer only after the hello's response (or a 3 second deadline),
+  because the announce is what makes the core push a key package, and one
+  written ahead of the hello is refused by a peripheral that cannot yet name
+  the link. The peripheral refuses a batch carrying a hello (a prepared write)
+  as a whole, before any request in it reaches the verifier.
 - **One client link per peer.** A second link that verifies as a peer already
   held is closed unannounced, on Android and in `BleManager`, and its address
   is left undialed for a minute or until the kept link is gone, whichever

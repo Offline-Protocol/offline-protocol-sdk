@@ -76,6 +76,10 @@ LIVENESS_INTERVAL = 15.0  # seconds
 # verified and refused again every cooldown.
 DUPLICATE_LINK_SUPPRESS = 60.0  # seconds
 LIVENESS_READ_TIMEOUT = 5.0  # seconds
+# How long the hello's write response may take. The announce waits on it, so
+# a peer that never answers must not hold the link unannounced; Android's
+# hello watchdog has the same bound.
+HELLO_WRITE_TIMEOUT = 3.0  # seconds
 SCAN_RESTART_INTERVAL = 30.0
 
 
@@ -427,19 +431,23 @@ class BleManager(TransportManager):
                 self._peer_device_ids[addr] = device_id
                 self._device_id_to_addr[device_id] = addr
 
+            # Subscribe to message notifications
+            await self._subscribe_to_messages(client, addr, device_id)
+
+            # Say who we are on this link, after the subscription and before
+            # any Message write, as the chapter orders it. The announce below
+            # is what makes the core queue for this peer (it pushes a key
+            # package on it), so the hello goes first: a key package written
+            # ahead of it reaches a peripheral that cannot name this link and
+            # is refused as a transport identity mismatch.
+            await self._write_hello(client, addr)
+
             # Announce the peer under the address it proved
             try:
                 rssi = -70  # approximate; bleak doesn't expose RSSI post-connect
                 self._protocol.ble_peer_discovered(peer_id=device_id, rssi=rssi)
             except Exception:
                 logger.debug("ble_peer_discovered failed for %s", device_id)
-
-            # Subscribe to message notifications
-            await self._subscribe_to_messages(client, addr, device_id)
-
-            # Say who we are on this link, after the subscription and before
-            # any Message write, as the chapter orders it.
-            await self._write_hello(client, addr)
 
             self._emit_diagnostic("info", "Connected to peer", {
                 "address": addr,
@@ -534,9 +542,10 @@ class BleManager(TransportManager):
         refused write all leave the link as it was.
         """
         try:
-            if client.services.get_characteristic(HELLO_CHAR_UUID) is None:
-                return
+            hello_char = client.services.get_characteristic(HELLO_CHAR_UUID)
         except Exception:
+            return
+        if hello_char is None:
             return
         try:
             assertion = bytes(self._protocol.identity_assertion([]))
@@ -545,8 +554,14 @@ class BleManager(TransportManager):
             return
         if not HELLO_MIN_LEN <= len(assertion) <= HELLO_MAX_LEN:
             return
+        # One ATT packet's payload, from the characteristic: bleak's BlueZ
+        # client reports a 23-byte MTU unless it was explicitly acquired, which
+        # bounded every Linux hello to 20 bytes so none was ever written. The
+        # characteristic reads BlueZ's MTU property (and on CoreBluetooth
+        # maximumWriteValueLength(.withoutResponse)), and a longer value would
+        # go out as a prepared write, which a peripheral refuses for a hello.
         try:
-            payload_limit = int(client.mtu_size) - 3
+            payload_limit = int(hello_char.max_write_without_response_size)
         except Exception:
             payload_limit = 0
         if payload_limit and len(assertion) > payload_limit:
@@ -557,9 +572,12 @@ class BleManager(TransportManager):
             })
             return
         try:
-            await client.write_gatt_char(HELLO_CHAR_UUID, assertion, response=True)
+            await asyncio.wait_for(
+                client.write_gatt_char(HELLO_CHAR_UUID, assertion, response=True),
+                HELLO_WRITE_TIMEOUT,
+            )
         except Exception as exc:
-            self._emit_diagnostic("debug", f"Hello write to {addr} refused: {exc}")
+            self._emit_diagnostic("debug", f"Hello write to {addr} refused: {exc!r}")
 
     async def _probe_link(self, addr: str, client: BleakClient, device_id: str) -> bool:
         """Read the peer's Device id back; False when the link is dead.
