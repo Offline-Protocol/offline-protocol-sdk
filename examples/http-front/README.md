@@ -12,6 +12,7 @@ On each host, run the service with the front, for example from the
 [container image](../../bindings/python/docker):
 
 ```bash
+export OFFLINE_PROTOCOL_STORE_KEY="$(openssl rand -hex 32)"   # once per host; keep it
 offline-protocol-service --config config.json --mls-root keys --state-root state \
     --listen 0.0.0.0:7878 --lan --http 127.0.0.1:8080
 ```
@@ -27,8 +28,13 @@ On the calling host, with the provider host's address (from its front's
 
 ```bash
 ./client.sh off1qx7jj4u8w32ptzysnkadwjzmz9w2nukfmc3ts2ap
-{"time": "2026-10-07T12:49:47+00:00", "tz": "utc", "caller": "off1q9kd..."}
+{"time": "2026-10-07T12:49:47+00:00", "caller": "off1q9kd..."}
 ```
+
+A front started with `--http-token-file` refuses both programs without its
+token: pass the file to the provider as `--token-file` and to the client as
+`OP_TOKEN_FILE`. R23 in the threat model says when a front on loopback
+should have one (a host where a browser runs).
 
 `caller` is the calling host's address as the engine authenticated it, which
 the provider can use to decide who may call it. With an alias file

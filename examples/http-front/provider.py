@@ -8,6 +8,9 @@ library only.
 
     python3 provider.py --front http://127.0.0.1:8080 --port 9000
 
+A front started with ``--http-token-file`` refuses a registration without
+its token; pass the same file as ``--token-file``.
+
 Prints one JSON line once registered, ``{"registered": "timeofday", "port": N}``.
 """
 
@@ -29,16 +32,16 @@ SERVICE = "timeofday"
 
 class Handler(BaseHTTPRequestHandler):
     def _answer(self) -> None:
-        url = urlsplit(self.path)
-        if url.path != "/now":
+        # Read any body before answering: a request whose body is left
+        # unread can be reset by the kernel when the socket closes.
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        if urlsplit(self.path).path != "/now":
             self._json(404, {"error": "no such path"})
             return
-        zone = parse_qs(url.query).get("tz", ["utc"])[0]
         self._json(
             200,
             {
                 "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "tz": zone,
                 "caller": self.headers.get("X-Offline-Protocol-Sender"),
             },
         )
@@ -58,21 +61,29 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write(f"{self.address_string()} {format % args}\n")
 
 
-def register(front: str, port: int, deadline: float) -> None:
-    """``PUT /services/timeofday`` on the front, retried until it answers:
-    the front may still be starting."""
+def register(front: str, port: int, deadline: float, token_file: str | None) -> None:
+    """``PUT /services/timeofday`` on the front, retried while the front
+    cannot be reached (it may still be starting). A refusal is final."""
     body = json.dumps({"callback": f"http://127.0.0.1:{port}", "version": "1"}).encode()
-    request = urllib.request.Request(
-        f"{front.rstrip('/')}/services/{SERVICE}",
-        data=body,
-        method="PUT",
-        headers={"Content-Type": "application/json"},
-    )
     while True:
+        headers = {"Content-Type": "application/json"}
+        if token_file:
+            # Read at every attempt: the front writes a new token each start.
+            try:
+                with open(token_file, encoding="utf-8") as handle:
+                    headers["X-Offline-Protocol-Token"] = handle.read().strip()
+            except OSError:
+                pass
+        request = urllib.request.Request(
+            f"{front.rstrip('/')}/services/{SERVICE}", data=body, method="PUT", headers=headers
+        )
         try:
             with urllib.request.urlopen(request, timeout=5) as reply:
                 reply.read()
                 return
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise SystemExit(f"the front at {front} refused the registration: {exc.code} {detail}") from None
         except (urllib.error.URLError, OSError) as exc:
             if time.monotonic() > deadline:
                 raise SystemExit(f"the front at {front} did not accept the registration: {exc}") from None
@@ -83,11 +94,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--front", default="http://127.0.0.1:8080", help="the HTTP front on this host")
     parser.add_argument("--port", type=int, default=9000, help="where to serve (0 picks a free port)")
+    parser.add_argument("--token-file", help="the front's --http-token-file, when it has one")
+    parser.add_argument("--wait", type=float, default=30, help="seconds to wait for the front to start")
     args = parser.parse_args(argv)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     port = server.server_address[1]
     Thread(target=server.serve_forever, daemon=True).start()
-    register(args.front, port, time.monotonic() + 30)
+    register(args.front, port, time.monotonic() + args.wait, args.token_file)
     print(json.dumps({"registered": SERVICE, "port": port}), flush=True)
     try:
         while True:

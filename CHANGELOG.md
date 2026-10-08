@@ -65,13 +65,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 - **A container image for the service, and an HTTP demo.**
   `bindings/python/docker` builds one service per host on `python:3.12-slim`
-  with the `lan` and `http` extras, configured from environment variables,
-  and its README lists what a host's container manifest must grant (host
+  with the `lan` and `http` extras, configured from environment variables.
+  A wheel built from a checkout is installed in place of PyPI's, and the
+  build fails when the installed service has no HTTP front. Its README lists what a host's container manifest must grant (host
   networking for multicast DNS, inbound TCP 7878, a persistent volume, the
   store key from a secret store, and the system D-Bus socket for Bluetooth
   LE) and the failure each grant prevents. `examples/http-front` has a
-  provider with no SDK import and a `curl` client. Two containers from the
-  image found each other over multicast DNS with no peer list and served a
+  provider with no SDK import and a `curl` client, both able to send the
+  front's token. Two containers from the image, on one bridge network,
+  found each other over multicast DNS with no peer list and served a
   request through the front, and the address and registrations survived a
   restart. Bluetooth LE from a container is untested on hardware.
 

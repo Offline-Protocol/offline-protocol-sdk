@@ -6,15 +6,25 @@
 # never Alpine (musl has no wheel). python:3.12-slim is Debian.
 FROM python:3.12-slim
 
-# What to install. The default installs the released package from PyPI; to
-# install a wheel built from a checkout instead, put it in wheels/ beside
-# this file and pass --build-arg SDK_SPEC='offline-protocol-sdk[lan,http]==<version>'.
+# What to install. With no wheel in wheels/, the released package from PyPI.
+# A wheel built from a checkout, put in wheels/, is installed instead: by
+# itself first, so a release with the same version number on PyPI can never
+# take its place, and then the extras' dependencies. The build fails unless
+# the installed service has the HTTP front, which a release older than the
+# `http` extra lacks: that image would otherwise build and then crash-loop on
+# `unrecognized arguments: --lan --http`.
 # Never COPY the checkout itself: the build context is this directory only.
 ARG SDK_SPEC="offline-protocol-sdk[lan,http]"
 
 COPY wheels/ /wheels/
-RUN pip install --no-cache-dir --find-links /wheels "${SDK_SPEC}" \
-    && rm -rf /wheels
+RUN set -eu; \
+    if ls /wheels/*.whl >/dev/null 2>&1; then \
+        pip install --no-cache-dir --no-deps --no-index --find-links /wheels offline-protocol-sdk; \
+    fi; \
+    pip install --no-cache-dir --find-links /wheels "${SDK_SPEC}"; \
+    rm -rf /wheels; \
+    offline-protocol-service --help | grep -q -- '--http ' \
+        || { echo "the installed offline-protocol-service has no HTTP front: put a wheel built from a checkout in wheels/" >&2; exit 1; }
 
 COPY config.json /etc/offline-protocol/config.json
 COPY entrypoint.sh /usr/local/bin/offline-protocol-entrypoint
