@@ -277,8 +277,8 @@ class DockerRunner(Runner):
         # Stopped while still on net-ab, so A sees the stream close. Taken off
         # the network first, C would leave A a stream that looks open until
         # keepalive ends it (about 30 s), and a message A sends in that window
-        # goes down it, is retried over direct carriers only, and never
-        # reaches the mesh (#541).
+        # goes down it and is retried down it, reaching the mesh only on the
+        # first retry after keepalive, past HOP_RECEIVED_S.
         self._docker("stop", f"{PROJECT}-c")
         self._docker("network", "disconnect", f"{PROJECT}_net-ab", f"{PROJECT}-c")
         self._docker("start", f"{PROJECT}-c")

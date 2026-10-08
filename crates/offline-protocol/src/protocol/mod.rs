@@ -2805,10 +2805,12 @@ impl OfflineProtocol {
                     current_transport,
                     Some(attempt_count.saturating_add(1)),
                 );
+                self.offer_resend_to_mesh(&message, true);
                 debug!(message_id = %message.id, "Flush send succeeded");
                 current_transport
             }
             Err(e) => {
+                self.offer_resend_to_mesh(&message, false);
                 let _ = self.retry_queue.enqueue(message.clone(), attempt_count);
                 debug!(message_id = %message.id, error = %e, "Flush send failed, re-enqueued");
                 None
@@ -3885,6 +3887,7 @@ impl OfflineProtocol {
                     if let Some(transport) = current_transport {
                         self.transport_manager.reset_retry_count(transport);
                     }
+                    self.offer_resend_to_mesh(&entry.message, true);
 
                     debug!(
                         message_id = %entry.message.id,
@@ -3894,6 +3897,7 @@ impl OfflineProtocol {
                     );
                 }
                 Err(e) => {
+                    self.offer_resend_to_mesh(&entry.message, false);
                     // Re-enqueue with incremented retry count for backoff
                     let next_retry_at = self
                         .retry_queue

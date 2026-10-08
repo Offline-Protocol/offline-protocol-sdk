@@ -113,9 +113,11 @@ each:
 
 ## Known gaps
 
-- **A message a direct link took and then lost never crosses the mesh**
-  (#541): a message sent down a stream to a device that went away without
-  closing it waits for a direct link to that device.
+- **A message a direct link took and then lost crosses the mesh late**:
+  a message sent down a stream to a device that went away without closing
+  it is retried down that stream until keepalive ends it (about 30 s), and
+  only the next retry is handed to the neighbours. That is why scenario 4
+  stops C before taking it off the network A shares with it.
 - **One phone per Linux box over Bluetooth LE.** The box's peripheral learns
   which phone wrote to it, but it maps a phone to its user id only while that
   phone is the one central connected, so with two a reply has no route back

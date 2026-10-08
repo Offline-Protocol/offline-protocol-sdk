@@ -588,9 +588,9 @@ impl OfflineProtocol {
     /// 2. **Pinned to [`TransportType::Internet`].** These frames are
     ///    self-addressed, and DORS demotes Internet below every mesh transport
     ///    (`INTERNET_FALLBACK_DEMOTION`), so ordinary routing hands them to
-    ///    BLE/Wi-Fi Direct first. BLE fails closed (self is never a connected
-    ///    peer), but Wi-Fi Direct and Reticulum enqueue unconditionally and
-    ///    return `Ok` — swallowing the frame while reporting success, which on
+    ///    the mesh carriers first. BLE and Wi-Fi Direct fail closed (self is
+    ///    never a connected peer), but Reticulum enqueues unconditionally and
+    ///    returns `Ok`, swallowing the frame while reporting success, which on
     ///    the broadcast path means the group message is delivered to nobody.
     ///
     /// Errors propagate to the caller rather than routing through
@@ -3606,11 +3606,11 @@ impl OfflineProtocol {
         self.ensure_ack_registration(message)?;
 
         // A transport reporting success is not always evidence the frame can
-        // arrive. Wi-Fi Direct and Reticulum accept any recipient and return
-        // `Ok`, so a send to someone we hold no link to is queued for a link
-        // that never drains — and because the mesh hand-off used to hang off
-        // the *failure* path, a device with either carrier up would swallow the
-        // frame instead of asking its neighbors to carry it. That is precisely
+        // arrive. The internet transport and Reticulum accept any recipient
+        // and return `Ok`, so a send to someone neither can reach is reported
+        // as sent and never arrives, and because the mesh hand-off used to hang
+        // off the *failure* path, a device with either carrier up would swallow
+        // the frame instead of asking its neighbors to carry it. That is precisely
         // the out-of-range case forwarding exists for, so the question is asked
         // directly rather than inferred from an error that never comes.
         //
@@ -3675,6 +3675,57 @@ impl OfflineProtocol {
             "Deferred message due to send error"
         );
         Ok(next_retry_at)
+    }
+
+    /// The mesh offer for a **resend**: the retry queue and both outbox
+    /// flushes. A resend asks the same question a first send does, so it gets
+    /// the same answer as [`Self::handle_send_success`] and
+    /// [`Self::handle_send_failure`]: a send no carrier took is offered to the
+    /// neighbors, and so is one a carrier took for a recipient it cannot
+    /// reach.
+    ///
+    /// Without this a message whose first attempt a carrier accepted and lost
+    /// (a stream that was already dead and had not noticed) never reached the
+    /// mesh at all: by the time its acknowledgement timed out the direct link
+    /// was gone, every resend was refused, and each refusal only went back on
+    /// the retry queue while a neighbor that could reach the recipient sat
+    /// unused for the life of the outbox entry.
+    ///
+    /// Re-offering on every resend is cheap for the reasons the park path
+    /// gives: a neighbor that took the frame refuses another copy of the id
+    /// for the whole `RelaySeenCache` retention window, the retry backoff
+    /// bounds how often we ask, and each offer spends the own-send tokens any
+    /// other frame of ours does. Excluding neighbors we already handed it to
+    /// would be wrong, because a neighbor records an id only when it *accepts*
+    /// the frame, and one that refused it (rate limit, full queue) is exactly
+    /// the one a later offer should reach.
+    pub(super) fn offer_resend_to_mesh(&mut self, message: &Message, accepted: bool) -> usize {
+        if !self.needs_mesh_copy(message.recipient.as_str(), accepted) {
+            return 0;
+        }
+        let handed_to_mesh = self.offer_to_mesh(message);
+        if handed_to_mesh > 0 {
+            debug!(
+                message_id = %message.id,
+                recipient = %message.recipient,
+                accepted,
+                handed_to_mesh,
+                "Resend could not reach the recipient directly; handed it to neighbors"
+            );
+        }
+        handed_to_mesh
+    }
+
+    /// Whether a frame for `recipient` that a carrier did (`accepted`) or did
+    /// not take must also be handed to the neighbours.
+    ///
+    /// The one rule for a resend and a handshake frame: yes when no carrier
+    /// took it, and yes when one took it for a recipient that
+    /// [`Self::can_reach_recipient`] says no carrier reaches, because a
+    /// carrier's `Ok` is not delivery. Two copies of it drifting apart would
+    /// leave one path swallowing frames the other carries.
+    fn needs_mesh_copy(&self, recipient: &str, accepted: bool) -> bool {
+        !accepted || !self.can_reach_recipient(recipient)
     }
 
     /// Hands a locally-originated frame to nearby devices so it can travel
@@ -3825,12 +3876,11 @@ impl OfflineProtocol {
     /// accepted the frame and no neighbour took it.
     pub(super) fn send_or_carry_handshake(&mut self, message: &Message) -> Result<usize> {
         let direct = self.transport_manager.send(message);
-        let handed_to_mesh =
-            if direct.is_err() || !self.can_reach_recipient(message.recipient.as_str()) {
-                self.offer_to_mesh(message)
-            } else {
-                0
-            };
+        let handed_to_mesh = if self.needs_mesh_copy(message.recipient.as_str(), direct.is_ok()) {
+            self.offer_to_mesh(message)
+        } else {
+            0
+        };
         if handed_to_mesh > 0 {
             debug!(
                 recipient = %message.recipient,
@@ -4947,14 +4997,14 @@ impl OfflineProtocol {
     /// ack handling already absorbs. When nothing reaches the sender directly
     /// the mesh remains the whole answer and step 3 is skipped, as before.
     ///
-    /// Step 1 is *gated on addressability* rather than on a send error, and
-    /// that gate is load-bearing. A transport returning `Ok` is not evidence
-    /// the frame can arrive: Wi-Fi Direct enqueues for any recipient, and it is
-    /// the preferred mesh carrier — so on the last hop of a forwarded frame the
-    /// answer would be queued for a link that never drains, reported as sent,
-    /// and step 2 would never run. The sender's retransmissions would take the
-    /// same path every time, ending in a failure report for a delivered
-    /// message.
+    /// Step 1 is *gated on addressability* as well as on the send result. A
+    /// transport returning `Ok` is not evidence the frame can arrive: a mesh
+    /// carrier that enqueued for any recipient (Wi-Fi Direct did, before it
+    /// refused a recipient no stream had proved) would, on the last hop of a
+    /// forwarded frame, report the answer as sent toward a sender it holds no
+    /// link to, and step 2 would never run. The sender's retransmissions would
+    /// take the same path every time, ending in a failure report for a
+    /// delivered message.
     ///
     /// An acknowledgement no route takes is held, not dropped
     /// ([`Self::hold_unrouted_ack`]): it was owed the moment the message was
