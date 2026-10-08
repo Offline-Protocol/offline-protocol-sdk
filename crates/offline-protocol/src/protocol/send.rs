@@ -3700,7 +3700,7 @@ impl OfflineProtocol {
     /// the frame, and one that refused it (rate limit, full queue) is exactly
     /// the one a later offer should reach.
     pub(super) fn offer_resend_to_mesh(&mut self, message: &Message, accepted: bool) -> usize {
-        if accepted && self.can_reach_recipient(message.recipient.as_str()) {
+        if !self.needs_mesh_copy(message.recipient.as_str(), accepted) {
             return 0;
         }
         let handed_to_mesh = self.offer_to_mesh(message);
@@ -3714,6 +3714,18 @@ impl OfflineProtocol {
             );
         }
         handed_to_mesh
+    }
+
+    /// Whether a frame for `recipient` that a carrier did (`accepted`) or did
+    /// not take must also be handed to the neighbours.
+    ///
+    /// The one rule for a resend and a handshake frame: yes when no carrier
+    /// took it, and yes when one took it for a recipient that
+    /// [`Self::can_reach_recipient`] says no carrier reaches, because a
+    /// carrier's `Ok` is not delivery. Two copies of it drifting apart would
+    /// leave one path swallowing frames the other carries.
+    fn needs_mesh_copy(&self, recipient: &str, accepted: bool) -> bool {
+        !accepted || !self.can_reach_recipient(recipient)
     }
 
     /// Hands a locally-originated frame to nearby devices so it can travel
@@ -3864,12 +3876,11 @@ impl OfflineProtocol {
     /// accepted the frame and no neighbour took it.
     pub(super) fn send_or_carry_handshake(&mut self, message: &Message) -> Result<usize> {
         let direct = self.transport_manager.send(message);
-        let handed_to_mesh =
-            if direct.is_err() || !self.can_reach_recipient(message.recipient.as_str()) {
-                self.offer_to_mesh(message)
-            } else {
-                0
-            };
+        let handed_to_mesh = if self.needs_mesh_copy(message.recipient.as_str(), direct.is_ok()) {
+            self.offer_to_mesh(message)
+        } else {
+            0
+        };
         if handed_to_mesh > 0 {
             debug!(
                 recipient = %message.recipient,
