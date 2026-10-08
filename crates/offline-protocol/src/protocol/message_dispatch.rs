@@ -536,10 +536,18 @@ impl OfflineProtocol {
                 .insert(sender.to_string(), pkg.clone());
             self.persist_peer_key_package(sender, &pkg);
 
-            // Send our key package back if auto_key_exchange is enabled
+            // Send our key package back if auto_key_exchange is enabled.
+            //
+            // Not yet to a sender only the mesh reaches. The Welcome built
+            // below is all that sender needs to join, and a package sent back
+            // first would make each side build a group of its own for the
+            // tiebreak to discard, every frame of both crossing each device in
+            // between. The fresh package a new session sends for group invites
+            // still goes, after the Welcome.
             if self.config.encryption.auto_key_exchange
                 && self.config.encryption.enabled
                 && !self.key_package_sent_to.contains_key(sender)
+                && self.can_reach_recipient(sender)
             {
                 let _ = self.send_key_package_to(sender, false);
             }

@@ -1251,9 +1251,34 @@ impl OfflineProtocol {
             ));
         }
 
-        match self.transport_manager.send(&record.welcome_message) {
-            Ok(()) => {
-                let transport_used = self.transport_manager.current_transport();
+        // A Welcome no carrier took directly is handed to neighbours to
+        // carry, as the key package that produced it was: a session between
+        // two devices that only reach each other through a third is built
+        // from exactly these two frames crossing it. Carried or sent, it is
+        // equally unproved, so it takes the same in-flight path below and
+        // the peer's probe or decrypt is still what settles it. A carried one
+        // waits the mesh confirmation timeout, since a neighbour is a mesh
+        // link whatever the selector last picked.
+        let sent = match self.transport_manager.send(&record.welcome_message) {
+            Ok(()) => Ok(self.transport_manager.current_transport()),
+            Err(err) => {
+                let handed_to_mesh = self.offer_to_mesh(&record.welcome_message);
+                if handed_to_mesh > 0 {
+                    debug!(
+                        peer_id = %peer_id,
+                        message_id = %record.welcome_message.id,
+                        handed_to_mesh,
+                        "Welcome handed to neighbours to carry"
+                    );
+                    Ok(None)
+                } else {
+                    Err(err)
+                }
+            }
+        };
+
+        match sent {
+            Ok(transport_used) => {
                 let mut updated =
                     self.welcome_lifecycles
                         .get(peer_id)
@@ -1436,6 +1461,7 @@ impl OfflineProtocol {
             return;
         }
         let Some((sent_at, repeats)) = self.key_package_sent_to.get_mut(peer_id) else {
+            self.push_key_package_across_mesh(peer_id);
             return;
         };
         if sent_at.elapsed() < StdDuration::from_secs(key_package_resend_wait_secs(*repeats)) {
@@ -1465,6 +1491,43 @@ impl OfflineProtocol {
             if let Some((_, repeats)) = self.key_package_sent_to.get_mut(peer_id) {
                 *repeats = repeats.saturating_add(1);
             }
+        }
+    }
+
+    /// Makes the first key-package push to a peer that only the mesh can
+    /// reach, for whom a message is waiting.
+    ///
+    /// Invariant: a message queued for a session is enough to start that
+    /// session over any path that can carry a frame to the peer. The first
+    /// push is otherwise discovery's, and discovery names only the device a
+    /// frame arrived from: on a peer two hops away every frame arrives
+    /// attributed to the device in the middle, so the pair is never
+    /// discovered and, before this, never started a session. A message to a
+    /// device the sender had never been next to waited out its seven days.
+    ///
+    /// Three things keep it narrow:
+    ///
+    /// - **Only with a message waiting.** The caller is the reconciliation
+    ///   tick, for peers holding a queued message, so the package goes to
+    ///   addresses the application asked to reach, never to whoever is heard.
+    /// - **Only when nothing else reaches the peer.** A direct link means
+    ///   discovery has already pushed, and an infrastructure carrier has its
+    ///   own exchange; both are left alone.
+    /// - **Only once by this route.** A push that a neighbour took is recorded
+    ///   like any other, so every repeat after it is the re-push ladder's, on
+    ///   its doubling wait. A push nobody took is tried again on the next
+    ///   tick, and costs nothing new: the pool hands the peer the same
+    ///   package until a Welcome consumes it (ADR 0012).
+    fn push_key_package_across_mesh(&mut self, peer_id: &str) {
+        if self.can_reach_recipient(peer_id) || self.transport_manager.mesh_neighbors().is_empty() {
+            return;
+        }
+        if !matches!(self.has_mls_session(peer_id), Ok(false)) {
+            return;
+        }
+        debug!(peer_id = %peer_id, "Message waiting for a peer only the mesh reaches, pushing our key package");
+        if let Err(e) = self.send_key_package_to(peer_id, false) {
+            debug!(peer_id = %peer_id, error = %e, "Key package push across the mesh deferred");
         }
     }
 

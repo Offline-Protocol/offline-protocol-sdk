@@ -93,6 +93,38 @@ re-enters the desync path. Repeating the reset flag would tear down a
 replacement session whose Welcome is in flight, so it belongs with the
 split-session work rather than here.
 
+### A peer only the mesh reaches is pushed to from the tick
+
+**A message waiting for a session is enough to start that session over any
+path that can carry a frame to the peer.** The first push is otherwise
+discovery's, and discovery names only the device a frame arrived from. A peer
+two hops away is never discovered: every frame from it arrives attributed to
+the device in between. Before this rule a message to a device the sender had
+never been next to waited in the pending queue for its full lifetime, because
+the key package and the Welcome were the only two frames that never crossed
+the mesh, and every frame after them is sealed.
+
+So the reconciliation tick, for each peer holding a queued message that has
+never been pushed to, pushes the key package when no carrier can address the
+peer directly, no infrastructure carrier claims to reach it, at least one mesh
+neighbour exists, and no session exists. The package goes out as any message
+to an unreachable peer does: the direct send fails and the frame is handed to
+neighbours. A neighbour taking it counts as sending it, so the peer is recorded
+and the re-push ladder above takes over from there; a push no neighbour took is
+tried on the next tick.
+
+The recipient's side has two rules of its own:
+
+- **The Welcome is handed to neighbours when no carrier takes it**, and takes
+  the same in-flight path as a Welcome a carrier accepted, with the mesh
+  confirmation timeout. A carrier's `Ok` was never proof of arrival; the
+  peer's probe or decrypt still settles it.
+- **A package from a sender only the mesh reaches is not answered with ours
+  first.** The Welcome is all the sender needs to join. Answering with a
+  package would make both sides build a group for the tiebreak to discard,
+  every frame of both crossing each device in between. The fresh package a
+  new session sends for group invites still goes, after the Welcome.
+
 ### An unconfirmed session holds one probe
 
 An unconfirmed session is probed on a fixed cadence, and **a peer holds at most

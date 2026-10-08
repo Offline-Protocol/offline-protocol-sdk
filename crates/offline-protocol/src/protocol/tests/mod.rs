@@ -8,6 +8,7 @@ mod data_sync_group;
 #[cfg(feature = "file-store")]
 mod file_stores;
 mod leaf_pairing;
+mod mesh_session;
 mod per_send_app_id;
 
 use super::*;

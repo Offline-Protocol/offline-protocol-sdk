@@ -5751,6 +5751,13 @@ impl OfflineProtocol {
     /// which both weakened forward secrecy at session establishment (one
     /// compromised init key opens every Welcome built against it) and made the
     /// second peer's Welcome permanently unprocessable.
+    ///
+    /// A peer no carrier can address directly is reached through the mesh:
+    /// when the direct send fails, the package is handed to neighbours to
+    /// carry, as an ordinary message is. Without that a pair whose only path
+    /// runs through a third device could never start a session, because the
+    /// package and the Welcome were the two frames that never left the
+    /// device by any other route, and every frame after them is sealed.
     pub(crate) fn send_key_package_to(&mut self, peer_id: &str, session_reset: bool) -> Result<()> {
         let mls = self.mls_manager.as_ref().ok_or(Error::MlsNotInitialized)?;
 
@@ -5776,7 +5783,30 @@ impl OfflineProtocol {
             self.create_message(peer_id, content, Some(MessagePriority::Low), None)?;
         self.sign_control_message(&mut message)?;
 
-        match self.transport_manager.send(&message) {
+        // A package no carrier took directly may still reach the peer
+        // through a neighbour. Handing it over counts as sending it: the
+        // stamp below is what starts the re-push ladder, which is the only
+        // repeat a package carried this way gets, since a peer we never hear
+        // directly produces no discovery to push again on.
+        let sent = match self.transport_manager.send(&message) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                let handed_to_mesh = self.offer_to_mesh(&message);
+                if handed_to_mesh > 0 {
+                    debug!(
+                        peer_id = %peer_id,
+                        message_id = %message.id,
+                        handed_to_mesh,
+                        "Key package handed to neighbours to carry"
+                    );
+                    Ok(())
+                } else {
+                    Err(err)
+                }
+            }
+        };
+
+        match sent {
             Ok(()) => {
                 // SECURITY (resource exhaustion): `key_package_sent_to` is keyed
                 // by the wire-claimed peer id, so a forged-sender key-package
@@ -5806,7 +5836,9 @@ impl OfflineProtocol {
             Err(err) => {
                 // Don't mark as sent and don't enqueue for retry -- if the peer is
                 // unreachable now, on_neighbor_discovered will fire again when they
-                // reconnect, generating a fresh exchange.
+                // reconnect, generating a fresh exchange, and a peer only the mesh
+                // reaches is pushed to from the reconciliation tick while a
+                // message waits for it.
                 debug!(peer_id = %peer_id, error = %err, "Key package send deferred");
                 Err(err)
             }

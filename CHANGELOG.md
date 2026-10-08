@@ -79,6 +79,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   registrations survived a restart. Bluetooth LE from a container is
   untested on hardware.
 
+- **Two devices that have never been in range of each other start a session
+  through a third.** With encryption required, a message to a peer the
+  sender had never been next to waited in the pending queue for its whole
+  lifetime when the only path ran through another device: the key package and
+  the Welcome were the two frames that never crossed the mesh, and every frame
+  after them is sealed. While a message waits for a peer that no carrier
+  reaches directly, the sender now hands its key package to its neighbours to
+  carry, and the recipient's Welcome takes the same route back; confirmation,
+  the message and its acknowledgement already did. The device in between
+  carries frames it cannot read. The threat model gains R24 (a session can be
+  started from anywhere the mesh reaches, and what bounds it).
+
 ### Changed
 
 - **A peer-stream or relay flag the configuration cannot honour is refused.**
