@@ -30,6 +30,7 @@ import secrets
 import shlex
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -85,14 +86,24 @@ class Device:
         )
         return process.returncode, _json_lines(process.stdout), process.stderr.strip()
 
-    def verify_in_background(self, *args: str) -> subprocess.Popen[str]:
-        return subprocess.Popen(
+    def verify_in_background(self, *args: str) -> "Background":
+        """Start an `await` or `watch` and return once it is subscribed.
+
+        Neither a receipt nor a relay report is held for a client that is
+        not yet listening, so the caller must not trigger the event until
+        the verifier has printed its readiness line.
+        """
+        background = Background(subprocess.Popen(
             self.runner.command(self.name, ["offline-protocol-verify", "--socket", self.runner.socket, *args]),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-        )
+        ))
+        if not background.subscribed.wait(SUBSCRIBE_S) or not background.ready:
+            status, _, err = background.finish(5)
+            raise ScenarioFailed(f"{self.name}: {args[0]} never subscribed (exit {status}): {err}")
+        return background
 
     def wait_ready(self) -> None:
         deadline = time.monotonic() + READY_S
@@ -130,14 +141,55 @@ def _saw(watched: list[dict], tag: str, message_id: str) -> dict | None:
     return None
 
 
-def _finish(process: subprocess.Popen[str], timeout: float) -> tuple[int, list[dict], str]:
-    try:
-        out, err = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        out, err = process.communicate()
-        return 2, _json_lines(out), err.strip()
-    return process.returncode, _json_lines(out), err.strip()
+#: The exact stderr line `await` and `watch` print once subscribed
+#: (`offline_protocol_sdk.verify.commands.READY_LINE`).
+READY_LINE = "subscribed"
+SUBSCRIBE_S = 30
+
+
+class Background:
+    """A verifier in flight, its output drained on threads.
+
+    Both pipes are read line by line from the start: stderr to see the
+    readiness line, stdout so a long `watch` never blocks on a full pipe.
+    """
+
+    def __init__(self, process: subprocess.Popen[str]) -> None:
+        self.process = process
+        #: Set once the readiness line arrives or stderr closes; `ready`
+        #: says which.
+        self.subscribed = threading.Event()
+        self.ready = False
+        self._out: list[str] = []
+        self._err: list[str] = []
+        self._readers = [
+            threading.Thread(target=self._drain, args=(process.stdout, self._out, False), daemon=True),
+            threading.Thread(target=self._drain, args=(process.stderr, self._err, True), daemon=True),
+        ]
+        for reader in self._readers:
+            reader.start()
+
+    def _drain(self, stream, into: list[str], watch_ready: bool) -> None:
+        for line in stream:
+            into.append(line)
+            if watch_ready and line.strip() == READY_LINE:
+                self.ready = True
+                self.subscribed.set()
+        # The pipe closed: nothing will subscribe now, so stop any wait.
+        if watch_ready:
+            self.subscribed.set()
+
+    def finish(self, timeout: float) -> tuple[int, list[dict], str]:
+        try:
+            status = self.process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+            status = 2
+        for reader in self._readers:
+            reader.join(timeout=5)
+        err = "".join(line for line in self._err if line.strip() != READY_LINE)
+        return status, _json_lines("".join(self._out)), err.strip()
 
 
 class Runner:
@@ -296,10 +348,9 @@ class Lab:
         # wait starts before B can answer.
         receipt = self.a.verify_in_background("await", message_id, "--until", "delivered",
                                               "--timeout", str(DELIVERY_AFTER_RETURN_S + READY_S))
-        time.sleep(2)
         started = time.monotonic()
         self.runner.on("b")
-        status, lines, err = _finish(receipt, DELIVERY_AFTER_RETURN_S + READY_S + 30)
+        status, lines, err = receipt.finish(DELIVERY_AFTER_RETURN_S + READY_S + 30)
         elapsed = time.monotonic() - started
         if status != 0 or elapsed > DELIVERY_AFTER_RETURN_S:
             return Result(name, False, elapsed, f"no receipt within {DELIVERY_AFTER_RETURN_S} s: {err}")
@@ -325,14 +376,13 @@ class Lab:
         window = str(HOP_RECEIVED_S + HOP_RECEIPT_S)
         middle = self.b.verify_in_background("watch", "--duration", window)
         sender = self.a.verify_in_background("watch", "--duration", window)
-        time.sleep(2)
         started = time.monotonic()
         message_id = self.a.send(self.c, f"{name} {time.strftime('%H:%M:%S')}")
         status, lines, err = self.c.verify("await", message_id, "--until", "received",
                                            "--timeout", str(HOP_RECEIVED_S))
         elapsed = time.monotonic() - started
-        _, watched_b, _ = _finish(middle, float(window) + 30)
-        _, watched_a, _ = _finish(sender, float(window) + 30)
+        _, watched_b, _ = middle.finish(float(window) + 30)
+        _, watched_a, _ = sender.finish(float(window) + 30)
         if status != 0:
             return Result(name, False, elapsed, f"C did not receive it within {HOP_RECEIVED_S} s: {err}")
         hops = lines[-1]["event"]["hop_count"]
