@@ -9,7 +9,7 @@ so a scenario passes on the engine's own events, not on a log read by eye:
   4 through the middle  A and C meet once, then share no network: C receives
                         A's message one hop away and B reports carrying it
 
-With --docker (the default) the devices are the containers of compose.yml in
+Without --ssh the devices are the containers of compose.yml in
 this directory, and switching a device off is `docker stop`. With --ssh each
 device is a host running the service, and the operator switches it off and on
 when asked. Standard library only.
@@ -167,6 +167,11 @@ class Runner:
     def part_a_and_c(self) -> None:
         raise NotImplementedError
 
+    def restore(self) -> None:
+        """Every device on again after a scenario that failed part-way, so
+        the next one does not fail for a device the last one left off."""
+        raise NotImplementedError
+
 
 class DockerRunner(Runner):
     def _compose(self, *args: str) -> None:
@@ -202,7 +207,14 @@ class DockerRunner(Runner):
         self._docker("kill", "--signal", "KILL", f"{PROJECT}-{device}")
 
     def join_a_and_c(self) -> None:
-        self._docker("network", "connect", f"{PROJECT}_net-ab", f"{PROJECT}-c")
+        # A run that stopped between this and part_a_and_c leaves C on net-ab,
+        # where `compose up` does not take it off; connecting it again fails.
+        networks = subprocess.run(
+            ["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", f"{PROJECT}-c"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        if f"{PROJECT}_net-ab" not in json.loads(networks):
+            self._docker("network", "connect", f"{PROJECT}_net-ab", f"{PROJECT}-c")
 
     def part_a_and_c(self) -> None:
         # Stopped while still on net-ab, so A sees the stream close. Taken off
@@ -213,6 +225,10 @@ class DockerRunner(Runner):
         self._docker("stop", f"{PROJECT}-c")
         self._docker("network", "disconnect", f"{PROJECT}_net-ab", f"{PROJECT}-c")
         self._docker("start", f"{PROJECT}-c")
+
+    def restore(self) -> None:
+        # `docker start` leaves a running container as it is.
+        self._docker("start", *(f"{PROJECT}-{d}" for d in "abc"))
 
 
 class SshRunner(Runner):
@@ -249,6 +265,9 @@ class SshRunner(Runner):
 
     def part_a_and_c(self) -> None:
         self._ask("move a and c apart so only b hears both (restart c's service to drop the old link)")
+
+    def restore(self) -> None:
+        self._ask("make sure a, b and c are all on")
 
 
 @dataclass
@@ -361,17 +380,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{device.name}: {device.address}", file=sys.stderr)
 
     wanted = args.scenario or [1, 2, 4]
-    for number, run in (
-        (1, lambda: lab.store_and_forward(restart_sender=False)),
-        (2, lambda: lab.store_and_forward(restart_sender=True)),
-        (4, lambda: lab.through_the_middle(args.require_hop_receipt)),
+    for number, name, run in (
+        (1, "1 store and forward", lambda: lab.store_and_forward(restart_sender=False)),
+        (2, "2 sender restarts", lambda: lab.store_and_forward(restart_sender=True)),
+        (4, "4 through the middle", lambda: lab.through_the_middle(args.require_hop_receipt)),
     ):
         if number not in wanted:
             continue
         try:
             result = run()
         except (ScenarioFailed, subprocess.SubprocessError) as exc:
-            result = Result(str(number), False, 0.0, str(exc))
+            result = Result(name, False, 0.0, str(exc))
+        if not result.passed:
+            try:
+                runner.restore()
+                for device in (lab.a, lab.b, lab.c):
+                    device.wait_ready()
+            except (ScenarioFailed, subprocess.SubprocessError) as exc:
+                print(f"could not switch every device back on: {exc}", file=sys.stderr)
         lab.results.append(result)
         print(f"{'PASS' if result.passed else 'FAIL'} {result.scenario}: {result.detail}", file=sys.stderr)
 
