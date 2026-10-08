@@ -82,7 +82,9 @@ Four bounds keep it cheap and correct:
 
 Only a peer already pushed to qualifies. The first push stays discovery's,
 and a first push that failed to send is still not recorded, so the next
-discovery makes it.
+discovery makes it. The one exception is a peer only the mesh reaches, which
+discovery never names: the tick makes its first push (see
+[A peer only the mesh reaches is pushed to from the tick](#a-peer-only-the-mesh-reaches-is-pushed-to-from-the-tick)).
 
 **A lost reset push is not healed by this rule.** The repeat push always
 carries `session_reset = false`, so a receiver only refreshes its stored copy
@@ -92,6 +94,47 @@ repeat push cannot make it let go, and the pair stays split until the peer
 re-enters the desync path. Repeating the reset flag would tear down a
 replacement session whose Welcome is in flight, so it belongs with the
 split-session work rather than here.
+
+### A peer only the mesh reaches is pushed to from the tick
+
+**A message waiting for a session is enough to start that session over any
+path that can carry a frame to the peer.** The first push is otherwise
+discovery's, and discovery names only the device a frame arrived from. A peer
+two hops away is never discovered: every frame from it arrives attributed to
+the device in between. Before this rule a message to a device the sender had
+never been next to waited in the pending queue for its full lifetime, because
+the key package and the Welcome were the only two frames that never crossed
+the mesh, and every frame after them is sealed.
+
+So the reconciliation tick, for each peer holding a queued message that has
+never been pushed to, pushes the key package when no carrier can address the
+peer directly, no infrastructure carrier claims to reach it, at least one mesh
+neighbour exists, and no session exists. The package is handed to neighbours
+whenever no carrier is known to reach the peer, whatever the direct send
+returned: the internet carrier accepts a frame for a peer the relay has already
+said it cannot reach, and an offer made only on a failed send never fired on an
+online device. A neighbour taking it counts as sending it, so the peer is
+recorded and the re-push ladder above takes over from there; a push no
+neighbour took is tried on the next tick.
+
+The recipient's side has three rules of its own:
+
+- **The Welcome is handed to neighbours when no carrier is known to reach the
+  peer**, by the same rule as the package, and takes the same in-flight path as
+  a Welcome a carrier accepted, with the mesh confirmation timeout. A carrier's
+  `Ok` was never proof of arrival; the peer's probe or decrypt still settles it.
+- **A package from a peer only the mesh reaches re-arms a stalled Welcome.**
+  The peer re-pushes only while it holds no session, so its package says our
+  Welcome never arrived. A neighbour's Welcome is re-armed on rediscovery and a
+  relay peer's on presence, but a peer two hops away produces neither: without
+  this a Welcome that expired while the path was down was never sent again, and
+  the message waiting on it sat out its lifetime. Only a `Created`, `Failed` or
+  `Expired` lifecycle is re-armed; one in flight or confirmed is left alone.
+- **A package from a sender only the mesh reaches is not answered with ours
+  first.** The Welcome is all the sender needs to join. Answering with a
+  package would make both sides build a group for the tiebreak to discard,
+  every frame of both crossing each device in between. The fresh package a
+  new session sends for group invites still goes, after the Welcome.
 
 ### An unconfirmed session holds one probe
 

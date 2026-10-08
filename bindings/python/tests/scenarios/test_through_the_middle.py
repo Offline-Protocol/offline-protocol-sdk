@@ -1,24 +1,18 @@
 """A reaches C through B when A and C cannot hear each other.
 
-A and C meet once first, directly, so their engines form the MLS session
-(the automatic key exchange and the Welcome travel only over a direct link,
-never through the mesh). Then C restarts with B as its only peer, A and C
-have no link, and a message from A to C is carried by B: B reports
-``message_relayed`` and C receives it one hop away.
+In the first two tests A and C meet once first, directly, so their engines
+form the MLS session over a direct link. Then C restarts with B as its only
+peer, A and C have no link, and a message from A to C is carried by B: B
+reports ``message_relayed`` and C receives it one hop away.
 
-The sender's receipt does not come back, and the second test records that as
-an expected failure. C's acknowledgement is carried back by B and reaches A,
-but A drops it: every send of a message whose only route is the mesh is
-refused by A's own carriers (``handle_send_failure``, ``send.rs``), so no
-pending acknowledgement is ever registered for it, and an acknowledgement
-with no pending record settles only a DM the relay parked
-(``settle_parked_dm_from_ack``, ``send.rs:5185``). A keeps re-offering the
-message, C keeps re-acknowledging the duplicates, and the outbox reports the
-delivered message failed when its lifetime ends. The Rust neighbourhood
-simulator does not catch it: ``the_answer_finds_its_way_back`` asserts that
-B transmits toward A, never that A emits ``message_delivered``. PR #537
-fixes it in the engine; the expected failure is strict, so the test turns
-red once that lands, and the marker comes off then.
+The second test follows C's acknowledgement back: B carries it to A, and A
+settles the message with ``message_delivered``, though no carrier of A ever
+took the send (the engine settles any direct message still in the outbox on
+its recipient's acknowledgement, not only one the relay parked).
+
+The third has A and C never meet: the message waits in A's pending queue
+while A's key package and C's Welcome cross B, and then it and its receipt
+follow the same way.
 """
 
 from __future__ import annotations
@@ -83,10 +77,6 @@ async def test_a_message_crosses_the_middle_device(network):
     assert not a.linked_to(c)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="a mesh-only DM registers no pending acknowledgement, so the carried receipt is dropped; fixed by #537 (module docstring)",
-)
 async def test_the_receipt_comes_back_through_the_middle_device(network):
     a, b, c = await _line_of_three(network)
     middle = Recorder(await network.client(b))
@@ -98,3 +88,27 @@ async def test_the_receipt_comes_back_through_the_middle_device(network):
     await middle.wait("message_relayed", DELIVERY_TIMEOUT, sender=c.address, recipient=a.address)
     delivered = await sender.wait("message_delivered", 20.0, message_id=message_id)
     assert delivered["hop_count"] == 1
+
+
+async def test_devices_that_never_met_start_a_session_through_the_middle(network):
+    a = network.device("alpha", 0x11)
+    b = network.device("bravo", 0x22)
+    c = network.device("charlie", 0x33)
+    await b.switch_on()
+    a.peers = [b]
+    c.peers = [b]
+    await a.switch_on()
+    await c.switch_on()
+    await until(lambda: b.linked_to(c) and b.linked_to(a), SESSION_TIMEOUT, "B linked to A and C")
+    receiver = Recorder(await network.client(c))
+    sender = Recorder(await network.client(a))
+    message_id = await sender.client.call(
+        "send_message", {"recipient": c.address, "content": "never met", "priority": "Medium"}
+    )
+
+    received = await receiver.wait("message_received", DELIVERY_TIMEOUT, message_id=message_id)
+    assert received["encrypted"] is True
+    assert received["hop_count"] == 1
+    delivered = await sender.wait("message_delivered", DELIVERY_TIMEOUT, message_id=message_id)
+    assert delivered["hop_count"] == 1
+    assert not a.linked_to(c) and not c.linked_to(a)

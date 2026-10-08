@@ -66,6 +66,142 @@ _INTER_FRAME_DELAY = 0.005
 # How often to poll the bless delegate for subscription changes.
 _PEER_MONITOR_INTERVAL = 1.0
 
+_BLUEZ_SERVICE = "org.bluez"
+_BLUEZ_DEVICE_IFACE = "org.bluez.Device1"
+_BLUEZ_CHAR_IFACE = "org.bluez.GattCharacteristic1"
+
+
+def _central_id_from_device_path(path: Any) -> str | None:
+    """``/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF`` -> ``AA:BB:CC:DD:EE:FF``."""
+    if not isinstance(path, str):
+        return None
+    leaf = path.rsplit("/", 1)[-1]
+    if not leaf.startswith("dev_") or len(leaf) <= 4:
+        return None
+    return leaf[4:].replace("_", ":")
+
+
+def _device_connected_query(path: str) -> Any:
+    """A ``Properties.Get(Device1, Connected)`` call for ``path``.
+
+    dbus_next is imported here, not at module load: it is bless's Linux
+    dependency and is absent everywhere else.
+    """
+    from dbus_next import Message  # type: ignore[import-not-found]
+
+    return Message(
+        destination=_BLUEZ_SERVICE,
+        path=path,
+        interface="org.freedesktop.DBus.Properties",
+        member="Get",
+        signature="ss",
+        body=[_BLUEZ_DEVICE_IFACE, "Connected"],
+    )
+
+
+class _BlueZCentrals:
+    """Which devices are centrals of this GATT server, on BlueZ.
+
+    bless's BlueZ backend tracks none: its characteristic drops the
+    ``options`` BlueZ passes to ``ReadValue`` and ``WriteValue``, and
+    ``StartNotify`` carries no device at all. Those options name the
+    calling device (``options["device"]``), so this observes the calls on
+    the bus before bless dispatches them, through dbus_next's message
+    handler hook, and never answers or alters one.
+
+    A device is a central of ours once it has read or written one of this
+    application's characteristics, and stops being one when BlueZ reports
+    its ``Device1.Connected`` false or the object is gone. That is how a
+    central is told apart from a peripheral our own central role connected
+    to: both are ``Device1`` objects with ``Connected`` true, but only a
+    central of ours calls into our application. Two limits follow. A
+    central that subscribes and never reads or writes is not seen (ours
+    always read the Device id and Identity first). And BlueZ reports a
+    subscription per characteristic, not per device, so with several
+    centrals connected a subscribed one cannot be named; ``connected()``
+    lists the devices only while the Message characteristic has a
+    subscriber.
+    """
+
+    def __init__(self, base_path: str) -> None:
+        self._base = base_path.rstrip("/")
+        self._bus: Any = None
+        self._seen: dict[str, str] = {}  # device path -> central id
+        #: The central behind the read or write being dispatched right now.
+        #: The hook and the dispatch run back to back on the bus's loop, so
+        #: a write handler reading this sees its own caller. That holds only
+        #: because bless's ReadValue and WriteValue are plain methods, which
+        #: dbus_next runs inline after the hook; a coroutine method would be
+        #: scheduled, and the next call's hook would run first.
+        #: ``test_bless_dispatches_gatt_calls_synchronously`` pins it.
+        self.current: str | None = None
+
+    def attach(self, bus: Any) -> None:
+        bus.add_message_handler(self._observe)
+        self._bus = bus
+
+    def detach(self) -> None:
+        bus, self._bus = self._bus, None
+        if bus is not None:
+            try:
+                bus.remove_message_handler(self._observe)
+            except Exception:
+                logger.debug("remove_message_handler failed", exc_info=True)
+        self._seen.clear()
+        self.current = None
+
+    def _observe(self, msg: Any) -> None:
+        try:
+            if getattr(msg.message_type, "name", "") != "METHOD_CALL":
+                return None
+            if msg.interface != _BLUEZ_CHAR_IFACE:
+                return None
+            if msg.member not in ("ReadValue", "WriteValue"):
+                return None
+            path = msg.path or ""
+            if not path.startswith(self._base + "/"):
+                return None
+            body = list(msg.body or ())
+            options = body[0] if msg.member == "ReadValue" else body[1]
+            device = options.get("device") if isinstance(options, dict) else None
+            device_path = getattr(device, "value", device)
+            central = _central_id_from_device_path(device_path)
+            self.current = central
+            if central is not None:
+                self._seen[device_path] = central
+        except Exception:
+            self.current = None
+            logger.debug("could not read the caller of a GATT call", exc_info=True)
+        # Never handled here: bless dispatches the call as it always has.
+        return None
+
+    async def connected(self, subscribed: bool) -> set[str]:
+        """The centrals still connected, or none while nobody subscribes."""
+        bus = self._bus
+        if bus is None:
+            return set()
+        gone: list[str] = []
+        for path in list(self._seen):
+            try:
+                reply = await bus.call(_device_connected_query(path))
+                alive = (
+                    reply is not None
+                    and getattr(reply.message_type, "name", "") == "METHOD_RETURN"
+                    and bool(getattr(reply.body[0], "value", False))
+                )
+            except Exception:
+                logger.debug("Device1.Connected query failed for %s", path, exc_info=True)
+                alive = False
+            if not alive:
+                gone.append(path)
+        for path in gone:
+            self._seen.pop(path, None)
+        return set(self._seen.values()) if subscribed else set()
+
+    def any_seen(self) -> bool:
+        """Whether a central of ours was connected at the last poll."""
+        return bool(self._seen)
+
 
 class BlePeripheral(TransportManager):
     """BLE transport — peripheral (advertiser / GATT server) role.
@@ -156,6 +292,11 @@ class BlePeripheral(TransportManager):
         # Background tasks
         self._peer_monitor_task: asyncio.Task[None] | None = None
 
+        # BlueZ only: who the centrals of our GATT server are (see
+        # _BlueZCentrals). None on CoreBluetooth, whose bless delegate
+        # tracks them itself.
+        self._bluez_centrals: _BlueZCentrals | None = None
+
     # -- TransportManager interface -------------------------------------------
 
     def is_available(self) -> bool:
@@ -229,6 +370,8 @@ class BlePeripheral(TransportManager):
             # phones can discover us via SERVICE_UUID scanning.
             await self._server.start(prioritize_local_name=False)
             self._is_advertising = True
+            if sys.platform == "linux":
+                self._attach_bluez_centrals()
         except Exception as exc:
             self._update_state(TransportState.STOPPED)
             raise TransportError(
@@ -273,6 +416,10 @@ class BlePeripheral(TransportManager):
             await asyncio.wait({self._peer_monitor_task})
         self._peer_monitor_task = None
 
+        if self._bluez_centrals is not None:
+            self._bluez_centrals.detach()
+            self._bluez_centrals = None
+
         # Stop GATT server
         if self._server is not None:
             try:
@@ -311,6 +458,26 @@ class BlePeripheral(TransportManager):
 
         self._update_state(TransportState.STOPPED)
         self._emit_diagnostic("info", "BLE peripheral stopped")
+
+    def _attach_bluez_centrals(self) -> None:
+        """Start observing who calls our GATT application on the bus.
+
+        Reads bless's own bus and application (``server.bus``,
+        ``server.app.base_path``, bless 0.3.x). Without them the peripheral
+        still carries data, attributed as it was before this existed.
+        """
+        try:
+            bus = self._server.bus  # type: ignore[union-attr]
+            base_path = self._server.app.base_path  # type: ignore[union-attr]
+        except AttributeError:
+            logger.warning(
+                "bless exposes no bus or application here: centrals of this "
+                "peripheral cannot be told apart"
+            )
+            return
+        tracker = _BlueZCentrals(base_path)
+        tracker.attach(bus)
+        self._bluez_centrals = tracker
 
     def get_metrics(self) -> dict[str, Any]:
         with self._lock:
@@ -449,6 +616,12 @@ class BlePeripheral(TransportManager):
         thread. Returns a stable sender ID so the Rust core can group
         fragments from the same source.
         """
+        tracker = self._bluez_centrals
+        if tracker is not None and tracker.current is not None:
+            # BlueZ named the writer: exact, however many are connected.
+            with self._lock:
+                self._last_known_central = tracker.current
+            return tracker.current
         with self._lock:
             count = len(self._connected_centrals)
             if count == 1:
@@ -535,6 +708,12 @@ class BlePeripheral(TransportManager):
     async def _drain_outgoing_fragments_inner(self) -> None:
         if self._server is None:
             return
+        # The core's fragment queue is shared with the central role and
+        # cannot be peeked or refilled: a fragment popped here is gone. With
+        # nobody subscribed a notification reaches no one, so leave the
+        # queue alone.
+        if not self.has_subscriber():
+            return
 
         while True:
             try:
@@ -549,22 +728,11 @@ class BlePeripheral(TransportManager):
                 break
 
             data = bytes(frag.data)
-            recipient = getattr(frag, 'recipient_id', None)
             logger.info(
                 "OUTGOING fragment: %d bytes, recipient=%s",
-                len(data), recipient,
+                len(data), getattr(frag, "recipient_id", None),
             )
-
-            char = self._server.get_characteristic(MESSAGE_CHAR_UUID)
-            if char is not None:
-                char.value = data
-                self._server.update_value(SERVICE_UUID, MESSAGE_CHAR_UUID)
-                with self._lock:
-                    self._bytes_sent += len(data)
-                    self._fragments_sent += 1
-
-                # Inter-frame delay to avoid overwhelming the BLE stack
-                await asyncio.sleep(_INTER_FRAME_DELAY)
+            await self.notify_fragment(data)
 
             # Return fragment to pool regardless of send outcome
             try:
@@ -572,13 +740,96 @@ class BlePeripheral(TransportManager):
             except Exception:
                 logger.debug("ble_return_fragment failed", exc_info=True)
 
+    def has_subscriber(self) -> bool:
+        """Whether a notification sent now reaches any central.
+
+        BlueZ: bless records the characteristics a central has subscribed
+        to, and a central of ours must still be connected. bless forgets a
+        subscription only on ``StopNotify``, which BlueZ sends on disconnect
+        for an unpaired central but not for a bonded one, so the list alone
+        can name a subscriber that left. CoreBluetooth: the delegate's
+        per-central subscriptions.
+        """
+        server = self._server
+        if server is None:
+            return False
+        tracker = self._bluez_centrals
+        if tracker is not None:
+            try:
+                subscribed = server.app.subscribed_characteristics
+            except AttributeError:
+                with self._lock:
+                    return bool(self._connected_centrals)
+            return tracker.any_seen() and MESSAGE_CHAR_UUID.lower() in {
+                str(u).lower() for u in subscribed
+            }
+        try:
+            return bool(server.peripheral_manager_delegate._central_subscriptions)
+        except (AttributeError, TypeError):
+            with self._lock:
+                return bool(self._connected_centrals)
+
+    async def notify_fragment(self, data: bytes) -> bool:
+        """Notify one fragment on the Message characteristic.
+
+        Every subscribed central receives it: neither backend of bless
+        addresses a notification to one central, so a peripheral with more
+        than one central fans every fragment out to all of them.
+
+        A notify that raises is reported and still returns True, as
+        ``BleManager.write_fragment`` does for a failed write: the fragment
+        was this role's, the core's retry re-sends the message, and a drain
+        that stopped here would strand every fragment behind this one.
+        """
+        server = self._server
+        if server is None:
+            return False
+        try:
+            char = server.get_characteristic(MESSAGE_CHAR_UUID)
+            if char is None:
+                return False
+            char.value = data
+            server.update_value(SERVICE_UUID, MESSAGE_CHAR_UUID)
+        except Exception as exc:
+            self._emit_diagnostic("warning", f"Failed to notify a fragment: {exc}")
+            return True
+        with self._lock:
+            self._bytes_sent += len(data)
+            self._fragments_sent += 1
+        # Inter-frame delay to avoid overwhelming the BLE stack
+        await asyncio.sleep(_INTER_FRAME_DELAY)
+        return True
+
     # -- background tasks -----------------------------------------------------
 
-    async def _peer_monitor_loop(self) -> None:
-        """Poll the bless delegate's subscription dict for changes.
+    async def _current_centrals(self) -> set[str] | None:
+        """The centrals connected now, or None when they cannot be read."""
+        server = self._server
+        if server is None:
+            return None
+        tracker = self._bluez_centrals
+        if tracker is not None:
+            return await tracker.connected(self.has_subscriber())
+        try:
+            delegate = server.peripheral_manager_delegate
+            # NOTE: _central_subscriptions is a bless-internal dict of its
+            # CoreBluetooth backend, validated against bless 0.3.x. If it is
+            # missing after a bless upgrade the monitor degrades (no peer
+            # tracking, but data transfer still works).
+            return set(delegate._central_subscriptions.keys())
+        except (AttributeError, TypeError):
+            logger.debug(
+                "Cannot read bless _central_subscriptions: "
+                "peer monitoring disabled (bless API may have changed)"
+            )
+            return None
 
-        When a central subscribes to the MESSAGE characteristic we treat it
-        as a peer connection; when it unsubscribes, a disconnection.
+    async def _peer_monitor_loop(self) -> None:
+        """Poll for centrals arriving and leaving.
+
+        CoreBluetooth: a central subscribed to any characteristic is a peer,
+        and its unsubscribing is a disconnection. BlueZ: see
+        :class:`_BlueZCentrals`.
         """
         known: set[str] = set()
         try:
@@ -588,19 +839,8 @@ class BlePeripheral(TransportManager):
                 if self._server is None:
                     continue
 
-                try:
-                    delegate = self._server.peripheral_manager_delegate
-                    # NOTE: _central_subscriptions is a bless-internal dict.
-                    # Validated against bless 0.3.x. If this attribute is
-                    # missing after a bless upgrade, the except below logs a
-                    # warning and the monitor degrades gracefully (no peer
-                    # tracking, but data transfer still works).
-                    current = set(delegate._central_subscriptions.keys())
-                except (AttributeError, TypeError):
-                    logger.debug(
-                        "Cannot read bless _central_subscriptions — "
-                        "peer monitoring disabled (bless API may have changed)"
-                    )
+                current = await self._current_centrals()
+                if current is None:
                     continue
 
                 # Classify under the lock (the delegate thread races us on
@@ -663,11 +903,13 @@ class BlePeripheral(TransportManager):
 
                 known = current.copy()
 
-                # Update cached advertising state
-                try:
-                    self._is_advertising = self._server.peripheral_manager_delegate.is_advertising()
-                except Exception:
-                    pass
+                # Update cached advertising state (CoreBluetooth only; on
+                # BlueZ the flag set at start() stands).
+                if self._bluez_centrals is None:
+                    try:
+                        self._is_advertising = self._server.peripheral_manager_delegate.is_advertising()
+                    except Exception:
+                        pass
 
         except asyncio.CancelledError:
             return
