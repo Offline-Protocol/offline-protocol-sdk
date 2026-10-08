@@ -65,7 +65,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 - **A container image for the service, and an HTTP demo.**
   `bindings/python/docker` builds one service per host on `python:3.12-slim`
-  with the `lan` and `http` extras, configured from environment variables. A
+  with the `lan` and `http` extras, configured from environment variables;
+  an argument after the image name wins over the variable for that flag. A
   wheel built from a checkout is installed in place of PyPI's, and the build
   fails when the installed service has no HTTP front. Its README lists what
   a host's container manifest must grant (host networking for multicast DNS,

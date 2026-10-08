@@ -47,7 +47,10 @@ part of its storage namespace: change it before the first start, never after.
 | `OP_RELAY` | none | `--relay`, token in `OFFLINE_PROTOCOL_RELAY_TOKEN`; the config must set `internet_enabled`, which the default leaves off, or the service refuses to start |
 | `OP_SOCKET` | `/run/offline-protocol/api.sock` | `--socket` |
 
-Arguments after the image name are appended to the command.
+Arguments after the image name come after every flag the environment sets,
+so an explicit flag wins over its variable: `docker run IMAGE --http
+0.0.0.0:8080 --http-token-file /run/front/token` serves off loopback even
+with `OP_HTTP` unset.
 
 The local API socket is inside the container. To reach it from the host,
 bind-mount its directory; the service refuses a socket directory that is

@@ -17,7 +17,8 @@
 #                               internet_enabled; its token in OFFLINE_PROTOCOL_RELAY_TOKEN
 #   OP_SOCKET                   local API socket (default /run/offline-protocol/api.sock)
 #
-# Any arguments are appended to the command.
+# Any arguments come after every flag the environment sets, so an explicit
+# flag wins over its variable.
 set -eu
 
 if [ -z "${OFFLINE_PROTOCOL_STORE_KEY:-}" ]; then
@@ -26,10 +27,13 @@ if [ -z "${OFFLINE_PROTOCOL_STORE_KEY:-}" ]; then
 fi
 
 data="${OP_DATA:-/var/lib/offline-protocol}"
-set -- --config "${OP_CONFIG:-/etc/offline-protocol/config.json}" \
+# The operator's own arguments stay first while the environment's flags are
+# appended, and are moved to the end below.
+operator=$#
+set -- "$@" --config "${OP_CONFIG:-/etc/offline-protocol/config.json}" \
     --mls-root "$data/mls" --state-root "$data/state" \
     --socket "${OP_SOCKET:-/run/offline-protocol/api.sock}" \
-    --listen "${OP_LISTEN:-0.0.0.0:7878}" "$@"
+    --listen "${OP_LISTEN:-0.0.0.0:7878}"
 
 # Split OP_PEERS on whitespace and nothing else: with globbing on, an IPv6 entry such as
 # [fd00::1]:7878 is a bracket pattern and could match a file.
@@ -62,5 +66,15 @@ fi
 if [ -n "${OP_RELAY:-}" ]; then
     set -- "$@" --relay "$OP_RELAY"
 fi
+
+# The operator's arguments last: the service keeps the last occurrence of a
+# flag, so `docker run IMAGE --http 0.0.0.0:8080 ...` would otherwise lose to
+# OP_HTTP's default and serve on loopback without saying so.
+i=0
+while [ "$i" -lt "$operator" ]; do
+    set -- "$@" "$1"
+    shift
+    i=$((i + 1))
+done
 
 exec offline-protocol-service "$@"
