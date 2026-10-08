@@ -373,7 +373,10 @@ and the server holds its inbound messages while it is away. It sends every
 request and response as a direct message, never on the service request path,
 whose bodies are plaintext, and it acts only on a `message_received` the
 engine reports as `encrypted`. Discovery is the one thing it takes from the
-service path. The envelope limits, the carried-header list, the application
+service path. Everything a handler can wait on
+(an answer, a browse stream, a callback) is ended before the HTTP server's
+cleanup, which otherwise waits two minutes for a running handler and
+outlives a supervisor's stop grace period. The envelope limits, the carried-header list, the application
 id and the error tokens of [the chapter](../spec/http-front.md) are module
 literals, and its tests pin them as literals (C5). `aiohttp` is imported only
 when the front starts, behind the `http` extra, so the base install's

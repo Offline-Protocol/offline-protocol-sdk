@@ -73,6 +73,12 @@ BROWSE_INTERVAL_SECONDS = 60.0
 #: A provider that answers no query for this many rounds is reported gone.
 BROWSE_SILENT_ROUNDS = 2
 BROWSE_KEEPALIVE_SECONDS = 15.0
+#: How long stopping waits for a handler still running once everything a
+#: handler can wait on has been ended. aiohttp's own default is 60 s, then
+#: another 60 s after a cancel that does not wake a handler awaiting
+#: something other than the request: a SIGTERM to a busy front outlived the
+#: grace period of every supervisor that sent it.
+SHUTDOWN_GRACE_SECONDS = 5.0
 #: Failure events for a message whose id the send call has not returned yet.
 EARLY_EVENTS_CAPACITY = 1024
 SUBSCRIPTIONS = ["message_received", "message_failed", "message_undeliverable", "service_discovered"]
@@ -204,12 +210,13 @@ class HttpFront:
         except ImportError as exc:
             raise ImportError("the HTTP front needs the optional dependency: pip install 'offline-protocol-sdk[http]'") from exc
         self._aiohttp = aiohttp
+        self._closing = False
         if self.token_path is not None:
             self.token = _write_token(self.token_path)
         self._session = aiohttp.ClientSession(auto_decompress=True)
         app = web.Application(client_max_size=MAX_BODY_BYTES + 1)
         app.router.add_route("*", "/{tail:.*}", self._dispatch)
-        self._runner = web.AppRunner(app, access_log=None)
+        self._runner = web.AppRunner(app, access_log=None, shutdown_timeout=SHUTDOWN_GRACE_SECONDS)
         await self._runner.setup()
         site = web.TCPSite(self._runner, self.host, self.port)
         try:
@@ -224,28 +231,39 @@ class HttpFront:
         logger.info("HTTP front serving on %s:%s for *.%s", self.host, self.port, self.domain)
 
     async def stop(self) -> None:
-        for browse in self._browses.values():
+        # Everything a handler can be waiting on ends before the server's
+        # cleanup, which waits for running handlers: a request waiting for
+        # its answer, a browse stream waiting for its next event, and a
+        # callback a local request is waiting on.
+        self._closing = True
+        self._fail_waiting()
+        for browse in list(self._browses.values()):
             if browse.task is not None:
                 browse.task.cancel()
+            for queue in browse.queues:
+                queue.put_nowait(None)
         for task in list(self._tasks):
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         await self.client.stop()
-        if self._runner is not None:
-            await self._runner.cleanup()
-            self._runner = None
+        self._fail_waiting()  # a request that sent while the tasks above wound down
         if self._session is not None:
             await self._session.close()
             self._session = None
-        for _, future in self._pending.values():
-            if not future.done():
-                future.set_exception(_Failed("not_connected"))
+        if self._runner is not None:
+            await self._runner.cleanup()
+            self._runner = None
         if self.token_path is not None and self.token is not None:
             try:
                 self.token_path.unlink()
             except FileNotFoundError:
                 pass
             self.token = None
+
+    def _fail_waiting(self) -> None:
+        for _, future in self._pending.values():
+            if not future.done():
+                future.set_exception(_Failed("not_connected"))
 
     async def _on_connect(self, hello: dict[str, Any]) -> None:
         """Registers every kept service again: the engine and the server's
@@ -281,6 +299,8 @@ class HttpFront:
         return web.json_response(body, status=ERRORS[token], headers={ERROR_HEADER: token})
 
     async def _dispatch(self, request: Any) -> Any:
+        if self._closing:
+            return self._error("not_connected", "the front is stopping")
         if self.token is not None and not secrets.compare_digest(
             request.headers.get(TOKEN_HEADER, "").encode(), self.token.encode()
         ):
@@ -367,6 +387,8 @@ class HttpFront:
         return web.Response(status=response.status, body=response.body, headers=out_headers)
 
     async def _send_and_wait(self, envelope: Request, address: str, timeout: float) -> Response:
+        if self._closing:
+            raise _Failed("not_connected")
         future: asyncio.Future[Response] = asyncio.get_running_loop().create_future()
         self._pending[envelope.id] = (address, future)
         message_id: str | None = None
@@ -453,7 +475,8 @@ class HttpFront:
         browse = self._browses.get(service)
         if browse is None:
             browse = self._browses[service] = _Browse(service)
-        queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
+        # ``None`` ends the stream: the front is stopping.
+        queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
         browse.queues.add(queue)
         for entry in list(browse.entries.values()):
             queue.put_nowait(("added", entry))
@@ -462,10 +485,13 @@ class HttpFront:
         try:
             while True:
                 try:
-                    kind, entry = await asyncio.wait_for(queue.get(), BROWSE_KEEPALIVE_SECONDS)
+                    item = await asyncio.wait_for(queue.get(), BROWSE_KEEPALIVE_SECONDS)
                 except asyncio.TimeoutError:
                     await response.write(b": keepalive\n\n")
                     continue
+                if item is None:
+                    break
+                kind, entry = item
                 public = {k: v for k, v in entry.items() if k != "last_seen"}
                 await response.write(f"event: {kind}\ndata: {json.dumps(public)}\n\n".encode())
         except (ConnectionResetError, asyncio.CancelledError):
@@ -586,6 +612,9 @@ class HttpFront:
         registration = self.registry.get(envelope.service)
         if registration is None:
             return Response.failure(envelope.id, "unknown_service")
+        session = self._session
+        if self._closing or session is None:
+            return Response.failure(envelope.id, "not_connected")
         timeout = min(max(remaining, MIN_CALLBACK_SECONDS), MAX_DEADLINE_SECONDS)
         headers = dict(envelope.headers)
         headers[SENDER_HEADER] = sender
@@ -594,7 +623,7 @@ class HttpFront:
         url = registration.callback.rstrip("/") + envelope.path
         aiohttp = self._aiohttp
         try:
-            async with self._session.request(
+            async with session.request(
                 envelope.method,
                 url,
                 headers=headers,

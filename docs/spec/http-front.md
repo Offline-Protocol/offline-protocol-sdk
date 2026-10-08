@@ -257,7 +257,7 @@ host's own router adds), and is recorded as
 | `deadline_exceeded` | 504 | requester | No response before the deadline |
 | `recipient_unreachable` | 502 | requester | The engine reported the device unreachable |
 | `send_failed` | 502 | requester | The engine gave up on the request message |
-| `not_connected` | 503 | either | The front has no connection to the local API |
+| `not_connected` | 503 | either | The front has no connection to the local API, or is stopping |
 | `unauthorized` | 401 | either | The token is missing or wrong, or the request carries `Origin` |
 | `unknown_service` | 404 | provider | Nothing registered under that name |
 | `callback_failed` | 502 | provider | The callback refused the connection, failed or timed out |

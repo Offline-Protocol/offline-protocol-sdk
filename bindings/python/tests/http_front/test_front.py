@@ -412,3 +412,31 @@ async def test_an_absolute_form_target_is_a_bad_request(hosts):
     writer.close()
     assert reply.startswith(b"HTTP/1.1 400"), reply[:200]
     assert b"bad_request" in reply
+
+
+async def test_stopping_does_not_wait_for_a_request_in_flight(hosts):
+    front = await hosts.front(hosts.server_a)
+    nobody = derive_address(list(os.urandom(32)))
+    waiting = asyncio.ensure_future(
+        hosts.request(front, host_for("timeofday", nobody), headers={"X-Offline-Protocol-Timeout": "300"})
+    )
+    await until(lambda: bool(front._pending))
+    started = time.monotonic()
+    await front.stop()
+    assert time.monotonic() - started < 5
+    status, headers, _ = await asyncio.wait_for(waiting, 5)
+    assert (status, headers["X-Offline-Protocol-Error"]) == (503, "not_connected")
+
+
+async def test_stopping_ends_an_open_browse(hosts):
+    front = await hosts.front(hosts.server_a)
+    stream = await hosts.http.get(f"http://127.0.0.1:{front.port}/browse/timeofday", headers={"Host": DOMAIN})
+    try:
+        await until(lambda: "timeofday" in front._browses)
+        started = time.monotonic()
+        await front.stop()
+        assert time.monotonic() - started < 5
+        await asyncio.wait_for(stream.read(), 5)
+        assert stream.content.at_eof()
+    finally:
+        stream.release()
