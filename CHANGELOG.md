@@ -88,8 +88,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   reaches directly, the sender now hands its key package to its neighbours to
   carry, and the recipient's Welcome takes the same route back; confirmation,
   the message and its acknowledgement already did. Both are offered to the
-  mesh even when the relay accepted them for a peer it has said is not on it.
-  The device in between carries frames it cannot
+  mesh even when the relay accepted them for a peer it has said is not on it,
+  and a Welcome that expired while the path was down is sent again on the
+  peer's next key package. The device in between carries frames it cannot
   read. The threat model gains R24 (a session can be started from anywhere
   the mesh reaches, and what bounds it).
 

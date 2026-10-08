@@ -115,12 +115,19 @@ online device. A neighbour taking it counts as sending it, so the peer is
 recorded and the re-push ladder above takes over from there; a push no
 neighbour took is tried on the next tick.
 
-The recipient's side has two rules of its own:
+The recipient's side has three rules of its own:
 
 - **The Welcome is handed to neighbours when no carrier is known to reach the
   peer**, by the same rule as the package, and takes the same in-flight path as
   a Welcome a carrier accepted, with the mesh confirmation timeout. A carrier's
   `Ok` was never proof of arrival; the peer's probe or decrypt still settles it.
+- **A package from a peer only the mesh reaches re-arms a stalled Welcome.**
+  The peer re-pushes only while it holds no session, so its package says our
+  Welcome never arrived. A neighbour's Welcome is re-armed on rediscovery and a
+  relay peer's on presence, but a peer two hops away produces neither: without
+  this a Welcome that expired while the path was down was never sent again, and
+  the message waiting on it sat out its lifetime. Only a `Created`, `Failed` or
+  `Expired` lifecycle is re-armed; one in flight or confirmed is left alone.
 - **A package from a sender only the mesh reaches is not answered with ours
   first.** The Welcome is all the sender needs to join. Answering with a
   package would make both sides build a group for the tiebreak to discard,

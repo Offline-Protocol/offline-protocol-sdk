@@ -1015,7 +1015,11 @@ allows. Stored packages are capped at 1000, evicting the soonest to expire,
 the push pool stops minting at 64 and shares a package past that, and a
 Welcome's lifecycle expires after 300 seconds of retries. A device does not
 answer a package from a sender only the mesh reaches with one of its own
-first, so a package buys one Welcome, not a second group. A device that
+first, so a package buys one Welcome, not a second group. A later package from
+the same mesh-only address re-arms that Welcome only while it has stalled or
+expired, so a replayed package buys at most one more Welcome per stall, from
+the same budget share; the receive deduplicator absorbs a replay of the same
+frame for an hour. A device that
 declines to carry (`allowRelay` off) carries none of this for others. The
 same flood from a direct neighbour or over the relay was possible before and
 is unchanged.

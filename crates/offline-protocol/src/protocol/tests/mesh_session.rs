@@ -18,6 +18,7 @@ use crate::mls::InMemoryStorage;
 use crate::protocol::prefixes::internal_prefixes;
 use crate::protocol::reachability::{Claim, FactSource};
 use crate::protocol::tests::create_test_config_for_user;
+use crate::protocol::types::WelcomeDeliveryState;
 use crate::protocol::{OfflineProtocol, TestProtocolStateStorage};
 use crate::test_identity::id;
 use crate::{Event, ProtocolConfig};
@@ -114,6 +115,8 @@ struct Line {
     nodes: Vec<Node>,
     /// Every frame that crossed a link, as `(from, to, frame)`.
     carried: Vec<(usize, usize, Message)>,
+    /// A one-way link that is down: frames put on it are lost.
+    cut: Option<(usize, usize)>,
 }
 
 const ALICE: usize = 0;
@@ -135,6 +138,7 @@ impl Line {
                 Node::new("carol", strict_config("carol"), relay),
             ],
             carried: Vec::new(),
+            cut: None,
         };
         if relay {
             for (from, to) in [(ALICE, CAROL), (CAROL, ALICE)] {
@@ -202,6 +206,9 @@ impl Line {
                     1,
                     "alice and carol share no link, so nothing passes between them directly"
                 );
+                if self.cut == Some((from, to)) {
+                    continue;
+                }
                 self.carried.push((from, to, frame.clone()));
                 let sender = self.nodes[from].address.clone();
                 self.nodes[to].transport.queue_message_from(frame, sender);
@@ -370,6 +377,66 @@ fn a_session_forms_across_the_mesh_when_the_relay_takes_what_it_cannot_deliver()
             .count(),
         1,
         "and the session formed through bob all the same"
+    );
+    assert_eq!(line.nodes[ALICE].delivered(&message_id), Some(1));
+}
+
+#[test]
+fn a_welcome_lost_while_the_path_was_down_is_sent_again_on_the_next_package() {
+    // carol builds the session on alice's package, and her Welcome and fresh
+    // package are lost on the way back. Her Welcome's lifecycle then expires.
+    // A neighbour would re-arm it on rediscovery, but alice is two hops away
+    // and is never rediscovered; alice's next package is the only sign that
+    // she still holds no session.
+    let mut line = Line::new(strict_config("bob"));
+    let alice = line.nodes[ALICE].address.clone();
+    let carol = line.nodes[CAROL].address.clone();
+    line.cut = Some((CAROL, BOB));
+
+    let message_id = line.nodes[ALICE]
+        .protocol
+        .send_message(&carol, "meet at the north gate", None, None::<String>)
+        .expect("queued until a session exists")
+        .as_str();
+
+    for _ in 0..40 {
+        line.step();
+        if line.nodes[CAROL]
+            .protocol
+            .welcome_lifecycles
+            .contains_key(&alice)
+        {
+            break;
+        }
+    }
+    line.run(5);
+    let lifecycle = line.nodes[CAROL]
+        .protocol
+        .welcome_lifecycles
+        .get_mut(&alice)
+        .expect("carol built a session on alice's package");
+    lifecycle.state = WelcomeDeliveryState::Expired;
+    lifecycle.next_retry_at = None;
+    assert_eq!(line.nodes[ALICE].delivered(&message_id), None);
+
+    // The path comes back, and alice's re-push ladder comes due.
+    line.cut = None;
+    let due = Instant::now()
+        .checked_sub(Duration::from_secs(3_600))
+        .expect("the clock is past an hour");
+    for (sent_at, _) in line.nodes[ALICE].protocol.key_package_sent_to.values_mut() {
+        *sent_at = due;
+    }
+    line.run(40);
+
+    assert_eq!(
+        line.nodes[CAROL]
+            .inbox
+            .iter()
+            .filter(|content| content.as_str() == "meet at the north gate")
+            .count(),
+        1,
+        "alice's re-push re-armed carol's Welcome, and the message arrived"
     );
     assert_eq!(line.nodes[ALICE].delivered(&message_id), Some(1));
 }

@@ -560,7 +560,20 @@ impl OfflineProtocol {
                         info!(sender = %sender, "Auto-established secure session after key package exchange");
                     }
                     Ok(None) => {
-                        // Session already exists — nothing to do.
+                        // A session already exists. If it is unconfirmed and
+                        // its sender is a peer only the mesh reaches, the
+                        // package is the peer saying it holds no session, so
+                        // our Welcome never arrived: re-arm it. A neighbour
+                        // gets this from rediscovery and a relay peer from
+                        // presence, but a peer two hops away produces
+                        // neither, so without it a Welcome that expired while
+                        // the path was down (300 s) was never sent again, the
+                        // peer's re-pushes were all answered with nothing,
+                        // and its waiting message sat out its seven days.
+                        // No-op unless the Welcome has stalled or expired.
+                        if !self.can_reach_recipient(sender) {
+                            self.rearm_welcome_for_peer(sender, "key_package_received");
+                        }
                     }
                     Err(e) => {
                         debug!(sender = %sender, error = %e, "Auto-establish deferred (session not ready yet)");
