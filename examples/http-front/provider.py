@@ -34,7 +34,11 @@ class Handler(BaseHTTPRequestHandler):
     def _answer(self) -> None:
         # Read any body before answering: a request whose body is left
         # unread can be reset by the kernel when the socket closes.
-        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        try:
+            length = max(0, int(self.headers.get("Content-Length") or 0))
+        except ValueError:
+            length = 0
+        self.rfile.read(length)
         if urlsplit(self.path).path != "/now":
             self._json(404, {"error": "no such path"})
             return
@@ -62,18 +66,23 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def register(front: str, port: int, deadline: float, token_file: str | None) -> None:
-    """``PUT /services/timeofday`` on the front, retried while the front
-    cannot be reached (it may still be starting). A refusal is final."""
+    """``PUT /services/timeofday`` on the front, retried while the front is
+    starting: unreachable, or a 5xx while it connects to the service. A 4xx
+    is the front refusing this registration, and is final."""
     body = json.dumps({"callback": f"http://127.0.0.1:{port}", "version": "1"}).encode()
     while True:
         headers = {"Content-Type": "application/json"}
         if token_file:
             # Read at every attempt: the front writes a new token each start.
+            # A missing file is the front not having started yet; any other
+            # failure (a permission, a directory) will not fix itself.
             try:
                 with open(token_file, encoding="utf-8") as handle:
                     headers["X-Offline-Protocol-Token"] = handle.read().strip()
-            except OSError:
+            except FileNotFoundError:
                 pass
+            except OSError as exc:
+                raise SystemExit(f"--token-file: {exc}") from None
         request = urllib.request.Request(
             f"{front.rstrip('/')}/services/{SERVICE}", data=body, method="PUT", headers=headers
         )
@@ -83,7 +92,11 @@ def register(front: str, port: int, deadline: float, token_file: str | None) -> 
                 return
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise SystemExit(f"the front at {front} refused the registration: {exc.code} {detail}") from None
+            if exc.code < 500:
+                raise SystemExit(f"the front at {front} refused the registration: {exc.code} {detail}") from None
+            if time.monotonic() > deadline:
+                raise SystemExit(f"the front at {front} did not accept the registration: {exc.code} {detail}") from None
+            time.sleep(0.5)
         except (urllib.error.URLError, OSError) as exc:
             if time.monotonic() > deadline:
                 raise SystemExit(f"the front at {front} did not accept the registration: {exc}") from None

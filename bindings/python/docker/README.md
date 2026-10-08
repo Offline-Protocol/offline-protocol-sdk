@@ -42,7 +42,7 @@ part of its storage namespace: change it before the first start, never after.
 | `OP_PEERS` | none | `--peer`, one per space-separated entry, for hosts multicast cannot reach |
 | `OP_LAN` | `1` | `--lan` when `1`, none when `0`; anything else is refused |
 | `OP_HTTP` | `127.0.0.1:8080` | `--http`; empty for no front |
-| `OP_HTTP_TOKEN_FILE` | none | `--http-token-file`: the front writes a per-launch token there and requires it; needed off loopback, and on a host where a browser runs (R23 in the threat model) |
+| `OP_HTTP_TOKEN_FILE` | none | `--http-token-file`: the front writes a per-launch token there and requires it; needed off loopback, and on a host where a browser runs (R23 in the threat model). The file is replaced at every start and readable by the container's user only: bind-mount its directory, never the file, and read it as that user |
 | `OP_HTTP_ALIASES` | none | `--http-aliases` |
 | `OP_RELAY` | none | `--relay`, token in `OFFLINE_PROTOCOL_RELAY_TOKEN`; the config must set `internet_enabled`, which the default leaves off, or the service refuses to start |
 | `OP_SOCKET` | `/run/offline-protocol/api.sock` | `--socket` |
@@ -51,8 +51,9 @@ Arguments after the image name are appended to the command.
 
 The local API socket is inside the container. To reach it from the host,
 bind-mount its directory; the service refuses a socket directory that is
-not owned by its own user with mode 0700, so the host directory must be
-root's and 0700.
+not owned by its own user with mode 0700, so the host directory must
+belong to the uid the container runs as (root, unless remapped) with mode
+0700.
 
 ## Building from a checkout
 
@@ -76,8 +77,9 @@ root or mount the checkout: `target/` alone fills the build VM.
 
 Two containers from this image, on one bridge network (not host networking)
 with no `OP_PEERS`, found each other over multicast DNS, announced each
-other under their proved addresses, and served a request through the HTTP front from one to the
-demo provider in [examples/http-front](../../../examples/http-front) on the
-other, end to end encrypted, in 35 ms. The address and the front's
-registrations survived a restart of the container. Bluetooth LE from a
-container has not been run on hardware.
+other under their proved addresses, and served a request through the HTTP
+front from one to the demo provider in
+[examples/http-front](../../../examples/http-front) on the other, end to end
+encrypted, in 35 ms. The address and the front's registrations survived a
+restart of the container. Bluetooth LE from a container has not been run on
+hardware.

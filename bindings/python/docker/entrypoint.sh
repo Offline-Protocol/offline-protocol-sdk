@@ -38,7 +38,7 @@ for peer in ${OP_PEERS:-}; do
     set -- "$@" --peer "$peer"
 done
 set +f
-case "${OP_LAN:-1}" in
+case "${OP_LAN-1}" in
     1) set -- "$@" --lan ;;
     0) ;;
     *)
@@ -48,6 +48,10 @@ case "${OP_LAN:-1}" in
 esac
 if [ -n "${OP_HTTP-127.0.0.1:8080}" ]; then
     set -- "$@" --http "${OP_HTTP-127.0.0.1:8080}"
+elif [ -n "${OP_HTTP_TOKEN_FILE:-}${OP_HTTP_ALIASES:-}" ]; then
+    # The service ignores the front's flags without --http.
+    echo "OP_HTTP_TOKEN_FILE and OP_HTTP_ALIASES configure the HTTP front, and OP_HTTP is empty" >&2
+    exit 64
 fi
 if [ -n "${OP_HTTP_TOKEN_FILE:-}" ]; then
     set -- "$@" --http-token-file "$OP_HTTP_TOKEN_FILE"

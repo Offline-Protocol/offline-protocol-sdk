@@ -13,6 +13,9 @@ FROM python:3.12-slim
 # the installed service has the HTTP front, which a release older than the
 # `http` extra lacks: that image would otherwise build and then crash-loop on
 # `unrecognized arguments: --lan --http`.
+# SDK_SPEC must keep both extras, and must carry no version a local wheel
+# fails, or the second install replaces the wheel; the check below also
+# imports both extras' libraries, since the flag exists without them.
 # Never COPY the checkout itself: the build context is this directory only.
 ARG SDK_SPEC="offline-protocol-sdk[lan,http]"
 
@@ -23,7 +26,7 @@ RUN set -eu; \
     fi; \
     pip install --no-cache-dir --find-links /wheels "${SDK_SPEC}"; \
     rm -rf /wheels; \
-    offline-protocol-service --help | grep -q -- '--http ' \
+    { offline-protocol-service --help | grep -q -- '--http ' && python -c 'import aiohttp, zeroconf'; } \
         || { echo "the installed offline-protocol-service has no HTTP front: put a wheel built from a checkout in wheels/" >&2; exit 1; }
 
 COPY config.json /etc/offline-protocol/config.json

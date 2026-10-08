@@ -22,7 +22,10 @@ device="$1"
 front="${2:-http://127.0.0.1:8080}"
 
 if [ -n "${OP_TOKEN_FILE:-}" ]; then
-    set -- -H "X-Offline-Protocol-Token: $(cat "$OP_TOKEN_FILE")"
+    # Read on its own line, so a missing file stops the script here rather
+    # than sending an empty token.
+    token="$(cat "$OP_TOKEN_FILE")"
+    set -- -H "X-Offline-Protocol-Token: $token"
 else
     set --
 fi

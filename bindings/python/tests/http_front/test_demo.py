@@ -57,19 +57,22 @@ async def test_the_demo_provider_answers_through_two_fronts(hosts):
         await process.wait()
 
 
-async def test_the_demo_provider_stops_at_a_refusal_with_the_fronts_reason():
-    """A front that answers is not starting: its refusal (a token it lacks,
-    a callback it will not take) ends the provider with the front's own
-    detail, instead of retrying it until the deadline."""
-    if not PROVIDER.exists():
-        pytest.skip("the example ships with the repository only")
+async def _run_provider_against(*answers: tuple[int, dict]) -> tuple[int, str, str, int]:
+    """Runs the provider against a stub front that gives ``answers`` in turn
+    (the last one repeated); returns its exit code, stdout, stderr and the
+    number of registration attempts."""
     from aiohttp import web
 
-    async def refuse(request: web.Request) -> web.Response:
-        return web.json_response({"error": "unauthorized", "detail": "the token is missing"}, status=401)
+    attempts = 0
+
+    async def answer(request: web.Request) -> web.Response:
+        nonlocal attempts
+        status, doc = answers[min(attempts, len(answers) - 1)]
+        attempts += 1
+        return web.json_response(doc, status=status)
 
     app = web.Application()
-    app.router.add_put("/services/timeofday", refuse)
+    app.router.add_put("/services/timeofday", answer)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
@@ -85,17 +88,47 @@ async def test_the_demo_provider_stops_at_a_refusal_with_the_fronts_reason():
             "0",
             "--wait",
             "30",
-            stdout=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         )
         try:
+            # A registered provider serves until killed: read its one line.
+            line = await asyncio.wait_for(process.stdout.readline(), 10)
+            if line:
+                return 0, line.decode(), "", attempts
             _, stderr = await asyncio.wait_for(process.communicate(), 10)
+            return process.returncode, "", stderr.decode(), attempts
         finally:
             if process.returncode is None:
                 process.kill()
                 await process.wait()
-        assert process.returncode != 0
-        assert "401" in stderr.decode() and "the token is missing" in stderr.decode()
     finally:
         await runner.cleanup()
+
+
+async def test_the_demo_provider_stops_at_a_refusal_with_the_fronts_reason():
+    """A 4xx is the front refusing this registration (a token it lacks, a
+    callback it will not take): the provider stops with the front's own
+    detail, instead of retrying it until the deadline."""
+    if not PROVIDER.exists():
+        pytest.skip("the example ships with the repository only")
+    code, _, stderr, attempts = await _run_provider_against(
+        (401, {"error": "unauthorized", "detail": "the token is missing"})
+    )
+    assert code != 0
+    assert "401" in stderr and "the token is missing" in stderr
+    assert attempts == 1
+
+
+async def test_the_demo_provider_retries_a_front_still_connecting():
+    """A front listens before it reaches the service and answers 503 until
+    then: a provider started beside it waits that out."""
+    if not PROVIDER.exists():
+        pytest.skip("the example ships with the repository only")
+    code, stdout, _, attempts = await _run_provider_against(
+        (503, {"error": "not_connected"}), (503, {"error": "not_connected"}), (200, {})
+    )
+    assert code == 0
+    assert json.loads(stdout)["registered"] == "timeofday"
+    assert attempts == 3
