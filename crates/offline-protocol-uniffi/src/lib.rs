@@ -13839,6 +13839,88 @@ mod tests {
         );
     }
 
+    /// The Android central refuses a second client link to a peer it already
+    /// holds, before announcing it, and leaves the address undialed.
+    ///
+    /// A macOS peripheral rotates its address and advertises under both, so
+    /// the scanner dials both and both verify as one peer. Two such links per
+    /// peer filled the four connection slots, and the cap then refused every
+    /// inbound central. `MeshConnectionRegistry` is unit-tested; the order in
+    /// `handleIdentityRead` and the dial-time check are not reachable from a
+    /// JVM test, so they are pinned here:
+    ///
+    /// 1. The duplicate check runs on the verified arm, before
+    ///    `announceVerifiedPeer`: an announce first would re-point the peer's
+    ///    address at the duplicate and register a second mesh connection.
+    /// 2. The refusal records the peer with the deadline, so it lapses with
+    ///    the kept link.
+    /// 3. `connectToDevice` consults the refusal before the connection cap.
+    #[test]
+    fn react_native_android_central_refuses_a_second_client_link_to_one_peer() {
+        let central = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/CentralGattClient.kt",
+        );
+        let facade = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+        let section = |source: &str, start: &str| -> String {
+            let from = source
+                .find(start)
+                .unwrap_or_else(|| panic!("missing {start}"));
+            let rest = &source[from + start.len()..];
+            rest[..rn_kotlin_body_end(rest)].to_string()
+        };
+
+        let identity = section(&central, "private fun handleIdentityRead(");
+        let verified = identity
+            .find("is PeerIdentityBinding.Outcome.Verified ->")
+            .expect("handleIdentityRead must have a verified arm");
+        let check = identity
+            .find("if (host.connections.hasOtherClientLink(outcome.peerId, address)) {")
+            .expect("the verified arm must check for another client link to the peer");
+        let refuse = identity
+            .find("refuseDuplicateLink(gatt, outcome.peerId)")
+            .expect("a duplicate must be refused through refuseDuplicateLink");
+        let announce = identity
+            .find("announceVerifiedPeer(gatt, outcome.peerId)")
+            .expect("the verified arm must announce the peer");
+        assert!(
+            verified < check && check < refuse && refuse < announce,
+            "the duplicate check must run on the verified arm before announceVerifiedPeer"
+        );
+
+        let refusal = section(&central, "private fun refuseDuplicateLink(");
+        assert!(
+            refusal.contains("host.connections.suppressDuplicate( address, peerId,"),
+            "the refusal must record the peer it duplicated, so it lapses with the kept link"
+        );
+        assert!(
+            refusal.contains("closeGattClient(gatt, \"duplicate_identity\")"),
+            "the duplicate link must be closed"
+        );
+        assert!(
+            !refusal.contains("blePeerDiscovered"),
+            "a duplicate link is closed unannounced"
+        );
+
+        let dial = section(&facade, "private fun connectToDevice(");
+        let suppressed = dial
+            .find(
+                "connections.isSuppressedDuplicate(device.address, SystemClock.elapsedRealtime())",
+            )
+            .expect("connectToDevice must consult the duplicate refusal");
+        let cap = dial
+            .find("if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {")
+            .expect("connectToDevice must keep its connection cap");
+        let connect = dial
+            .find("device.connectGatt(")
+            .expect("connectToDevice must dial");
+        assert!(
+            suppressed < cap && cap < connect,
+            "a refused duplicate address must be skipped before the cap and the dial"
+        );
+    }
+
     /// A phone running several SDK apps presents one instance of the service
     /// per app behind one BLE link, and each central binds exactly one of them.
     ///

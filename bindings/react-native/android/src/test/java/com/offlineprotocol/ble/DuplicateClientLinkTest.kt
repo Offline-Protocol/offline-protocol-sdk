@@ -57,10 +57,18 @@ class DuplicateClientLinkTest {
         assertFalse(registry.hasOtherClientLink("off1mac", excluding = "CC:CC:CC:CC:CC:02"))
     }
 
+    /** A registry holding a client link to `off1mac` at the kept address. */
+    private fun holding(kept: String): MeshConnectionRegistry {
+        val registry = MeshConnectionRegistry()
+        registry.registerGatt(kept, gatt(kept))
+        registry.setDeviceIdentifier(kept, "off1mac")
+        return registry
+    }
+
     @Test
     fun `a refused address stays undialed until the suppression lapses`() {
-        val registry = MeshConnectionRegistry()
-        registry.suppressDuplicate("DD:DD:DD:DD:DD:02", untilMs = 1_000L)
+        val registry = holding("DD:DD:DD:DD:DD:01")
+        registry.suppressDuplicate("DD:DD:DD:DD:DD:02", "off1mac", untilMs = 1_000L)
 
         assertTrue(registry.isSuppressedDuplicate("DD:DD:DD:DD:DD:02", nowMs = 999L))
         assertFalse(registry.isSuppressedDuplicate("DD:DD:DD:DD:DD:02", nowMs = 1_000L))
@@ -72,10 +80,27 @@ class DuplicateClientLinkTest {
     }
 
     @Test
+    fun `a refusal lapses early once the kept link is gone`() {
+        val registry = holding("FF:FF:FF:FF:FF:01")
+        registry.suppressDuplicate("FF:FF:FF:FF:FF:02", "off1mac", untilMs = Long.MAX_VALUE)
+        assertTrue(registry.isSuppressedDuplicate("FF:FF:FF:FF:FF:02", nowMs = 0L))
+
+        registry.removeGatt("FF:FF:FF:FF:FF:01")
+
+        assertFalse(
+            "the peer must be redialable at the address it still advertises",
+            registry.isSuppressedDuplicate("FF:FF:FF:FF:FF:02", nowMs = 0L),
+        )
+    }
+
+    @Test
     fun `clear forgets every refusal`() {
-        val registry = MeshConnectionRegistry()
-        registry.suppressDuplicate("EE:EE:EE:EE:EE:02", untilMs = Long.MAX_VALUE)
+        val registry = holding("EE:EE:EE:EE:EE:01")
+        registry.suppressDuplicate("EE:EE:EE:EE:EE:02", "off1mac", untilMs = Long.MAX_VALUE)
         registry.clear()
+        // The kept link comes back, so only a forgotten refusal answers false.
+        registry.registerGatt("EE:EE:EE:EE:EE:01", gatt("EE:EE:EE:EE:EE:01"))
+        registry.setDeviceIdentifier("EE:EE:EE:EE:EE:01", "off1mac")
 
         assertFalse(registry.isSuppressedDuplicate("EE:EE:EE:EE:EE:02", nowMs = 0L))
     }

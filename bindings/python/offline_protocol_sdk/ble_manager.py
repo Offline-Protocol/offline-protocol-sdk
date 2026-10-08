@@ -70,6 +70,11 @@ PEER_LOST_TIMEOUT = 30.0  # seconds since last seen
 # process (and its GATT service) is gone, and fragments are written without
 # response, so nothing else ever fails on such a link.
 LIVENESS_INTERVAL = 15.0  # seconds
+# How long an address refused as a second link to a peer already held is left
+# undialed, unless the kept link dies first. A rotating peripheral advertises
+# under both addresses for a while, and without this the address was redialed,
+# verified and refused again every cooldown.
+DUPLICATE_LINK_SUPPRESS = 60.0  # seconds
 LIVENESS_READ_TIMEOUT = 5.0  # seconds
 SCAN_RESTART_INTERVAL = 30.0
 
@@ -128,6 +133,8 @@ class BleManager(TransportManager):
         self._connecting: set[str] = set()
         # address -> consecutive identity refusals; each doubles the cooldown
         self._refusals: dict[str, int] = {}
+        # address -> (peer it duplicated, monotonic time the refusal lapses)
+        self._duplicates: dict[str, tuple[str, float]] = {}
 
         # Metrics
         self._bytes_sent: int = 0
@@ -226,6 +233,7 @@ class BleManager(TransportManager):
             self._device_id_to_addr.clear()
             self._last_seen.clear()
             self._connecting.clear()
+            self._duplicates.clear()
 
         try:
             self._protocol.ble_status_changed(is_available=False)
@@ -300,6 +308,9 @@ class BleManager(TransportManager):
 
     def _should_connect_locked(self, addr: str, now: float) -> bool:
         """Adaptive rate-limiting. Caller must hold ``_lock``."""
+        if self._suppressed_duplicate_locked(addr, now):
+            return False
+
         # Per-peripheral cooldown
         last_attempt = self._connection_attempts.get(addr, 0)
         if now - last_attempt < self._cooldown_locked(addr):
@@ -312,6 +323,21 @@ class BleManager(TransportManager):
             return False
 
         return True
+
+    def _suppressed_duplicate_locked(self, addr: str, now: float) -> bool:
+        """Whether ``addr`` is inside a duplicate-link refusal. Caller must
+        hold ``_lock``. Lapses early once the kept link is gone, so a peer
+        whose kept link died is redialed at the address it still advertises."""
+        entry = self._duplicates.get(addr)
+        if entry is None:
+            return False
+        peer, until = entry
+        held = self._device_id_to_addr.get(peer)
+        kept = held is not None and held != addr and held in self._clients
+        if now < until and kept:
+            return True
+        self._duplicates.pop(addr, None)
+        return False
 
     def _cooldown_locked(self, addr: str) -> float:
         """Per-peripheral cooldown, doubled per consecutive identity refusal
@@ -382,6 +408,11 @@ class BleManager(TransportManager):
                     and self._clients[held].is_connected
                 )
             if duplicate:
+                with self._lock:
+                    self._duplicates[addr] = (
+                        device_id,
+                        time.monotonic() + DUPLICATE_LINK_SUPPRESS,
+                    )
                 self._emit_diagnostic("info", "Closed a second link to a peer already held", {
                     "address": addr,
                     "device_id": device_id,

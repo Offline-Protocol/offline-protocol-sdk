@@ -463,9 +463,11 @@ The pieces, each of which the failure needs only one of to come back:
   the `.withResponse` figure is 512 there and a longer write goes out as a
   prepared write, which this peripheral refuses.
 - **One client link per peer.** A second link that verifies as a peer already
-  held is closed unannounced, on Android and in `BleManager`. Kept, two such
-  peers fill Android's four connection slots, and the cap then refuses every
-  inbound central.
+  held is closed unannounced, on Android and in `BleManager`, and its address
+  is left undialed for a minute or until the kept link is gone, whichever
+  comes first. Kept, two such peers fill Android's four connection slots, and
+  the cap then refuses every inbound central. Without the early lapse a peer
+  whose kept link died stayed undialed at the address it still advertises.
 - **On macOS a notification goes to the recipient's central** when that
   central said hello, through `updateValue:forCharacteristic:onSubscribedCentrals:`,
   and a `NO` from it (a full transmit queue) waits for the stack's ready

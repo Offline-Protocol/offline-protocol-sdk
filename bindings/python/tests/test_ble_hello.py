@@ -547,6 +547,46 @@ class TestCentralDuplicateLink:
         assert manager.holds_peer(PHONE)
 
     @pytest.mark.asyncio
+    async def test_a_refused_address_is_not_redialed_while_the_kept_link_lives(
+        self, manager, protocol
+    ):
+        """Without this the second address of a rotating peripheral was
+        redialed, verified and refused again every cooldown."""
+        first, second = _client(PEER_READS), _client(PEER_READS)
+        await _connect(manager, first, "AA:01")
+        await _connect(manager, second, "AA:02")
+        # Past the per-address cooldown, inside the refusal: only the
+        # refusal can say no here.
+        inside = (
+            ble_manager_module.time.monotonic()
+            + ble_manager_module.ADAPTIVE_COOLDOWN_PER_PERIPHERAL
+            + 1
+        )
+        assert inside < manager._duplicates["AA:02"][1]
+        with manager._lock:
+            manager._global_attempts.clear()
+            assert not manager._should_connect_locked("AA:02", inside)
+            # Lapses once the kept link is gone, inside the window.
+            manager._clients.pop("AA:01")
+            assert manager._should_connect_locked("AA:02", inside)
+            assert "AA:02" not in manager._duplicates
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_lapses_after_its_window(self, manager, protocol):
+        first, second = _client(PEER_READS), _client(PEER_READS)
+        await _connect(manager, first, "AA:01")
+        await _connect(manager, second, "AA:02")
+        later = (
+            ble_manager_module.time.monotonic()
+            + ble_manager_module.DUPLICATE_LINK_SUPPRESS
+            + ble_manager_module.ADAPTIVE_COOLDOWN_PER_PERIPHERAL
+            + 1
+        )
+        with manager._lock:
+            manager._global_attempts.clear()
+            assert manager._should_connect_locked("AA:02", later)
+
+    @pytest.mark.asyncio
     async def test_a_peer_whose_kept_link_died_is_linked_again(self, manager, protocol):
         first = _client(PEER_READS, connected=False)
         await _connect(manager, first, "AA:01")

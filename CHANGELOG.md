@@ -270,9 +270,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   were run; no iPhone was.
 - **Android and the Python central keep one client link per peer.** A second
   link that verifies as a peer already held (a peripheral advertising under an
-  old and a new address) is closed unannounced, and Android leaves that address
-  undialed for a minute. Kept, two such peers filled Android's four connection
-  slots, and the cap then refused every inbound central.
+  old and a new address) is closed unannounced, and both leave that address
+  undialed for a minute, or until the kept link is gone. Kept, two such peers
+  filled Android's four connection slots, and the cap then refused every
+  inbound central.
 - **On macOS a peripheral notification reaches its recipient, and survives a
   full transmit queue.** A fragment for a peer whose central said hello goes to
   that central alone rather than to every subscriber, and a notification

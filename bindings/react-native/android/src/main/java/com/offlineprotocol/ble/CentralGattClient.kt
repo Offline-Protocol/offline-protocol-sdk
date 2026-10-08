@@ -193,8 +193,8 @@ internal class CentralGattClient(
         private const val GATT_GENERIC_ERROR = 133
         /** How long an address refused as a duplicate client link is left
          *  undialed. Long enough to outlast a rotating peripheral advertising
-         *  under its old address, short enough that a peer whose kept link
-         *  died is redialed at the address it still advertises. */
+         *  under its old address. The refusal lapses early once the kept
+         *  link is gone ([MeshConnectionRegistry.isSuppressedDuplicate]). */
         internal const val DUPLICATE_LINK_SUPPRESS_MS = 60_000L
         /** Hard ceiling on a single inbound BLE notification we accept from
          *  a remote peripheral. Mirrors [PeripheralGattServer.MAX_INBOUND_WRITE_BYTES]
@@ -1343,16 +1343,6 @@ internal class CentralGattClient(
     }
 
     /**
-     * Closes a link whose peer could not prove the id it advertised.
-     *
-     * Nothing needs retracting: no announce happens before
-     * [announceVerifiedPeer], so a refused peer was never visible to the
-     * protocol layer. The link is dropped rather than kept unannounced —
-     * holding a connection we will never address costs a slot on both ends,
-     * and closing it lets the ordinary reconnect path retry, which is what
-     * recovers a peer that simply had not finished initializing its identity.
-     */
-    /**
      * Closes a client link that proved an identity we already hold a client
      * link to at another address.
      *
@@ -1375,12 +1365,23 @@ internal class CentralGattClient(
         )
         host.connections.suppressDuplicate(
             address,
+            peerId,
             SystemClock.elapsedRealtime() + DUPLICATE_LINK_SUPPRESS_MS,
         )
         host.connections.consumePendingRole(address)
         closeGattClient(gatt, "duplicate_identity")
     }
 
+    /**
+     * Closes a link whose peer could not prove the id it advertised.
+     *
+     * Nothing needs retracting: no announce happens before
+     * [announceVerifiedPeer], so a refused peer was never visible to the
+     * protocol layer. The link is dropped rather than kept unannounced —
+     * holding a connection we will never address costs a slot on both ends,
+     * and closing it lets the ordinary reconnect path retry, which is what
+     * recovers a peer that simply had not finished initializing its identity.
+     */
     private fun rejectPeer(gatt: BluetoothGatt, reason: String, detail: String) {
         val address = gatt.device.address
         advertisedDeviceIds.remove(address)

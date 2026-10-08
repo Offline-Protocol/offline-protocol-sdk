@@ -32,13 +32,14 @@ class MeshConnectionRegistry {
     private val establishedClients = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
     /**
      * Addresses refused as a second client link to a peer we already hold a
-     * client link to, with the elapsed-realtime moment the refusal lapses.
+     * client link to, with that peer and the elapsed-realtime moment the
+     * refusal lapses.
      * A peripheral that rotates its address (macOS does, on its own clock)
      * advertises under both for a while, and without this the scanner would
      * redial the second address on every advertisement, verify it, and be
      * refused again, each round holding a connection slot.
      */
-    private val duplicateUntil = ConcurrentHashMap<String, Long>()
+    private val duplicateUntil = ConcurrentHashMap<String, Pair<String, Long>>()
 
     fun registerGatt(address: String, gatt: BluetoothGatt) {
         gattClients[address] = gatt
@@ -127,16 +128,26 @@ class MeshConnectionRegistry {
             id == deviceId && address != excluding && gattClients.containsKey(address)
         }
 
-    /** Refuse client links to [address] until [untilMs] (elapsed realtime). */
-    fun suppressDuplicate(address: String, untilMs: Long) {
-        duplicateUntil[address] = untilMs
+    /**
+     * Refuse client links to [address], a duplicate of [deviceId], until
+     * [untilMs] (elapsed realtime).
+     */
+    fun suppressDuplicate(address: String, deviceId: String, untilMs: Long) {
+        duplicateUntil[address] = deviceId to untilMs
     }
 
-    /** Whether a dial to [address] is still inside a duplicate refusal. */
+    /**
+     * Whether a dial to [address] is still inside a duplicate refusal.
+     *
+     * Lapses early once the client link it duplicated is gone: otherwise a
+     * peer whose kept link died just after the refusal stayed undialed at the
+     * address it still advertises for the rest of the window.
+     */
     fun isSuppressedDuplicate(address: String, nowMs: Long): Boolean {
-        val until = duplicateUntil[address] ?: return false
-        if (nowMs < until) return true
-        duplicateUntil.remove(address, until)
+        val entry = duplicateUntil[address] ?: return false
+        val (deviceId, until) = entry
+        if (nowMs < until && hasOtherClientLink(deviceId, address)) return true
+        duplicateUntil.remove(address, entry)
         return false
     }
 
