@@ -161,17 +161,23 @@ device it runs on and waits for those events, so a check passes or fails on
 what the engine says:
 
 ```bash
-# on A: send, then wait for B's acknowledgement (up to 10 minutes)
-id=$(offline-protocol-verify send off1...B "hello" | jq -r .sent.message_id)
-offline-protocol-verify await "$id" --until delivered --timeout 600
+# on A: send, and wait for B's acknowledgement on the same connection
+# (up to 10 minutes)
+id=$(offline-protocol-verify send off1...B "hello" --await --timeout 600 \
+     | jq -r 'select(.sent) | .sent.message_id')
 # on B: wait for the message itself
 offline-protocol-verify await "$id" --until received
 ```
 
+A separate `await --until delivered` connects only after `send` has closed
+its connection, and a receipt that arrives in between reaches no client: to
+a recipient that is reachable now that is most receipts. Use it for a
+message whose recipient is away, started before the recipient returns.
+
 | Command | Waits for | Passes on |
 |---|---|---|
 | `state [--peer ADDR]` | nothing | always; prints address, carriers, queues, relay counters, the session with each peer; it never takes a held message |
-| `send ADDR TEXT` | nothing | always; prints the message id |
+| `send ADDR TEXT [--await]` | nothing, or with `--await` the receipt | prints the message id; with `--await`, as `await --until delivered`, on the connection the send used |
 | `await ID --until delivered` | the receipt on the sender | `message_delivered` naming the id; `message_failed` is a failure, `message_deferred`, `message_retrying` and `message_undeliverable` print as status |
 | `await ID --until received` | the message on the recipient | `message_received` naming the id |
 | `pair ADDR` | the session with a peer | `get_establishment_state` reaching `SessionConfirmed` |
@@ -195,9 +201,9 @@ events by the identifier they carry rather than relying on the server's
 correlation, which knows only the identifiers its own clients were handed
 by this process; so `await` works on a sender restarted since the send. And
 an event the engine emits while no client of the application is connected
-is gone, except a received message: start `await` or `watch` on the sender
-before the recipient can answer, which for a restart test means restarting
-the sender while the recipient is still away. Two devices that will reach
+is gone, except a received message: use `send --await`, or start `await`
+or `watch` on the sender before the recipient can answer, which for a
+restart test means restarting the sender while the recipient is still away. Two devices that will reach
 each other only through a third must have met directly once: the automatic
 key exchange and the Welcome travel over a direct link, never through the
 mesh. Today a message that crosses the mesh is received, but the sender's

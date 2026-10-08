@@ -114,17 +114,34 @@ async def state(target: Target, peers: list[str], output: Output) -> int:
     return PASS
 
 
-async def send(target: Target, recipient: str, content: str, output: Output) -> int:
-    """Sends one message and prints its id. The id is what ``await`` takes."""
+async def send(
+    target: Target,
+    recipient: str,
+    content: str,
+    output: Output,
+    *,
+    wait: bool = False,
+    timeout: float = 120.0,
+) -> int:
+    """Sends one message and prints its id. The id is what ``await`` takes.
+
+    With ``wait`` it then waits for the receipt as ``await --until
+    delivered`` does, on the same connection. That is the only race-free
+    way to see the receipt of a message to a recipient that is reachable
+    now: the connection is subscribed before ``send_message`` is called,
+    whereas a separate ``await`` connects only after this one closed, and
+    a receipt that fires in between reaches no client and is not held."""
     client = await target.open()
     try:
         message_id = await client.call(
             "send_message", {"recipient": recipient, "content": content, "priority": "Medium"}
         )
+        output.line({"sent": {"message_id": message_id, "recipient": recipient}})
+        output.say(f"sent {message_id} to {recipient}")
+        if wait:
+            return await _await_on(client, message_id, "delivered", timeout, output)
     finally:
         await client.close()
-    output.line({"sent": {"message_id": message_id, "recipient": recipient}})
-    output.say(f"sent {message_id} to {recipient}")
     return PASS
 
 

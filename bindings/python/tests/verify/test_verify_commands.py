@@ -82,6 +82,38 @@ async def test_send_then_await_passes_on_the_receipt_and_the_arrival(harness):
     assert event["type"] == "message_received" and event["content"] == "checked"
 
 
+async def test_send_await_waits_for_the_receipt_on_its_own_connection(harness):
+    """``send --await`` is the race-free way to the receipt of a message to
+    a reachable recipient: a separate ``await`` connects after the send's
+    connection closed, and the receipt usually fires in between."""
+    server_a, server_b = await two_servers(harness)
+    out = _output()
+    status = await commands.send(
+        _target(server_a), server_b.manager.local_address, "and wait", out, wait=True, timeout=15.0
+    )
+    assert status == commands.PASS
+    sent, result = _lines(out)[0], _lines(out)[-1]
+    message_id = sent["sent"]["message_id"]
+    assert result["result"] == "pass"
+    assert result["event"]["type"] == "message_delivered"
+    assert result["event"]["message_id"] == message_id
+
+
+async def test_send_await_times_out_with_status_two(harness):
+    server = await harness.server(config=make_config(profile="alone", internet_enabled=False, wifi_direct_enabled=True))
+    out = _output()
+    status = await commands.send(_target(server), "off1nobody", "lost", out, wait=True, timeout=0.3)
+    assert status == commands.TIMED_OUT
+    assert _lines(out)[-1]["result"] == "timeout"
+
+
+def test_the_command_line_takes_send_await():
+    args = cli.build_parser().parse_args(["send", "off1x", "hi", "--await", "--timeout", "5"])
+    assert args.wait is True and args.timeout == 5.0
+    args = cli.build_parser().parse_args(["send", "off1x", "hi"])
+    assert args.wait is False
+
+
 async def test_send_prints_the_id_await_matches(harness):
     server_a, server_b = await two_servers(harness)
     out = _output()

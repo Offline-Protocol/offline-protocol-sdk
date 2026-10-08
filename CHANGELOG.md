@@ -90,8 +90,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   when the engine gave the message up. It matches events by the identifier
   they carry, so it works on a sender restarted since the send. A receipt
   the engine emits while no client of the application is connected is not
-  held, so start `await` or `watch` on the sender before the recipient can
-  answer. New scenario tests run the networking properties end to end over
+  held, so `send --await` waits for it on the connection it sent on, and a
+  separate `await` or `watch` on the sender must start before the recipient
+  can answer. New scenario tests run the networking properties end to end over
   loopback peer streams with encryption on: a message to a device that is
   off arrives when it returns and the sender gets the receipt; a queued
   message survives the sender restarting (and is lost when the saved state
