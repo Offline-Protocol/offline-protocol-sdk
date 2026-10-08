@@ -37,15 +37,24 @@ CORRELATION_KEYS: tuple[str, ...] = ("message_id", "file_id", "query_id", "reque
 #: says happens to an identifier the server does not know.
 ISSUED_CAPACITY = 65536
 
-#: The last event that names an identifier, after which it is forgotten.
-#: ``message_undeliverable`` is not one: the engine parks the message, may
-#: repeat the event on every reachability probe, and settles it later with
-#: ``message_delivered`` or ``message_failed``. Forgetting the id on it
-#: broadcast the delivery receipt of a parked message to every client.
+#: How many settled identifiers still route to their owner. The engine emits
+#: some events after the one that settles an id, in the same breath: a
+#: connection request it gives up on reports ``message_failed`` and then
+#: ``connection_request_undeliverable`` for the same id. Forgetting the id
+#: outright on the first broadcast the second, recipient and all, to every
+#: client. Settled ids sit in their own table so they never crowd a live
+#: one (a message parked for days) out of the issued table.
+SETTLED_CAPACITY = 1024
+
+#: The event that settles an identifier, after which it is no longer live.
+#: Neither ``message_undeliverable`` nor ``connection_request_undeliverable``
+#: is one: on a relay verdict the engine keeps the message (or request) in
+#: its outbox, may repeat the event on every reachability probe, and settles
+#: it later with ``message_delivered`` or ``message_failed``. Treating either
+#: as the last word broadcast that later receipt to every client.
 TERMINAL_TAGS: dict[str, str] = {
     "message_delivered": "message_id",
     "message_failed": "message_id",
-    "connection_request_undeliverable": "message_id",
     "media_sent": "file_id",
     "media_send_failed": "file_id",
     "service_response_received": "request_id",
@@ -66,6 +75,7 @@ class EventRouter:
         self._ownership = ownership
         self._sessions: dict[str, list[Session]] = {}
         self._issued: OrderedDict[str, str] = OrderedDict()
+        self._settled: OrderedDict[str, str] = OrderedDict()
         self._held: dict[str, deque[dict[str, Any]]] = {}
         #: Events the run loop emitted while a call was in flight, naming an
         #: identifier nobody owned yet. Routed once the call's result is
@@ -135,6 +145,10 @@ class EventRouter:
             value = event.get(key)
             if isinstance(value, str) and value in self._issued:
                 return self._issued[value]
+        for key in CORRELATION_KEYS:
+            value = event.get(key)
+            if isinstance(value, str) and value in self._settled:
+                return self._settled[value]
         service_id = event.get("service_id")
         if isinstance(service_id, str):
             return self._ownership.owner(service_id)
@@ -145,8 +159,14 @@ class EventRouter:
         if key is None:
             return
         value = event.get(key)
-        if isinstance(value, str):
-            self._issued.pop(value, None)
+        if not isinstance(value, str):
+            return
+        owner = self._issued.pop(value, None)
+        if owner is not None:
+            self._settled[value] = owner
+            self._settled.move_to_end(value)
+            while len(self._settled) > SETTLED_CAPACITY:
+                self._settled.popitem(last=False)
 
     # -- routing --------------------------------------------------------------
 

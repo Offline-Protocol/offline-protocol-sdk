@@ -100,8 +100,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   which the engine emits when a recipient is away and repeats on every
   reachability probe while it keeps the message. Every later event for that
   message, its delivery receipt included, was broadcast to every connected
-  application. The id is now kept until `message_delivered` or
-  `message_failed`. Both example clients (`examples/local_api_client.py`
+  application. A connection request had the same fault on
+  `connection_request_undeliverable`, and the one the engine emits right
+  after the `message_failed` of a request it gives up on was broadcast
+  too. The id is now kept until `message_delivered` or `message_failed`,
+  and a settled id still reaches its client for the next 1024
+  settlements, so an event that trails the settling one is not
+  broadcast. Both example clients (`examples/local_api_client.py`
   and `examples/local-api/client.mjs`) print a `message_undeliverable` as a
   status line and keep waiting for the delivery, where they used to stop at
   it; each takes `--deliver-timeout SECONDS` (30 by default).
