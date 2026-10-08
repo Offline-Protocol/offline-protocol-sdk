@@ -61,3 +61,20 @@ def test_the_standalone_command_builds_a_front_on_a_socket(tmp_path):
     )
     front = cli.build_front(args)
     assert front.domain == "mesh.example"
+
+
+@pytest.mark.parametrize("content", ["[]", "not json", '{"services": []}', '{"services": {"Bad_Name": {"callback": "http://x"}}}'])
+def test_a_registry_the_front_could_not_load_stops_the_command_first(tmp_path, content):
+    registry = tmp_path / "services.json"
+    registry.write_text(content)
+    cli, args = _cli_args(tmp_path, "--http", "127.0.0.1:8080", "--http-registry", str(registry))
+    with pytest.raises(SystemExit, match="--http-registry"):
+        cli.http_front_options(args)
+
+    from offline_protocol_sdk.http_front import cli as front_cli
+
+    args = front_cli.build_parser().parse_args(
+        ["--socket", str(tmp_path / "api.sock"), "--listen", "127.0.0.1:0", "--http-registry", str(registry)]
+    )
+    with pytest.raises(SystemExit, match="--http-registry"):
+        front_cli.build_front(args)

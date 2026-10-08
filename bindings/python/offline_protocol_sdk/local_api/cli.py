@@ -25,7 +25,10 @@ from websockets.exceptions import InvalidURI
 from websockets.uri import parse_uri
 
 from ..gateway_manager import DEFAULT_DAEMON_ADDRESS
-from ..http_front.cli import add_front_arguments, front_options
+# Neither imports aiohttp: the front imports it when it starts, so a
+# service without --http runs without the `http` extra.
+from ..http_front.cli import add_front_arguments, check_registry, front_options
+from ..http_front.front import LOOPBACK_HOSTS, HttpFront
 from ..protocol_manager import ProtocolManager
 from . import codec
 from .authz import Policy
@@ -244,8 +247,7 @@ def http_front_options(args: argparse.Namespace) -> dict[str, Any] | None:
         state_root = args.state_root or os.environ.get("OFFLINE_PROTOCOL_STATE_ROOT")
         if state_root:
             options["registry_path"] = str(Path(state_root) / "http-front-services.json")
-    from ..http_front.front import LOOPBACK_HOSTS
-
+    check_registry(options["registry_path"])
     if options["host"] not in LOOPBACK_HOSTS and options["token_path"] is None:
         raise SystemExit(f"--http on {options['host']} needs --http-token-file: off loopback the front is never open")
     return options
@@ -263,10 +265,6 @@ async def run(server: LocalApiServer, http: dict[str, Any] | None = None) -> Non
     front = None
     try:
         if http is not None:
-            # Imported here: the front needs the `http` extra, and a service
-            # without --http must not.
-            from ..http_front.front import HttpFront
-
             front = HttpFront(
                 socket_path=server.socket_path,
                 tcp_port=server.port if server.socket_path is None else None,

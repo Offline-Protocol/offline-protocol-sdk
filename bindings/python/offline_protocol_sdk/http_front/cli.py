@@ -17,6 +17,7 @@ from typing import Any
 
 from .front import HttpFront
 from .hostname import DEFAULT_DOMAIN, Aliases
+from .registry import Registry
 
 
 def parse_listen(value: str) -> tuple[str, int]:
@@ -63,6 +64,17 @@ def front_options(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def check_registry(path: str | None) -> None:
+    """Refuses a registry file the front could not load, before anything
+    starts: found only once the service is serving, it would stop it."""
+    if path is None:
+        return
+    try:
+        Registry(path)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"--http-registry: {exc}") from None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="offline-protocol-http-front",
@@ -80,12 +92,14 @@ def build_parser() -> argparse.ArgumentParser:
 def build_front(args: argparse.Namespace) -> HttpFront:
     if args.tcp is not None and not args.token_file:
         raise SystemExit("--tcp requires --token-file")
+    options = front_options(args)
+    check_registry(options["registry_path"])
     try:
         return HttpFront(
             socket_path=args.socket,
             tcp_port=args.tcp,
             local_api_token_file=args.token_file,
-            **front_options(args),
+            **options,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None

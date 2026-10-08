@@ -54,7 +54,7 @@ class LocalApiClient:
     on_connect:
         Awaited after every successful ``hello`` and ``subscribe``, before
         the client counts as connected for callers, with the ``hello``
-        result.
+        result. It may :meth:`call`.
     socket_path, or tcp_port with tcp_host and token or token_file:
         The server's carrier. A token file is read at every connect, since
         the server writes a new token at every launch.
@@ -90,6 +90,9 @@ class LocalApiClient:
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._ws: Any = None
         self._connected = asyncio.Event()
+        #: ``hello`` succeeded on the current socket: ``on_connect`` may call
+        #: before the client counts as connected for everyone else.
+        self._ready = False
         self._stopping = False
         self._task: asyncio.Task[None] | None = None
         self.hello_result: dict[str, Any] | None = None
@@ -125,16 +128,19 @@ class LocalApiClient:
         self._fail_pending()
 
     async def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
-        if not self.connected or self._ws is None:
+        if not self._ready:
             raise NotConnected(f"cannot call {method}: not connected")
         return await self._send(method, params)
 
     async def _send(self, method: str, params: dict[str, Any] | None) -> Any:
+        ws = self._ws
+        if ws is None:
+            raise NotConnected(f"cannot call {method}: not connected")
         request_id = next(self._ids)
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
         try:
-            await self._ws.send(
+            await ws.send(
                 json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}})
             )
             return await future
@@ -166,6 +172,7 @@ class LocalApiClient:
                 reader = asyncio.create_task(self._read(self._ws))
                 self.hello_result = await self._send("hello", self._hello_params())
                 await self._send("subscribe", {"types": self._subscribe})
+                self._ready = True
                 if self._on_connect is not None:
                     await self._on_connect(self.hello_result)
                 self._connected.set()
@@ -181,6 +188,7 @@ class LocalApiClient:
             except Exception:
                 logger.exception("local API client failed")
             finally:
+                self._ready = False
                 self._connected.clear()
                 if reader is not None:
                     reader.cancel()

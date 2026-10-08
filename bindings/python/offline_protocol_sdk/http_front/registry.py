@@ -65,7 +65,10 @@ class Registry:
         self._entries: dict[str, Registration] = {}
         if self._path is not None and self._path.exists():
             doc = json.loads(self._path.read_text(encoding="utf-8"))
-            for service, entry in (doc.get("services") or {}).items():
+            services = doc.get("services", {}) if isinstance(doc, dict) else None
+            if not isinstance(services, dict):
+                raise ValueError(f'{self._path} must be {{"services": {{"name": {{...}}}}}}')
+            for service, entry in services.items():
                 self._entries[service] = Registration.parse(service, entry)
 
     def get(self, service: str) -> Registration | None:

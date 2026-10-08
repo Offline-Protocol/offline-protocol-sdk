@@ -16,6 +16,7 @@ aiohttp = pytest.importorskip("aiohttp")
 from aiohttp import web  # noqa: E402
 
 from offline_protocol_sdk.http_front import FRONT_APP_ID, Aliases, HttpFront  # noqa: E402
+from offline_protocol_sdk.http_front import front as front_module  # noqa: E402
 from offline_protocol_sdk.http_front.envelope import Request  # noqa: E402
 from offline_protocol_sdk.offline_protocol import derive_address  # noqa: E402
 from offline_protocol_sdk.protocol_manager import ProtocolManager  # noqa: E402
@@ -498,3 +499,28 @@ async def test_stopping_ends_an_open_browse(hosts):
         assert stream.content.at_eof()
     finally:
         stream.release()
+
+
+async def test_the_last_browser_leaving_forgets_the_service(hosts, monkeypatch):
+    """Otherwise the next browser is replayed entries nothing refreshed."""
+    monkeypatch.setattr(front_module, "BROWSE_KEEPALIVE_SECONDS", 0.1)
+    stream = await hosts.http.get(f"http://127.0.0.1:{hosts.a.port}/browse/timeofday", headers={"Host": DOMAIN})
+    await until(lambda: "timeofday" in hosts.a._browses)
+    stream.close()
+    await until(lambda: "timeofday" not in hosts.a._browses, 5)
+
+
+async def test_registering_without_a_connection_is_a_503(hosts):
+    await hosts.b.client.stop()
+    async with hosts.http.put(
+        f"http://127.0.0.1:{hosts.b.port}/services/timeofday", json={"callback": hosts.provider.url}
+    ) as reply:
+        assert (reply.status, reply.headers["X-Offline-Protocol-Error"]) == (503, "not_connected")
+    assert hosts.b.registry.get("timeofday") is None
+
+
+async def test_a_registration_over_the_limit_says_so(hosts):
+    doc = {"callback": hosts.provider.url, "capabilities": {"k": "v" * 9000}}
+    async with hosts.http.put(f"http://127.0.0.1:{hosts.b.port}/services/timeofday", json=doc) as reply:
+        assert reply.status == 400
+        assert "at most" in (await reply.json())["detail"]

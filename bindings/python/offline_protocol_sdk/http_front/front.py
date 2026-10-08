@@ -279,7 +279,7 @@ class HttpFront:
                 logger.error("could not register %s again: %s", registration.service, exc)
 
     async def _register_with_engine(self, registration: Registration) -> None:
-        await self.client._send(
+        await self.client.call(
             "services.register_service",
             {
                 "service_id": registration.service,
@@ -461,6 +461,10 @@ class HttpFront:
             self.registry.remove(service)
             return web.json_response({"service": service, "registered": False})
         raw = await _read_limited(request.content, MAX_HEADER_BYTES)
+        if raw is None:
+            return web.json_response(
+                {"error": "bad_request", "detail": f"a registration is at most {MAX_HEADER_BYTES} bytes"}, status=400
+            )
         try:
             registration = Registration.parse(service, json.loads(raw or b"null"))
         except ValueError as exc:
@@ -506,9 +510,14 @@ class HttpFront:
             pass
         finally:
             browse.queues.discard(queue)
-            if not browse.queues and browse.task is not None:
-                browse.task.cancel()
-                browse.task = None
+            if not browse.queues:
+                if browse.task is not None:
+                    browse.task.cancel()
+                    browse.task = None
+                # Forgotten with its last browser: the next one would be
+                # replayed entries nothing has refreshed since.
+                if self._browses.get(service) is browse:
+                    del self._browses[service]
         return response
 
     async def _browse_loop(self, browse: _Browse) -> None:
