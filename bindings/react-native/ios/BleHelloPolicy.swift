@@ -33,7 +33,10 @@ enum BleHelloPolicy {
     ///   - alreadyWritten: whether this connection already wrote its hello.
     ///     Characteristic discovery replays on a live link, and the hello is
     ///     per connection.
-    ///   - maximumWriteLength: `maximumWriteValueLength(for: .withResponse)`.
+    ///   - maximumWriteLength: `maximumWriteValueLength(for: .withoutResponse)`,
+    ///     the payload of one ATT packet. Not the `.withResponse` figure: iOS
+    ///     reports 512 there and sends anything longer than one packet as a
+    ///     prepared write, which a peripheral must refuse for a hello.
     static func helloToWrite(
         identity: Data?,
         peerServesHello: Bool,

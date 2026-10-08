@@ -3485,7 +3485,11 @@ extension BleManager: CBPeripheralDelegate {
                identity: currentSignedIdentity()?.encode(),
                peerServesHello: true,
                alreadyWritten: helloWritten.contains(peripheral.identifier),
-               maximumWriteLength: peripheral.maximumWriteValueLength(for: .withResponse)
+               // `.withoutResponse` is the single-packet payload (MTU - 3).
+               // The `.withResponse` figure is 512 on iOS because CoreBluetooth
+               // turns a longer write into a prepared write, which the chapter
+               // forbids for a hello and a peripheral refuses.
+               maximumWriteLength: peripheral.maximumWriteValueLength(for: .withoutResponse)
            ) {
             helloWritten.insert(peripheral.identifier)
             peripheral.writeValue(hello, for: helloCharacteristic, type: .withResponse)

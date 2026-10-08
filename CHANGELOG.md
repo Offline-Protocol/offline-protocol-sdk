@@ -262,8 +262,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   before its handshake reads (`BleHelloPolicy`). Without it an iPhone could
   verify a Python box and never start a session through the link it opened. A
   link bound by a hello is never rebound, and a message's `sender` field never
-  replaces the binding. Two Macs and a Galaxy M36 (Android 16) were run; no
-  iPhone was.
+  replaces the binding. The iOS hello is written only when it fits one ATT
+  packet, since iOS sends a longer with-response write as a prepared write,
+  which a peripheral refuses for a hello. Two Macs and a Galaxy M36 (Android
+  16) were run; no iPhone was.
 - **Android and the Python central keep one client link per peer.** A second
   link that verifies as a peer already held (a peripheral advertising under an
   old and a new address) is closed unannounced, and Android leaves that address

@@ -454,7 +454,10 @@ The pieces, each of which the failure needs only one of to come back:
 - **The central writes its hello** after its Message subscription and before
   its first write, when the peer serves Hello and the assertion fits one write.
   So do the Android and iOS centrals, which is what lets a phone start a
-  session with this peripheral at all.
+  session with this peripheral at all. "Fits one write" means one ATT packet:
+  iOS bounds it by `maximumWriteValueLength(for: .withoutResponse)`, because
+  the `.withResponse` figure is 512 there and a longer write goes out as a
+  prepared write, which this peripheral refuses.
 - **One client link per peer.** A second link that verifies as a peer already
   held is closed unannounced, on Android and in `BleManager`. Kept, two such
   peers fill Android's four connection slots, and the cap then refuses every

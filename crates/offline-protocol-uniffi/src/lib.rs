@@ -13760,15 +13760,24 @@ mod tests {
             swift.contains(&format!("CBUUID(string: \"{BLE_HELLO_CHAR_UUID}\")")),
             "BleManager.swift must declare the Hello characteristic as {BLE_HELLO_CHAR_UUID}"
         );
-        assert_eq!(
-            swift
-                .matches("[MESSAGE_CHAR_UUID, DEVICE_ID_CHAR_UUID, IDENTITY_CHAR_UUID]")
-                .count(),
-            0,
-            "every discoverCharacteristics call that discovers the handshake characteristics must \
-             also discover HELLO_CHAR_UUID: a path that omits it hands the discovery delegate no \
-             Hello characteristic, and that link never says hello"
+        let discoveries: Vec<&str> = swift
+            .split("discoverCharacteristics(")
+            .skip(1)
+            .map(|rest| &rest[..rest.find(']').unwrap_or(rest.len())])
+            .filter(|list| list.contains("IDENTITY_CHAR_UUID"))
+            .collect();
+        assert!(
+            !discoveries.is_empty(),
+            "BleManager.swift must discover the handshake characteristics somewhere"
         );
+        for list in &discoveries {
+            assert!(
+                list.contains("HELLO_CHAR_UUID"),
+                "every discoverCharacteristics call that discovers the handshake characteristics \
+                 must also discover HELLO_CHAR_UUID: a path that omits it hands the discovery \
+                 delegate no Hello characteristic, and that link never says hello ({list}])"
+            );
+        }
 
         let body_start = swift
             .find(
@@ -13800,6 +13809,14 @@ mod tests {
             gate < policy && policy < write && write < first_read,
             "the hello must sit below the announce gate (one per connection) and above the first \
              handshake read (so it precedes every Message write in CoreBluetooth's GATT order)"
+        );
+        assert!(
+            body.contains(
+                "maximumWriteLength: peripheral.maximumWriteValueLength(for: .withoutResponse)"
+            ),
+            "the hello must be bounded by one packet's payload: iOS reports 512 for \
+             .withResponse and sends anything longer than one packet as a prepared write, which \
+             a peripheral refuses for a hello"
         );
         assert!(
             body.contains("alreadyWritten: helloWritten.contains(peripheral.identifier)")
