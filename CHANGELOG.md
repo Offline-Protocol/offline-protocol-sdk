@@ -31,6 +31,38 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   switched on from the command; `--lan` switches on both (it needs the `lan`
   extra and fails at start, naming it, without).
 
+- **The HTTP front.** An application that does not use the SDK can call a
+  service on another device with a plain HTTP request to
+  `<service>.<device>.offline.protocol.internal`. `offline-protocol-service
+  --http HOST:PORT` (with the new `http` extra) starts the front in the
+  service's process, as a client of the local API; `offline-protocol-http-front`
+  runs it apart. A request and its response travel as the content of an end
+  to end encrypted direct message, never on the service request path, whose
+  bodies are signed plaintext, and a front acts only on a message the engine
+  reports as encrypted, so the provider's callback is told the caller's
+  MLS-authenticated address in `X-Offline-Protocol-Sender`. A device is named
+  by its address, which is a DNS label as it stands, or by an operator alias,
+  never by one learned from the LAN. `PUT /services/<name>` registers a
+  callback (kept across restarts, and registered with the engine so signed
+  discovery finds it), and `GET /browse/<name>` streams the devices that
+  offer a service. Bodies are limited to 128 KiB each way, and a request
+  waits 30 seconds by default and at most 300. Off loopback the front
+  requires a per-launch token, and on any binding it refuses a request
+  carrying `Origin`, so a web page cannot send a body or register a callback
+  through it by DNS rebinding; a page can still make a blind `GET` by loading
+  a resource, which only a token stops, so a host where a browser runs
+  should use one. A request path with a `.` or `..` segment is refused, so a
+  peer cannot reach a path outside the one a provider registered, and
+  forwarding headers such as `X-Forwarded-For` never cross. A carried
+  header value that is not UTF-8 is a `400`, and a token that is not UTF-8
+  a `401`. A callback answer the requester would refuse, such as a status
+  past 599, is `callback_failed` at once rather than a wait for the
+  deadline. A provider runs
+  at most 32 callbacks at once. Run one front per service.
+  `docs/spec/http-front.md` is the contract;
+  the threat model gains R23 (the front trusts every process that can reach
+  it) and the Python bridge rules gain P13.
+
 ### Changed
 
 - **A peer-stream or relay flag the configuration cannot honour is refused.**

@@ -108,6 +108,45 @@ pinned WebSocket library accepts only `GET` and drops any other method
 before the server sees it, so a `POST` would fail silently rather than with
 an error.
 
+## The HTTP front
+
+An application that should not know the SDK exists can still reach a service
+on another device: `--http 127.0.0.1:8080` (with the `http` extra) starts the
+[HTTP front](spec/http-front.md) in the same process, as a client of this
+server under the application id `offline-protocol-http-front`. A policy
+file that names any application must list that id too.
+
+A provider registers its HTTP endpoint with the front on its own host:
+
+```bash
+curl -X PUT http://127.0.0.1:8080/services/timeofday \
+    -H 'Content-Type: application/json' \
+    -d '{"callback": "http://127.0.0.1:9000", "version": "1"}'
+```
+
+A requester on another host calls it by device address, or by an alias from
+`--http-aliases`:
+
+```bash
+curl http://127.0.0.1:8080/now \
+    -H 'Host: timeofday.bob.offline.protocol.internal'
+```
+
+The request travels inside an end-to-end encrypted message, the far front
+calls `http://127.0.0.1:9000/now` with `X-Offline-Protocol-Sender` set to the
+caller's authenticated address, and the answer comes back as the response.
+`GET /browse/timeofday` streams the devices that offer a service, as
+server-sent events. Registrations are kept beside the state root and
+registered again at every start. A host that resolves
+`*.offline.protocol.internal` to the front removes the need for the manual
+`Host` header; until then, setting it by hand exercises the same path. The
+front runs apart from the service as `offline-protocol-http-front`, never
+beside `--http` on the same service: both would receive every request and
+call the callback twice. Off loopback it requires `--http-token-file`, and
+on a host where a browser runs it should have one on loopback too; the
+residual risk of a front any local process can reach is R23 in the threat
+model.
+
 ## The policy file
 
 With no policy, any well-formed application id is accepted and nothing is

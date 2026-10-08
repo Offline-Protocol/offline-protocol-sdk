@@ -964,8 +964,22 @@ whether that sender may make it.
 
 **What bounds it:** bodies never leave the host in the clear (invariant 1 of
 the chapter), the sender a provider is told is the MLS-authenticated one,
-and off loopback the token is required. **What application teams must do:**
-run the front where only the operator's applications can reach it, and
+off loopback the token is required, and a request from a browser page
+(one carrying `Origin`, or reaching a tokenless front under a name other
+than loopback or the domain) is refused. That does not cover a `GET` a page
+makes by loading a resource, which carries no `Origin`: with a wildcard
+route to the domain on a host where a browser runs, any page can make a
+blind `GET` to a service as this device. A token closes it, since such a
+load cannot set a header. A peer cannot steer a callback outside the path
+its provider registered (dot segments are refused), cannot choose the source
+address a proxy in front of the callback reports (the forwarding headers are
+dropped), and cannot hold more than 32 callback connections at once.
+That limit bounds the callback's load, not fairness: one peer with a
+session can hold all 32 for the maximum deadline, and every other peer is
+refused with `callback_failed` until it lets go.
+**What application teams must do:**
+run the front where only the operator's applications can reach it, with a
+token on any host where a browser runs, and
 authorize in the provider by reading `X-Offline-Protocol-Sender`. A host
 that can identify the calling container should pass that identity to the
 front; until then, one front is one application to every rule.

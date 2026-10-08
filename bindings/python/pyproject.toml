@@ -44,6 +44,8 @@ dev = [
     # test_peer_stream_manager.py is the only check that a published record
     # resolves, and it skips without this.
     "zeroconf>=0.140,<0.160",
+    # The HTTP front's suite: tests/http_front skips without it.
+    "aiohttp>=3.14,<4",
 ]
 # LAN discovery for the peer-stream transport (DNS-SD, `PeerStreamManager`).
 # Imported lazily and only when a manager asks to advertise or discover, so
@@ -56,11 +58,21 @@ lan = [
     # zeroconf depends on it too. MIT.
     "ifaddr>=0.2,<1",
 ]
+# The HTTP front (`offline_protocol_sdk.http_front`, `offline-protocol-service
+# --http`): an HTTP server for applications that do not use the SDK, and the
+# client it calls their callbacks with. Imported only when a front starts, so
+# the base install's audited dependency set is unchanged. aiohttp is
+# Apache-2.0 AND MIT.
+http = [
+    "aiohttp>=3.14,<4",
+]
 
 [project.scripts]
 # The reference server for the local API (docs/spec/local-api.md): one
 # engine, served to local applications over a Unix domain socket.
 offline-protocol-service = "offline_protocol_sdk.local_api.cli:main"
+# The HTTP front on its own, against a service already running.
+offline-protocol-http-front = "offline_protocol_sdk.http_front.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Offline-Protocol/offline-protocol-sdk"
