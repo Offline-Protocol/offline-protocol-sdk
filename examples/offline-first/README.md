@@ -118,10 +118,13 @@ each:
   it is retried down that stream until keepalive ends it (about 30 s), and
   only the next retry is handed to the neighbours. That is why scenario 4
   stops C before taking it off the network A shares with it.
-- **One phone per Linux box over Bluetooth LE.** The box's peripheral learns
-  which phone wrote to it, but it maps a phone to its user id only while that
-  phone is the one central connected, so with two a reply has no route back
-  through the peripheral.
+- **A phone that writes no hello is one per box.** A phone that writes the
+  Bluetooth LE Hello (Android does) is bound to its address on the box's
+  peripheral however many centrals are connected. One that does not (iOS
+  today) is mapped to its user id only while it is the one central connected.
+  On a Linux box every subscribed phone also receives every notification,
+  because BlueZ offers no per-central notification; the core drops what is not
+  addressed to it.
 - **An image built from 0.28.0 or earlier** never gets the receipt in
   scenario 4: the engine drops an acknowledgement for a message whose only
   route was the mesh (#537). Pass `--allow-missing-hop-receipt` to run the

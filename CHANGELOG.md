@@ -248,6 +248,42 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   peripheral when a central is subscribed. The peripheral alone takes
   nothing while no central is subscribed, where a notification reached no
   one. No board run has been done yet.
+- **An Android phone and a Mac running the Python service start a session
+  over Bluetooth LE.** They found and verified each other and never formed a
+  session: the Mac rotates its Bluetooth address, the phone kept a link to
+  each address, the Mac's peripheral then saw two centrals and attributed
+  every write to the placeholder `ble-peer`, and the core refused the phone's
+  key package as a transport identity mismatch (`TRANSPORT_IDENTITY_MISMATCH`).
+  The Python peripheral now names the central behind each write on macOS too,
+  serves the optional Hello characteristic, binds a central to the address its
+  hello proves and hands the core that central's fragments under that address.
+  The Python central writes its hello to a peer that serves one. A link bound
+  by a hello is never rebound, and a message's `sender` field never replaces
+  the binding. Two Macs and a Galaxy M36 (Android 16) were run.
+- **Android and the Python central keep one client link per peer.** A second
+  link that verifies as a peer already held (a peripheral advertising under an
+  old and a new address) is closed unannounced, and Android leaves that address
+  undialed for a minute. Kept, two such peers filled Android's four connection
+  slots, and the cap then refused every inbound central.
+- **On macOS a peripheral notification reaches its recipient, and survives a
+  full transmit queue.** A fragment for a peer whose central said hello goes to
+  that central alone rather than to every subscriber, and a notification
+  CoreBluetooth refuses because its queue is full is retried once the stack
+  says it is ready. bless ignored the refusal, so a burst (a message, its
+  receipt, a key package) lost fragments and waited for the core's next retry.
+- **A dead Bluetooth LE link is dropped within about 20 seconds.**
+  CoreBluetooth kept a link to a Mac whose service had restarted "connected"
+  for over five minutes, and every frame written into it vanished. The Python
+  central now reads each link's Device id back every 15 seconds and drops a
+  link whose read fails, takes more than 5 seconds, or names another address,
+  reporting the peer lost.
+- **A Mac that may not use Bluetooth no longer wedges the service.** Started
+  where macOS cannot grant Bluetooth (over ssh), the Bluetooth LE peripheral
+  blocked the service inside bless's constructor for good: no API socket, and
+  the 30 second transport start deadline never fired, because the block was on
+  the event loop itself. The peripheral now refuses to start when macOS reports
+  Bluetooth denied or restricted, builds its server off the loop with a 20
+  second deadline otherwise, and the service runs on its other transports.
 - **A resend is offered to the mesh when no carrier reaches the recipient.**
   Only a message's first send was handed to neighbours when no carrier took
   it. A message whose first attempt went into a direct link that had already

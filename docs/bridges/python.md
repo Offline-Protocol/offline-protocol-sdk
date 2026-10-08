@@ -406,7 +406,8 @@ is the caller of the call bless dispatches next only because bless's
 a coroutine method would be scheduled after the next call's hook, so a test
 reads the method dbus_next dispatches and refuses a coroutine. Each inbound write is attributed to its own caller, so two
 centrals no longer collapse into `ble-peer`. Notifications go to every
-subscribed central: neither bless backend addresses one.
+subscribed central on BlueZ, which offers no per-central notification; on
+macOS see P15.
 
 The core's outbound fragment queue is shared by the two roles and offers no
 peek and no requeue (`ble_return_fragment` is a no-op), so a fragment one
@@ -419,6 +420,63 @@ that fails is reported and the drain goes on, so one failure never strands the
 fragments behind it. The peripheral on
 its own takes nothing while nobody is subscribed. `test_ble_peripheral.py`
 pins both with a fake bus. Nothing here has run on a board.
+
+## P15. A peripheral link carries the address its hello proved, or it cannot start a session
+
+**Invariant:** a fragment the peripheral hands to the core carries, as its
+transport identity, the address the writing central proved with its hello,
+and nothing else proves it. The core refuses a hop-0 control frame whose
+sender is not the link's identity (`TRANSPORT_IDENTITY_MISMATCH`), and a key
+package is such a frame. A link known by a central UUID, or by the
+`ble-peer` placeholder, can carry ciphertext for a session that already
+exists but can never start one. That is how an Android phone and a Mac found
+each other, verified each other, and never formed a session: the Mac rotates
+its address, the phone held a link to each address, so the Mac's peripheral
+saw two centrals, attributed every write to `ble-peer`, and the core refused
+the phone's key package.
+
+The pieces, each of which the failure needs only one of to come back:
+
+- **The writer of each write is named.** bless hands a CoreBluetooth write to
+  its callback without its `CBCentral`. The peripheral builds bless's server
+  with a subclass of its delegate (swapped into bless's module for that one
+  construction, under a lock) that passes each request's central, offset and
+  value through, and answers with the ATT code the peripheral returns. On
+  BlueZ the bus hook of P14 names the writer.
+- **The peripheral serves Hello** ([the chapter](../spec/ble-framing.md),
+  writable with response) and runs the chapter's order: refuse an offset write
+  (`0x07`) or a value outside 96 to 512 bytes (`0x0D`) before verifying;
+  verify with the core's one verifier; bind the central to the derived address;
+  never rebind; announce the peer only when no other link has, which includes
+  the central role's client link (`ProtocolManager` hands the peripheral
+  `BleManager.holds_peer`). A message's `sender` field never replaces a hello
+  binding: it proves nothing.
+- **The central writes its hello** after its Message subscription and before
+  its first write, when the peer serves Hello and the assertion fits one write.
+- **One client link per peer.** A second link that verifies as a peer already
+  held is closed unannounced, on Android and in `BleManager`. Kept, two such
+  peers fill Android's four connection slots, and the cap then refuses every
+  inbound central.
+- **On macOS a notification goes to the recipient's central** when that
+  central said hello, through `updateValue:forCharacteristic:onSubscribedCentrals:`,
+  and a `NO` from it (a full transmit queue) waits for the stack's ready
+  signal and is retried. bless ignores that `NO`, which dropped fragments of
+  every burst.
+- **A dead client link is found.** CoreBluetooth kept a link to a Mac whose
+  service process had restarted "connected" for over five minutes while every
+  write into it vanished. `BleManager` reads each link's Device id back every
+  15 seconds and drops a link whose read fails, hangs past 5 seconds, or names
+  another address.
+- **A Bluetooth stack that never comes up fails the start.** bless's
+  CoreBluetooth delegate waits in its constructor, with no deadline, for a
+  power-on that never comes when the process is not authorised (a service
+  started over ssh). On the loop thread that froze the whole service past the
+  local API server's start deadline. The server is now built on a daemon
+  thread with a 20 second deadline, and a process macOS reports as denied or
+  restricted is refused before the stack is touched.
+
+`test_ble_hello.py` pins each of these, and each has a mutation that turns it
+red. The macOS pieces were run between two Macs and a Galaxy M36 (Android 16).
 
 ## Testing
 
