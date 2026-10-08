@@ -93,6 +93,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   "no token", and each transport has 30 seconds to start before it counts
   as failed and is stopped.
 
+### Fixed
+
+- **A message the mesh carried settles when its recipient answers.** A direct
+  message to a peer no carrier could reach was handed to neighbours to carry,
+  but registered no pending acknowledgement, and an acknowledgement with none
+  to match settled only a message the relay had declared unreachable. So a
+  message to a peer two hops away arrived, was read, and stayed in the
+  sender's outbox, retried on its backoff, until the outbox lifetime failed it
+  with `message_failed` seven days later; `message_delivered` never fired. The
+  recipient's acknowledgement now settles any direct message still in the
+  outbox, parked or not, with `message_delivered`.
+
 ## [0.28.0] — 2026-10-06
 
 > **The peer-stream slot carries traffic on phones.** The mobile managers

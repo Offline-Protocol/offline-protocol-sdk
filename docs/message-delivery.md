@@ -259,7 +259,7 @@ When the internet relay reports a recipient unreachable for an in-flight regular
 3. The outbox entry stays put, so the message remains "in flight" and subject only to the outbox lifetime
 4. The message is offered to any mesh neighbors, who may be able to reach a recipient the relay cannot — see [An online device in a mixed neighborhood](./mesh.md#an-online-device-in-a-mixed-neighborhood)
 
-The mesh offer repeats on each subsequent park, so a recipient who was out of range when the message was first parked is still reached later. Handing a copy to a neighbor is not proof of arrival, so the park and its probe stand regardless; what settles the message is the acknowledgement coming back. Since parking removed the pending ACK, that acknowledgement settles the parked entry on its own and fires the ordinary `MessageDelivered`.
+The mesh offer repeats on each subsequent park, so a recipient who was out of range when the message was first parked is still reached later. Handing a copy to a neighbor is not proof of arrival, so the park and its probe stand regardless; what settles the message is the acknowledgement coming back. Since parking removed the pending ACK, that acknowledgement settles the parked entry on its own and fires the ordinary `MessageDelivered`. The same holds for a message no carrier took directly, which is handed to the mesh at once and never had a pending ACK: its recipient's acknowledgement settles it whether or not it was ever parked.
 
 A parked message is re-driven with a fresh ACK budget on every reachability edge:
 
