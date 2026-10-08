@@ -70,9 +70,14 @@ class Device:
     runner: "Runner"
     address: str = ""
 
+    # Every verifier runs with stdin closed. Under --ssh the operator answers
+    # prompts on the terminal while an `await` is in flight, and an ssh
+    # client that inherits the terminal forwards what it reads to the remote
+    # side: the Enter that says B is back on would never reach input().
     def verify(self, *args: str, timeout: float = 600) -> tuple[int, list[dict], str]:
         process = subprocess.run(
             self.runner.command(self.name, ["offline-protocol-verify", "--socket", SOCKET, *args]),
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -82,6 +87,7 @@ class Device:
     def verify_in_background(self, *args: str) -> subprocess.Popen[str]:
         return subprocess.Popen(
             self.runner.command(self.name, ["offline-protocol-verify", "--socket", SOCKET, *args]),
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
