@@ -69,7 +69,11 @@ checks over ssh against hosts that already run the service, and asks the
 operator to switch devices off and on, and to move a and c apart, at each
 step. Each host runs the [service image](../../bindings/python/docker) under
 host networking with `OP_LISTEN` set to its own LAN address, or the service
-directly.
+directly. The verifier has to run where the service's socket is: for the
+image that is inside the container, so add `--remote-exec "docker exec
+<container>"` (`docker-offline-protocol-1` for the image's `compose.yml`
+started from its own directory); for the service run directly, add
+`--socket` with the path it was started with.
 
 The legs that need real radios or more than one machine, and how to run
 each:

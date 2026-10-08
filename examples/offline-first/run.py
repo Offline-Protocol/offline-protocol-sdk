@@ -18,7 +18,8 @@ Usage:
   python3 run.py                        # build, start, run every scenario
   python3 run.py --fresh                # new identities first (compose down -v)
   python3 run.py --scenario 1 --scenario 2
-  python3 run.py --ssh a=pi@10.0.0.11 --ssh b=pi@10.0.0.12 --ssh c=pi@10.0.0.13
+  python3 run.py --ssh a=pi@10.0.0.11 --ssh b=pi@10.0.0.12 --ssh c=pi@10.0.0.13 \\
+      --remote-exec "docker exec docker-offline-protocol-1"   # hosts run the image
 """
 
 from __future__ import annotations
@@ -76,7 +77,7 @@ class Device:
     # side: the Enter that says B is back on would never reach input().
     def verify(self, *args: str, timeout: float = 600) -> tuple[int, list[dict], str]:
         process = subprocess.run(
-            self.runner.command(self.name, ["offline-protocol-verify", "--socket", SOCKET, *args]),
+            self.runner.command(self.name, ["offline-protocol-verify", "--socket", self.runner.socket, *args]),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -86,7 +87,7 @@ class Device:
 
     def verify_in_background(self, *args: str) -> subprocess.Popen[str]:
         return subprocess.Popen(
-            self.runner.command(self.name, ["offline-protocol-verify", "--socket", SOCKET, *args]),
+            self.runner.command(self.name, ["offline-protocol-verify", "--socket", self.runner.socket, *args]),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -141,6 +142,9 @@ def _finish(process: subprocess.Popen[str], timeout: float) -> tuple[int, list[d
 
 class Runner:
     """How to reach a device and how to switch it off and on."""
+
+    #: The local API socket, as the verifier sees it where it runs.
+    socket = SOCKET
 
     def command(self, device: str, argv: list[str]) -> list[str]:
         raise NotImplementedError
@@ -212,13 +216,21 @@ class DockerRunner(Runner):
 
 
 class SshRunner(Runner):
-    """Hosts that run the service already; power and links are the operator's."""
+    """Hosts that run the service already; power and links are the operator's.
 
-    def __init__(self, hosts: dict[str, str]) -> None:
+    The verifier must run where the socket is: on a host that runs the
+    service image, that is inside the container (``prefix`` is then
+    ``docker exec <container>``), since the socket is in the container and
+    the host has no verifier; on a host that runs the service directly, on
+    the host, with ``socket`` naming the service's ``--socket``."""
+
+    def __init__(self, hosts: dict[str, str], prefix: list[str], socket: str) -> None:
         self.hosts = hosts
+        self.prefix = prefix
+        self.socket = socket
 
     def command(self, device: str, argv: list[str]) -> list[str]:
-        return ["ssh", self.hosts[device], shlex.join(argv)]
+        return ["ssh", self.hosts[device], shlex.join([*self.prefix, *argv])]
 
     def _ask(self, text: str) -> None:
         input(f"\n>>> {text}, then press Enter: ")
@@ -321,6 +333,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--ssh", action="append", default=[], metavar="NAME=HOST",
                         help="a device as an ssh destination (a, b and c); without it, Docker")
+    parser.add_argument("--remote-exec", default="", metavar="COMMAND",
+                        help="ssh: run the verifier through this on each host, e.g. 'docker exec CONTAINER' "
+                             "when the host runs the service image")
+    parser.add_argument("--socket", default=SOCKET,
+                        help=f"ssh: the service's local API socket where the verifier runs (default: {SOCKET})")
     parser.add_argument("--fresh", action="store_true", help="Docker: remove the devices and their identities first")
     parser.add_argument("--no-build", action="store_true",
                         help="Docker: use the image offline-protocol-service:offline-first as it is")
@@ -333,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
         hosts = dict(item.split("=", 1) for item in args.ssh)
         if set(hosts) != {"a", "b", "c"}:
             parser.error("--ssh needs a=..., b=... and c=...")
-        runner: Runner = SshRunner(hosts)
+        runner: Runner = SshRunner(hosts, shlex.split(args.remote_exec), args.socket)
     else:
         runner = DockerRunner(build=not args.no_build)
     runner.setup(args.fresh)
