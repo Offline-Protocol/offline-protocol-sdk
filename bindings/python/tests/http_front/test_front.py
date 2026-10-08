@@ -524,3 +524,43 @@ async def test_a_registration_over_the_limit_says_so(hosts):
     async with hosts.http.put(f"http://127.0.0.1:{hosts.b.port}/services/timeofday", json=doc) as reply:
         assert reply.status == 400
         assert "at most" in (await reply.json())["detail"]
+
+
+class _Sends:
+    """``send_message`` without an engine, emitting a failure event inside
+    the call or after it."""
+
+    def __init__(self, front: HttpFront, kind: str, *, inside: bool) -> None:
+        self.front, self.kind, self.inside = front, kind, inside
+
+    async def __call__(self, method, params=None):
+        assert method == "send_message"
+        event = {"type": self.kind, "message_id": "m1"}
+        if self.inside:
+            self.front._on_event(event)
+        else:
+            asyncio.get_running_loop().call_later(0.05, self.front._on_event, event)
+        return "m1"
+
+
+@pytest.mark.parametrize(
+    "kind, token, inside",
+    [
+        ("message_failed", "send_failed", True),
+        ("message_undeliverable", "recipient_unreachable", True),
+        ("message_failed", "send_failed", False),
+        ("message_undeliverable", "recipient_unreachable", False),
+    ],
+)
+async def test_a_failure_event_ends_the_wait_whenever_it_arrives(tmp_path, kind, token, inside):
+    """Inside the call, the event reaches the front before the send's
+    result names the message, and is kept until it does."""
+    front = HttpFront(socket_path=tmp_path / "api.sock", port=0)
+    front.client.call = _Sends(front, kind, inside=inside)
+    envelope = Request("r1", "timeofday", "GET", "/", {}, b"", int(time.time()) + 30)
+    started = time.monotonic()
+    with pytest.raises(front_module._Failed) as failure:
+        await front._send_and_wait(envelope, derive_address(list(os.urandom(32))), 10)
+    assert failure.value.token == token
+    assert time.monotonic() - started < 5
+    assert not front._pending and not front._by_message and not front._early
