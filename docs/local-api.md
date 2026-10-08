@@ -214,12 +214,11 @@ Two devices that reach each other only through a third need not have met:
 while a message waits for a peer no carrier reaches directly, the key
 package and the Welcome cross the mesh like every frame after them, and the
 recipient's acknowledgement comes back the same way, so `message_delivered`
-on the sender proves the crossing end to end. One gap remains: only a send
-no carrier takes is handed to the mesh. A message a direct link took and
-then lost (a stream to a device that went away without closing it, until
-keepalive ends it in about 30 seconds) is retried over direct carriers
-only, so it never crosses the mesh; it waits for a direct link to the
-recipient.
+on the sender proves the crossing end to end. A message a direct link took
+and then lost (a stream to a device that went away without closing it)
+crosses the mesh too, but late: while the stream still looks open its
+retries go down it, and only once keepalive ends it (about 30 seconds) is
+the next retry handed to the neighbours.
 
 ## The policy file
 
