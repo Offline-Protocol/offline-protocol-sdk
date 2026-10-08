@@ -49,6 +49,14 @@ EARLY_CAPACITY = 256
 #: How long ``watch`` waits before reconnecting to a service that went away.
 WATCH_RECONNECT_DELAY = 0.5
 
+#: The stderr line ``await`` and ``watch`` print, alone, once their
+#: subscription to every event is confirmed. An event emitted after it is
+#: seen; one emitted before it may not be (only received messages are held).
+#: A caller that starts one of them and then triggers the event (brings a
+#: recipient back, sends from another device) waits for this line rather
+#: than sleeping. Part of the command line's contract: a script matches it.
+READY_LINE = "subscribed"
+
 
 @dataclass
 class Target:
@@ -168,6 +176,7 @@ async def await_message(
     is not held: start this before the recipient can answer.
     """
     client = await target.open()
+    output.say(READY_LINE)
     try:
         return await _await_on(client, message_id, until, timeout, output)
     finally:
@@ -362,6 +371,7 @@ async def watch(
                 continue
             connected = ever_connected = True
             output.say(f"watch: connected to {client.local_address}")
+            output.say(READY_LINE)
             try:
                 while True:
                     remaining = None if deadline is None else deadline - loop.time()

@@ -152,6 +152,40 @@ async def test_await_times_out_with_status_two(harness):
     assert _lines(out)[-1] == {"result": "timeout", "message_id": "no-such-message", "until": "delivered"}
 
 
+async def test_await_and_watch_say_subscribed_once_ready(harness):
+    """The readiness line is a contract with scripts (the offline-first
+    runner waits for it), so its exact text is pinned here."""
+    assert commands.READY_LINE == "subscribed"
+    server_a, server_b = await two_servers(harness)
+    out = _output()
+    waiting = asyncio.ensure_future(commands.await_message(_target(server_a), "m-ready", "delivered", 10.0, out))
+    try:
+        for _ in range(200):
+            if "subscribed\n" in out.err.getvalue():
+                break
+            await asyncio.sleep(0.02)
+        assert out.err.getvalue().splitlines()[0] == "subscribed"
+        # Anything emitted from here on is seen: the server pushes it to the
+        # subscribed connection, not to a hold.
+        server_a.router.route({"type": "message_delivered", "message_id": "m-ready", "transport": "x", "hop_count": 0})
+        assert await waiting == commands.PASS
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+
+    out = _output()
+    watcher = asyncio.ensure_future(commands.watch(_target(server_b), None, 10.0, out))
+    try:
+        for _ in range(200):
+            if "subscribed\n" in out.err.getvalue():
+                break
+            await asyncio.sleep(0.02)
+        assert "subscribed" in out.err.getvalue().splitlines()
+    finally:
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+
+
 async def test_await_fails_on_message_failed_and_prints_status_events(harness):
     server = await harness.server(config=make_config(profile="alone"))
     out = _output()

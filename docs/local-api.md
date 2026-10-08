@@ -187,7 +187,12 @@ message whose recipient is away, started before the recipient returns.
 Each command prints JSON lines on standard output and a summary on standard
 error, and exits 0 on a pass, 2 when its time ran out, and 1 on a terminal
 failure (the engine gave the message up, refused a call, or the service went
-away). Every verifier declares the application id `offline-protocol-verify`
+away). `await` and `watch` print the line `subscribed`, alone, on standard
+error once their subscription to every event is confirmed (`watch` again
+after each reconnect). An event emitted after that line is seen, and one
+emitted before it may not be, so a script that starts either in the
+background and then brings a recipient back or sends from another device
+waits for that line instead of sleeping. Every verifier declares the application id `offline-protocol-verify`
 unless told otherwise with `--app-id`, and the sending and receiving
 devices must declare the same one: a received message is routed to the
 clients of the application its sender stamped, and held for that
