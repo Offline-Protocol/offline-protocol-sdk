@@ -781,8 +781,14 @@ class TestPeripheralOnBlueZ:
         server.start = AsyncMock()
         server.stop = AsyncMock()
         peripheral = BlePeripheral(mock_protocol, device_id="coordinator")
+        # bless is not installed on Windows, where the module's GATT enums
+        # are None: stand in for them too, so this runs on every platform.
         with patch.object(
             ble_peripheral_module, "BlessServer", return_value=server
+        ), patch.object(
+            ble_peripheral_module, "GATTCharacteristicProperties", MagicMock()
+        ), patch.object(
+            ble_peripheral_module, "GATTAttributePermissions", MagicMock()
         ), patch.object(BlePeripheral, "is_available", return_value=True):
             await peripheral.start()
         try:
