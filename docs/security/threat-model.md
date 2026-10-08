@@ -974,6 +974,9 @@ load cannot set a header. A peer cannot steer a callback outside the path
 its provider registered (dot segments are refused), cannot choose the source
 address a proxy in front of the callback reports (the forwarding headers are
 dropped), and cannot hold more than 32 callback connections at once.
+That limit bounds the callback's load, not fairness: one peer with a
+session can hold all 32 for the maximum deadline, and every other peer is
+refused with `callback_failed` until it lets go.
 **What application teams must do:**
 run the front where only the operator's applications can reach it, with a
 token on any host where a browser runs, and

@@ -217,7 +217,9 @@ On a `message_received` stamped with the front's application id and with
    request is answered `callback_failed` at once rather than queued: any
    device with a session can send requests, each can hold a connection to
    the callback for the whole maximum deadline, and a queue would hold every
-   later request, from every device, behind whoever filled it.
+   later request, from every device, behind whoever filled it. The limit
+   is per provider, not per sender: it bounds the load on the callback,
+   and one device can still hold every slot.
 4. Send a `resp` with the callback's status, carried headers and body to the
    sender. A callback that fails or times out is `callback_failed` (502),
    and a body over the limit is `response_too_large` (502).
