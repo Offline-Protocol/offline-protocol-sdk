@@ -1005,6 +1005,82 @@ fn a_device_with_custody_off_still_strips_the_request_and_holds_nothing() {
     assert_eq!(net.node("bob").custody_stats().accepted, 0);
 }
 
+/// Records every `message_delivered` a device reports.
+fn watch_deliveries(net: &mut Neighborhood, id: &str) -> Arc<Mutex<Vec<String>>> {
+    let delivered = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = Arc::clone(&delivered);
+    net.node(id).on_event(move |event| {
+        if let Event::MessageDelivered { message_id, .. } = event {
+            seen.lock().unwrap().push(message_id);
+        }
+    });
+    delivered
+}
+
+/// Steps the network until `delivered` holds something, at most `rounds`
+/// times, without sleeping.
+fn step_until_delivered(
+    net: &mut Neighborhood,
+    delivered: &Arc<Mutex<Vec<String>>>,
+    rounds: usize,
+) {
+    for _ in 0..rounds {
+        net.step();
+        if !delivered.lock().unwrap().is_empty() {
+            return;
+        }
+    }
+}
+
+/// Asserts that `sender` has settled `message_id`: its outbox no longer holds
+/// it, so a flush, which re-drives every entry whatever its backoff, puts it
+/// on no carrier, and nothing is left on the retry queue.
+///
+/// A message the mesh carried without a pending acknowledgement reaches its
+/// recipient whether or not the sender settles it, so the recipient's inbox
+/// proves nothing about this. Unsettled, it stays in the outbox, re-offered on
+/// every retry, until the outbox lifetime fails it seven days later.
+fn assert_settled(
+    net: &mut Neighborhood,
+    sender: &str,
+    message_id: &str,
+    other_carriers: &[&MockTransport],
+) {
+    for carrier in other_carriers {
+        carrier.clear_sent_messages();
+    }
+    let before = net
+        .transmissions
+        .iter()
+        .filter(|(from, _, id)| from == sender && id == message_id)
+        .count();
+    net.node(sender).flush_outbox_all();
+    net.step();
+    let after = net
+        .transmissions
+        .iter()
+        .filter(|(from, _, id)| from == sender && id == message_id)
+        .count();
+    assert_eq!(
+        after, before,
+        "{sender} still holds {message_id} in its outbox: a flush sent it again"
+    );
+    for carrier in other_carriers {
+        assert!(
+            !carrier
+                .sent_messages()
+                .iter()
+                .any(|m| m.id.as_str() == message_id),
+            "{sender} still holds {message_id} in its outbox: a flush put it on a carrier"
+        );
+    }
+    assert_eq!(
+        net.node(sender).retry_queue_size(),
+        0,
+        "{sender} still has {message_id} on its retry queue"
+    );
+}
+
 #[test]
 fn a_message_lost_on_a_dead_direct_link_is_carried_by_the_mesh_on_retry() {
     // The first send took the direct link, which was already dead: the carrier
@@ -1075,9 +1151,10 @@ fn a_message_lost_on_a_dead_direct_link_is_carried_by_the_mesh_on_retry() {
     );
     assert_eq!(
         *delivered.lock().unwrap(),
-        vec![msg_id],
+        vec![msg_id.clone()],
         "and alice must learn it was delivered"
     );
+    assert_settled(&mut net, "alice", &msg_id, &[]);
 }
 
 #[test]
@@ -1090,6 +1167,7 @@ fn a_flushed_message_no_carrier_takes_is_handed_to_the_neighbors() {
     let mut net = Neighborhood::new(&["alice", "bob", "carol"]);
     net.link("bob", "carol");
 
+    let delivered = watch_deliveries(&mut net, "alice");
     let msg_id = net.send("alice", "carol", "carried on the flush");
     assert_eq!(net.transmission_count(&msg_id), 0, "alice was alone");
 
@@ -1097,22 +1175,30 @@ fn a_flushed_message_no_carrier_takes_is_handed_to_the_neighbors() {
     net.node("alice").flush_outbox_all();
     // Rounds only, no sleeping: the retry queue's own timer is a second away
     // and must not be what delivers this.
-    for _ in 0..6 {
-        net.step();
-    }
+    step_until_delivered(&mut net, &delivered, 12);
 
     assert_eq!(
         net.inbox("carol"),
         vec!["carried on the flush".to_string()],
         "the flush must hand the message to bob"
     );
+    // Nothing accepted the flushed frame, so it has no pending acknowledgement
+    // and carol's answer is the only way alice learns it arrived.
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        vec![msg_id.clone()],
+        "carol's acknowledgement must settle the message the mesh carried"
+    );
+    assert_settled(&mut net, "alice", &msg_id, &[]);
 }
 
 #[test]
 fn a_resend_a_carrier_swallows_is_still_handed_to_the_neighbors() {
-    // Wi-Fi Direct and Reticulum take a frame for any recipient and report
-    // success, so a resend can "succeed" into a carrier that holds no link to
-    // the recipient. Alice's first attempt went that way while she was alone;
+    // A carrier can take a frame for a recipient it cannot reach and report
+    // success (the internet transport does, for one the relay has said it
+    // cannot reach; the mock here stands in for it on a mesh slot, so that no
+    // relay verdict is needed). Alice's first attempt went that way while she
+    // was alone;
     // bob has arrived since, and he can reach carol. The resend after the
     // acknowledgement times out is swallowed the same way, and it has to be
     // offered to bob as a first send would be, not counted as sent.
@@ -1129,6 +1215,7 @@ fn a_resend_a_carrier_swallows_is_still_handed_to_the_neighbors() {
         .add_transport(TransportType::WiFiDirect, Box::new(swallowing.clone()));
     net.link("bob", "carol");
 
+    let delivered = watch_deliveries(&mut net, "alice");
     let msg_id = net.send("alice", "carol", "past the swallowing carrier");
     assert!(
         swallowing
@@ -1143,7 +1230,7 @@ fn a_resend_a_carrier_swallows_is_still_handed_to_the_neighbors() {
     for _ in 0..50 {
         std::thread::sleep(std::time::Duration::from_millis(20));
         net.step();
-        if !net.inbox("carol").is_empty() {
+        if !delivered.lock().unwrap().is_empty() {
             break;
         }
     }
@@ -1153,6 +1240,12 @@ fn a_resend_a_carrier_swallows_is_still_handed_to_the_neighbors() {
         vec!["past the swallowing carrier".to_string()],
         "the swallowed resend must also be handed to bob"
     );
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        vec![msg_id.clone()],
+        "carol's acknowledgement must settle the message the mesh carried"
+    );
+    assert_settled(&mut net, "alice", &msg_id, &[&swallowing]);
 }
 
 #[test]
@@ -1164,6 +1257,7 @@ fn a_flush_a_carrier_swallows_is_still_handed_to_the_neighbors() {
     let mut net = Neighborhood::new(&["alice", "bob", "carol"]);
     net.link("bob", "carol");
 
+    let delivered = watch_deliveries(&mut net, "alice");
     let msg_id = net.send("alice", "carol", "flushed past the swallowing carrier");
     assert_eq!(net.transmission_count(&msg_id), 0, "alice was alone");
 
@@ -1181,15 +1275,19 @@ fn a_flush_a_carrier_swallows_is_still_handed_to_the_neighbors() {
             .any(|m| m.id.as_str() == msg_id),
         "the flush should have gone to the carrier that accepts anyone"
     );
-    for _ in 0..6 {
-        net.step();
-    }
+    step_until_delivered(&mut net, &delivered, 12);
 
     assert_eq!(
         net.inbox("carol"),
         vec!["flushed past the swallowing carrier".to_string()],
         "the swallowed flush must also be handed to bob"
     );
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        vec![msg_id.clone()],
+        "carol's acknowledgement must settle the message the mesh carried"
+    );
+    assert_settled(&mut net, "alice", &msg_id, &[&swallowing]);
 }
 
 #[test]
