@@ -91,13 +91,19 @@ each:
   return.
 - **Relay.** The relay server with a Postgres database and authentication
   off for a closed test, `config-relay.json` and `OP_RELAY=ws://<relay>:3000/ws`
-  on each box. Scenario 1 twice: once with A also off when B returns (the
-  relay's mailbox holds the frame), once with the relay unreachable from A
-  (A's outbox holds it). `message_undeliverable` is printed as status on the
-  way: it is the relay saying B is away now, not a failure.
+  on each box, and no peer stream between them (`OP_LAN=0` and no
+  `OP_PEERS`, or two networks): a live direct link to the recipient is
+  tried before any other carrier, so on one LAN the message comes back over
+  `wifiDirect` and proves nothing about the relay. The receipt names
+  `internet` when it does. Scenario 1 twice: once with A also off when B
+  returns (the relay's mailbox holds the frame), once with the relay
+  unreachable from A (A's outbox holds it). `message_undeliverable` is
+  printed as status on the way: it is the relay saying B is away now, not a
+  failure.
 - **Reticulum.** A gateway daemon and `rnsd` on each of two boxes with a
   backbone between them (a TCP interface, or a pair of RNodes), a config
-  with `reticulum_enabled` and `OP_GATEWAY=127.0.0.1:4242`. Check the attach
+  with `reticulum_enabled` and `OP_GATEWAY=127.0.0.1:4242`, and no peer
+  stream between the boxes, as for the relay. Check the attach
   first (the transport comes up only after the daemon's capabilities), then
   scenario 1. The service's gateway client has not met a real daemon yet.
 - **A phone.** The React Native example app with Bluetooth LE on, against a
