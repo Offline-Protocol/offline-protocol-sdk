@@ -79,6 +79,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   registrations survived a restart. Bluetooth LE from a container is
   untested on hardware.
 
+- **Two devices that have never been in range of each other start a session
+  through a third.** With encryption required, a message to a peer the
+  sender had never been next to waited in the pending queue for its whole
+  lifetime when the only path ran through another device: the key package and
+  the Welcome were the two frames that never crossed the mesh, and every frame
+  after them is sealed. While a message waits for a peer that no carrier
+  reaches directly, the sender now hands its key package to its neighbours to
+  carry, and the recipient's Welcome takes the same route back; confirmation,
+  the message and its acknowledgement already did. Both are offered to the
+  mesh even when the relay accepted them for a peer it has said is not on it,
+  and a Welcome that expired while the path was down is sent again on the
+  peer's next key package. The device in between carries frames it cannot
+  read. The threat model gains R24 (a session can be started from anywhere
+  the mesh reaches, and what bounds it).
+
 ### Changed
 
 - **A peer-stream or relay flag the configuration cannot honour is refused.**
@@ -95,6 +110,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A message the mesh carried settles when its recipient answers.** A direct
+  message to a peer no carrier could reach was handed to neighbours to carry,
+  but registered no pending acknowledgement, and an acknowledgement with none
+  to match settled only a message the relay had declared unreachable. So a
+  message to a peer two hops away arrived, was read, and stayed in the
+  sender's outbox, retried on its backoff, until the outbox lifetime failed it
+  with `message_failed` seven days later; `message_delivered` never fired. The
+  recipient's acknowledgement now settles any direct message still in the
+  outbox, parked or not, with `message_delivered`.
 - **The local API keeps a parked message's events with the client that
   sent it.** The service forgot a message id on `message_undeliverable`,
   which the engine emits when a recipient is away and repeats on every

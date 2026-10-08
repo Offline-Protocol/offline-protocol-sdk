@@ -365,7 +365,9 @@ of closing them is paid on every peer forever; the harm is a stale restatement
 inside a bounded window.
 
 **What stands in front of it:** the receive deduplicator refuses an exact repeat
-for an hour, so a replay must wait out that window to land at all.
+for the redelivery window (seven days by default, while the id is among the
+5000 most recent it tracks), so a replay must wait out that window to land at
+all.
 
 **Two exposures that are not in the window at all.** A peer that has never
 presented a freshness-bound signature is where it always was, since holding it
@@ -983,6 +985,47 @@ token on any host where a browser runs, and
 authorize in the provider by reading `X-Offline-Protocol-Sender`. A host
 that can identify the calling container should pass that identity to the
 front; until then, one front is one application to every rule.
+
+### R24. A session can be started from anywhere the mesh reaches
+
+A key package that arrives across the mesh is admitted, and answered with a
+session and a Welcome that the receiving device hands to its neighbours to
+carry back, followed by the fresh key package every new session sends for
+group invites. So anyone a mesh path connects to this device can make it build
+an MLS group, store a key package, and put two frames on its links, by signing
+a key package under an address of their own. Addresses cost nothing to mint,
+so an A2 adversary several hops away can do it once per address. Until the
+handshake crossed the mesh, the answer had no route back unless the sender was
+a neighbour or reached by the relay, so a distant sender cost the device the
+group and the stored package but nothing on the air.
+
+**Why it stands:** a device two hops away is indistinguishable from an
+adversary two hops away until the handshake completes, and the handshake is
+what the mesh exists to carry for a pair that has never met. Refusing a
+package from a sender this device cannot see would refuse exactly that pair.
+
+**What bounds it:** the package's signature must verify against the key its
+claimed address derives from, so it cannot be made on another device's
+behalf, and the session it opens is with the attacker's own address only.
+Every device in between applies its per-neighbour forwarding allowance to the
+attacker's link before the package goes further, and its per-second budget
+after, so the rate at which packages reach this device is the forwarding
+rate, not the attacker's. The receiving device sends its two frames from the
+share of its own budget that its own traffic uses, so a flood delays this
+device's own frames rather than putting more on the air than the budget
+allows. Stored packages are capped at 1000, evicting the soonest to expire,
+the push pool stops minting at 64 and shares a package past that, and a
+Welcome's lifecycle expires after 300 seconds of retries. A device does not
+answer a package from a sender only the mesh reaches with one of its own
+first, so a package buys one Welcome, not a second group. A later package from
+the same mesh-only address re-arms that Welcome only while it has stalled or
+expired, so a replayed package buys at most one more Welcome per stall, from
+the same budget share; the receive deduplicator absorbs a replay of the same
+frame for the redelivery window (seven days by default, while the id is among
+the 5000 most recent it tracks). A device that declines to carry
+(`allowRelay` off) carries none of this for others. The
+same flood from a direct neighbour or over the relay was possible before and
+is unchanged.
 
 ## Network egress
 
