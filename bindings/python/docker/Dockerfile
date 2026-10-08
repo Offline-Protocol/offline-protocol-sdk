@@ -27,9 +27,13 @@ RUN set -eu; \
     pip install --no-cache-dir --find-links /wheels "${SDK_SPEC}"; \
     rm -rf /wheels; \
     { offline-protocol-service --help | grep -q -- '--http ' && python -c 'import aiohttp, zeroconf'; } \
-        || { echo "the installed offline-protocol-service has no HTTP front: put a wheel built from a checkout in wheels/" >&2; exit 1; }
+        || { echo "the installed offline-protocol-service has no HTTP front: put a wheel built from a checkout in wheels/" >&2; exit 1; }; \
+    command -v offline-protocol-verify >/dev/null \
+        || { echo "the installed package has no offline-protocol-verify: put a wheel built from a checkout in wheels/" >&2; exit 1; }
 
-COPY config.json /etc/offline-protocol/config.json
+# The baked configuration, and two to mount or name with OP_CONFIG: one
+# with Bluetooth LE on, one with the internet relay on.
+COPY config.json config-ble.json config-relay.json /etc/offline-protocol/
 COPY entrypoint.sh /usr/local/bin/offline-protocol-entrypoint
 RUN chmod 0755 /usr/local/bin/offline-protocol-entrypoint \
     && mkdir -p /var/lib/offline-protocol

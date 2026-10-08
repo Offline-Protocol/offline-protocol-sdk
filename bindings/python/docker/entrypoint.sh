@@ -15,7 +15,9 @@
 #   OP_HTTP_ALIASES             device alias file for the front
 #   OP_RELAY                    internet relay URL, with a config that sets
 #                               internet_enabled; its token in OFFLINE_PROTOCOL_RELAY_TOKEN
-#   OP_SOCKET                   local API socket (default /run/offline-protocol/api.sock)
+#   OP_GATEWAY                  gateway daemon HOST:PORT, with a config that sets
+#                               reticulum_enabled
+#   OP_SOCKET                  local API socket (default /run/offline-protocol/api.sock)
 #
 # Any arguments come after every flag the environment sets, so an explicit
 # flag wins over its variable.
@@ -65,6 +67,9 @@ if [ -n "${OP_HTTP_ALIASES:-}" ]; then
 fi
 if [ -n "${OP_RELAY:-}" ]; then
     set -- "$@" --relay "$OP_RELAY"
+fi
+if [ -n "${OP_GATEWAY:-}" ]; then
+    set -- "$@" --gateway "$OP_GATEWAY"
 fi
 
 # The operator's arguments last: the service keeps the last occurrence of a

@@ -1,0 +1,61 @@
+# Three devices on one machine, for the offline-first scenarios in README.md.
+#
+#   a ---- net-ab ---- b ---- net-bc ---- c
+#
+# a and c share no network, so b is the only way between them; Docker keeps
+# separate bridge networks apart. Each device is the service image from
+# bindings/python/docker with its own identity on its own volume. No HTTP
+# front: the scenarios use the local API through offline-protocol-verify.
+#
+# Peers are static (a and c dial b, c also dials a when the scenario puts it
+# on net-ab), so the topology is decided here and not by multicast DNS.
+#
+# run.py writes .env with one store key per device the first time; keep it,
+# or the devices come back with new addresses.
+x-device: &device
+  build: ../../bindings/python/docker
+  image: offline-protocol-service:offline-first
+  environment: &environment
+    OP_LAN: "0"
+    OP_HTTP: ""
+    OP_LISTEN: 0.0.0.0:7878
+
+services:
+  a:
+    <<: *device
+    container_name: offline-first-a
+    hostname: a
+    environment:
+      <<: *environment
+      OFFLINE_PROTOCOL_STORE_KEY: ${KEY_A:?run run.py once, or set KEY_A}
+      OP_PEERS: b:7878
+    networks: [net-ab]
+    volumes: [data-a:/var/lib/offline-protocol]
+  b:
+    <<: *device
+    container_name: offline-first-b
+    hostname: b
+    environment:
+      <<: *environment
+      OFFLINE_PROTOCOL_STORE_KEY: ${KEY_B:?run run.py once, or set KEY_B}
+    networks: [net-ab, net-bc]
+    volumes: [data-b:/var/lib/offline-protocol]
+  c:
+    <<: *device
+    container_name: offline-first-c
+    hostname: c
+    environment:
+      <<: *environment
+      OFFLINE_PROTOCOL_STORE_KEY: ${KEY_C:?run run.py once, or set KEY_C}
+      OP_PEERS: b:7878 a:7878
+    networks: [net-bc]
+    volumes: [data-c:/var/lib/offline-protocol]
+
+networks:
+  net-ab:
+  net-bc:
+
+volumes:
+  data-a:
+  data-b:
+  data-c:

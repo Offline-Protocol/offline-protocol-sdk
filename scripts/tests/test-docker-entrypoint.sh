@@ -129,6 +129,18 @@ run "the front's flags follow OP_HTTP" "$BASE
 wss://relay.example" OP_HTTP=0.0.0.0:8080 OP_HTTP_TOKEN_FILE=/run/front/token \
   OP_HTTP_ALIASES=/etc/aliases.json OP_RELAY=wss://relay.example
 
+run "OP_GATEWAY names the gateway daemon, before an operator flag" "$BASE
+--lan
+--http
+127.0.0.1:8080
+--gateway
+10.0.0.5:4242
+--gateway
+127.0.0.1:4242" OP_GATEWAY=10.0.0.5:4242 -- --gateway 127.0.0.1:4242
+
+run "an empty OP_GATEWAY names none" "$BASE
+--lan" OP_HTTP= OP_GATEWAY=
+
 run "OP_LAN other than 1 or 0 is refused" REFUSED OP_LAN=2
 run "an empty OP_LAN is refused" REFUSED OP_LAN=
 run "a front flag without a front is refused" REFUSED OP_HTTP= OP_HTTP_TOKEN_FILE=/t

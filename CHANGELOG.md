@@ -102,6 +102,23 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   sender and so has no pending acknowledgement to settle. The test records
   it as an expected failure until the engine fix in #537 lands.
 
+- **An offline-first demo on three devices.** `examples/offline-first` runs
+  three services from the container image on two bridge networks, so the
+  middle one is the only way between the other two, and `run.py` runs the
+  scenarios with `offline-protocol-verify` and prints a table: store and
+  forward, the sender killed and restarted while its message is queued, and
+  a message carried through the middle device. Its README is the runbook for
+  the legs that need hardware (the LAN between hosts, the carrier changing
+  under a stream of messages, the relay, a gateway daemon, a phone), with a
+  record of what has been run: scenarios 1, 2 and 4 in containers on one
+  machine, nothing on hardware yet. The image gains `OP_GATEWAY` (the
+  gateway daemon, for a configuration with `reticulum_enabled`), two baked
+  configurations beside the default (`config-ble.json`, `config-relay.json`),
+  and the verifier, and its build fails when the installed package has none.
+  Found while running it: a message that a direct stream took and then lost
+  (a device that went away without closing the stream) is retried over
+  direct carriers only and never handed to the mesh.
+
 ### Changed
 
 - **A peer-stream or relay flag the configuration cannot honour is refused.**
