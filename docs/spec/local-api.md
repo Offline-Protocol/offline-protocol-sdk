@@ -576,6 +576,22 @@ server's; they never change an event and they never reach the mesh.
    client and not its neighbours, and a `message_delivered` for a message the
    relay re-sent after a restart reaches everyone.
 
+   An identifier stays live until the event that settles it:
+   `message_delivered` or `message_failed` for a message id (a connection
+   request's included), `media_sent` or `media_send_failed` for a file id,
+   and `service_response_received` for a request id.
+   `message_undeliverable` and `connection_request_undeliverable` settle
+   nothing on a relay verdict: the engine keeps the message or the request,
+   may repeat the event on every reachability probe, and later delivers it
+   or gives up. A message a client sent to a recipient that is away
+   therefore reports `message_undeliverable` to that client, as often as
+   the engine says so, and its `message_delivered` reaches that client too.
+   A settled identifier still routes to its client for the next 1024
+   settlements, because the engine emits some events after the one that
+   settles an id: a connection request it gives up on reports
+   `message_failed` and then `connection_request_undeliverable`, and the
+   second names the recipient.
+
    The engine emits synchronously, on the thread that is inside its call, so
    some events fire before the call that caused them has returned:
    `message_sent` is emitted inside the send when a transport takes the
