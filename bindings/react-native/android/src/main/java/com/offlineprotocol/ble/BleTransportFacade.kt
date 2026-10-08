@@ -14,6 +14,7 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
 import android.os.ParcelUuid
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.content.ContextCompat
 import com.offlineprotocol.BleAppTag
@@ -2802,6 +2803,14 @@ class BleTransportFacade(
                     return
                 }
                 
+                if (connections.isSuppressedDuplicate(device.address, SystemClock.elapsedRealtime())) {
+                    if (logThrottler.shouldLog("duplicate_skip_${device.address}", intervalMs = 30000)) {
+                        Log.d(TAG, "Not redialing ${device.address}: a second link to a peer already held")
+                    }
+                    connections.consumePendingRole(device.address)
+                    return
+                }
+
                 if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
                     if (logThrottler.shouldLog("mesh_conn_cap", intervalMs = 10000)) {
                         Log.d(TAG, "Connection cap reached, not connecting to ${device.address}")

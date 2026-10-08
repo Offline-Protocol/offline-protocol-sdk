@@ -12,6 +12,7 @@ import android.bluetooth.BluetoothStatusCodes
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import com.offlineprotocol.BleServiceInstanceSelection
 import com.offlineprotocol.PeerIdentityBinding
@@ -190,6 +191,11 @@ internal class CentralGattClient(
          * leave RSSI intact because they do not imply a quality problem.
          */
         private const val GATT_GENERIC_ERROR = 133
+        /** How long an address refused as a duplicate client link is left
+         *  undialed. Long enough to outlast a rotating peripheral advertising
+         *  under its old address, short enough that a peer whose kept link
+         *  died is redialed at the address it still advertises. */
+        internal const val DUPLICATE_LINK_SUPPRESS_MS = 60_000L
         /** Hard ceiling on a single inbound BLE notification we accept from
          *  a remote peripheral. Mirrors [PeripheralGattServer.MAX_INBOUND_WRITE_BYTES]
          *  — well above mesh fragment size for MTU-negotiation headroom, but
@@ -1243,6 +1249,10 @@ internal class CentralGattClient(
                 return
             }
             is PeerIdentityBinding.Outcome.Verified -> {
+                if (host.connections.hasOtherClientLink(outcome.peerId, address)) {
+                    refuseDuplicateLink(gatt, outcome.peerId)
+                    return
+                }
                 announceVerifiedPeer(gatt, outcome.peerId)
                 // Identity proved → now enable notifications.
                 enableNotificationsOnLink(gatt)
@@ -1342,6 +1352,35 @@ internal class CentralGattClient(
      * and closing it lets the ordinary reconnect path retry, which is what
      * recovers a peer that simply had not finished initializing its identity.
      */
+    /**
+     * Closes a client link that proved an identity we already hold a client
+     * link to at another address.
+     *
+     * A macOS peripheral rotates its address and advertises under the old and
+     * the new one at once, so the scanner dials both and both verify as the
+     * same peer. Kept, the pair spends two of [BleTransportFacade]'s four
+     * connection slots on one peer, and with two such peers the cap refuses
+     * every inbound central, which is how such a peripheral's own central
+     * would have learned who we are. The first link to verify stays; this one
+     * is closed unannounced, and its address is not redialed for
+     * [DUPLICATE_LINK_SUPPRESS_MS].
+     */
+    private fun refuseDuplicateLink(gatt: BluetoothGatt, peerId: String) {
+        val address = gatt.device.address
+        Log.i(TAG, "Closing a second client link to $peerId at $address")
+        diagnosticEmitter(
+            "info",
+            "BLE duplicate link closed",
+            mapOf("address" to address, "peer" to peerId),
+        )
+        host.connections.suppressDuplicate(
+            address,
+            SystemClock.elapsedRealtime() + DUPLICATE_LINK_SUPPRESS_MS,
+        )
+        host.connections.consumePendingRole(address)
+        closeGattClient(gatt, "duplicate_identity")
+    }
+
     private fun rejectPeer(gatt: BluetoothGatt, reason: String, detail: String) {
         val address = gatt.device.address
         advertisedDeviceIds.remove(address)
