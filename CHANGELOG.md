@@ -55,7 +55,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   peer cannot reach a path outside the one a provider registered, and
   forwarding headers such as `X-Forwarded-For` never cross. A carried
   header value that is not UTF-8 is a `400`, and a token that is not UTF-8
-  a `401`. A provider runs
+  a `401`. A callback answer the requester would refuse, such as a status
+  past 599, is `callback_failed` at once rather than a wait for the
+  deadline. A provider runs
   at most 32 callbacks at once. Run one front per service.
   `docs/spec/http-front.md` is the contract;
   the threat model gains R23 (the front trusts every process that can reach

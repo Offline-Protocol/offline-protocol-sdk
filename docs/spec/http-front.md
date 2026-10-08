@@ -137,9 +137,15 @@ provider registered. A 1xx written as the answer leaves the client waiting
 for the real one. A string with no UTF-8 form (a JSON `\udcff` escape) is
 not processed either. On the requester, a carried header value that is not
 UTF-8, which HTTP allows, is `bad_request`: the far side could not decode it.
-A token header that is not UTF-8 is `unauthorized`, like any wrong token. On
-the provider, a callback that answers such a header value is
-`callback_failed`.
+A token header that is not UTF-8 is `unauthorized`, like any wrong token.
+
+Neither front sends an envelope the other would not process: a dropped
+envelope leaves the requester waiting out its whole deadline, and its log
+blames the wrong device. The requester answers `bad_request` to a request it
+could not encode as one. The provider answers `callback_failed` when the
+callback's answer could not be encoded as one, such as a status outside 200
+to 599, which an HTTP client accepts, or a header value that is not UTF-8 or
+holds a control character.
 
 ### Limits
 
@@ -302,7 +308,7 @@ host's own router adds), and is recorded as
 | `not_connected` | 503 | either | The front has no connection to the local API, or is stopping |
 | `unauthorized` | 401 | either | The token is missing or wrong, or the request carries `Origin` |
 | `unknown_service` | 404 | provider | Nothing registered under that name |
-| `callback_failed` | 502 | provider | The callback refused the connection, failed, timed out or answered a 1xx, or 32 callbacks were already running |
+| `callback_failed` | 502 | provider | The callback refused the connection, failed, timed out, or answered what a requester would refuse (a 1xx, a status past 599, a header value that is not UTF-8 or holds a control character), or 32 callbacks were already running |
 | `response_too_large` | 502 | provider | The callback's body is over the limit |
 | `unsupported_version` | 400 | provider | The envelope version is not 1 |
 

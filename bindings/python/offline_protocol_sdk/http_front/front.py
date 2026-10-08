@@ -394,6 +394,13 @@ class HttpFront:
             deadline=int(time.time() + timeout),
         )
         try:
+            # The far front's own predicate: an envelope it would drop leaves
+            # this request waiting out its deadline. The server's parser
+            # refuses such input today; this does not rely on it.
+            decode(envelope.encode())
+        except EnvelopeError as exc:
+            return self._error("bad_request", str(exc))
+        try:
             if address == self.client.local_address:
                 response = await self._serve(envelope, address)
                 if response is None:
@@ -684,7 +691,18 @@ class HttpFront:
                     except EnvelopeError:
                         logger.warning("callback for %s answered a header value that is not UTF-8", envelope.service)
                         return Response.failure(envelope.id, "callback_failed")
-                    return Response(envelope.id, reply.status, reply_headers, body)
+                    response = Response(envelope.id, reply.status, reply_headers, body)
+                    try:
+                        # The requester applies this predicate and drops what
+                        # fails it, then waits out its deadline for an answer
+                        # that will not come. The HTTP client accepts a status
+                        # past 599 and a control character in a header value,
+                        # so only this keeps the two sides in step.
+                        decode(response.encode())
+                    except EnvelopeError as exc:
+                        logger.warning("callback for %s answered what a requester refuses: %s", envelope.service, exc)
+                        return Response.failure(envelope.id, "callback_failed")
+                    return response
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                 logger.warning("callback for %s failed: %s", envelope.service, exc)
                 return Response.failure(envelope.id, "callback_failed")

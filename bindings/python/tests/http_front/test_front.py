@@ -39,6 +39,7 @@ class Provider:
 
     def __init__(self) -> None:
         self.calls: list[dict] = []
+        self.slow_started = 0
         self.port = 0
         self._runner: web.AppRunner | None = None
 
@@ -72,6 +73,7 @@ class Provider:
         return web.Response(body=b"x" * (128 * 1024 + 1))
 
     async def _slow(self, request: web.Request) -> web.Response:
+        self.slow_started += 1
         # Longer than any test waits for it; short, because stopping the
         # provider waits for this handler.
         await asyncio.sleep(5)
@@ -520,7 +522,7 @@ async def test_stopping_does_not_wait_for_a_local_callback(hosts):
             headers={"X-Offline-Protocol-Timeout": "300"},
         )
     )
-    await until(lambda: front._callback_slots._value < 32)  # the callback is running
+    await until(lambda: hosts.provider.slow_started == 1)  # the callback is running
     started = time.monotonic()
     await front.stop()
     assert time.monotonic() - started < 3
@@ -565,6 +567,51 @@ async def test_a_callback_header_that_is_not_utf8_is_a_callback_failure(hosts, c
     finally:
         callback.close()
         await callback.wait_closed()
+
+
+async def _answer_raw(hosts, response: bytes):
+    """Registers a callback that writes ``response`` verbatim and calls it."""
+
+    async def answer(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(response)
+        await writer.drain()
+        writer.close()
+
+    callback = await asyncio.start_server(answer, "127.0.0.1", 0)
+    try:
+        port = callback.sockets[0].getsockname()[1]
+        await hosts.register(hosts.b, callback=f"http://127.0.0.1:{port}")
+        # A short deadline: before the fix the requester waited all of it.
+        return await hosts.request(
+            hosts.a,
+            host_for("timeofday", "bob"),
+            method="GET",
+            body=None,
+            headers={"X-Offline-Protocol-Timeout": "1"},
+        )
+    finally:
+        callback.close()
+        await callback.wait_closed()
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        # The HTTP client accepts a status past 599; the requester refuses it.
+        b"HTTP/1.1 600 Nope\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+        # The HTTP client accepts a control character in a response header
+        # value, though the server refuses one in a request.
+        b"HTTP/1.1 200 OK\r\nX-Note: a\x01b\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+    ],
+    ids=["status-600", "control-character"],
+)
+async def test_a_callback_answer_the_requester_would_refuse_is_a_callback_failure(hosts, caplog, response):
+    """The provider sent it, the requester dropped it as malformed and
+    answered ``deadline_exceeded`` once the whole deadline had passed."""
+    status, headers, _ = await _answer_raw(hosts, response)
+    assert (status, headers["X-Offline-Protocol-Error"]) == (502, "callback_failed")
+    assert any("what a requester refuses" in r.getMessage() for r in caplog.records)
 
 
 async def test_stopping_ends_an_open_browse(hosts):
