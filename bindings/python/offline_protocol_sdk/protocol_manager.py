@@ -135,7 +135,7 @@ class _BleTransportCallbackImpl(BleTransportCallback):
             if await ble.write_fragment(recipient, data):
                 pass
             elif peripheral.has_subscriber():
-                await peripheral.notify_fragment(data)
+                await peripheral.notify_fragment(data, recipient)
             else:
                 # Rare: the core queues a fragment only for a peer it holds.
                 # A drop means the message waits for the core's retry, which
@@ -477,6 +477,11 @@ class ProtocolManager:
         self.ble_peripheral: BlePeripheral | None = None
         if getattr(config, "ble_enabled", False):
             self.ble_peripheral = BlePeripheral(self._protocol, device_id)
+            if self.ble is not None:
+                # A hello from a peer our own central already proved does not
+                # announce it twice, and the peer's central leaving does not
+                # report lost a peer our client link still reaches.
+                self.ble_peripheral.peer_linked_elsewhere = self.ble.holds_peer
 
         # The peer-stream transport behind the `wifi_direct` slot: TCP
         # streams to configured or discovered hosts, each proved by the

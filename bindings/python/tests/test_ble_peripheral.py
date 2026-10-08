@@ -880,9 +880,12 @@ class TestSharedFragmentDrain:
         peripheral.sent = []
         peripheral.has_subscriber = MagicMock(return_value=subscribed)
 
-        async def notify_fragment(data):
+        async def notify_fragment(data, recipient=None):
             peripheral.sent.append(data)
+            peripheral.recipients.append(recipient)
             return True
+
+        peripheral.recipients = []
 
         peripheral.notify_fragment = notify_fragment
         return _BleTransportCallbackImpl(central, peripheral), central, peripheral
@@ -898,6 +901,9 @@ class TestSharedFragmentDrain:
         await router._drain_shared()
         assert central.sent == [("off1central", b"a1"), ("off1central", b"a2")]
         assert peripheral.sent == [b"b1"]
+        # The recipient travels with the fragment, so the peripheral can
+        # address it to that peer's central alone.
+        assert peripheral.recipients == ["AA:BB:CC:DD:EE:01"]
         assert mock_protocol.ble_get_next_fragment.call_count == 4
         assert router.fragments_dropped == 0
 
