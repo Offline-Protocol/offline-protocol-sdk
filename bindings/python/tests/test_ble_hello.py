@@ -65,6 +65,19 @@ def verifier(monkeypatch):
     return verify
 
 
+def advancing_clock(step):
+    """A monitor clock that moves ``step`` seconds per reading. Wall time
+    cannot be used: on Windows time.monotonic() ticks every 15.6 ms and
+    asyncio runs a millisecond sleep at once, so a grace never elapsed."""
+    now = [0.0]
+
+    def clock():
+        now[0] += step
+        return now[0]
+
+    return clock
+
+
 def write(peripheral, central, uuid, value, offset=0):
     return peripheral._on_attributed_write(central, uuid.upper(), value, offset)
 
@@ -208,7 +221,11 @@ class TestPeripheralCentralLeaving:
         # first polls, subscribed after.
         polls = iter([set()] * 5)
         await self._poll(
-            peripheral, lambda: False, current=lambda: next(polls, {PHONE_CENTRAL}), ticks=60
+            peripheral,
+            lambda: False,
+            current=lambda: next(polls, {PHONE_CENTRAL}),
+            ticks=60,
+            step=0.5,
         )
         assert peripheral._hello_bindings == {PHONE_CENTRAL: PHONE}
         protocol.ble_peer_lost.assert_not_called()
@@ -224,9 +241,10 @@ class TestPeripheralCentralLeaving:
         assert PHONE_CENTRAL not in peripheral._hello_bindings
         protocol.ble_peer_lost.assert_not_called()
 
-    async def _poll(self, peripheral, done, current=lambda: set(), ticks=200):
+    async def _poll(self, peripheral, done, current=lambda: set(), ticks=200, step=1.0):
         peripheral._server = MagicMock()
         peripheral._bluez_centrals = None
+        peripheral._clock = advancing_clock(step)
 
         async def centrals():
             return current()
@@ -246,6 +264,7 @@ class TestPeripheralCentralLeaving:
         write(peripheral, PHONE_CENTRAL, HELLO_CHAR_UUID, HELLO)
         peripheral._server = MagicMock()
         peripheral._bluez_centrals = None
+        peripheral._clock = advancing_clock(1.0)
         seen = [{PHONE_CENTRAL}, set()]
 
         async def current():

@@ -31,7 +31,7 @@ import logging
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 # bless is not installed on Windows (pyproject.toml leaves it out there: it
 # has no Windows backend), and this module is imported by the package's
@@ -502,6 +502,11 @@ class BlePeripheral(TransportManager):
         # the stack's "ready to update subscribers" signal.
         self._subscribed_centrals: dict[str, Any] = {}
         self._notify_ready: asyncio.Event | None = None
+        # The monitor loop's clock. A test substitutes one it advances itself:
+        # on Windows time.monotonic() ticks every 15.6 ms, and asyncio runs a
+        # timer due within that at once, so a test sleeping in milliseconds
+        # never saw a grace period elapse.
+        self._clock: Callable[[], float] = time.monotonic
     # -- TransportManager interface -------------------------------------------
 
     def is_available(self) -> bool:
@@ -1298,7 +1303,7 @@ class BlePeripheral(TransportManager):
                 # Classify under the lock (the delegate thread races us on
                 # _connected_centrals / _central_to_user_id). FFI + diagnostic
                 # notifications happen afterward, outside the lock.
-                now = time.monotonic()
+                now = self._clock()
                 added: list[str] = []
                 rejected: list[str] = []
                 removed: list[tuple[str, str | None]] = []
