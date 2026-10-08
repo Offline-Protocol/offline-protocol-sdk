@@ -9,13 +9,14 @@
 //! acknowledgement comes back, with nothing readable on bob's side.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use offline_protocol_core::Message;
 use offline_protocol_transport::{MockTransport, Transport, TransportType};
 
 use crate::mls::InMemoryStorage;
 use crate::protocol::prefixes::internal_prefixes;
+use crate::protocol::reachability::{Claim, FactSource};
 use crate::protocol::tests::create_test_config_for_user;
 use crate::protocol::{OfflineProtocol, TestProtocolStateStorage};
 use crate::test_identity::id;
@@ -24,6 +25,9 @@ use crate::{Event, ProtocolConfig};
 struct Node {
     protocol: OfflineProtocol,
     transport: MockTransport,
+    /// An internet carrier that accepts every frame and delivers none: a
+    /// relay the peer at the other end of the line is not on.
+    internet: Option<MockTransport>,
     address: String,
     events: Arc<Mutex<Vec<Event>>>,
     inbox: Vec<String>,
@@ -48,7 +52,7 @@ fn strict_config(label: &str) -> ProtocolConfig {
 }
 
 impl Node {
-    fn new(label: &str, config: ProtocolConfig) -> Self {
+    fn new(label: &str, config: ProtocolConfig, internet: bool) -> Self {
         let mut protocol = OfflineProtocol::new(config).expect("protocol");
         protocol
             .initialize_mls(
@@ -67,6 +71,14 @@ impl Node {
         protocol
             .transport_manager_mut()
             .add_transport(TransportType::BLE, Box::new(mock));
+        let internet = internet.then(|| {
+            let relay = MockTransport::new(TransportType::Internet);
+            relay.start().expect("internet start");
+            protocol
+                .transport_manager_mut()
+                .add_transport(TransportType::Internet, Box::new(relay.clone()));
+            relay
+        });
         let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = events.clone();
         protocol.on_event(move |event| sink.lock().unwrap().push(event));
@@ -74,6 +86,7 @@ impl Node {
         Self {
             protocol,
             transport,
+            internet,
             address: id(label),
             events,
             inbox: Vec::new(),
@@ -109,14 +122,32 @@ const CAROL: usize = 2;
 
 impl Line {
     fn new(bob: ProtocolConfig) -> Self {
+        Self::with_relay_on_the_ends(bob, false)
+    }
+
+    /// The line, with alice and carol also online on a relay that has told
+    /// each of them it cannot reach the other.
+    fn with_relay_on_the_ends(bob: ProtocolConfig, relay: bool) -> Self {
         let mut line = Self {
             nodes: vec![
-                Node::new("alice", strict_config("alice")),
-                Node::new("bob", bob),
-                Node::new("carol", strict_config("carol")),
+                Node::new("alice", strict_config("alice"), relay),
+                Node::new("bob", bob, false),
+                Node::new("carol", strict_config("carol"), relay),
             ],
             carried: Vec::new(),
         };
+        if relay {
+            for (from, to) in [(ALICE, CAROL), (CAROL, ALICE)] {
+                let peer = line.nodes[to].address.clone();
+                line.nodes[from].protocol.reachability.record(
+                    &peer,
+                    TransportType::Internet,
+                    Claim::Unreachable,
+                    FactSource::GatewayVerdict,
+                    Instant::now(),
+                );
+            }
+        }
         line.link(ALICE, BOB);
         line.link(BOB, CAROL);
         line
@@ -300,4 +331,45 @@ fn a_device_that_declines_to_carry_starts_no_session_between_others() {
             .any(|(from, _, frame)| *from == BOB && frame.sender.as_str() == alice),
         "bob passed on nothing of alice's, her key package included"
     );
+}
+
+#[test]
+fn a_session_forms_across_the_mesh_when_the_relay_takes_what_it_cannot_deliver() {
+    // alice and carol are both online, and the relay has told each that the
+    // other is not on it. The internet carrier still accepts every frame,
+    // so a handshake sent "successfully" there and nowhere else never
+    // arrives: the key package and the Welcome have to cross bob anyway.
+    let mut line = Line::with_relay_on_the_ends(strict_config("bob"), true);
+    let carol = line.nodes[CAROL].address.clone();
+
+    let message_id = line.nodes[ALICE]
+        .protocol
+        .send_message(&carol, "meet at the north gate", None, None::<String>)
+        .expect("queued until a session exists")
+        .as_str();
+
+    line.run(40);
+    assert!(
+        line.nodes[ALICE]
+            .internet
+            .as_ref()
+            .expect("alice is online")
+            .sent_messages()
+            .iter()
+            .any(
+                |frame| frame.content.starts_with(internal_prefixes::KEY_PACKAGE)
+                    && frame.recipient.as_str() == carol
+            ),
+        "the relay accepted alice's key package, so the direct send reported success"
+    );
+    assert_eq!(
+        line.nodes[CAROL]
+            .inbox
+            .iter()
+            .filter(|content| content.as_str() == "meet at the north gate")
+            .count(),
+        1,
+        "and the session formed through bob all the same"
+    );
+    assert_eq!(line.nodes[ALICE].delivered(&message_id), Some(1));
 }

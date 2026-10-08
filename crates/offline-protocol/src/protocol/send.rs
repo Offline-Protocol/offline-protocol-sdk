@@ -3805,6 +3805,48 @@ impl OfflineProtocol {
         handed_to
     }
 
+    /// Puts a session-handshake frame (a key package or a Welcome) on its
+    /// way, returning how many neighbours took a copy.
+    ///
+    /// Invariant: a handshake frame for a peer that no carrier is known to
+    /// reach is handed to the mesh, whatever the direct send returned. A
+    /// carrier's `Ok` is not that knowledge. The internet transport enqueues
+    /// for any recipient, the one the relay has already said it cannot reach
+    /// included, and Reticulum accepts for routing. Offering only when the
+    /// direct send failed left a device with either carrier up unable to start
+    /// a session with a peer only the mesh reaches: the carrier took every key
+    /// package and Welcome and delivered none, and the message waiting on the
+    /// session never left. This is the question
+    /// [`Self::handle_send_success`] asks of every ordinary message, asked of
+    /// the two frames that do not go through it.
+    ///
+    /// Additive, as there: a copy that also arrives through the carrier is a
+    /// duplicate the receiver already absorbs. `Err` only when no carrier
+    /// accepted the frame and no neighbour took it.
+    pub(super) fn send_or_carry_handshake(&mut self, message: &Message) -> Result<usize> {
+        let direct = self.transport_manager.send(message);
+        let handed_to_mesh =
+            if direct.is_err() || !self.can_reach_recipient(message.recipient.as_str()) {
+                self.offer_to_mesh(message)
+            } else {
+                0
+            };
+        if handed_to_mesh > 0 {
+            debug!(
+                recipient = %message.recipient,
+                message_id = %message.id,
+                handed_to_mesh,
+                carrier_accepted = direct.is_ok(),
+                "Handshake frame handed to neighbours to carry"
+            );
+        }
+        match direct {
+            Ok(()) => Ok(handed_to_mesh),
+            Err(_) if handed_to_mesh > 0 => Ok(handed_to_mesh),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Confirms that a message was successfully sent by the transport layer.
     pub fn on_transport_send_confirmed(&mut self, message_id: &str) -> Result<()> {
         let Some(peer_id) = self.find_welcome_peer_by_message_id(message_id) else {
@@ -5752,9 +5794,9 @@ impl OfflineProtocol {
     /// compromised init key opens every Welcome built against it) and made the
     /// second peer's Welcome permanently unprocessable.
     ///
-    /// A peer no carrier can address directly is reached through the mesh:
-    /// when the direct send fails, the package is handed to neighbours to
-    /// carry, as an ordinary message is. Without that a pair whose only path
+    /// A peer no carrier is known to reach is reached through the mesh: the
+    /// package is handed to neighbours to carry, as an ordinary message is
+    /// (see [`Self::send_or_carry_handshake`]). Without that a pair whose only path
     /// runs through a third device could never start a session, because the
     /// package and the Welcome were the two frames that never left the
     /// device by any other route, and every frame after them is sealed.
@@ -5783,31 +5825,13 @@ impl OfflineProtocol {
             self.create_message(peer_id, content, Some(MessagePriority::Low), None)?;
         self.sign_control_message(&mut message)?;
 
-        // A package no carrier took directly may still reach the peer
-        // through a neighbour. Handing it over counts as sending it: the
-        // stamp below is what starts the re-push ladder, which is the only
+        // A package no carrier is known to reach the peer with may still
+        // reach it through a neighbour. Handing it over counts as sending it:
+        // the stamp below is what starts the re-push ladder, which is the only
         // repeat a package carried this way gets, since a peer we never hear
         // directly produces no discovery to push again on.
-        let sent = match self.transport_manager.send(&message) {
-            Ok(()) => Ok(()),
-            Err(err) => {
-                let handed_to_mesh = self.offer_to_mesh(&message);
-                if handed_to_mesh > 0 {
-                    debug!(
-                        peer_id = %peer_id,
-                        message_id = %message.id,
-                        handed_to_mesh,
-                        "Key package handed to neighbours to carry"
-                    );
-                    Ok(())
-                } else {
-                    Err(err)
-                }
-            }
-        };
-
-        match sent {
-            Ok(()) => {
+        match self.send_or_carry_handshake(&message) {
+            Ok(_) => {
                 // SECURITY (resource exhaustion): `key_package_sent_to` is keyed
                 // by the wire-claimed peer id, so a forged-sender key-package
                 // flood (each reply routes through here) would grow it without

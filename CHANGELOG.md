@@ -87,9 +87,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   after them is sealed. While a message waits for a peer that no carrier
   reaches directly, the sender now hands its key package to its neighbours to
   carry, and the recipient's Welcome takes the same route back; confirmation,
-  the message and its acknowledgement already did. The device in between
-  carries frames it cannot read. The threat model gains R24 (a session can be
-  started from anywhere the mesh reaches, and what bounds it).
+  the message and its acknowledgement already did. Both are offered to the
+  mesh even when the relay accepted them for a peer it has said is not on it.
+  The device in between carries frames it cannot
+  read. The threat model gains R24 (a session can be started from anywhere
+  the mesh reaches, and what bounds it).
 
 ### Changed
 

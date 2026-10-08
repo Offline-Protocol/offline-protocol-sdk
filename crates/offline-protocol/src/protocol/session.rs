@@ -1251,31 +1251,23 @@ impl OfflineProtocol {
             ));
         }
 
-        // A Welcome no carrier took directly is handed to neighbours to
-        // carry, as the key package that produced it was: a session between
-        // two devices that only reach each other through a third is built
-        // from exactly these two frames crossing it. Carried or sent, it is
-        // equally unproved, so it takes the same in-flight path below and
-        // the peer's probe or decrypt is still what settles it. A carried one
-        // waits the mesh confirmation timeout, since a neighbour is a mesh
-        // link whatever the selector last picked.
-        let sent = match self.transport_manager.send(&record.welcome_message) {
-            Ok(()) => Ok(self.transport_manager.current_transport()),
-            Err(err) => {
-                let handed_to_mesh = self.offer_to_mesh(&record.welcome_message);
+        // A Welcome for a peer no carrier is known to reach is handed to
+        // neighbours to carry, as the key package that produced it was: a
+        // session between two devices that only reach each other through a
+        // third is built from exactly these two frames crossing it. Carried
+        // or sent, it is equally unproved, so it takes the same in-flight
+        // path below and the peer's probe or decrypt is still what settles
+        // it. A carried one waits the mesh confirmation timeout, since a
+        // neighbour is a mesh link whatever the selector last picked.
+        let sent = self
+            .send_or_carry_handshake(&record.welcome_message)
+            .map(|handed_to_mesh| {
                 if handed_to_mesh > 0 {
-                    debug!(
-                        peer_id = %peer_id,
-                        message_id = %record.welcome_message.id,
-                        handed_to_mesh,
-                        "Welcome handed to neighbours to carry"
-                    );
-                    Ok(None)
+                    None
                 } else {
-                    Err(err)
+                    self.transport_manager.current_transport()
                 }
-            }
-        };
+            });
 
         match sent {
             Ok(transport_used) => {
