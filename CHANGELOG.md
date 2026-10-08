@@ -93,6 +93,28 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   "no token", and each transport has 30 seconds to start before it counts
   as failed and is stopped.
 
+### Fixed
+
+- **The Python Bluetooth LE peripheral knows its centrals on Linux.** It
+  read the list of subscribed centrals from a structure only bless's macOS
+  backend has, so on BlueZ it never announced a central to the core,
+  attributed every inbound fragment to the placeholder `ble-peer`, and gave
+  the core no route back to a phone that had connected to it. It now reads
+  the device BlueZ names in each read and write of its characteristics and
+  asks BlueZ when that device disconnects. A peripheral our own central
+  connected to is not counted, since it never calls into our server. With
+  several centrals connected, each write is attributed to its writer;
+  notifications still reach every subscribed central, which bless offers no
+  way around.
+- **The two Bluetooth LE roles no longer split a message between them.**
+  The central and the peripheral took fragments from the core's one queue
+  at the same time, so a message's fragments could leave on two links and
+  never reassemble. With both roles running, one drain now takes each
+  fragment and gives it to the central's link to that peer, else to the
+  peripheral when a central is subscribed. The peripheral alone takes
+  nothing while no central is subscribed, where a notification reached no
+  one. No board run has been done yet.
+
 ## [0.28.0] — 2026-10-06
 
 > **The peer-stream slot carries traffic on phones.** The mobile managers

@@ -383,6 +383,34 @@ literals, and its tests pin them as literals (C5). `aiohttp` is imported only
 when the front starts, behind the `http` extra, so the base install's
 dependency set is unchanged.
 
+## P14. On BlueZ the peripheral learns its centrals from the bus, and one drain feeds both roles
+
+bless tracks the centrals of its server only in its CoreBluetooth backend. Its
+BlueZ characteristic drops the options BlueZ passes to `ReadValue` and
+`WriteValue`, which name the calling device, and `StartNotify` names none. So
+on Linux the peripheral adds a dbus_next message handler to bless's own bus
+that reads `options["device"]` from each read or write of its application's
+characteristics before bless dispatches the call, and never answers one. A
+device is a central once it has called into the application, and stops being
+one when BlueZ reports its `Device1.Connected` false or the object gone. That
+is what tells a central apart from a peripheral the central role connected
+to: both are connected `Device1` objects, and only a central reads our
+identity. It is announced to the core only while the Message characteristic
+has a subscriber, because BlueZ reports subscriptions per characteristic and
+not per device. Each inbound write is attributed to its own caller, so two
+centrals no longer collapse into `ble-peer`. Notifications go to every
+subscribed central: neither bless backend addresses one.
+
+The core's outbound fragment queue is shared by the two roles and offers no
+peek and no requeue (`ble_return_fragment` is a no-op), so a fragment one
+role pops is gone. Two drains running at once split a message's fragments
+across two links. With both roles present, `ProtocolManager` runs one drain
+that pops each fragment once and writes it on the central's link to its
+recipient, else notifies it when the peripheral has a subscriber, else drops
+and counts it; the core's retry of the message re-sends it. The peripheral on
+its own takes nothing while nobody is subscribed. `test_ble_peripheral.py`
+pins both with a fake bus. Nothing here has run on a board.
+
 ## Testing
 
 ```bash

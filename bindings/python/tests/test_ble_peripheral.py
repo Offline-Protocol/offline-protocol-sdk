@@ -554,3 +554,280 @@ class TestInterruptedStop:
         assert peripheral.state == TransportState.STOPPED
         assert monitor.done()
         assert peripheral._peer_monitor_task is None
+
+
+# ---------------------------------------------------------------------------
+# BlueZ: who the centrals are. bless's BlueZ backend tracks none, so the
+# peripheral reads the caller BlueZ names in each ReadValue / WriteValue.
+# A fake bus stands in for dbus_next: the hook and the Properties.Get calls
+# are all the tracker uses.
+# ---------------------------------------------------------------------------
+
+from types import SimpleNamespace  # noqa: E402
+
+from offline_protocol_sdk import ble_peripheral as ble_peripheral_module  # noqa: E402
+from offline_protocol_sdk.ble_manager import (  # noqa: E402
+    DEVICE_ID_CHAR_UUID,
+    MESSAGE_CHAR_UUID,
+)
+from offline_protocol_sdk.ble_peripheral import _BlueZCentrals  # noqa: E402
+
+APP_BASE = "/org/bluez/coordinato"
+CHAR_PATH = APP_BASE + "/service0001/char0001"
+PHONE = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_01"
+OTHER_PHONE = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_02"
+OUR_PERIPHERAL = "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_03"
+
+
+def gatt_call(member: str, device: str | None, path: str = CHAR_PATH) -> SimpleNamespace:
+    options = {} if device is None else {"device": SimpleNamespace(value=device)}
+    body = [options] if member == "ReadValue" else [[1, 2, 3], options]
+    return SimpleNamespace(
+        message_type=SimpleNamespace(name="METHOD_CALL"),
+        interface="org.bluez.GattCharacteristic1",
+        member=member,
+        path=path,
+        body=body,
+    )
+
+
+class FakeBus:
+    """``add_message_handler`` plus ``Device1.Connected`` answers."""
+
+    def __init__(self) -> None:
+        self.handlers: list = []
+        self.connected: dict[str, bool] = {}
+        self.queried: list[str] = []
+
+    def add_message_handler(self, handler) -> None:
+        self.handlers.append(handler)
+
+    def remove_message_handler(self, handler) -> None:
+        self.handlers.remove(handler)
+
+    def deliver(self, msg) -> None:
+        for handler in self.handlers:
+            assert not handler(msg), "the hook must never handle a call"
+
+    async def call(self, path: str):
+        self.queried.append(path)
+        if path not in self.connected:
+            return SimpleNamespace(message_type=SimpleNamespace(name="ERROR"), body=[])
+        return SimpleNamespace(
+            message_type=SimpleNamespace(name="METHOD_RETURN"),
+            body=[SimpleNamespace(value=self.connected[path])],
+        )
+
+
+@pytest.fixture
+def fake_bus(monkeypatch):
+    monkeypatch.setattr(ble_peripheral_module, "_device_connected_query", lambda path: path)
+    return FakeBus()
+
+
+class TestBlueZCentrals:
+    def test_a_device_that_calls_our_application_is_a_central(self, fake_bus):
+        tracker = _BlueZCentrals(APP_BASE)
+        tracker.attach(fake_bus)
+        fake_bus.deliver(gatt_call("ReadValue", PHONE))
+        assert tracker.current == "AA:BB:CC:DD:EE:01"
+        fake_bus.deliver(gatt_call("WriteValue", OTHER_PHONE))
+        assert tracker.current == "AA:BB:CC:DD:EE:02"
+
+    @pytest.mark.asyncio
+    async def test_a_peripheral_our_central_holds_is_not_a_central(self, fake_bus):
+        """Both are Device1 objects with Connected true; only a central of
+        ours calls into our application."""
+        tracker = _BlueZCentrals(APP_BASE)
+        tracker.attach(fake_bus)
+        fake_bus.connected = {PHONE: True, OUR_PERIPHERAL: True}
+        fake_bus.deliver(gatt_call("ReadValue", PHONE))
+        assert await tracker.connected(subscribed=True) == {"AA:BB:CC:DD:EE:01"}
+
+    @pytest.mark.asyncio
+    async def test_calls_to_another_application_are_not_ours(self, fake_bus):
+        tracker = _BlueZCentrals(APP_BASE)
+        tracker.attach(fake_bus)
+        fake_bus.connected = {PHONE: True}
+        fake_bus.deliver(gatt_call("WriteValue", PHONE, path="/org/bluez/other/service0001/char0001"))
+        fake_bus.deliver(gatt_call("WriteValue", PHONE, path=APP_BASE + "x/service0001/char0001"))
+        assert tracker.current is None
+        assert await tracker.connected(subscribed=True) == set()
+
+    def test_a_call_without_a_device_clears_the_current_caller(self, fake_bus):
+        """A stale caller would attribute this write to the previous one."""
+        tracker = _BlueZCentrals(APP_BASE)
+        tracker.attach(fake_bus)
+        fake_bus.deliver(gatt_call("WriteValue", PHONE))
+        fake_bus.deliver(gatt_call("WriteValue", None))
+        assert tracker.current is None
+
+    @pytest.mark.asyncio
+    async def test_a_disconnected_or_removed_device_stops_being_a_central(self, fake_bus):
+        tracker = _BlueZCentrals(APP_BASE)
+        tracker.attach(fake_bus)
+        fake_bus.connected = {PHONE: True, OTHER_PHONE: True}
+        fake_bus.deliver(gatt_call("ReadValue", PHONE))
+        fake_bus.deliver(gatt_call("ReadValue", OTHER_PHONE))
+        assert len(await tracker.connected(subscribed=True)) == 2
+        fake_bus.connected[PHONE] = False
+        del fake_bus.connected[OTHER_PHONE]
+        assert await tracker.connected(subscribed=True) == set()
+        fake_bus.queried.clear()
+        await tracker.connected(subscribed=True)
+        assert fake_bus.queried == []
+
+    @pytest.mark.asyncio
+    async def test_nobody_is_listed_while_nobody_subscribes(self, fake_bus):
+        tracker = _BlueZCentrals(APP_BASE)
+        tracker.attach(fake_bus)
+        fake_bus.connected = {PHONE: True}
+        fake_bus.deliver(gatt_call("ReadValue", PHONE))
+        assert await tracker.connected(subscribed=False) == set()
+        assert await tracker.connected(subscribed=True) == {"AA:BB:CC:DD:EE:01"}
+
+    def test_detach_removes_the_hook(self, fake_bus):
+        tracker = _BlueZCentrals(APP_BASE)
+        tracker.attach(fake_bus)
+        tracker.detach()
+        assert fake_bus.handlers == []
+
+
+def bluez_peripheral(mock_protocol, fake_bus, subscribed: list[str]) -> BlePeripheral:
+    peripheral = BlePeripheral(mock_protocol, device_id="coordinator")
+    server = MagicMock()
+    server.bus = fake_bus
+    server.app.base_path = APP_BASE
+    server.app.subscribed_characteristics = subscribed
+    peripheral._server = server
+    peripheral._attach_bluez_centrals()
+    return peripheral
+
+
+class TestPeripheralOnBlueZ:
+    @pytest.mark.asyncio
+    async def test_the_monitor_announces_and_loses_a_central(self, mock_protocol, fake_bus, monkeypatch):
+        monkeypatch.setattr(ble_peripheral_module, "_PEER_MONITOR_INTERVAL", 0.01)
+        subscribed: list[str] = []
+        peripheral = bluez_peripheral(mock_protocol, fake_bus, subscribed)
+        fake_bus.connected = {PHONE: True}
+        task = asyncio.ensure_future(peripheral._peer_monitor_loop())
+        try:
+            fake_bus.deliver(gatt_call("ReadValue", PHONE))
+            peripheral._on_read(DEVICE_ID_CHAR_UUID)
+            await asyncio.sleep(0.05)
+            mock_protocol.ble_peer_discovered.assert_not_called()
+
+            subscribed.append(MESSAGE_CHAR_UUID)
+            await asyncio.sleep(0.05)
+            mock_protocol.ble_peer_discovered.assert_called_once_with(
+                peer_id="AA:BB:CC:DD:EE:01", rssi=-50
+            )
+            assert "AA:BB:CC:DD:EE:01" in peripheral._connected_centrals
+
+            fake_bus.connected[PHONE] = False
+            await asyncio.sleep(0.05)
+            mock_protocol.ble_peer_lost.assert_called_with(peer_id="AA:BB:CC:DD:EE:01")
+            assert peripheral._connected_centrals == {}
+        finally:
+            task.cancel()
+            await asyncio.wait({task})
+
+    def test_a_write_is_attributed_to_its_caller_among_several(self, mock_protocol, fake_bus):
+        """Before, two connected centrals made every write ``ble-peer``."""
+        peripheral = bluez_peripheral(mock_protocol, fake_bus, [MESSAGE_CHAR_UUID])
+        peripheral._connected_centrals.update({"AA:BB:CC:DD:EE:01": 1.0, "AA:BB:CC:DD:EE:02": 2.0})
+        fake_bus.deliver(gatt_call("WriteValue", OTHER_PHONE))
+        peripheral._on_write(MESSAGE_CHAR_UUID, bytearray(b"\x03\x00x"))
+        assert mock_protocol.ble_fragment_received.call_args.kwargs["sender_id"] == "AA:BB:CC:DD:EE:02"
+
+    def test_subscription_is_read_from_the_message_characteristic(self, mock_protocol, fake_bus):
+        peripheral = bluez_peripheral(mock_protocol, fake_bus, [])
+        assert not peripheral.has_subscriber()
+        peripheral._server.app.subscribed_characteristics = [DEVICE_ID_CHAR_UUID]
+        assert not peripheral.has_subscriber()
+        peripheral._server.app.subscribed_characteristics = [MESSAGE_CHAR_UUID.upper()]
+        assert peripheral.has_subscriber()
+
+    @pytest.mark.asyncio
+    async def test_the_drain_takes_nothing_while_nobody_subscribes(self, mock_protocol, fake_bus):
+        """A popped fragment is gone; with no subscriber it would reach no one."""
+        peripheral = bluez_peripheral(mock_protocol, fake_bus, [])
+        await peripheral._drain_outgoing_fragments()
+        mock_protocol.ble_get_next_fragment.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stop_removes_the_hook(self, mock_protocol, fake_bus):
+        peripheral = bluez_peripheral(mock_protocol, fake_bus, [])
+        peripheral._state = TransportState.RUNNING
+        peripheral._server.stop = AsyncMock()
+        await peripheral.stop()
+        assert fake_bus.handlers == []
+        assert peripheral._bluez_centrals is None
+
+
+# ---------------------------------------------------------------------------
+# One drain for both roles: the core's fragment queue cannot be peeked or
+# refilled, so each fragment is popped once and given to the role holding a
+# link for it.
+# ---------------------------------------------------------------------------
+
+class TestSharedFragmentDrain:
+    def fragments(self, *pairs):
+        return [SimpleNamespace(recipient_id=r, data=list(d)) for r, d in pairs] + [None]
+
+    def roles(self, mock_protocol, central_peers: set[str], subscribed: bool):
+        from offline_protocol_sdk.protocol_manager import _BleTransportCallbackImpl
+
+        central = MagicMock()
+        central._protocol = mock_protocol
+        central.sent = []
+
+        async def write_fragment(recipient, data):
+            if recipient not in central_peers:
+                return False
+            central.sent.append((recipient, data))
+            return True
+
+        central.write_fragment = write_fragment
+        peripheral = MagicMock()
+        peripheral.sent = []
+        peripheral.has_subscriber = MagicMock(return_value=subscribed)
+
+        async def notify_fragment(data):
+            peripheral.sent.append(data)
+            return True
+
+        peripheral.notify_fragment = notify_fragment
+        return _BleTransportCallbackImpl(central, peripheral), central, peripheral
+
+    @pytest.mark.asyncio
+    async def test_each_fragment_goes_to_the_role_that_holds_its_peer(self, mock_protocol):
+        router, central, peripheral = self.roles(mock_protocol, {"off1central"}, subscribed=True)
+        mock_protocol.ble_get_next_fragment = MagicMock(
+            side_effect=self.fragments(
+                ("off1central", b"a1"), ("AA:BB:CC:DD:EE:01", b"b1"), ("off1central", b"a2")
+            )
+        )
+        await router._drain_shared()
+        assert central.sent == [("off1central", b"a1"), ("off1central", b"a2")]
+        assert peripheral.sent == [b"b1"]
+        assert mock_protocol.ble_get_next_fragment.call_count == 4
+        assert router.fragments_dropped == 0
+
+    @pytest.mark.asyncio
+    async def test_a_fragment_nobody_can_carry_is_counted(self, mock_protocol):
+        router, central, peripheral = self.roles(mock_protocol, set(), subscribed=False)
+        mock_protocol.ble_get_next_fragment = MagicMock(side_effect=self.fragments(("x", b"z")))
+        await router._drain_shared()
+        assert central.sent == [] and peripheral.sent == []
+        assert router.fragments_dropped == 1
+
+    def test_with_both_roles_neither_drains_on_its_own(self, mock_protocol):
+        """Two drains popping the one queue split a message across links."""
+        router, central, peripheral = self.roles(mock_protocol, set(), subscribed=True)
+        central._loop = None
+        peripheral._loop = None
+        router.on_fragments_available()
+        central.on_fragments_available.assert_not_called()
+        peripheral.on_fragments_available.assert_not_called()
