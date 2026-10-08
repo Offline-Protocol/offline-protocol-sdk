@@ -373,7 +373,8 @@ and the server holds its inbound messages while it is away. It sends every
 request and response as a direct message, never on the service request path,
 whose bodies are plaintext, and it acts only on a `message_received` the
 engine reports as `encrypted`. Discovery is the one thing it takes from the
-service path. Everything a handler can wait on
+service path. It runs one per service, since every client under one
+application id receives each request. Everything a handler can wait on
 (an answer, a browse stream, a callback) is ended before the HTTP server's
 cleanup, which otherwise waits two minutes for a running handler and
 outlives a supervisor's stop grace period. The envelope limits, the carried-header list, the application

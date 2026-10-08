@@ -93,7 +93,10 @@ The alias file is JSON:
 Two fronts exchange JSON objects as the content of a direct message. Every
 message a front sends carries the application id
 `offline-protocol-http-front`, so the receiving host's local API routes it to
-the front and holds it while the front is away.
+the front and holds it while the front is away. A host runs one front: the
+local API delivers a message stamped with that id to every client that
+declared it, so a second front would call the callback again for every
+request.
 
 ```json
 {"op":"req","v":1,"id":"1f0e…","svc":"timeofday","m":"POST","p":"/now?tz=utc",
@@ -257,14 +260,23 @@ launch, written to a file with mode `0600` in the same call that creates it,
 presented in `X-Offline-Protocol-Token`. A wrong or missing token is
 `unauthorized` (401). A request carrying an `Origin` header is
 `unauthorized` (401) on any binding: a browser sends one on every
-cross-origin request and on every method other than `GET` and `HEAD`, and no
-other client does, so this is what stops a web page the user opens from
-sending a request as this device or registering a callback of its choosing
-through a wildcard route to the domain or DNS rebinding. Without a token,
-the front's own endpoints answer only a host that is the domain, `localhost`
-or a loopback address, and refuse any other with `bad_host` (400): a
-rebinding page reaches the front under its own name, and a same-origin `GET`
-carries no `Origin`. Telling one local application from another is the
+cross-origin `fetch` or `XMLHttpRequest` and on every method other than
+`GET` and `HEAD`, and no other client does, so this is what stops a web page
+the user opens from sending a body as this device or registering a callback
+of its choosing through a wildcard route to the domain or DNS rebinding.
+Without a token, the front's own endpoints answer only a host that is the
+domain, `localhost` or a loopback address, and refuse any other with
+`bad_host` (400): a rebinding page reaches the front under its own name, and
+a same-origin `GET` carries no `Origin`.
+
+That leaves one route open without a token. A `GET` a page makes by loading
+a resource (an image, a script, a frame, a navigation) carries no `Origin`,
+and `Sec-Fetch-*` is not sent to a plain-`http` name that is not loopback,
+so with a wildcard route to the domain on a host where a browser runs, any
+page can make a blind `GET` to `<service>.<device>.<domain>` as this device.
+It cannot read the answer or set a header, so a front with a token refuses
+it. A host where a browser runs and the domain resolves to the front should
+run the front with a token. Telling one local application from another is the
 host's to provide (a per-application network namespace, or a header the
 host's own router adds), and is recorded as
 [R23](../security/threat-model.md#r23-the-http-front-trusts-every-process-that-can-reach-it).

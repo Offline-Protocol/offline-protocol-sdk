@@ -4,6 +4,11 @@ The usual way to run the front is ``offline-protocol-service --http``, which
 starts it in the service's own process. This command runs it as a separate
 process against a service that is already running, on its Unix socket or
 on its loopback TCP port with the launch token file.
+
+Run one front per service: the local API delivers a message stamped with
+the front's application id to every client that declared it, so a second
+front, this command beside ``--http`` for one, would call the callback a
+second time for every request.
 """
 
 from __future__ import annotations

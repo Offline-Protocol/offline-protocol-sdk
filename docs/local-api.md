@@ -140,9 +140,12 @@ server-sent events. Registrations are kept beside the state root and
 registered again at every start. A host that resolves
 `*.offline.protocol.internal` to the front removes the need for the manual
 `Host` header; until then, setting it by hand exercises the same path. The
-front runs apart from the service as `offline-protocol-http-front`. Off
-loopback it requires `--http-token-file`; the residual risk of a front any
-local process can reach is R23 in the threat model.
+front runs apart from the service as `offline-protocol-http-front`, never
+beside `--http` on the same service: both would receive every request and
+call the callback twice. Off loopback it requires `--http-token-file`, and
+on a host where a browser runs it should have one on loopback too; the
+residual risk of a front any local process can reach is R23 in the threat
+model.
 
 ## The policy file
 
