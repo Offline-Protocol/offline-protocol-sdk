@@ -346,6 +346,17 @@ class TestPeripheralNotify:
         )
 
 
+class TestPeripheralHoldsPeer:
+    def test_a_subscribed_central_bound_to_the_address_holds_it(self, peripheral, verifier):
+        """What BleManager asks before reporting a peer lost when its own
+        client link goes."""
+        write(peripheral, PHONE_CENTRAL, HELLO_CHAR_UUID, HELLO)
+        assert not peripheral.holds_peer(PHONE), "said hello but not subscribed: no route"
+        peripheral._connected_centrals[PHONE_CENTRAL] = 1.0
+        assert peripheral.holds_peer(PHONE)
+        assert not peripheral.holds_peer(OTHER)
+
+
 class TestPreparedHello:
     """CoreBluetooth hands a long write over as one batch at rising offsets.
     The chapter refuses a prepared hello before verifying anything, so the
@@ -675,6 +686,23 @@ class TestCentralLiveness:
 
         client.disconnect.assert_awaited()
         protocol.ble_peer_lost.assert_called_once_with(peer_id=PHONE)
+        assert not manager.holds_peer(PHONE)
+
+    @pytest.mark.asyncio
+    async def test_a_peer_the_peripheral_still_reaches_is_not_reported_lost(
+        self, manager, protocol
+    ):
+        """The peer's central is bound on our peripheral, so a notification
+        still reaches it. Reported lost, the core dropped that route too."""
+        manager.peer_linked_elsewhere = lambda peer: peer == PHONE
+        client = _client(PEER_READS)
+        await _connect(manager, client, "AA:01")
+        client.read_gatt_char = AsyncMock(side_effect=RuntimeError("attribute not found"))
+
+        await manager._check_liveness()
+
+        client.disconnect.assert_awaited()
+        protocol.ble_peer_lost.assert_not_called()
         assert not manager.holds_peer(PHONE)
 
     @pytest.mark.asyncio

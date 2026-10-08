@@ -15,6 +15,7 @@ import logging
 import os
 import platform
 import sys
+import weakref
 from pathlib import Path
 from typing import Any, Callable
 
@@ -149,6 +150,23 @@ class _BleTransportCallbackImpl(BleTransportCallback):
                 protocol.ble_return_fragment()
             except Exception:
                 logger.debug("ble_return_fragment failed", exc_info=True)
+
+
+def _weak_probe(method: Callable[[str], bool]) -> Callable[[str], bool]:
+    """``method`` without the strong reference a bound method holds.
+
+    The two BLE roles each ask the other whether a peer is still reached, so
+    strong bound methods made them a cycle, and a dropped ProtocolManager
+    kept the core, and the stores it holds open, alive until a garbage
+    collection pass. A role that is gone reaches nothing.
+    """
+    ref = weakref.WeakMethod(method)
+
+    def probe(peer_id: str) -> bool:
+        target = ref()
+        return bool(target(peer_id)) if target is not None else False
+
+    return probe
 
 
 class _WifiDirectTransportCallbackImpl(WifiDirectTransportCallback):
@@ -481,7 +499,10 @@ class ProtocolManager:
                 # A hello from a peer our own central already proved does not
                 # announce it twice, and the peer's central leaving does not
                 # report lost a peer our client link still reaches.
-                self.ble_peripheral.peer_linked_elsewhere = self.ble.holds_peer
+                self.ble_peripheral.peer_linked_elsewhere = _weak_probe(self.ble.holds_peer)
+                # And the other way: our client link going away does not
+                # report lost a peer whose central is bound on our peripheral.
+                self.ble.peer_linked_elsewhere = _weak_probe(self.ble_peripheral.holds_peer)
 
         # The peer-stream transport behind the `wifi_direct` slot: TCP
         # streams to configured or discovered hosts, each proved by the

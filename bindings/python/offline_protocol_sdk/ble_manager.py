@@ -139,6 +139,10 @@ class BleManager(TransportManager):
         self._refusals: dict[str, int] = {}
         # address -> (peer it duplicated, monotonic time the refusal lapses)
         self._duplicates: dict[str, tuple[str, float]] = {}
+        # Set by ProtocolManager: whether another link (a central bound on our
+        # own peripheral) still reaches a peer, so a client link going away
+        # does not report lost a peer the core can still route to.
+        self.peer_linked_elsewhere: Any = None
 
         # Metrics
         self._bytes_sent: int = 0
@@ -640,18 +644,31 @@ class BleManager(TransportManager):
             if device_id is not None:
                 self._device_id_to_addr.pop(device_id, None)
 
-        # A link that never proved a peer was never announced, so there is
-        # nothing to report lost.
+        # A link that never proved a peer was never announced, and one already
+        # torn down (a liveness drop runs this before the stack's own
+        # disconnect callback does) was reported then: nothing to report.
         if device_id is None:
-            self._emit_diagnostic("debug", f"Unverified link closed: {addr}")
+            self._emit_diagnostic("debug", f"Link closed with no proved peer on file: {addr}")
             return
 
+        self._emit_diagnostic("info", f"Peer disconnected: {device_id}")
+        if self._linked_elsewhere(device_id):
+            return
         try:
             self._protocol.ble_peer_lost(peer_id=device_id)
         except Exception:
             logger.debug("ble_peer_lost failed for %s", device_id)
 
-        self._emit_diagnostic("info", f"Peer disconnected: {device_id}")
+    def _linked_elsewhere(self, peer_id: str) -> bool:
+        """Whether another link of ours (the peripheral's) still reaches
+        ``peer_id``. Never raises: a probe that fails says no."""
+        probe = self.peer_linked_elsewhere
+        if probe is None:
+            return False
+        try:
+            return bool(probe(peer_id))
+        except Exception:
+            return False
 
     # -- outgoing fragment handling -------------------------------------------
 
@@ -769,6 +786,8 @@ class BleManager(TransportManager):
                         stale_device_ids.append(device_id)
                 # Notify protocol outside the lock
                 for device_id in stale_device_ids:
+                    if self._linked_elsewhere(device_id):
+                        continue
                     try:
                         self._protocol.ble_peer_lost(peer_id=device_id)
                     except Exception:

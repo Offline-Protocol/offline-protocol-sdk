@@ -289,7 +289,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   for over five minutes, and every frame written into it vanished. The Python
   central now reads each link's Device id back every 15 seconds and drops a
   link whose read fails, takes more than 5 seconds, or names another address,
-  reporting the peer lost.
+  reporting the peer lost unless its central is still bound on our own
+  peripheral, which still reaches it.
 - **A Mac that may not use Bluetooth no longer wedges the service.** Started
   where macOS cannot grant Bluetooth (over ssh), the Bluetooth LE peripheral
   blocked the service inside bless's constructor for good: no API socket, and

@@ -991,6 +991,19 @@ class BlePeripheral(TransportManager):
                 logger.debug("ble_peer_discovered failed for %s", address)
         return _ATT_SUCCESS
 
+    def holds_peer(self, address: str) -> bool:
+        """Whether a subscribed central of ours carries ``address``.
+
+        ``BleManager`` asks this before reporting a peer lost when its client
+        link goes: a notification addressed to ``address`` still reaches that
+        central, so the core keeps a route it would otherwise drop.
+        """
+        with self._lock:
+            return any(
+                self._central_to_user_id.get(central) == address
+                for central in self._connected_centrals
+            )
+
     def _linked_elsewhere(self, address: str) -> bool:
         probe = self.peer_linked_elsewhere
         if probe is None:

@@ -485,7 +485,10 @@ The pieces, each of which the failure needs only one of to come back:
   service process had restarted "connected" for over five minutes while every
   write into it vanished. `BleManager` reads each link's Device id back every
   15 seconds and drops a link whose read fails, hangs past 5 seconds, or names
-  another address.
+  another address. A peer whose central is still bound on our peripheral is
+  not reported lost when our client link goes, in either direction
+  (`holds_peer` on each role, wired by `ProtocolManager`): a notification still
+  reaches it, and a lost report would drop the core's route.
 - **A Bluetooth stack that never comes up fails the start.** bless's
   CoreBluetooth delegate waits in its constructor, with no deadline, for a
   power-on that never comes when the process is not authorised (a service
