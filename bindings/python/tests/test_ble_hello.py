@@ -346,6 +346,34 @@ class TestPeripheralNotify:
         )
 
 
+class TestPreparedHello:
+    """CoreBluetooth hands a long write over as one batch at rising offsets.
+    The chapter refuses a prepared hello before verifying anything, so the
+    batch is judged whole, ahead of the per-request handler."""
+
+    def test_a_hello_in_a_batch_is_refused(self):
+        hello = HELLO_CHAR_UUID.upper()
+        assert peripheral_module._prepared_hello_refusal([(hello, 0), (hello, 96)]) == 0x07
+
+    def test_a_hello_batched_with_another_write_is_refused_at_offset_zero(self):
+        """A reliable write puts several requests at offset 0 in one batch;
+        a hello among them is still not one write."""
+        assert peripheral_module._prepared_hello_refusal(
+            [(HELLO_CHAR_UUID, 0), (MESSAGE_CHAR_UUID, 0)]
+        ) == 0x07
+
+    def test_a_hello_at_an_offset_is_refused(self):
+        assert peripheral_module._prepared_hello_refusal([(HELLO_CHAR_UUID, 4)]) == 0x07
+
+    def test_a_single_hello_at_offset_zero_passes_to_the_handler(self):
+        assert peripheral_module._prepared_hello_refusal([(HELLO_CHAR_UUID, 0)]) is None
+
+    def test_message_writes_are_not_judged(self):
+        assert peripheral_module._prepared_hello_refusal(
+            [(MESSAGE_CHAR_UUID, 0), (MESSAGE_CHAR_UUID, 0)]
+        ) is None
+
+
 # ---------------------------------------------------------------------------
 # A Bluetooth stack that never comes up fails the start, it does not wedge
 # ---------------------------------------------------------------------------

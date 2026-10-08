@@ -97,6 +97,23 @@ _NOTIFY_READY_TIMEOUT = 1.0
 _UNSUBSCRIBED_HELLO_GRACE = 5.0
 
 _ATTRIBUTING_DELEGATE: Any = None
+
+
+def _prepared_hello_refusal(writes: list[tuple[str, int]]) -> int | None:
+    """The ATT code that refuses a batch carrying a hello, or None.
+
+    ``writes`` is each request's ``(characteristic UUID, offset)``.
+    CoreBluetooth hands a prepared (long) write to the delegate as one batch
+    of requests at rising offsets, and the chapter requires a peripheral to
+    refuse a prepared or offset hello before verifying anything. Handled
+    request by request, the batch's first chunk (offset 0, a plausible
+    length) reached the verifier before the second chunk's offset refused it.
+    """
+    hello = HELLO_CHAR_UUID.lower()
+    for char_uuid, offset in writes:
+        if char_uuid.lower() == hello and (len(writes) > 1 or offset != 0):
+            return _ATT_INVALID_OFFSET
+    return None
 _DELEGATE_SWAP_LOCK = threading.Lock()
 # How long a construction waits for another one's delegate swap. A swap is
 # held for a whole construction, and one that wedged (see
@@ -139,6 +156,17 @@ def _attributing_delegate_class() -> Any:
         ) -> None:
             handler = getattr(self, "attributed_write_func", None)
             result = _ATT_SUCCESS
+            if handler is not None:
+                try:
+                    refusal = _prepared_hello_refusal([
+                        (str(r.characteristic().UUID().UUIDString()), int(r.offset()))
+                        for r in requests
+                    ])
+                except Exception:  # never let a raise skip the response
+                    refusal = None
+                if refusal is not None:
+                    peripheral_manager.respondToRequest_withResult_(requests[0], refusal)
+                    return
             for request in requests:
                 char_uuid = str(request.characteristic().UUID().UUIDString())
                 raw = request.value()
@@ -698,17 +726,22 @@ class BlePeripheral(TransportManager):
         own module; it is pointed at the subclass for this one construction,
         under a lock, and put back.
         """
-        delegate_cls = _attributing_delegate_class() if sys.platform == "darwin" else None
-        if delegate_cls is None:
+        if sys.platform != "darwin":
             return BlessServer(name=name, loop=loop)
-        import bless.backends.corebluetooth.server as cb_server  # type: ignore[import-not-found]
-
+        # The class is built under the lock too: an Objective-C class name can
+        # be registered once per process, and two constructions racing to
+        # build it would both try.
         if not _DELEGATE_SWAP_LOCK.acquire(timeout=_DELEGATE_SWAP_WAIT):
             raise TransportError(
                 "an earlier Bluetooth stack construction in this process never "
                 "returned; restart the service once Bluetooth is allowed"
             )
         try:
+            delegate_cls = _attributing_delegate_class()
+            if delegate_cls is None:
+                return BlessServer(name=name, loop=loop)
+            import bless.backends.corebluetooth.server as cb_server  # type: ignore[import-not-found]
+
             original = cb_server.PeripheralManagerDelegate
             cb_server.PeripheralManagerDelegate = delegate_cls
             try:
