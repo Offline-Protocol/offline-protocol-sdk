@@ -224,9 +224,9 @@ async def pair(target: Target, peer: str, timeout: float, output: Output) -> int
     """Waits until the session toward ``peer`` is confirmed.
 
     The engine forms it by itself once the two devices hear each other
-    directly (``docs/state-machines/session-lifecycle.md``); this only waits.
-    The automatic key exchange never crosses a hop, so two devices that will
-    later reach each other only through a third must have met once."""
+    directly (``docs/state-machines/session-lifecycle.md``), or through a device
+    between them while a message waits for a peer no carrier reaches
+    directly; this only waits."""
     client = await target.open(observer=True)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout

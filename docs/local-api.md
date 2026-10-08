@@ -192,10 +192,11 @@ error once their subscription to every event is confirmed (`watch` again
 after each reconnect). An event emitted after that line is seen, and one
 emitted before it may not be, so a script that starts either in the
 background and then brings a recipient back or sends from another device
-waits for that line instead of sleeping. Every verifier declares the application id `offline-protocol-verify`
-unless told otherwise with `--app-id`, and the sending and receiving
-devices must declare the same one: a received message is routed to the
-clients of the application its sender stamped, and held for that
+waits for that line instead of sleeping. Every verifier declares the
+application id `offline-protocol-verify` unless told otherwise with
+`--app-id`, and the sending and receiving devices must declare the same
+one: a received message is routed to the clients of the application its
+sender stamped, and held for that
 application, 256 deep, while none is connected. The first connection of the
 application takes everything held, so on the recipient run `await --until
 received` before `send`, `ping` or `watch`; `state` and `pair` only read,
@@ -208,20 +209,17 @@ by this process; so `await` works on a sender restarted since the send. And
 an event the engine emits while no client of the application is connected
 is gone, except a received message: use `send --await`, or start `await`
 or `watch` on the sender before the recipient can answer, which for a
-restart test means restarting the sender while the recipient is still away. Two devices that will reach
-each other only through a third must have met directly once: the automatic
-key exchange and the Welcome travel over a direct link, never through the
-mesh. Today a message that crosses the mesh is received, but the sender's
-receipt never arrives: the acknowledgement is carried back and dropped,
-because a message whose only route is the mesh has no pending
-acknowledgement to settle (an engine defect the scenario tests record as an
-expected failure; #537 fixes it). Until then, check a crossing on the
-recipient with `await --until received`, and on the middle device in the
-`watch` log as `message_relayed`. A second gap: only a send no carrier takes
-is handed to the mesh. A message a direct link took and then lost (a stream
-to a device that went away without closing it, until keepalive ends it in
-about 30 seconds) is retried over direct carriers only, so it never crosses
-the mesh; it waits for a direct link to the recipient.
+restart test means restarting the sender while the recipient is still away.
+Two devices that reach each other only through a third need not have met:
+while a message waits for a peer no carrier reaches directly, the key
+package and the Welcome cross the mesh like every frame after them, and the
+recipient's acknowledgement comes back the same way, so `message_delivered`
+on the sender proves the crossing end to end. One gap remains: only a send
+no carrier takes is handed to the mesh. A message a direct link took and
+then lost (a stream to a device that went away without closing it, until
+keepalive ends it in about 30 seconds) is retried over direct carriers
+only, so it never crosses the mesh; it waits for a direct link to the
+recipient.
 
 ## The policy file
 
