@@ -77,20 +77,78 @@ class _BleTransportCallbackImpl(BleTransportCallback):
     ) -> None:
         self._ble = ble_manager
         self._peripheral = ble_peripheral
+        self._draining = False
+        #: Fragments popped that neither role had a link for.
+        self.fragments_dropped = 0
 
     def on_fragments_available(self) -> None:
-        # The scanner and peripheral share a single fragment queue.
-        # Only let the scanner drain if it has connected clients;
-        # otherwise the scanner pops fragments it can't deliver,
-        # starving the peripheral.
-        scanner_has_clients = (
-            self._ble is not None
-            and bool(self._ble._clients)
-        )
-        if scanner_has_clients:
+        # The two roles share the core's one fragment queue, which can be
+        # neither peeked nor refilled. Two drains popping it at once split a
+        # message's fragments across two links and lose it, so with both
+        # roles present one drain pops each fragment and gives it to the
+        # role that can deliver it.
+        if self._ble is not None and self._peripheral is not None:
+            loop = self._running_loop()
+            if loop is not None:
+                loop.call_soon_threadsafe(asyncio.ensure_future, self._drain_shared())
+            return
+        if self._ble is not None:
             self._ble.on_fragments_available()
         if self._peripheral is not None:
             self._peripheral.on_fragments_available()
+
+    def _running_loop(self) -> asyncio.AbstractEventLoop | None:
+        for role in (self._ble, self._peripheral):
+            loop = getattr(role, "_loop", None)
+            if loop is not None and not loop.is_closed() and loop.is_running():
+                return loop
+        return None
+
+    async def _drain_shared(self) -> None:
+        if self._draining:
+            return
+        self._draining = True
+        try:
+            await self._drain_shared_inner()
+        finally:
+            self._draining = False
+
+    async def _drain_shared_inner(self) -> None:
+        ble, peripheral = self._ble, self._peripheral
+        if ble is None or peripheral is None:
+            return
+        protocol = ble._protocol
+        while True:
+            try:
+                frag = protocol.ble_get_next_fragment()
+            except Exception as exc:
+                logger.warning("Unexpected error getting next fragment: %s", exc)
+                break
+            if frag is None:
+                break
+            recipient = frag.recipient_id
+            data = bytes(frag.data)
+            # Our own client link first: it is the one keyed by the peer's
+            # proved address. Then the peripheral, which notifies every
+            # subscribed central. With neither the fragment has no link
+            # here, and the core's retry of the message is what re-sends it.
+            if await ble.write_fragment(recipient, data):
+                pass
+            elif peripheral.has_subscriber():
+                await peripheral.notify_fragment(data)
+            else:
+                # Rare: the core queues a fragment only for a peer it holds.
+                # A drop means the message waits for the core's retry, which
+                # is what a board run wants to see.
+                self.fragments_dropped += 1
+                logger.info(
+                    "no BLE link for a fragment to %s (%d dropped)",
+                    recipient, self.fragments_dropped,
+                )
+            try:
+                protocol.ble_return_fragment()
+            except Exception:
+                logger.debug("ble_return_fragment failed", exc_info=True)
 
 
 class _WifiDirectTransportCallbackImpl(WifiDirectTransportCallback):

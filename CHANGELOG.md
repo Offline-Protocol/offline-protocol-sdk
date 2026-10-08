@@ -79,6 +79,20 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   registrations survived a restart. Bluetooth LE from a container is
   untested on hardware.
 
+- **Two devices that have never been in range of each other start a session
+  through a third.** With encryption required, a message to a peer the
+  sender had never been next to waited in the pending queue for its whole
+  lifetime when the only path ran through another device: the key package and
+  the Welcome were the two frames that never crossed the mesh, and every frame
+  after them is sealed. While a message waits for a peer that no carrier
+  reaches directly, the sender now hands its key package to its neighbours to
+  carry, and the recipient's Welcome takes the same route back; confirmation,
+  the message and its acknowledgement already did. Both are offered to the
+  mesh even when the relay accepted them for a peer it has said is not on it,
+  and a Welcome that expired while the path was down is sent again on the
+  peer's next key package. The device in between carries frames it cannot
+  read. The threat model gains R24 (a session can be started from anywhere
+  the mesh reaches, and what bounds it).
 - **`offline-protocol-verify`: drive a service and read the proof.** A
   command for the device a service runs on: `send` a message, `await` its
   delivery receipt on the sender or its arrival on the recipient, `pair`
@@ -93,16 +107,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   held, so `send --await` waits for it on the connection it sent on, and a
   separate `await` or `watch` on the sender must start before the recipient
   can answer; both print `subscribed` on standard error once they are
-  listening, which a script waits for instead of sleeping. New scenario tests run the networking properties end to end over
-  loopback peer streams with encryption on: a message to a device that is
-  off arrives when it returns and the sender gets the receipt; a queued
+  listening, which a script waits for instead of sleeping. New scenario
+  tests run the networking properties end to end over loopback peer streams
+  with encryption on: a message to a device that is off arrives when it
+  returns and the sender gets the receipt; a queued
   message survives the sender restarting (and is lost when the saved state
   is removed, the control); a message crosses a middle device to one the
-  sender cannot hear. In that last one the sender's receipt never arrives:
-  the recipient's acknowledgement is carried back and dropped, because a
-  message whose only route is the mesh is refused by every carrier of the
-  sender and so has no pending acknowledgement to settle. The test records
-  it as an expected failure until the engine fix in #537 lands.
+  sender cannot hear, and the recipient's receipt comes back the same way.
 
 ### Changed
 
@@ -117,6 +128,52 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   with `--relay-token-env` and left unset is refused rather than read as
   "no token", and each transport has 30 seconds to start before it counts
   as failed and is stopped.
+
+### Fixed
+
+- **A message the mesh carried settles when its recipient answers.** A direct
+  message to a peer no carrier could reach was handed to neighbours to carry,
+  but registered no pending acknowledgement, and an acknowledgement with none
+  to match settled only a message the relay had declared unreachable. So a
+  message to a peer two hops away arrived, was read, and stayed in the
+  sender's outbox, retried on its backoff, until the outbox lifetime failed it
+  with `message_failed` seven days later; `message_delivered` never fired. The
+  recipient's acknowledgement now settles any direct message still in the
+  outbox, parked or not, with `message_delivered`.
+- **The local API keeps a parked message's events with the client that
+  sent it.** The service forgot a message id on `message_undeliverable`,
+  which the engine emits when a recipient is away and repeats on every
+  reachability probe while it keeps the message. Every later event for that
+  message, its delivery receipt included, was broadcast to every connected
+  application. A connection request had the same fault on
+  `connection_request_undeliverable`, and the one the engine emits right
+  after the `message_failed` of a request it gives up on was broadcast
+  too. The id is now kept until `message_delivered` or `message_failed`,
+  and a settled id still reaches its client for the next 1024
+  settlements, so an event that trails the settling one is not
+  broadcast. Both example clients (`examples/local_api_client.py`
+  and `examples/local-api/client.mjs`) print a `message_undeliverable` as a
+  status line and keep waiting for the delivery, where they used to stop at
+  it; each takes `--deliver-timeout SECONDS` (30 by default).
+- **The Python Bluetooth LE peripheral knows its centrals on Linux.** It
+  read the list of subscribed centrals from a structure only bless's macOS
+  backend has, so on BlueZ it never announced a central to the core,
+  attributed every inbound fragment to the placeholder `ble-peer`, and gave
+  the core no route back to a phone that had connected to it. It now reads
+  the device BlueZ names in each read and write of its characteristics and
+  asks BlueZ when that device disconnects. A peripheral our own central
+  connected to is not counted, since it never calls into our server. With
+  several centrals connected, each write is attributed to its writer;
+  notifications still reach every subscribed central, which bless offers no
+  way around.
+- **The two Bluetooth LE roles no longer split a message between them.**
+  The central and the peripheral took fragments from the core's one queue
+  at the same time, so a message's fragments could leave on two links and
+  never reassemble. With both roles running, one drain now takes each
+  fragment and gives it to the central's link to that peer, else to the
+  peripheral when a central is subscribed. The peripheral alone takes
+  nothing while no central is subscribed, where a notification reached no
+  one. No board run has been done yet.
 
 ## [0.28.0] — 2026-10-06
 

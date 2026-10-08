@@ -8,6 +8,7 @@ mod data_sync_group;
 #[cfg(feature = "file-store")]
 mod file_stores;
 mod leaf_pairing;
+mod mesh_session;
 mod per_send_app_id;
 
 use super::*;
@@ -10178,6 +10179,61 @@ fn test_a_later_park_offers_the_dm_to_whoever_is_around_then() {
 }
 
 #[test]
+fn test_a_dm_the_mesh_carried_without_a_park_is_settled_by_its_answer() {
+    // No relay at all: the one neighbour is carol, the recipient is bob, so
+    // the direct send fails and the frame is handed to carol to carry. Nothing
+    // accepted it, so no pending ACK exists, and nothing parked it either.
+    // Bob's answer coming back is the only way this device learns the message
+    // arrived; dropping it kept a delivered message retrying for seven days.
+    let mut protocol = OfflineProtocol::new(create_relay_test_config_for_user("user123")).unwrap();
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    ble.set_reject_unknown_recipients(true);
+    ble.add_connected_peer("carol", -55);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble.clone()));
+    protocol.start().unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let message_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    assert!(
+        ble.peer_sends()
+            .iter()
+            .any(|(to, frame)| to == "carol" && frame.id == message_id),
+        "the message was handed to carol to carry"
+    );
+    assert!(!protocol.ack_manager.is_waiting_for_ack(&message_id));
+    assert!(!protocol.dm_unreachable_parks.contains_key("bob"));
+
+    ble.queue_message_from(
+        delivery_ack_frame("bob", "user123", &message_id),
+        "carol".to_string(),
+    );
+    assert!(protocol.receive_message().is_none());
+
+    assert!(
+        !protocol.outbox.contains_key(&message_id),
+        "the message was delivered; it must leave the outbox"
+    );
+    assert!(!protocol.retry_queue.contains(&message_id.as_str()));
+    assert!(
+        events.lock().unwrap().iter().any(|event| matches!(
+            event,
+            Event::MessageDelivered { message_id: id, hop_count: 2, .. }
+                if *id == message_id.as_str()
+        )),
+        "and the application hears that it was"
+    );
+}
+
+#[test]
 fn test_a_parked_dm_is_settled_by_an_acknowledgement_carried_back() {
     // The other half of the offer. Parking removed the pending ACK, so the
     // answer to a mesh-carried delivery lands on the branch that used to drop
@@ -10326,8 +10382,8 @@ fn test_an_acknowledgement_carrying_only_ack_for_settles_the_message() {
 #[test]
 fn test_a_parked_dm_is_not_settled_by_anyone_elses_acknowledgement() {
     // An acknowledgement carries no signature, so the settle path is gated on
-    // what it cannot choose: the message must be parked, and the answer must
-    // come from the peer it was addressed to.
+    // what it cannot choose: the message must still be waiting in the outbox,
+    // and the answer must come from the peer it was addressed to.
     let (mut protocol, _internet, ble) = online_device_with_a_neighbor();
 
     let message_id = protocol
@@ -10350,10 +10406,10 @@ fn test_a_parked_dm_is_not_settled_by_anyone_elses_acknowledgement() {
         "only the recipient's own answer settles a parked message"
     );
 
-    // With no park counter this is an ordinary late or duplicate answer, and
-    // the outbox entry is not this path's to remove: a reachability edge that
-    // cleared the counter also re-drove the message, which registers a fresh
-    // pending ACK for the ordinary path to settle.
+    // The recipient's own answer settles it, with or without a live park
+    // counter: the park offered the frame to the mesh, and a copy the mesh
+    // carried is delivered whatever the counter says by the time the answer
+    // comes back.
     protocol.dm_unreachable_parks.remove("bob");
     ble.queue_message_from(
         delivery_ack_frame("bob", "user123", &message_id),
@@ -10361,8 +10417,8 @@ fn test_a_parked_dm_is_not_settled_by_anyone_elses_acknowledgement() {
     );
     assert!(protocol.receive_message().is_none());
     assert!(
-        protocol.outbox.contains_key(&message_id),
-        "without a live park this is a late answer, not a park settlement"
+        !protocol.outbox.contains_key(&message_id),
+        "the recipient's answer settles a message with no pending acknowledgement"
     );
 }
 

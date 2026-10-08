@@ -3805,6 +3805,48 @@ impl OfflineProtocol {
         handed_to
     }
 
+    /// Puts a session-handshake frame (a key package or a Welcome) on its
+    /// way, returning how many neighbours took a copy.
+    ///
+    /// Invariant: a handshake frame for a peer that no carrier is known to
+    /// reach is handed to the mesh, whatever the direct send returned. A
+    /// carrier's `Ok` is not that knowledge. The internet transport enqueues
+    /// for any recipient, the one the relay has already said it cannot reach
+    /// included, and Reticulum accepts for routing. Offering only when the
+    /// direct send failed left a device with either carrier up unable to start
+    /// a session with a peer only the mesh reaches: the carrier took every key
+    /// package and Welcome and delivered none, and the message waiting on the
+    /// session never left. This is the question
+    /// [`Self::handle_send_success`] asks of every ordinary message, asked of
+    /// the two frames that do not go through it.
+    ///
+    /// Additive, as there: a copy that also arrives through the carrier is a
+    /// duplicate the receiver already absorbs. `Err` only when no carrier
+    /// accepted the frame and no neighbour took it.
+    pub(super) fn send_or_carry_handshake(&mut self, message: &Message) -> Result<usize> {
+        let direct = self.transport_manager.send(message);
+        let handed_to_mesh =
+            if direct.is_err() || !self.can_reach_recipient(message.recipient.as_str()) {
+                self.offer_to_mesh(message)
+            } else {
+                0
+            };
+        if handed_to_mesh > 0 {
+            debug!(
+                recipient = %message.recipient,
+                message_id = %message.id,
+                handed_to_mesh,
+                carrier_accepted = direct.is_ok(),
+                "Handshake frame handed to neighbours to carry"
+            );
+        }
+        match direct {
+            Ok(()) => Ok(handed_to_mesh),
+            Err(_) if handed_to_mesh > 0 => Ok(handed_to_mesh),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Confirms that a message was successfully sent by the transport layer.
     pub fn on_transport_send_confirmed(&mut self, message_id: &str) -> Result<()> {
         let Some(peer_id) = self.find_welcome_peer_by_message_id(message_id) else {
@@ -4251,7 +4293,7 @@ impl OfflineProtocol {
     /// A plain DM is parked exactly as for a `DeliveryError`: without the park
     /// the missing ACK burns the retry budget to a terminal `message_failed`.
     /// If the push did deliver, the recipient's acknowledgement settles the
-    /// parked entry (`settle_parked_dm_from_ack`).
+    /// parked entry (`settle_dm_without_pending_ack`).
     ///
     /// `stored` is the relay saying its mailbox also holds the frame
     /// (`MessageSent { pushed: true, stored: true }`, reported as
@@ -4495,7 +4537,7 @@ impl OfflineProtocol {
             // is not proof of arrival. What settles it is the acknowledgement
             // coming back — over the mesh, for a message the relay could not
             // deliver, which is why parked DMs must be settleable without a
-            // pending ACK (`settle_parked_dm_from_ack`). Without that arm this
+            // pending ACK (`settle_dm_without_pending_ack`). Without that arm this
             // offer would deliver messages the sender never learns about.
             //
             // Re-offering on every park is cheap by construction: neighbors
@@ -5184,11 +5226,11 @@ impl OfflineProtocol {
                     }
                 } else {
                     // No pending ACK. Ordinarily that means a duplicate answer
-                    // or one arriving after the message already settled — but a
-                    // *parked* DM has no pending ACK either, because parking
-                    // removed it, and its delivery is the one this device has
-                    // no other way to learn about.
-                    self.settle_parked_dm_from_ack(&message_id, message);
+                    // or one arriving after the message already settled, but a
+                    // parked DM has none either, nor does one the mesh carried
+                    // after no carrier took it directly, and their delivery is
+                    // the one this device has no other way to learn about.
+                    self.settle_dm_without_pending_ack(&message_id, message);
                 }
             }
         }
@@ -5219,57 +5261,55 @@ impl OfflineProtocol {
         ack.sender.as_str() == entry.message.recipient.as_str()
     }
 
-    /// Settles a parked DM whose acknowledgement arrived with no pending ACK to
-    /// match it — the delivery a park can otherwise never learn about.
+    /// Settles a DM whose acknowledgement arrived with no pending ACK to match
+    /// it: the delivery the sender can otherwise never learn about.
     ///
-    /// Parking is what makes this necessary: it removes the pending ACK so the
-    /// retry budget stops burning against a peer the relay says is offline. Once
-    /// the park also hands the frame to the mesh
-    /// ([`Self::park_unreachable_dm`]), a neighbor can carry it to a recipient
-    /// the relay could not reach — and the answer coming back would land here,
-    /// on the branch that used to drop it. The message would sit in the outbox
-    /// being probed until its lifetime expired, delivered and read the whole
-    /// time. The offer and this arm are one change; neither is correct alone.
+    /// Invariant: a plain DM still in the outbox is settled by its recipient's
+    /// acknowledgement, whichever copy of it arrived. A pending ACK exists only
+    /// for a send some carrier accepted, and two paths hand a DM to the mesh
+    /// without one: a park, which removes it so the retry budget stops burning
+    /// against a peer the relay says is offline, and a direct send that no
+    /// carrier took, which never registered one. On both, a neighbour can
+    /// carry the frame to the recipient and the answer lands here. Before this
+    /// arm took the second path, a message to a peer two hops away was
+    /// delivered and read, and its sender kept it in the outbox, retrying,
+    /// until the outbox lifetime failed it seven days later.
     ///
-    /// Gated three ways, because an acknowledgement is unauthenticated (it
-    /// carries no internal prefix, so it never reaches the control gate, and it
-    /// is handled before the security gate runs on the receive path):
+    /// The offer and this arm are one change; neither is correct alone.
     ///
-    /// 1. the id is a parkable plain DM — welcomes keep their own lifecycle,
-    ///    and media chunks are never parked, so they keep their pending ACK and
+    /// Gated twice, because an acknowledgement is unauthenticated (it carries
+    /// no internal prefix, so it never reaches the control gate, and it is
+    /// handled before the security gate runs on the receive path):
+    ///
+    /// 1. the id is a plain DM ([`Self::is_parkable_plain_dm`]): welcomes keep
+    ///    their own lifecycle, and media chunks keep their pending ACK and
     ///    settle on the branch above. This gate does **not** exclude connection
-    ///    requests, whatever [`Self::is_parkable_plain_dm`] looks like it
-    ///    promises: the caller retires their typed tracking a few lines earlier
-    ///    and unconditionally, so by the time that check runs the map no longer
-    ///    holds the id. The outcome is the wanted one — a request whose typed
-    ///    window has already lapsed, carried to its recipient and answered, was
+    ///    requests: the caller retires their typed tracking a few lines earlier
+    ///    and unconditionally, so by the time it runs the map no longer holds
+    ///    the id. A request carried to its recipient and answered was
     ///    delivered, and settling it is the same proof the pending-ACK branch
-    ///    acts on for an already-untracked request — but it is the caller's
-    ///    ordering that decides it, not this gate;
-    /// 2. it is still in the outbox;
-    /// 3. its recipient holds a live park counter, so the relay did declare this
-    ///    peer unreachable and no edge has cleared it since.
+    ///    acts on;
+    /// 2. it is still in the outbox, so a late or duplicate answer to a
+    ///    message that already settled finds nothing to act on.
     ///
-    /// Attribution — that the answer comes from the recipient rather than from
-    /// any party that handled the frame — is deliberately *not* a fourth gate
-    /// here. [`Self::handle_ack_message`] now applies it to every
-    /// acknowledgement it accepts, so both settle paths judge by one rule
-    /// against one record; a copy of it here would be unreachable, and the kind
-    /// of unreachable that reads as load-bearing to the next person.
+    /// Attribution, that the answer comes from the recipient rather than from
+    /// any party that handled the frame, is applied by
+    /// [`Self::handle_ack_message`] to every acknowledgement it accepts, so
+    /// both settle paths judge by one rule against one record.
     ///
-    /// What remains after all of them is a forgery by someone who saw the frame
-    /// *and* knows the relay refused it — the carriers and the relay, parties
-    /// who can already deny delivery outright. What they gain is making a
-    /// parked message look delivered rather than staying parked, which is the
-    /// same class as forging an acknowledgement for an in-flight message.
+    /// What remains is a forgery by someone who saw the frame: a carrier or the
+    /// relay, parties who can already deny delivery outright and who can forge
+    /// an acknowledgement for an in-flight message on the branch above. An
+    /// earlier third gate, a live park counter, narrowed that to parties who
+    /// also knew the relay refused the frame; it is gone because it is what
+    /// dropped every answer to a message the mesh carried without a park.
     ///
     /// Reports latency end to end (from the first send) rather than per attempt:
     /// there is no pending record to measure the last attempt against, and for a
-    /// message that waited out a park the honest number is how long delivery
-    /// actually took. For the same reason no transport metric is recorded — the
-    /// carrier label is peer-supplied and there is no attempt to attribute it
-    /// to.
-    fn settle_parked_dm_from_ack(&mut self, message_id: &MessageId, ack: &Message) {
+    /// message that waited the honest number is how long delivery actually
+    /// took. For the same reason no transport metric is recorded: the carrier
+    /// label is peer-supplied and there is no attempt to attribute it to.
+    fn settle_dm_without_pending_ack(&mut self, message_id: &MessageId, ack: &Message) {
         if !self.is_parkable_plain_dm(message_id) {
             return;
         }
@@ -5277,9 +5317,6 @@ impl OfflineProtocol {
             return;
         };
         let recipient = entry.message.recipient.as_str().to_string();
-        if !self.dm_unreachable_parks.contains_key(&recipient) {
-            return;
-        }
 
         let latency = Utc::now()
             .signed_duration_since(entry.first_sent_at)
@@ -5300,7 +5337,7 @@ impl OfflineProtocol {
             message_id = %message_id,
             recipient = %recipient,
             latency_ms = latency,
-            "Parked DM was delivered after all; settling from its acknowledgement"
+            "DM with no pending acknowledgement was delivered; settling from its acknowledgement"
         );
 
         self.retry_queue.remove(&message_id.as_str());
@@ -5324,10 +5361,10 @@ impl OfflineProtocol {
             ));
             drop(state);
         } else {
-            error!("Failed to lock shared state for parked-ACK event, skipping event emission");
+            error!("Failed to lock shared state for an ACK event, skipping event emission");
         }
-        // The peer answered, so the rest of their parked traffic can go now
-        // rather than waiting out its own escalated probe timers.
+        // The peer answered, so the rest of their waiting traffic can go now
+        // rather than waiting out its own backoff or escalated probe timers.
         self.flush_outbox_for_peer_via(&recipient, redrive_via);
     }
 
@@ -5756,6 +5793,13 @@ impl OfflineProtocol {
     /// which both weakened forward secrecy at session establishment (one
     /// compromised init key opens every Welcome built against it) and made the
     /// second peer's Welcome permanently unprocessable.
+    ///
+    /// A peer no carrier is known to reach is reached through the mesh: the
+    /// package is handed to neighbours to carry, as an ordinary message is
+    /// (see [`Self::send_or_carry_handshake`]). Without that a pair whose only path
+    /// runs through a third device could never start a session, because the
+    /// package and the Welcome were the two frames that never left the
+    /// device by any other route, and every frame after them is sealed.
     pub(crate) fn send_key_package_to(&mut self, peer_id: &str, session_reset: bool) -> Result<()> {
         let mls = self.mls_manager.as_ref().ok_or(Error::MlsNotInitialized)?;
 
@@ -5781,8 +5825,13 @@ impl OfflineProtocol {
             self.create_message(peer_id, content, Some(MessagePriority::Low), None)?;
         self.sign_control_message(&mut message)?;
 
-        match self.transport_manager.send(&message) {
-            Ok(()) => {
+        // A package no carrier is known to reach the peer with may still
+        // reach it through a neighbour. Handing it over counts as sending it:
+        // the stamp below is what starts the re-push ladder, which is the only
+        // repeat a package carried this way gets, since a peer we never hear
+        // directly produces no discovery to push again on.
+        match self.send_or_carry_handshake(&message) {
+            Ok(_) => {
                 // SECURITY (resource exhaustion): `key_package_sent_to` is keyed
                 // by the wire-claimed peer id, so a forged-sender key-package
                 // flood (each reply routes through here) would grow it without
@@ -5811,7 +5860,9 @@ impl OfflineProtocol {
             Err(err) => {
                 // Don't mark as sent and don't enqueue for retry -- if the peer is
                 // unreachable now, on_neighbor_discovered will fire again when they
-                // reconnect, generating a fresh exchange.
+                // reconnect, generating a fresh exchange, and a peer only the mesh
+                // reaches is pushed to from the reconciliation tick while a
+                // message waits for it.
                 debug!(peer_id = %peer_id, error = %err, "Key package send deferred");
                 Err(err)
             }

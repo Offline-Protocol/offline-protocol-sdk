@@ -8,8 +8,9 @@
 // Unix socket needs a WebSocket library that can dial one.
 //
 // What it shows, in order: hello with an application id and the token,
-// subscribe, send_message and the terminal event for it (message_delivered,
-// or message_undeliverable when the engine gives up), a document edit
+// subscribe, send_message and the event that settles it (message_delivered,
+// or message_failed when the engine gives up; a message_undeliverable on
+// the way is printed and waited past), a document edit
 // (data.map_set, then data.doc_json to read it back), and the one-shot
 // idiom (a fresh connection: hello, one request, close). An engine refusal
 // is printed as the JSON-RPC code and the engine's variant name; any other
@@ -27,7 +28,7 @@ if (typeof WebSocket === "undefined") {
 }
 
 function parseArgs(argv) {
-  const args = { appId: "notes", content: "hello from Node", space: "notes-1", doc: "todo" };
+  const args = { appId: "notes", content: "hello from Node", space: "notes-1", doc: "todo", deliverTimeoutMs: 30000 };
   for (let i = 0; i < argv.length; i += 2) {
     const [flag, value] = [argv[i], argv[i + 1]];
     if (flag === "--port") args.port = Number(value);
@@ -37,6 +38,7 @@ function parseArgs(argv) {
     else if (flag === "--content") args.content = value;
     else if (flag === "--space") args.space = value;
     else if (flag === "--doc") args.doc = value;
+    else if (flag === "--deliver-timeout") args.deliverTimeoutMs = Number(value) * 1000;
     else throw new Error(`unknown flag ${flag}`);
   }
   if (!args.port || !args.tokenFile) throw new Error("--port and --token-file are required");
@@ -60,6 +62,7 @@ class Client {
     this.nextId = 1;
     this.pending = new Map(); // id -> { resolve, reject }
     this.events = [];
+    this.observers = []; // called with every event as it arrives
     this.waiters = []; // { matches, resolve, reject }
     socket.addEventListener("message", (frame) => {
       const message = JSON.parse(frame.data);
@@ -70,6 +73,7 @@ class Client {
         return;
       }
       this.events.push(message.params); // a notification: the event object itself
+      for (const observe of this.observers) observe(message.params);
       this.waiters = this.waiters.filter((w) => !(w.matches(message.params) && (w.resolve(message.params), true)));
     });
     const fail = (reason) => {
@@ -137,10 +141,22 @@ async function main() {
     const token = readFileSync(args.tokenFile, "ascii").trim(); // written 0600 at launch
     client = await Client.open(args.port);
     console.log(JSON.stringify({ hello: await hello(client, args.appId, token) }));
-    await client.call("subscribe", { types: ["message_received", "message_delivered", "message_undeliverable"] });
+    await client.call("subscribe", {
+      types: ["message_received", "message_delivered", "message_failed", "message_undeliverable"],
+    });
     if (args.to) {
       const messageId = await client.call("send_message", { recipient: args.to, content: args.content, priority: "Medium" });
-      const outcome = await client.nextEvent(["message_delivered", "message_undeliverable"], { message_id: messageId });
+      // message_undeliverable settles nothing: the recipient is away, the
+      // engine keeps the message, may say so again on every probe, and
+      // delivers it when the recipient is back. Print each as a status line
+      // and keep waiting for the event that settles the id.
+      const status = (e) => {
+        if (e.type === "message_undeliverable" && e.message_id === messageId) console.log(JSON.stringify({ undeliverable: e }));
+      };
+      client.events.forEach(status);
+      client.observers.push(status);
+      const outcome = await client.nextEvent(["message_delivered", "message_failed"], { message_id: messageId }, args.deliverTimeoutMs);
+      client.observers.splice(client.observers.indexOf(status), 1);
       console.log(JSON.stringify({ [outcome.type.replace(/^message_/, "")]: outcome }));
     }
     // create_doc is a no-op for a document that exists. A written value is
