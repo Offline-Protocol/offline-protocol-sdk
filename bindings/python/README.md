@@ -220,8 +220,13 @@ offline-protocol-service --config config.json \
 ```
 
 `config.json` holds the `ProtocolConfig` fields by name; the socket is
-created owner-only. A client opens the socket, sends `hello` with its
-application id, and calls the engine's own methods by name:
+created owner-only. The service starts every transport the configuration
+enables: `--lan` (with the `lan` extra) finds the other hosts on the LAN
+with no `--peer` list, `ble_enabled` starts both Bluetooth LE roles so phones
+can find this host, and `--relay URL` connects the internet transport. A
+transport that fails to start is logged and the others run. A client opens
+the socket, sends `hello` with its application id, and calls the engine's
+own methods by name:
 
 ```python
 import asyncio, json

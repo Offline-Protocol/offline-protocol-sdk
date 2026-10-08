@@ -11,6 +11,40 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+## [Unreleased]
+
+### Added
+
+- **The service starts every transport its configuration enables.**
+  `offline-protocol-service` started only the peer stream and the gateway
+  client, so a configuration with `ble_enabled` built both Bluetooth LE
+  managers and never ran either, and `internet_enabled` had no way to name a
+  relay. The server now starts the Bluetooth LE central and peripheral where
+  the platform has a backend, and the internet transport once `--relay URL`
+  names one (the token from `OFFLINE_PROTOCOL_RELAY_TOKEN`, or the variable
+  `--relay-token-env` names). A transport that fails to start is logged and
+  left stopped while the others run, and the server fails only when none
+  starts: a Bluetooth adapter another process holds no longer takes the LAN
+  path down with it.
+- **`--lan` finds the other hosts on the LAN.** The peer-stream transport's
+  DNS-SD advertising and discovery existed in the library and could not be
+  switched on from the command; `--lan` switches on both (it needs the `lan`
+  extra and fails at start, naming it, without).
+
+### Changed
+
+- **A peer-stream or relay flag the configuration cannot honour is refused.**
+  `--listen` and `--peer` without `wifi_direct_enabled` were ignored, which
+  left a service that reached nobody and said nothing; they, `--lan`, and
+  `--relay` without `internet_enabled`, now stop the command at start with
+  the configuration field named. A `--relay` that is not a `ws://` or
+  `wss://` URL with a host is refused too: the internet transport retries a
+  failed connect for as long as it runs, so a mis-typed relay was a service
+  that reported the relay running and passed `/health`. A variable named
+  with `--relay-token-env` and left unset is refused rather than read as
+  "no token", and each transport has 30 seconds to start before it counts
+  as failed and is stopped.
+
 ## [0.28.0] — 2026-10-06
 
 > **The peer-stream slot carries traffic on phones.** The mobile managers

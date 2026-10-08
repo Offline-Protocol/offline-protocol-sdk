@@ -54,7 +54,45 @@ offline-protocol-service --config config.json \
 [Configuration](configuration.md)); `--listen` and `--peer` drive the
 peer-stream transport when the configuration enables it, and `--gateway
 HOST:PORT` names the gateway daemon when it enables `reticulum` (default
-`localhost:4242`, see [the gateway contract](spec/gateway-contract.md)). Two carriers:
+`localhost:4242`, see [the gateway contract](spec/gateway-contract.md)).
+
+### Which transports run
+
+The server starts every transport the configuration enables and the host
+can run, once the engine has an address to prove:
+
+| Transport | Enabled by | Started when |
+|---|---|---|
+| Peer stream | `wifi_direct_enabled` | Always. `--listen`, `--peer` and `--lan` configure it. |
+| Bluetooth LE central and peripheral | `ble_enabled` | The central always; the peripheral where `bless` has a backend (macOS, and Linux through BlueZ). The peripheral advertises this device to phones. |
+| Internet relay | `internet_enabled` | `--relay URL` names the relay; the token, if any, is read from `OFFLINE_PROTOCOL_RELAY_TOKEN` (`--relay-token-env` names another variable). |
+| Gateway | `reticulum_enabled` | Always once configured; `--gateway` names the daemon. |
+
+`--lan` advertises this host on the LAN over DNS-SD and dials every other
+host that advertises the same service type, so two hosts on one segment find
+each other with no `--peer` list. It needs the optional dependency
+(`pip install 'offline-protocol-sdk[lan]'`), and multicast DNS, so a
+container must share the host's network. An address a record carries is a
+hint; the stream's preamble proves the peer.
+
+**A transport that fails to start is logged and stays stopped, and the
+others run; the server fails only when none starts.** The failure this
+prevents is a Bluetooth adapter another process holds, or a refused
+advertisement, taking the LAN path down with it. A transport that has not
+started within 30 seconds counts as failed and is stopped then, not at
+shutdown, so a Bluetooth backend that hangs cannot keep the API socket from
+opening, nor finish starting later with nothing watching it. Transports start
+one after another, so the socket can take up to 30 seconds per configured
+transport to open. A flag the configuration
+cannot honour (`--lan` without `wifi_direct_enabled`, `--relay` without
+`internet_enabled`) is refused at start rather than ignored, and so is a
+value the transport could never use: `--relay` must be a `ws://` or `wss://`
+URL with a host, because the internet transport retries a failed connect
+for as long as it runs and would never report the mistake, and a variable
+named with `--relay-token-env` must be set. A `ws://` relay that is not on
+loopback is accepted with a warning: the token crosses the network in clear.
+
+Two carriers serve the API itself:
 
 | Carrier | How | Credential |
 |---|---|---|

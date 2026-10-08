@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -20,6 +21,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from websockets.exceptions import InvalidURI
+from websockets.uri import parse_uri
+
 from ..gateway_manager import DEFAULT_DAEMON_ADDRESS
 from ..protocol_manager import ProtocolManager
 from . import codec
@@ -27,6 +31,9 @@ from .authz import Policy
 from .server import LocalApiServer
 
 DEFAULT_STORE_KEY_ENV = "OFFLINE_PROTOCOL_STORE_KEY"
+DEFAULT_RELAY_TOKEN_ENV = "OFFLINE_PROTOCOL_RELAY_TOKEN"
+
+logger = logging.getLogger(__name__)
 
 
 def default_socket_path() -> Path:
@@ -72,6 +79,18 @@ def build_parser() -> argparse.ArgumentParser:
     mesh = parser.add_argument_group("peer stream")
     mesh.add_argument("--listen", metavar="HOST:PORT", help="where the peer-stream transport accepts streams")
     mesh.add_argument("--peer", action="append", default=[], metavar="ENTRY", help="a peer to keep a stream to: host:port or off1...@host:port")
+    mesh.add_argument(
+        "--lan",
+        action="store_true",
+        help="advertise this host and discover others on the LAN over DNS-SD (needs the [lan] extra)",
+    )
+    relay = parser.add_argument_group("internet relay")
+    relay.add_argument("--relay", metavar="URL", help="the relay to connect to when the config enables internet")
+    relay.add_argument(
+        "--relay-token-env",
+        default=DEFAULT_RELAY_TOKEN_ENV,
+        help=f"environment variable holding the relay auth token, if any (default: {DEFAULT_RELAY_TOKEN_ENV})",
+    )
     parser.add_argument(
         "--gateway",
         metavar="HOST:PORT",
@@ -101,14 +120,8 @@ def build_manager(args: argparse.Namespace) -> ProtocolManager:
             )
         except ValueError as exc:
             raise SystemExit(str(exc)) from None
-    if manager.peer_stream is not None and (args.listen or args.peer):
-        listen_host, listen_port = None, ...
-        if args.listen:
-            host, _, port = args.listen.rpartition(":")
-            if not host or not port.isdigit():
-                raise SystemExit("--listen takes HOST:PORT")
-            listen_host, listen_port = host.strip("[]"), int(port)
-        manager.peer_stream.configure(listen_host=listen_host, listen_port=listen_port, peers=args.peer)
+    configure_peer_stream(args, manager)
+    configure_relay(args, manager)
     if manager.gateway is not None:
         try:
             manager.gateway.configure(daemon_address=args.gateway or DEFAULT_DAEMON_ADDRESS)
@@ -117,6 +130,84 @@ def build_manager(args: argparse.Namespace) -> ProtocolManager:
     elif args.gateway:
         raise SystemExit("--gateway needs reticulum_enabled in the config")
     return manager
+
+
+def configure_peer_stream(args: argparse.Namespace, manager: ProtocolManager) -> None:
+    """Applies ``--listen``, ``--peer`` and ``--lan`` to the peer stream.
+
+    Each needs the transport, and a flag the configuration cannot honour is
+    refused rather than ignored: an operator who asked for LAN discovery
+    and got a service that reaches nobody would learn why only from the
+    silence.
+    """
+    asked = [flag for flag, given in (("--listen", args.listen), ("--peer", args.peer), ("--lan", args.lan)) if given]
+    if not asked:
+        return
+    if manager.peer_stream is None:
+        raise SystemExit(f"{', '.join(asked)} needs wifi_direct_enabled in the config (the peer-stream transport)")
+    listen_host, listen_port = None, ...
+    if args.listen:
+        host, _, port = args.listen.rpartition(":")
+        if not host or not port.isdigit():
+            raise SystemExit("--listen takes HOST:PORT")
+        listen_host, listen_port = host.strip("[]"), int(port)
+    if args.lan:
+        try:
+            import zeroconf  # noqa: F401
+        except ImportError:
+            raise SystemExit("--lan needs the optional dependency: pip install 'offline-protocol-sdk[lan]'") from None
+    try:
+        manager.peer_stream.configure(
+            listen_host=listen_host,
+            listen_port=listen_port,
+            peers=args.peer or None,
+            advertise=args.lan or None,
+            discover=args.lan or None,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"--peer: {exc}") from None
+
+
+def configure_relay(args: argparse.Namespace, manager: ProtocolManager) -> None:
+    """Applies ``--relay``: the internet transport's server and token.
+
+    The URL is checked here because the transport never refuses one: a
+    connect that fails, for a malformed URL as for an unreachable relay, is
+    retried for as long as the transport runs. A mis-typed ``--relay`` would
+    otherwise be a service that reports the relay running, answers
+    ``/health``, and logs the same failure every thirty seconds.
+    """
+    if not args.relay:
+        return
+    if manager.internet is None:
+        raise SystemExit("--relay needs internet_enabled in the config")
+    # The parser the transport's connect runs, so the CLI refuses exactly
+    # what the transport could never dial: a port that is not a number or
+    # out of range passes a looser check and is then retried forever.
+    try:
+        uri = parse_uri(args.relay)
+    except (InvalidURI, ValueError) as exc:
+        raise SystemExit(f"--relay takes a ws:// or wss:// URL with a host, not {args.relay!r}: {exc}") from None
+    if not uri.secure and not _is_loopback(uri.host):
+        logger.warning("--relay %s is not TLS: the relay token and traffic metadata cross the network in clear", args.relay)
+    token = os.environ.get(args.relay_token_env)
+    if not token and args.relay_token_env != DEFAULT_RELAY_TOKEN_ENV:
+        # A variable the operator named and left unset is a mistake, not an
+        # open relay: without a token the transport authenticates with the
+        # profile name.
+        raise SystemExit(f"--relay-token-env: {args.relay_token_env} is not set")
+    manager.internet.configure(server_url=args.relay)
+    if token:
+        manager.internet.set_auth_token(token)
+
+
+def _is_loopback(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def build_server(args: argparse.Namespace, manager: ProtocolManager) -> LocalApiServer:
