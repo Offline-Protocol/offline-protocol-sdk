@@ -168,6 +168,11 @@ def test_a_request_with_another_version_comes_back_for_refusal():
         {"op": "resp", "v": 1, "id": "x", "s": True},
         {"op": "resp", "v": 2, "id": "x", "s": 200},
         {"op": "resp", "v": 1, "id": "x", "s": 200, "h": {"x-big": "v" * 8200}},
+        # A lone surrogate has no UTF-8 form: refused as an envelope, not
+        # left to raise a UnicodeEncodeError nothing catches.
+        {"op": "req", "v": 1, "id": "x", "svc": "s", "m": "GET", "p": "/\udcff", "dl": 1},
+        {"op": "req", "v": 1, "id": "x", "svc": "s", "m": "GET", "p": "/", "dl": 1, "h": {"x-a": "\udcff"}},
+        {"op": "resp", "v": 1, "id": "x", "s": 200, "h": {"x-a": "\udcff"}},
     ],
 )
 def test_what_is_not_an_envelope_is_refused(doc):

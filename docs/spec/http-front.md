@@ -134,7 +134,9 @@ and a requester that relayed a CR or LF would split its own response. An
 HTTP client normalizes dot segments away, `/api/%2e%2e/admin` included, so
 joined to the callback URL such a path reaches one outside the path the
 provider registered. A 1xx written as the answer leaves the client waiting
-for the real one.
+for the real one. A string with no UTF-8 form (a JSON `\udcff` escape) is
+not processed either. On the requester, a header value that is not UTF-8,
+which HTTP allows, is `bad_request`: the far side could not decode it.
 
 ### Limits
 
@@ -286,7 +288,7 @@ host's own router adds), and is recorded as
 | Token | Status | Raised by | Means |
 |---|---|---|---|
 | `bad_host` | 400 | requester | The host is under the domain but not `<service>.<device>`, or, without a token, names neither the domain nor loopback |
-| `bad_request` | 400 | requester | Headers or path over their limit, a path with a dot segment, or a timeout that is not a number |
+| `bad_request` | 400 | requester | Headers or path over their limit, a header value that is not UTF-8, a path with a dot segment, or a timeout that is not a number |
 | `unknown_device` | 404 | requester | The label is neither an address nor an alias |
 | `body_too_large` | 413 | requester | The request body is over the limit |
 | `deadline_exceeded` | 504 | requester | No response before the deadline |

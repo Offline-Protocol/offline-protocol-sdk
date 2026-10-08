@@ -355,8 +355,14 @@ class HttpFront:
         if len(path.encode()) > MAX_PATH_BYTES:
             return self._error("bad_request", "path over the limit")
         headers = carried(request.headers)
-        if header_bytes(headers) > MAX_HEADER_BYTES:
-            return self._error("bad_request", "headers over the limit")
+        try:
+            if header_bytes(headers) > MAX_HEADER_BYTES:
+                return self._error("bad_request", "headers over the limit")
+        except EnvelopeError:
+            # A header byte that is not UTF-8 (obs-text, which HTTP allows):
+            # the server hands it over as a lone surrogate, and the far
+            # front could not decode the envelope it would go in.
+            return self._error("bad_request", "a carried header value must be UTF-8")
         body = await _read_limited(request.content, MAX_BODY_BYTES)
         if body is None:
             return self._error("body_too_large")

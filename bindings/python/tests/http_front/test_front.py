@@ -487,6 +487,21 @@ async def test_stopping_does_not_wait_for_a_request_in_flight(hosts):
     assert (status, headers["X-Offline-Protocol-Error"]) == (503, "not_connected")
 
 
+async def test_a_header_value_that_is_not_utf8_is_a_bad_request(hosts):
+    """HTTP allows such a byte and the server hands it over as a lone
+    surrogate; without the check the front answered a bare 500."""
+    await hosts.register(hosts.b)
+    reader, writer = await asyncio.open_connection("127.0.0.1", hosts.a.port)
+    host = host_for("timeofday", "bob")
+    writer.write(f"GET /now HTTP/1.1\r\nHost: {host}\r\nX-Note: caf".encode() + b"\xe9\r\nConnection: close\r\n\r\n")
+    await writer.drain()
+    reply = await asyncio.wait_for(reader.read(), 10)
+    writer.close()
+    assert reply.startswith(b"HTTP/1.1 400"), reply[:200]
+    assert b"bad_request" in reply
+    assert hosts.provider.calls == []
+
+
 async def test_stopping_ends_an_open_browse(hosts):
     front = await hosts.front(hosts.server_a)
     stream = await hosts.http.get(f"http://127.0.0.1:{front.port}/browse/timeofday", headers={"Host": DOMAIN})

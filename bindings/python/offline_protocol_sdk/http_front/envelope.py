@@ -109,8 +109,20 @@ def carried(headers: Mapping[str, str] | Any) -> dict[str, str]:
     return out
 
 
+def utf8(value: str) -> bytes:
+    """``value`` as UTF-8, or :class:`EnvelopeError`. A lone surrogate is a
+    ``str`` that has no UTF-8 form: JSON can name one (``"\\udcff"``), and
+    the HTTP server hands a header byte that is not UTF-8 over as one. Left
+    to ``str.encode`` it raises a ``ValueError`` that is not an
+    ``EnvelopeError``, which nothing on either side catches."""
+    try:
+        return value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise EnvelopeError("not UTF-8: a lone surrogate") from None
+
+
 def header_bytes(headers: Mapping[str, str]) -> int:
-    return sum(len(k.encode()) + len(v.encode()) for k, v in headers.items())
+    return sum(len(utf8(k)) + len(utf8(v)) for k, v in headers.items())
 
 
 #: An HTTP token (RFC 9110 section 5.6.2): a method or a header name.
@@ -234,7 +246,7 @@ def decode(content: str) -> Request | Response:
         if version != ENVELOPE_VERSION:
             return Request(request_id, "", "", "", version=version)
         path = _str(doc, "p")
-        if not path.startswith("/") or len(path.encode()) > MAX_PATH_BYTES:
+        if not path.startswith("/") or len(utf8(path)) > MAX_PATH_BYTES:
             raise EnvelopeError("p must be a path within the limit")
         if has_dot_segment(path) or _CONTROL.search(path):
             raise EnvelopeError("p must hold no dot segment and no control character")
