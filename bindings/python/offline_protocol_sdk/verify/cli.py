@@ -55,7 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    state = sub.add_parser("state", help="address, carriers, neighbours, queues, relay counters, sessions")
+    state = sub.add_parser("state", help="address, carriers, queues, relay counters, sessions")
     state.add_argument("--peer", action="append", default=[], help="an off1... address to report the session with")
 
     send = sub.add_parser("send", help="send one message and print its id")

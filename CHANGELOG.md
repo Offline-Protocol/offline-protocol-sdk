@@ -85,7 +85,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   (wait for the session with a peer), `ping` (a message on a cadence, each
   reported with the carrier it arrived over), `watch` (every event as a JSON
   line, across restarts of the service) and `state` (address, carriers,
-  neighbours, queues, relay counters, sessions). Each prints JSON lines and
+  queues, relay counters, sessions). Each prints JSON lines and
   exits 0 when what it waited for happened, 2 when its time ran out and 1
   when the engine gave the message up. It matches events by the identifier
   they carry, so it works on a sender restarted since the send. A receipt

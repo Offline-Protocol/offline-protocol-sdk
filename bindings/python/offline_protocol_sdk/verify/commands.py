@@ -34,6 +34,10 @@ TIMED_OUT = 2
 #: ``message_delivered`` or ``message_failed``.
 STATUS_TAGS = frozenset({"message_sent", "message_deferred", "message_retrying", "message_undeliverable"})
 
+#: Appended to the application id by the commands that only read state
+#: (``state``, ``pair``); see :meth:`Target.open`.
+OBSERVER_SUFFIX = ".observer"
+
 #: How often ``pair`` asks for the session state.
 PAIR_POLL_INTERVAL = 0.25
 
@@ -53,12 +57,17 @@ class Target:
     token_file: str | None = None
     app_id: str = DEFAULT_APP_ID
 
-    async def open(self) -> VerifyClient:
+    async def open(self, *, observer: bool = False) -> VerifyClient:
+        """Connects as the application, or with ``observer`` under an id of
+        its own. The service hands every message it held for an application
+        to the first connection of that application, so a command that only
+        reads state must not declare it: a ``state`` run on the recipient
+        before ``await --until received`` would take the message and drop it."""
         return await VerifyClient.open(
             socket_path=self.socket_path,
             tcp_port=self.tcp_port,
             token_file=self.token_file,
-            app_id=self.app_id,
+            app_id=f"{self.app_id}{OBSERVER_SUFFIX}" if observer else self.app_id,
         )
 
 
@@ -84,14 +93,13 @@ def _names(event: dict[str, Any], message_id: str) -> bool:
 
 async def state(target: Target, peers: list[str], output: Output) -> int:
     """What this device is and holds right now: its address, the carriers
-    that are up, its direct neighbours, the queues, the relay counters, and
+    that are up, the queues, the relay counters, and
     the session state toward each of ``peers``."""
-    client = await target.open()
+    client = await target.open(observer=True)
     try:
         report: dict[str, Any] = {
             "local_address": client.local_address,
             "active_transports": await client.call("get_active_transports"),
-            "topology": await client.call("get_topology"),
             "pending_ack_count": await client.call("get_pending_ack_count"),
             "retry_queue_size": await client.call("get_retry_queue_size"),
             "mesh_relay_stats": await client.call("get_mesh_relay_stats"),
@@ -191,7 +199,7 @@ async def pair(target: Target, peer: str, timeout: float, output: Output) -> int
     directly (``docs/state-machines/session-lifecycle.md``); this only waits.
     The automatic key exchange never crosses a hop, so two devices that will
     later reach each other only through a third must have met once."""
-    client = await target.open()
+    client = await target.open(observer=True)
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     last = None

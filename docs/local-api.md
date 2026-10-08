@@ -170,7 +170,7 @@ offline-protocol-verify await "$id" --until received
 
 | Command | Waits for | Passes on |
 |---|---|---|
-| `state [--peer ADDR]` | nothing | always; prints address, carriers, neighbours, queues, relay counters, the session with each peer |
+| `state [--peer ADDR]` | nothing | always; prints address, carriers, queues, relay counters, the session with each peer; it never takes a held message |
 | `send ADDR TEXT` | nothing | always; prints the message id |
 | `await ID --until delivered` | the receipt on the sender | `message_delivered` naming the id; `message_failed` is a failure, `message_deferred`, `message_retrying` and `message_undeliverable` print as status |
 | `await ID --until received` | the message on the recipient | `message_received` naming the id |
@@ -185,7 +185,10 @@ away). Every verifier declares the application id `offline-protocol-verify`
 unless told otherwise with `--app-id`, and the sending and receiving
 devices must declare the same one: a received message is routed to the
 clients of the application its sender stamped, and held for that
-application, 256 deep, while none is connected.
+application, 256 deep, while none is connected. The first connection of the
+application takes everything held, so on the recipient run `await --until
+received` before `send`, `ping` or `watch`; `state` and `pair` only read,
+and connect as `<app id>.observer` so they never take a held message.
 
 Two things about events decide how a check is written. A verifier matches
 events by the identifier they carry rather than relying on the server's
@@ -203,7 +206,11 @@ because a message whose only route is the mesh has no pending
 acknowledgement to settle (an engine defect the scenario tests record as an
 expected failure; #537 fixes it). Until then, check a crossing on the
 recipient with `await --until received`, and on the middle device in the
-`watch` log as `message_relayed`.
+`watch` log as `message_relayed`. A second gap: only a send no carrier takes
+is handed to the mesh. A message a direct link took and then lost (a stream
+to a device that went away without closing it, until keepalive ends it in
+about 30 seconds) is retried over direct carriers only, so it never crosses
+the mesh; it waits for a direct link to the recipient.
 
 ## The policy file
 

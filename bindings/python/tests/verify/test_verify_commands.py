@@ -45,7 +45,6 @@ async def test_state_reports_the_address_the_carriers_and_the_session(harness):
     assert report["local_address"] == server_a.manager.local_address
     assert "WiFiDirect" in report["active_transports"]
     assert set(report) >= {
-        "topology",
         "pending_ack_count",
         "retry_queue_size",
         "mesh_relay_stats",
@@ -90,6 +89,27 @@ async def test_send_prints_the_id_await_matches(harness):
     message_id = _lines(out)[0]["sent"]["message_id"]
     arrival = _output()
     assert await commands.await_message(_target(server_b), message_id, "received", 15.0, arrival) == commands.PASS
+
+
+async def test_state_and_pair_on_the_recipient_leave_a_held_message_for_await(harness):
+    """The service hands what it held for an application to that
+    application's first connection. Run on the recipient before the
+    arrival check, ``state`` and ``pair`` must not be it."""
+    server_a, server_b = await two_servers(harness)
+    out = _output()
+    assert await commands.send(_target(server_a), server_b.manager.local_address, "held", out) == commands.PASS
+    message_id = _lines(out)[0]["sent"]["message_id"]
+    for _ in range(300):
+        if server_b.router.held_count(commands.DEFAULT_APP_ID):
+            break
+        await asyncio.sleep(0.05)
+    assert server_b.router.held_count(commands.DEFAULT_APP_ID) == 1
+
+    assert await commands.state(_target(server_b), [], _output()) == commands.PASS
+    assert await commands.pair(_target(server_b), server_a.manager.local_address, 0.2, _output()) == commands.TIMED_OUT
+    assert server_b.router.held_count(commands.DEFAULT_APP_ID) == 1
+    arrival = _output()
+    assert await commands.await_message(_target(server_b), message_id, "received", 5.0, arrival) == commands.PASS
 
 
 async def test_await_times_out_with_status_two(harness):
