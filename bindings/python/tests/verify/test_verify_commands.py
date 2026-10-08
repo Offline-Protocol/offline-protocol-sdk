@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 
 import pytest
 
@@ -364,6 +365,7 @@ async def test_watch_retries_a_service_that_drops_the_handshake(harness, monkeyp
         await asyncio.gather(watcher, return_exceptions=True)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="asyncio has no Unix socket client on Windows")
 async def test_watch_that_never_connected_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(commands, "WATCH_RECONNECT_DELAY", 0.05)
     out = _output()
