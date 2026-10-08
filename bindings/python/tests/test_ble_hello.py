@@ -184,6 +184,63 @@ class TestPeripheralCentralLeaving:
         lost = [c.kwargs["peer_id"] for c in protocol.ble_peer_lost.call_args_list]
         assert lost == [PHONE_CENTRAL]
 
+    @pytest.mark.asyncio
+    async def test_a_hello_from_a_central_that_never_subscribes_is_dropped(
+        self, peripheral, protocol, verifier, monkeypatch
+    ):
+        """The monitor tracks subscribers only, so a central that said hello
+        and left without subscribing kept its binding, and the core a route
+        to its address, for the life of the process."""
+        monkeypatch.setattr(peripheral_module, "_UNSUBSCRIBED_HELLO_GRACE", 0.01)
+        write(peripheral, PHONE_CENTRAL, HELLO_CHAR_UUID, HELLO)
+        await self._poll(peripheral, lambda: PHONE_CENTRAL not in peripheral._hello_bindings)
+        assert PHONE_CENTRAL not in peripheral._hello_bindings
+        assert PHONE_CENTRAL not in peripheral._central_to_user_id
+        protocol.ble_peer_lost.assert_called_once_with(peer_id=PHONE)
+
+    @pytest.mark.asyncio
+    async def test_a_hello_that_subscribes_within_the_grace_is_kept(
+        self, peripheral, protocol, verifier, monkeypatch
+    ):
+        monkeypatch.setattr(peripheral_module, "_UNSUBSCRIBED_HELLO_GRACE", 5.0)
+        write(peripheral, PHONE_CENTRAL, HELLO_CHAR_UUID, HELLO)
+        # A hello lands before the subscription does: unsubscribed for the
+        # first polls, subscribed after.
+        polls = iter([set()] * 5)
+        await self._poll(
+            peripheral, lambda: False, current=lambda: next(polls, {PHONE_CENTRAL}), ticks=60
+        )
+        assert peripheral._hello_bindings == {PHONE_CENTRAL: PHONE}
+        protocol.ble_peer_lost.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_dropped_hello_another_link_still_reaches_is_not_lost(
+        self, peripheral, protocol, verifier, monkeypatch
+    ):
+        monkeypatch.setattr(peripheral_module, "_UNSUBSCRIBED_HELLO_GRACE", 0.01)
+        peripheral.peer_linked_elsewhere = lambda address: True
+        write(peripheral, PHONE_CENTRAL, HELLO_CHAR_UUID, HELLO)
+        await self._poll(peripheral, lambda: PHONE_CENTRAL not in peripheral._hello_bindings)
+        assert PHONE_CENTRAL not in peripheral._hello_bindings
+        protocol.ble_peer_lost.assert_not_called()
+
+    async def _poll(self, peripheral, done, current=lambda: set(), ticks=200):
+        peripheral._server = MagicMock()
+        peripheral._bluez_centrals = None
+
+        async def centrals():
+            return current()
+
+        peripheral._current_centrals = centrals
+        with patch.object(peripheral_module, "_PEER_MONITOR_INTERVAL", 0.001):
+            task = asyncio.ensure_future(peripheral._peer_monitor_loop())
+            for _ in range(ticks):
+                await asyncio.sleep(0.002)
+                if done():
+                    break
+            task.cancel()
+            await asyncio.wait({task})
+
     async def _leave(self, peripheral, linked_elsewhere):
         peripheral.peer_linked_elsewhere = lambda address: linked_elsewhere
         write(peripheral, PHONE_CENTRAL, HELLO_CHAR_UUID, HELLO)
@@ -243,6 +300,20 @@ class TestPeripheralNotify:
         assert peripheral._centrals_for(PHONE) == [central_obj]
         assert peripheral._centrals_for(OTHER) is None
         assert peripheral._centrals_for(None) is None
+
+    def test_a_central_that_unsubscribes_mid_lookup_falls_back_to_all(
+        self, peripheral, verifier
+    ):
+        """CoreBluetooth's queue removes an unsubscribing central between a
+        membership test and an index; the lookup must not raise."""
+        write(peripheral, PHONE_CENTRAL, HELLO_CHAR_UUID, HELLO)
+
+        class Vanishing(dict):
+            def __contains__(self, key):
+                return True  # present at the test, gone at the index
+
+        peripheral._subscribed_centrals = Vanishing()
+        assert peripheral._centrals_for(PHONE) is None
 
     @pytest.mark.asyncio
     async def test_a_refused_notification_is_sent_once_the_stack_is_ready(self, peripheral):
@@ -363,6 +434,29 @@ def test_the_attributing_delegate_is_swapped_in_for_one_construction_only():
         assert BlePeripheral._construct_server("coordinator") == "server"
     assert seen["delegate"] is marker
     assert cb_server.PeripheralManagerDelegate is original
+
+
+def test_a_construction_behind_a_wedged_one_says_so(monkeypatch):
+    """A constructor that never returned keeps the delegate swapped and the
+    lock held. A later start reports that, rather than waiting out the init
+    deadline and blaming the adapter."""
+    pytest.importorskip("bless.backends.corebluetooth.server")
+    monkeypatch.setattr(peripheral_module, "_DELEGATE_SWAP_WAIT", 0.01)
+    monkeypatch.setattr(peripheral_module.sys, "platform", "darwin")
+    monkeypatch.setattr(peripheral_module, "_attributing_delegate_class", lambda: MagicMock())
+    construct = MagicMock()
+    monkeypatch.setattr(peripheral_module, "BlessServer", construct)
+    assert peripheral_module._DELEGATE_SWAP_LOCK.acquire(timeout=1)
+    try:
+        with pytest.raises(TransportError, match="never returned"):
+            BlePeripheral._construct_server("coordinator")
+    finally:
+        peripheral_module._DELEGATE_SWAP_LOCK.release()
+    construct.assert_not_called()
+    # Released on the way out of a normal construction too.
+    BlePeripheral._construct_server("coordinator")
+    assert peripheral_module._DELEGATE_SWAP_LOCK.acquire(timeout=0)
+    peripheral_module._DELEGATE_SWAP_LOCK.release()
 
 
 # ---------------------------------------------------------------------------

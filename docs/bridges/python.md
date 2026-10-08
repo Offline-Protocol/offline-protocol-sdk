@@ -450,7 +450,11 @@ The pieces, each of which the failure needs only one of to come back:
   never rebind; announce the peer only when no other link has, which includes
   the central role's client link (`ProtocolManager` hands the peripheral
   `BleManager.holds_peer`). A message's `sender` field never replaces a hello
-  binding: it proves nothing.
+  binding: it proves nothing. A central that says hello and never subscribes
+  is not a central the monitor tracks, so its binding is dropped, and its peer
+  reported lost unless another link reaches it, once it has gone 5 seconds
+  without a subscription. Kept, it left a route to the address it proved for
+  the life of the process.
 - **The central writes its hello** after its Message subscription and before
   its first write, when the peer serves Hello and the assertion fits one write.
   So do the Android and iOS centrals, which is what lets a phone start a
@@ -478,7 +482,10 @@ The pieces, each of which the failure needs only one of to come back:
   started over ssh). On the loop thread that froze the whole service past the
   local API server's start deadline. The server is now built on a daemon
   thread with a 20 second deadline, and a process macOS reports as denied or
-  restricted is refused before the stack is touched.
+  restricted is refused before the stack is touched. A construction that
+  never returned keeps bless's delegate swapped and its lock held, so a later
+  start in the same process waits 2 seconds for it and then says so, rather
+  than waiting out the deadline and blaming the adapter.
 
 `test_ble_hello.py` pins each of these, and each has a mutation that turns it
 red. The macOS pieces were run between two Macs and a Galaxy M36 (Android 16).

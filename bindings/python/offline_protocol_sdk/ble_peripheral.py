@@ -89,8 +89,20 @@ _ATT_INVALID_ATTRIBUTE_VALUE_LENGTH = 0x0D
 _NOTIFY_RETRIES = 4
 _NOTIFY_READY_TIMEOUT = 1.0
 
+# A central that said hello but is not subscribed is given this long to
+# subscribe before its binding is dropped and its peer reported lost. Without
+# it a central that writes a hello and disconnects without ever subscribing
+# (the monitor tracks subscribers only) left its binding, and a route to the
+# address it proved, behind for the life of the process.
+_UNSUBSCRIBED_HELLO_GRACE = 5.0
+
 _ATTRIBUTING_DELEGATE: Any = None
 _DELEGATE_SWAP_LOCK = threading.Lock()
+# How long a construction waits for another one's delegate swap. A swap is
+# held for a whole construction, and one that wedged (see
+# _SERVER_INIT_TIMEOUT) never releases it, so a later start says so instead
+# of waiting out the init deadline and blaming the adapter.
+_DELEGATE_SWAP_WAIT = 2.0
 
 
 def _attributing_delegate_class() -> Any:
@@ -451,6 +463,9 @@ class BlePeripheral(TransportManager):
         # key package from it through the core's transport-sender check.
         # Never rebound: a hello on a bound link is ignored.
         self._hello_bindings: dict[str, str] = {}
+        # Central id -> when its bound hello was first seen without a
+        # subscription (see _UNSUBSCRIBED_HELLO_GRACE). Monitor loop only.
+        self._unsubscribed_since: dict[str, float] = {}
         # Set by ProtocolManager: whether another link (our own central's)
         # already announced an address, so a hello does not announce it twice
         # and a central leaving does not report a peer lost that is still up.
@@ -603,6 +618,7 @@ class BlePeripheral(TransportManager):
             self._connected_centrals.clear()
             self._central_to_user_id.clear()
             self._hello_bindings.clear()
+            self._unsubscribed_since.clear()
             self._last_known_central = None
         self._subscribed_centrals = {}
         self._notify_ready = None
@@ -687,13 +703,20 @@ class BlePeripheral(TransportManager):
             return BlessServer(name=name, loop=loop)
         import bless.backends.corebluetooth.server as cb_server  # type: ignore[import-not-found]
 
-        with _DELEGATE_SWAP_LOCK:
+        if not _DELEGATE_SWAP_LOCK.acquire(timeout=_DELEGATE_SWAP_WAIT):
+            raise TransportError(
+                "an earlier Bluetooth stack construction in this process never "
+                "returned; restart the service once Bluetooth is allowed"
+            )
+        try:
             original = cb_server.PeripheralManagerDelegate
             cb_server.PeripheralManagerDelegate = delegate_cls
             try:
                 return BlessServer(name=name, loop=loop)
             finally:
                 cb_server.PeripheralManagerDelegate = original
+        finally:
+            _DELEGATE_SWAP_LOCK.release()
 
     def _install_attribution(self) -> None:
         """Point the attributing delegate, when present, at this peripheral."""
@@ -1147,7 +1170,10 @@ class BlePeripheral(TransportManager):
             return None
         with self._lock:
             ids = [c for c, a in self._hello_bindings.items() if a == recipient]
-        targets = [self._subscribed_centrals[c] for c in ids if c in self._subscribed_centrals]
+        # .get, not a membership test then an index: CoreBluetooth's queue
+        # removes an unsubscribing central between the two.
+        subscribed = self._subscribed_centrals
+        targets = [t for t in (subscribed.get(c) for c in ids) if t is not None]
         return targets or None
 
     async def _notify_corebluetooth(
@@ -1230,6 +1256,7 @@ class BlePeripheral(TransportManager):
                 added: list[str] = []
                 rejected: list[str] = []
                 removed: list[tuple[str, str | None]] = []
+                dropped: list[tuple[str, str]] = []
 
                 with self._lock:
                     capacity = self._max_connections
@@ -1249,6 +1276,24 @@ class BlePeripheral(TransportManager):
                         if resolved_uid is not None and resolved_uid in self._hello_bindings.values():
                             resolved_uid = None  # another central of ours still carries it
                         removed.append((central_uuid, resolved_uid))
+
+                    # A central that said hello and never subscribed is not in
+                    # `known`, so the sweep above never sees it leave.
+                    orphans: list[str] = []
+                    for central_uuid in list(self._hello_bindings):
+                        if central_uuid in current or central_uuid in self._connected_centrals:
+                            self._unsubscribed_since.pop(central_uuid, None)
+                            continue
+                        since = self._unsubscribed_since.setdefault(central_uuid, now)
+                        if now - since >= _UNSUBSCRIBED_HELLO_GRACE:
+                            orphans.append(central_uuid)
+                    for central_uuid in orphans:
+                        self._unsubscribed_since.pop(central_uuid, None)
+                        address = self._hello_bindings.pop(central_uuid)
+                        self._central_to_user_id.pop(central_uuid, None)
+                        if address in self._hello_bindings.values():
+                            continue  # another central of ours still carries it
+                        dropped.append((central_uuid, address))
                 for central_uuid in rejected:
                     self._emit_diagnostic(
                         "warning",
@@ -1282,6 +1327,18 @@ class BlePeripheral(TransportManager):
                     self._emit_diagnostic(
                         "info", "Central disconnected", {"central": central_uuid}
                     )
+
+                for central_uuid, address in dropped:
+                    self._emit_diagnostic("info", "Dropped a hello from a central that never subscribed", {
+                        "central": central_uuid,
+                        "address": address,
+                    })
+                    if self._linked_elsewhere(address):
+                        continue
+                    try:
+                        self._protocol.ble_peer_lost(peer_id=address)
+                    except Exception:
+                        logger.debug("ble_peer_lost failed for %s", address)
 
                 known = current.copy()
 
