@@ -134,7 +134,11 @@ processed. A request with an unknown version is answered with
 | Provider clock slack | 60 s | a request older than this past its deadline is dropped |
 
 The body limit keeps a base64 body and its envelope under the engine's
-256 KiB content limit with room to spare. A requester may ask for a shorter
+256 KiB content limit with room to spare. It does not fit every carrier: a sealed
+envelope over about 71 KB does not cross Bluetooth LE at the 185-byte MTU
+floor, nor one over 64 KiB a Nostr relay. The engine retries such a message
+as it retries any other, so a requester whose only route is one of those
+sees `deadline_exceeded`, not `send_failed`. A requester may ask for a shorter
 or longer deadline with `X-Offline-Protocol-Timeout: <seconds>`, clamped to
 1 and 300.
 
