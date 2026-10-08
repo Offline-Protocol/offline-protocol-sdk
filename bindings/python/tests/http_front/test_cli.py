@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -78,3 +80,19 @@ def test_a_registry_the_front_could_not_load_stops_the_command_first(tmp_path, c
     )
     with pytest.raises(SystemExit, match="--http-registry"):
         front_cli.build_front(args)
+
+
+def test_the_service_command_imports_without_the_http_extra():
+    """``local_api.cli`` imports the front's modules at the top; the front
+    imports aiohttp only when it starts. A top-level ``import aiohttp`` in
+    any of them would stop ``offline-protocol-service`` starting without the
+    ``http`` extra, with or without ``--http``."""
+    probe = (
+        "import sys\n"
+        "sys.modules['aiohttp'] = None\n"
+        "sys.modules['aiohttp.web'] = None\n"
+        "import offline_protocol_sdk.local_api.cli\n"
+        "import offline_protocol_sdk.http_front\n"
+    )
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr

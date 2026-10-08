@@ -72,7 +72,9 @@ class Provider:
         return web.Response(body=b"x" * (128 * 1024 + 1))
 
     async def _slow(self, request: web.Request) -> web.Response:
-        await asyncio.sleep(30)
+        # Longer than any test waits for it; short, because stopping the
+        # provider waits for this handler.
+        await asyncio.sleep(5)
         return web.Response(text="late")
 
     @property
@@ -485,6 +487,29 @@ async def test_stopping_does_not_wait_for_a_request_in_flight(hosts):
     assert time.monotonic() - started < 5
     status, headers, _ = await asyncio.wait_for(waiting, 5)
     assert (status, headers["X-Offline-Protocol-Error"]) == (503, "not_connected")
+
+
+async def test_stopping_does_not_wait_for_a_local_callback(hosts):
+    """A request to this device's own address waits on the callback itself,
+    not on a pending answer: closing the client session is what ends it."""
+    front = await hosts.front(hosts.server_a)
+    await hosts.register(front)
+    waiting = asyncio.ensure_future(
+        hosts.request(
+            front,
+            host_for("timeofday", hosts.manager_a.local_address),
+            "/slow",
+            method="GET",
+            body=None,
+            headers={"X-Offline-Protocol-Timeout": "300"},
+        )
+    )
+    await until(lambda: front._callback_slots._value < 32)  # the callback is running
+    started = time.monotonic()
+    await front.stop()
+    assert time.monotonic() - started < 3
+    status, headers, _ = await asyncio.wait_for(waiting, 3)
+    assert (status, headers["X-Offline-Protocol-Error"]) == (502, "callback_failed")
 
 
 async def test_a_header_value_that_is_not_utf8_is_a_bad_request(hosts):

@@ -132,7 +132,8 @@ class _Browse:
     def __init__(self, service: str) -> None:
         self.service = service
         self.entries: dict[str, dict[str, Any]] = {}
-        self.queues: set[asyncio.Queue[tuple[str, dict[str, Any]]]] = set()
+        #: ``None`` on a queue ends that browser's stream.
+        self.queues: set[asyncio.Queue[tuple[str, dict[str, Any]] | None]] = set()
         self.task: asyncio.Task[None] | None = None
 
     def publish(self, kind: str, entry: dict[str, Any]) -> None:
