@@ -946,6 +946,30 @@ and a squatter whose signal is stronger than the honest owner's keeps
 winning the join until the takeover. The same rule covers an owner whose
 application died, since the group can outlive the process. Formation is opt-in and Android-only.
 
+### R23. The HTTP front trusts every process that can reach it
+
+The [HTTP front](../spec/http-front.md) lets any process that can open its
+port register a service, unregister one, or send a request as this device.
+Bound to loopback, that is every process on the host; bound elsewhere, every
+process that holds the launch token. It cannot tell one local application
+from another, so the local API's per-application rules (space scoping,
+method denials, service ownership) separate the front, as one application,
+from the others, and do nothing between the applications behind it. A
+registered callback is called as given, so a process that can register
+chooses which local URL remote devices reach.
+
+On the remote side, any device whose message this engine decrypts can call
+any registered service: MLS proves who sent a request, and nothing decides
+whether that sender may make it.
+
+**What bounds it:** bodies never leave the host in the clear (invariant 1 of
+the chapter), the sender a provider is told is the MLS-authenticated one,
+and off loopback the token is required. **What application teams must do:**
+run the front where only the operator's applications can reach it, and
+authorize in the provider by reading `X-Offline-Protocol-Sender`. A host
+that can identify the calling container should pass that identity to the
+front; until then, one front is one application to every rule.
+
 ## Network egress
 
 Until 0.26 the Rust crates opened no socket: every byte that left a device
