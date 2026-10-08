@@ -149,6 +149,62 @@ model. [examples/http-front](../examples/http-front) has a provider and a
 client, and [the container image](../bindings/python/docker) runs one
 service per host with the front on.
 
+## Checking what the network did: `offline-protocol-verify`
+
+The engine reports every networking fact as an event: `message_deferred`
+while a recipient is away, `message_relayed` on a device that carries a
+frame for someone else, `message_received` with its `hop_count` and
+`transport` on the far side, and `message_delivered` back on the sender,
+which is the recipient's own acknowledgement and names the carrier it
+arrived over. `offline-protocol-verify` sends through the service on the
+device it runs on and waits for those events, so a check passes or fails on
+what the engine says:
+
+```bash
+# on A: send, then wait for B's acknowledgement (up to 10 minutes)
+id=$(offline-protocol-verify send off1...B "hello" | jq -r .sent.message_id)
+offline-protocol-verify await "$id" --until delivered --timeout 600
+# on B: wait for the message itself
+offline-protocol-verify await "$id" --until received
+```
+
+| Command | Waits for | Passes on |
+|---|---|---|
+| `state [--peer ADDR]` | nothing | always; prints address, carriers, neighbours, queues, relay counters, the session with each peer |
+| `send ADDR TEXT` | nothing | always; prints the message id |
+| `await ID --until delivered` | the receipt on the sender | `message_delivered` naming the id; `message_failed` is a failure, `message_deferred`, `message_retrying` and `message_undeliverable` print as status |
+| `await ID --until received` | the message on the recipient | `message_received` naming the id |
+| `pair ADDR` | the session with a peer | `get_establishment_state` reaching `SessionConfirmed` |
+| `ping ADDR --every S --count N` | each message's receipt | every message delivered within `--timeout` of its send; each line names the carrier |
+| `watch [--log FILE]` | until stopped or `--duration` | every event as `{"at_ms", "event"}`, reconnecting across restarts of the service |
+
+Each command prints JSON lines on standard output and a summary on standard
+error, and exits 0 on a pass, 2 when its time ran out, and 1 on a terminal
+failure (the engine gave the message up, refused a call, or the service went
+away). Every verifier declares the application id `offline-protocol-verify`
+unless told otherwise with `--app-id`, and the sending and receiving
+devices must declare the same one: a received message is routed to the
+clients of the application its sender stamped, and held for that
+application, 256 deep, while none is connected.
+
+Two things about events decide how a check is written. A verifier matches
+events by the identifier they carry rather than relying on the server's
+correlation, which knows only the identifiers its own clients were handed
+by this process; so `await` works on a sender restarted since the send. And
+an event the engine emits while no client of the application is connected
+is gone, except a received message: start `await` or `watch` on the sender
+before the recipient can answer, which for a restart test means restarting
+the sender while the recipient is still away. Two devices that will reach
+each other only through a third must have met directly once: the automatic
+key exchange and the Welcome travel over a direct link, never through the
+mesh. Today a message that crosses the mesh is received, but the sender's
+receipt never arrives: the acknowledgement is carried back and dropped,
+because a message whose only route is the mesh has no pending
+acknowledgement to settle (an engine defect the scenario tests record as an
+expected failure; #537 fixes it). Until then, check a crossing on the
+recipient with `await --until received`, and on the middle device in the
+`watch` log as `message_relayed`.
+
 ## The policy file
 
 With no policy, any well-formed application id is accepted and nothing is

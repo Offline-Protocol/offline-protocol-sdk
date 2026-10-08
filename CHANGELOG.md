@@ -79,6 +79,29 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   registrations survived a restart. Bluetooth LE from a container is
   untested on hardware.
 
+- **`offline-protocol-verify`: drive a service and read the proof.** A
+  command for the device a service runs on: `send` a message, `await` its
+  delivery receipt on the sender or its arrival on the recipient, `pair`
+  (wait for the session with a peer), `ping` (a message on a cadence, each
+  reported with the carrier it arrived over), `watch` (every event as a JSON
+  line, across restarts of the service) and `state` (address, carriers,
+  neighbours, queues, relay counters, sessions). Each prints JSON lines and
+  exits 0 when what it waited for happened, 2 when its time ran out and 1
+  when the engine gave the message up. It matches events by the identifier
+  they carry, so it works on a sender restarted since the send. A receipt
+  the engine emits while no client of the application is connected is not
+  held, so start `await` or `watch` on the sender before the recipient can
+  answer. New scenario tests run the networking properties end to end over
+  loopback peer streams with encryption on: a message to a device that is
+  off arrives when it returns and the sender gets the receipt; a queued
+  message survives the sender restarting (and is lost when the saved state
+  is removed, the control); a message crosses a middle device to one the
+  sender cannot hear. In that last one the sender's receipt never arrives:
+  the recipient's acknowledgement is carried back and dropped, because a
+  message whose only route is the mesh is refused by every carrier of the
+  sender and so has no pending acknowledgement to settle. The test records
+  it as an expected failure until the engine fix in #537 lands.
+
 ### Changed
 
 - **A peer-stream or relay flag the configuration cannot honour is refused.**
