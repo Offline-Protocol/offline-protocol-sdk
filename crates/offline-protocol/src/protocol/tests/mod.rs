@@ -10,6 +10,7 @@ mod file_stores;
 mod leaf_pairing;
 mod mesh_session;
 mod per_send_app_id;
+mod service_seal;
 
 use super::*;
 use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY};
@@ -3134,6 +3135,7 @@ fn peer_capability_restore_prunes_overflow() {
         rich_versions: vec![RICH_PAYLOAD_V1],
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let encoded = serde_json::to_vec(&caps).unwrap();
@@ -3275,6 +3277,7 @@ fn peer_capability_restore_prefers_session_peers() {
         rich_versions: vec![RICH_PAYLOAD_V1],
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let encoded = serde_json::to_vec(&caps).unwrap();
@@ -22642,37 +22645,6 @@ fn test_discover_services_no_peers() {
         .mesh_services()
         .seen_discovery_queries()
         .contains_key(&query_id));
-}
-
-#[test]
-fn test_require_encryption_allows_service_control_messages() {
-    let mut config = create_test_config();
-    config.encryption.enabled = true;
-    config.encryption.require_encryption = true;
-
-    let mut protocol = OfflineProtocol::new(config).unwrap();
-
-    let mock_transport = MockTransport::new(TransportType::BLE);
-    mock_transport.start().unwrap();
-    protocol
-        .transport_manager_mut()
-        .add_transport(TransportType::BLE, Box::new(mock_transport));
-    protocol.start().unwrap();
-
-    // Service messages are internal protocol messages (not user content),
-    // so they must work even with require_encryption=true.
-    // discover_services with no known peers returns Ok with empty broadcast.
-    let discover_result = protocol.discover_services(None);
-    assert!(discover_result.is_ok());
-
-    // Add a known peer so service request has a target
-    protocol.on_neighbor_discovered("bob");
-    let request_result = protocol.send_service_request("bob", "echo.v1", "ping", "{}");
-    assert!(request_result.is_ok());
-
-    let respond_result =
-        protocol.respond_to_service_request("req-1", "alice", "echo.v1", "ok", "pong");
-    assert!(respond_result.is_ok());
 }
 
 #[test]

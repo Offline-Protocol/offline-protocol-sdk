@@ -533,9 +533,47 @@ impl OfflineProtocol {
 
         let mut message = self.create_message(recipient, content, Some(priority), None)?;
         self.sign_control_message(&mut message)?;
+        self.dispatch_internal_message(message)
+    }
+
+    /// Sends an internal frame already sealed for `recipient` (an
+    /// `__MLS_ENC__` body), unsigned.
+    ///
+    /// Not signed because the data plane is not: a 1:1 envelope is
+    /// authenticated by MLS, and the security gate admits `__MLS_ENC__`
+    /// without a signature for exactly that reason. `reseal` carries the
+    /// plaintext so a resend after a desync re-key is sealed again against the
+    /// new epoch rather than replaying ciphertext nobody can open any more.
+    pub(super) fn send_sealed_internal_message(
+        &mut self,
+        recipient: &str,
+        sealed: String,
+        priority: MessagePriority,
+        reseal: Option<OutboxReseal>,
+    ) -> Result<MessageId> {
+        {
+            let state = lock_shared_state(&self.shared_state)?;
+            if state.state != ProtocolState::Running {
+                return Err(Error::NotStarted);
+            }
+        }
+
+        let message = self.create_message(recipient, sealed, Some(priority), None)?;
+        if let Some(reseal) = reseal {
+            self.stage_outbox_reseal(&message.id, reseal);
+        }
+        self.dispatch_internal_message(message)
+    }
+
+    /// Transmits a built internal frame: dedup, send, the success or failure
+    /// bookkeeping (outbox, ACK, retry) and the transport-switch event. Shared
+    /// by the signed and the sealed internal senders so the two cannot drift.
+    fn dispatch_internal_message(&mut self, message: Message) -> Result<MessageId> {
         let message_id = message.id.clone();
 
         if self.deduplicator.is_duplicate(&message_id) {
+            // Staged re-seal provenance must never outlive its message.
+            self.pending_reseal.remove(&message_id);
             return Err(crate::Error::Other("Duplicate message".to_string()));
         }
 
@@ -554,7 +592,7 @@ impl OfflineProtocol {
                     self.handle_send_failure(&message, current_transport.or(previous_transport))?;
                 warn!(
                     message_id = %message.id,
-                    recipient = %recipient,
+                    recipient = %message.recipient,
                     error = %err,
                     "Internal message send failed, message deferred"
                 );
@@ -5825,7 +5863,15 @@ impl OfflineProtocol {
             // the peer-capability record that closes the downgrade could then
             // never be written.
             ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
-            svc_versions: Vec::new(),
+            // Advertised under the switch only: a peer told we route the
+            // sealed form seals toward us, and with the switch off we still
+            // route it (parsing is unconditional), so this gates only whether
+            // peers are invited to.
+            svc_versions: if self.config.encryption.encrypt_service_messages {
+                vec![offline_protocol_sealed::SVC_SEALED_V1]
+            } else {
+                Vec::new()
+            },
             // Present only when the Nostr transport is installed. Advertised
             // regardless of the sealing kill switch, which gates what *we*
             // publish, not what a peer may seal to us: withholding it would

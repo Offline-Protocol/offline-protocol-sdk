@@ -146,6 +146,7 @@ impl OfflineProtocol {
         self.peer_ctrl_freshness.remove(user_id);
         self.peer_rich_payload.remove(user_id);
         self.peer_rich_attested.remove(user_id);
+        self.peer_svc_sealed.remove(user_id);
         self.forget_data_sync_peer(user_id);
         // The Nostr sealing key lives in the transport, not in one of the sets
         // above, so it needs its own clear — the durable record is deleted by

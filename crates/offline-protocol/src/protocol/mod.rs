@@ -20,6 +20,7 @@ pub(crate) mod reachability;
 mod receive;
 mod security;
 mod send;
+mod service_seal;
 mod session;
 pub(crate) mod state_crypto;
 mod storage;
@@ -417,6 +418,23 @@ pub struct OfflineProtocol {
     /// `key_package_sent_to`. Forgetting a peer only costs silently dropped
     /// rich extras — never a cleartext fallback.
     peer_rich_payload: std::collections::HashSet<String>,
+
+    /// Peers that route a sealed service frame ([`SVC_SEALED_V1`] in
+    /// `svc_versions`), so a service request or response addressed to them
+    /// may travel inside `__MLS_ENC__` rather than as signed plaintext.
+    ///
+    /// Learned two ways. From a **signed** key package, like the sets above
+    /// (persisted as [`PeerCapabilities`], restored on `initialize_mls`); and
+    /// from a sealed service frame the peer sent us, which proves it more
+    /// strongly than any key package can, since an older package can be
+    /// replayed and a sealed frame from before the upgrade cannot exist. The
+    /// second is in memory only: the durable record stays what the peer
+    /// advertised. Bounded like `key_package_sent_to`. Forgetting a peer
+    /// costs signed plaintext service bodies toward them until either signal
+    /// arrives again.
+    ///
+    /// [`SVC_SEALED_V1`]: offline_protocol_sealed::SVC_SEALED_V1
+    pub(crate) peer_svc_sealed: std::collections::HashSet<String>,
 
     /// Peers whose key package advertised replicated-document sync
     /// ([`DATA_SYNC_V1`] in `data_versions`), so the send path may push
@@ -1162,6 +1180,7 @@ impl OfflineProtocol {
             control_freshness_peers: std::collections::HashSet::new(),
             control_reset_watermark: std::collections::HashMap::new(),
             peer_rich_payload: std::collections::HashSet::new(),
+            peer_svc_sealed: std::collections::HashSet::new(),
             peer_data_sync: std::collections::HashSet::new(),
             peer_data_group: std::collections::HashSet::new(),
             peer_data_group_attested: std::collections::HashSet::new(),
@@ -1372,6 +1391,7 @@ impl OfflineProtocol {
         let previous_control_freshness_peers = self.control_freshness_peers.clone();
         let previous_control_reset_watermark = self.control_reset_watermark.clone();
         let previous_peer_rich_payload = self.peer_rich_payload.clone();
+        let previous_peer_svc_sealed = self.peer_svc_sealed.clone();
         let previous_peer_data_sync = self.peer_data_sync.clone();
         let previous_peer_rich_attested = self.peer_rich_attested.clone();
         let previous_peer_data_group = self.peer_data_group.clone();
@@ -1537,6 +1557,7 @@ impl OfflineProtocol {
             self.control_freshness_peers = previous_control_freshness_peers;
             self.control_reset_watermark = previous_control_reset_watermark;
             self.peer_rich_payload = previous_peer_rich_payload;
+            self.peer_svc_sealed = previous_peer_svc_sealed;
             self.peer_data_sync = previous_peer_data_sync;
             self.peer_rich_attested = previous_peer_rich_attested;
             self.peer_data_group = previous_peer_data_group;

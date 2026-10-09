@@ -16,7 +16,8 @@ use crate::SessionStateError;
 use chrono::Utc;
 use offline_protocol_core::{Message, MessagePriority};
 use offline_protocol_mls::{EncryptedMessage, WelcomeMessage};
-use offline_protocol_services::ServiceAction;
+use offline_protocol_sealed::SVC_SEALED_V1;
+use offline_protocol_services::{ServiceAction, SVC_MESSAGE_PREFIX};
 use offline_protocol_transport::TransportType;
 use tracing::{debug, error, info, warn};
 
@@ -46,10 +47,11 @@ impl OfflineProtocol {
     /// Handles an incoming MLS key package message.
     ///
     /// `signed` is the security gate's verdict on this specific frame (see
-    /// [`ControlGateOutcome::Proceed`]). It gates **only** `nostr_pubkey`,
-    /// which is consumed as a destination key rather than as a feature hint —
-    /// see the comment at that use for why the distinction earns a separate
-    /// trust level from the capability lists around it.
+    /// [`ControlGateOutcome::Proceed`]). It gates **only** `nostr_pubkey` and
+    /// `svc_versions`: the first is consumed as a destination key rather than
+    /// as a feature hint, and the second decides whether a service body is
+    /// readable by every hop. See the comments at those uses for why each
+    /// earns a separate trust level from the capability lists around them.
     ///
     /// `freshness` gates **only** `session_reset`, which is the one field here
     /// that destroys state: `Some(stamp)` when the frame's signature covers
@@ -151,6 +153,21 @@ impl OfflineProtocol {
                 self.peer_ctrl_freshness.insert(sender.to_string());
             } else {
                 self.peer_ctrl_freshness.remove(sender);
+            }
+
+            // Record whether this peer routes a sealed service frame, so a
+            // request or response addressed to them may travel inside
+            // `__MLS_ENC__`. Same shape as the lists above, with one
+            // difference: honoured only from a signed key package, like
+            // `nostr_pubkey` below, because this list sits beside a
+            // confidentiality decision rather than a rendering one. The gate
+            // refuses unsigned key packages today, so the check costs a branch
+            // and keeps the posture from depending on that staying true.
+            let advertises_svc_sealed = signed && payload.svc_versions.contains(&SVC_SEALED_V1);
+            if self.config.encryption.encrypt_service_messages && advertises_svc_sealed {
+                self.record_svc_sealed_peer(sender);
+            } else {
+                self.peer_svc_sealed.remove(sender);
             }
 
             // Record whether this peer replicates documents, so the data
@@ -345,6 +362,7 @@ impl OfflineProtocol {
                 &payload.rich_versions,
                 &payload.data_versions,
                 &payload.ctrl_versions,
+                if signed { &payload.svc_versions } else { &[] },
                 advertised_nostr_pubkey.as_deref(),
             );
             if caps.is_any() {
@@ -1338,7 +1356,17 @@ impl OfflineProtocol {
                         sender_owned.clone(),
                         format!("is_confirm={}", is_session_confirm),
                     ));
-                    let surfaced = if is_session_confirm {
+                    // A service request or response sealed in this 1:1
+                    // session. Handled only after the confirm below, so a reply
+                    // the service layer sends from inside the handler (the
+                    // automatic `not_found`) finds the session confirmed and is
+                    // sealed too; handled before it, the owner's first decrypt
+                    // from this peer would answer in plaintext.
+                    let mut text = text;
+                    let sealed_service_frame = (group_id.starts_with("session:")
+                        && text.starts_with(SVC_MESSAGE_PREFIX))
+                    .then(|| std::mem::take(&mut text));
+                    let surfaced = if is_session_confirm || sealed_service_frame.is_some() {
                         Some(InternalMessageResult::Consumed)
                     } else if let Some(body) = text.strip_prefix(internal_prefixes::DATA_V1) {
                         // A document sync frame. Consumed either way, and
@@ -1365,6 +1393,9 @@ impl OfflineProtocol {
                         Some(InternalMessageResult::Decrypted(text))
                     };
                     self.confirm_session_from_successful_decrypt(&sender_owned, &group_id);
+                    if let Some(frame) = sealed_service_frame {
+                        self.handle_sealed_service_frame(&sender_owned, &frame, message);
+                    }
                     surfaced
                 }
                 DecryptResult::Empty => {
@@ -2196,6 +2227,31 @@ impl OfflineProtocol {
     }
 
     /// Handles service discovery and request/response messages.
+    /// Routes a service frame that arrived sealed in the 1:1 session with
+    /// `sender` into the service layer.
+    ///
+    /// `sender` is the MLS-authenticated one: the decrypt checked the
+    /// credential that produced the ciphertext against the wire sender, so the
+    /// provider's `service_request_received.sender` is proven by the session
+    /// rather than by a signature. The frame is never re-fed through
+    /// `process_internal_message_via`, whose gate would refuse an unsigned
+    /// `__SVC_` frame. Routing is unconditional (parsing is never gated by a
+    /// kill switch), so a peer's sealed request does not surface as chat text
+    /// here when our switch is off. A group-sealed service frame is not routed
+    /// here: the service protocol has no group form.
+    ///
+    /// A peer that sealed a service frame has proved it routes them, and no
+    /// replay of an older key package can fake that, so with the switch on the
+    /// sender is recorded as able to receive the sealed form. That closes the
+    /// window in which a provider would otherwise answer a sealed request in
+    /// plaintext because the requester's fresh key package has not landed yet.
+    fn handle_sealed_service_frame(&mut self, sender: &str, content: &str, message: &Message) {
+        if self.config.encryption.encrypt_service_messages {
+            self.record_svc_sealed_peer(sender);
+        }
+        self.handle_service_message(sender, content, message);
+    }
+
     pub(crate) fn handle_service_message(
         &mut self,
         sender: &str,
@@ -2222,8 +2278,11 @@ impl OfflineProtocol {
                 messages_to_send,
                 events_to_emit,
             } => {
+                // Through the chooser, so the automatic `not_found` answer to a
+                // sealed request is sealed too. Discovery forwards pass
+                // through it unchanged: it seals requests and responses only.
                 for msg in messages_to_send {
-                    let _ = self.send_internal_message(&msg.recipient, msg.content, msg.priority);
+                    let _ = self.send_service_frame(&msg.recipient, msg.content, msg.priority);
                 }
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
                     for svc_event in events_to_emit {
