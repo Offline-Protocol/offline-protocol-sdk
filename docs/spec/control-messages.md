@@ -157,8 +157,11 @@ toward a peer that advertised `svc_versions` entry 1
 ([capability negotiation](capability-negotiation.md)), once the 1:1 session
 with that peer is confirmed. The sealed form is unsigned, as every 1:1
 envelope is: MLS authenticates its sender. A receiver that decrypts a plaintext
-beginning `__SVC_` from a 1:1 session slot MUST hand it to its service layer
-with the MLS-authenticated sender, and MUST NOT surface it as a message. It
+beginning `__SVC_REQ__` or `__SVC_RESP__` from a 1:1 session slot MUST hand
+it to its service layer with the MLS-authenticated sender. It MUST NOT surface
+any decrypted `__SVC_` plaintext as a message, and it drops any other service
+frame found there: discovery is never sealed, and a receiver that routed a
+sealed query would forward it onward as plaintext gossip. It
 routes the frame whatever its own configuration says, because parsing is never
 gated. The signed plaintext form remains the floor. Neither form changes the
 exemption classes in this chapter, since the sealed form is `__MLS_ENC__`. See

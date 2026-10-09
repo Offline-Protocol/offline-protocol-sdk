@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use offline_protocol_core::{Message, ServiceDescriptor, ServiceId};
+use offline_protocol_core::{Message, MessagePriority, ServiceDescriptor, ServiceId};
 use offline_protocol_services::{
     SVC_DISCOVER_QUERY, SVC_MESSAGE_PREFIX, SVC_REQUEST, SVC_RESPONSE,
 };
@@ -704,6 +704,50 @@ fn the_automatic_reply_to_the_first_sealed_request_is_sealed() {
         })
         .collect();
     assert_eq!(statuses, vec!["not_found".to_string()]);
+}
+
+/// Discovery is never sealed. A sealed discovery query that arrives anyway is
+/// dropped: routing it would have the receiver forward it onward as plaintext
+/// gossip, and it must never surface as a message either.
+#[test]
+fn a_sealed_discovery_query_is_dropped_not_forwarded_or_surfaced() {
+    let (mut alice, alice_h, _) = encrypted("alice", |_| {});
+    let (mut bob, bob_h, bob_events) = encrypted("bob", |_| {});
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+    register(&mut bob, "echo");
+    // A third peer bob would forward a routed query to.
+    bob.on_neighbor_discovered(&id("carol"));
+    alice.on_neighbor_discovered(&id("bob"));
+
+    alice_h.clear_sent_messages();
+    alice.discover_services(Some("echo")).unwrap();
+    let query = alice_h
+        .sent_messages()
+        .into_iter()
+        .find(|frame| frame.content.starts_with(SVC_DISCOVER_QUERY))
+        .expect("discovery sends a query")
+        .content;
+    alice_h.clear_sent_messages();
+    let sealed = alice
+        .encrypt_content_for_recipient(&id("bob"), &query, MessagePriority::Medium)
+        .unwrap();
+    alice
+        .send_sealed_internal_message(&id("bob"), sealed, MessagePriority::Medium, None)
+        .unwrap();
+
+    bob_h.clear_sent_messages();
+    deliver(&alice_h, &id("alice"), &mut bob, &bob_h);
+    assert!(
+        !bob_h
+            .sent_messages()
+            .iter()
+            .any(|frame| frame.content.starts_with(SVC_MESSAGE_PREFIX)),
+        "a sealed discovery query was routed and forwarded in plaintext"
+    );
+    assert!(!bob_events.lock().unwrap().iter().any(|event| matches!(
+        event,
+        Event::MessageReceived { .. } | Event::ServiceDiscovered { .. }
+    )));
 }
 
 /// A sealed service frame proves its sender routes them, which a replayed key

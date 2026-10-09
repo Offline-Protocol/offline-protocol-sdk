@@ -17,7 +17,7 @@ use chrono::Utc;
 use offline_protocol_core::{Message, MessagePriority};
 use offline_protocol_mls::{EncryptedMessage, WelcomeMessage};
 use offline_protocol_sealed::SVC_SEALED_V1;
-use offline_protocol_services::{ServiceAction, SVC_MESSAGE_PREFIX};
+use offline_protocol_services::{ServiceAction, SVC_MESSAGE_PREFIX, SVC_REQUEST, SVC_RESPONSE};
 use offline_protocol_transport::TransportType;
 use tracing::{debug, error, info, warn};
 
@@ -1369,10 +1369,29 @@ impl OfflineProtocol {
                     // sealed too; handled before it, the owner's first decrypt
                     // from this peer would answer in plaintext.
                     let mut text = text;
-                    let sealed_service_frame = (group_id.starts_with("session:")
-                        && text.starts_with(SVC_MESSAGE_PREFIX))
+                    //
+                    // Request and response only, the two frames a sender
+                    // seals. Discovery is never sealed: routing a sealed query
+                    // would have us forward it onward as plaintext gossip, so
+                    // any other service frame found here is dropped, and like
+                    // every service frame it never surfaces as a message.
+                    let in_session = group_id.starts_with("session:");
+                    let sealed_service_frame = (in_session
+                        && (text.starts_with(SVC_REQUEST) || text.starts_with(SVC_RESPONSE)))
                     .then(|| std::mem::take(&mut text));
-                    let surfaced = if is_session_confirm || sealed_service_frame.is_some() {
+                    let unroutable_service_frame = sealed_service_frame.is_none()
+                        && in_session
+                        && text.starts_with(SVC_MESSAGE_PREFIX);
+                    if unroutable_service_frame {
+                        debug!(
+                            sender = %sender_owned,
+                            "Dropping a sealed service frame that is not a request or response"
+                        );
+                    }
+                    let surfaced = if is_session_confirm
+                        || sealed_service_frame.is_some()
+                        || unroutable_service_frame
+                    {
                         Some(InternalMessageResult::Consumed)
                     } else if let Some(body) = text.strip_prefix(internal_prefixes::DATA_V1) {
                         // A document sync frame. Consumed either way, and
