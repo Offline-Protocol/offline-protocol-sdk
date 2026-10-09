@@ -1656,6 +1656,12 @@ pub enum Event {
         body: String,
         /// Peer user ID of the requester.
         sender: String,
+        /// Whether the request arrived sealed inside the 1:1 MLS session with
+        /// `sender`, so no device that carried it could read the body and the
+        /// session authenticated `sender`. `false` means it arrived as signed
+        /// plaintext, readable by every hop (threat model R9).
+        #[serde(default)]
+        encrypted: bool,
     },
 
     /// A response to a service request was received.
@@ -1670,6 +1676,11 @@ pub enum Event {
         body: String,
         /// Peer user ID of the provider.
         provider_peer_id: String,
+        /// Whether the response arrived sealed inside the 1:1 MLS session
+        /// with the provider. `false` means it arrived as signed plaintext,
+        /// readable by every hop (threat model R9).
+        #[serde(default)]
+        encrypted: bool,
     },
 
     // --- Presence, typing, and read receipts ---
@@ -2749,7 +2760,8 @@ impl Event {
         }
     }
 
-    /// Creates a ServiceRequestReceived event.
+    /// Creates a ServiceRequestReceived event for a request that arrived as
+    /// signed plaintext (`encrypted: false`).
     pub fn service_request_received(
         request_id: String,
         service_id: String,
@@ -2763,10 +2775,12 @@ impl Event {
             method,
             body,
             sender,
+            encrypted: false,
         }
     }
 
-    /// Creates a ServiceResponseReceived event.
+    /// Creates a ServiceResponseReceived event for a response that arrived as
+    /// signed plaintext (`encrypted: false`).
     pub fn service_response_received(
         request_id: String,
         service_id: String,
@@ -2780,6 +2794,7 @@ impl Event {
             status,
             body,
             provider_peer_id,
+            encrypted: false,
         }
     }
 
@@ -3006,6 +3021,9 @@ impl From<ServiceEvent> for Event {
                 method,
                 body,
                 sender,
+                // The service layer cannot know; the engine sets it for a
+                // frame that arrived sealed (`handle_service_message`).
+                encrypted: false,
             },
             ServiceEvent::ServiceResponseReceived {
                 request_id,
@@ -3019,6 +3037,7 @@ impl From<ServiceEvent> for Event {
                 status,
                 body,
                 provider_peer_id,
+                encrypted: false,
             },
         }
     }
@@ -3470,6 +3489,7 @@ impl fmt::Debug for Event {
                 method,
                 body,
                 sender: _,
+                encrypted,
             } => f
                 .debug_struct("ServiceRequestReceived")
                 .field("request_id", request_id)
@@ -3477,6 +3497,7 @@ impl fmt::Debug for Event {
                 .field("method", method)
                 .field("body", &format!("[REDACTED {} bytes]", body.len()))
                 .field("sender", &"[REDACTED]")
+                .field("encrypted", encrypted)
                 .finish(),
             Self::ServiceResponseReceived {
                 request_id,
@@ -3484,6 +3505,7 @@ impl fmt::Debug for Event {
                 status,
                 body,
                 provider_peer_id: _,
+                encrypted,
             } => f
                 .debug_struct("ServiceResponseReceived")
                 .field("request_id", request_id)
@@ -3491,6 +3513,7 @@ impl fmt::Debug for Event {
                 .field("status", status)
                 .field("body", &format!("[REDACTED {} bytes]", body.len()))
                 .field("provider_peer_id", &"[REDACTED]")
+                .field("encrypted", encrypted)
                 .finish(),
             Self::GroupCreated { group_id, name } => f
                 .debug_struct("GroupCreated")
@@ -4378,6 +4401,7 @@ mod tests {
                 status: "ok".to_string(),
                 body: "body".to_string(),
                 provider_peer_id: SENTINEL.to_string(),
+                encrypted: true,
             },
             Event::PresenceUpdated {
                 peer_id: SENTINEL.to_string(),

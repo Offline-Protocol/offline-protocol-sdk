@@ -423,18 +423,32 @@ pub struct OfflineProtocol {
     /// `svc_versions`), so a service request or response addressed to them
     /// may travel inside `__MLS_ENC__` rather than as signed plaintext.
     ///
-    /// Learned two ways. From a **signed** key package, like the sets above
-    /// (persisted as [`PeerCapabilities`], restored on `initialize_mls`); and
-    /// from a sealed service frame the peer sent us, which proves it more
-    /// strongly than any key package can, since an older package can be
-    /// replayed and a sealed frame from before the upgrade cannot exist. The
-    /// second is in memory only: the durable record stays what the peer
-    /// advertised. Bounded like `key_package_sent_to`. Forgetting a peer
-    /// costs signed plaintext service bodies toward them until either signal
-    /// arrives again.
+    /// The **advertised** half: learned only from a **signed** key package,
+    /// like the sets above (persisted as [`PeerCapabilities`], restored on
+    /// `initialize_mls`), and rewritten by every key package, so a fresh one
+    /// that stops advertising removes the peer. Bounded like
+    /// `key_package_sent_to`. The proved half is
+    /// [`Self::svc_sealed_proved_peers`], and either one is enough to seal.
     ///
     /// [`SVC_SEALED_V1`]: offline_protocol_sealed::SVC_SEALED_V1
     pub(crate) peer_svc_sealed: std::collections::HashSet<String>,
+
+    /// Peers that have sent us a service frame sealed inside the 1:1 session,
+    /// which proves they route the sealed form.
+    ///
+    /// A **ratchet**, unlike [`Self::peer_svc_sealed`]: no key package can
+    /// remove a peer from it. The failure it prevents is a replayed key
+    /// package from before the peer upgraded, which would otherwise drop the
+    /// peer from the advertised set and send its service bodies in signed
+    /// plaintext again. A key package signed under `offline-ctrl-v1` is
+    /// admitted at any age, so nothing else bounds that replay. Durable in
+    /// the peer's [`EncryptionCapableEntry`] beside `ctrl_freshness_proved`,
+    /// and a strict subset of [`Self::encryption_capable_peers`] by
+    /// construction, so `MAX_ENCRYPTION_CAPABLE_PEERS` bounds it too.
+    ///
+    /// Knowledge, not policy: recorded whatever our own switch says, and the
+    /// switch gates only whether we seal.
+    pub(crate) svc_sealed_proved_peers: std::collections::HashSet<String>,
 
     /// Peers whose key package advertised replicated-document sync
     /// ([`DATA_SYNC_V1`] in `data_versions`), so the send path may push
@@ -1181,6 +1195,7 @@ impl OfflineProtocol {
             control_reset_watermark: std::collections::HashMap::new(),
             peer_rich_payload: std::collections::HashSet::new(),
             peer_svc_sealed: std::collections::HashSet::new(),
+            svc_sealed_proved_peers: std::collections::HashSet::new(),
             peer_data_sync: std::collections::HashSet::new(),
             peer_data_group: std::collections::HashSet::new(),
             peer_data_group_attested: std::collections::HashSet::new(),
@@ -1392,6 +1407,7 @@ impl OfflineProtocol {
         let previous_control_reset_watermark = self.control_reset_watermark.clone();
         let previous_peer_rich_payload = self.peer_rich_payload.clone();
         let previous_peer_svc_sealed = self.peer_svc_sealed.clone();
+        let previous_svc_sealed_proved_peers = self.svc_sealed_proved_peers.clone();
         let previous_peer_data_sync = self.peer_data_sync.clone();
         let previous_peer_rich_attested = self.peer_rich_attested.clone();
         let previous_peer_data_group = self.peer_data_group.clone();
@@ -1558,6 +1574,7 @@ impl OfflineProtocol {
             self.control_reset_watermark = previous_control_reset_watermark;
             self.peer_rich_payload = previous_peer_rich_payload;
             self.peer_svc_sealed = previous_peer_svc_sealed;
+            self.svc_sealed_proved_peers = previous_svc_sealed_proved_peers;
             self.peer_data_sync = previous_peer_data_sync;
             self.peer_rich_attested = previous_peer_rich_attested;
             self.peer_data_group = previous_peer_data_group;
@@ -3541,7 +3558,7 @@ impl OfflineProtocol {
 
         // --- Service discovery & request/response ---
         if content.starts_with(offline_protocol_services::SVC_MESSAGE_PREFIX) {
-            self.handle_service_message(sender, content, message);
+            self.handle_service_message(sender, content, message, false);
             return Some(InternalMessageResult::Consumed);
         }
 

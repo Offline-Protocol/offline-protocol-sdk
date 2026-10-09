@@ -22558,7 +22558,12 @@ fn test_process_svc_request_registered_emits_event() {
             method,
             body,
             sender,
+            encrypted,
         } => {
+            assert!(
+                !encrypted,
+                "a signed plaintext request is not reported sealed"
+            );
             assert_eq!(request_id, "req-002");
             assert_eq!(service_id, "echo");
             assert_eq!(method, "ping");
@@ -22605,7 +22610,12 @@ fn test_process_svc_response_emits_event() {
             status,
             body,
             provider_peer_id,
+            encrypted,
         } => {
+            assert!(
+                !encrypted,
+                "a signed plaintext response is not reported sealed"
+            );
             assert_eq!(request_id, "req-003");
             assert_eq!(service_id, "echo");
             assert_eq!(status, "ok");
@@ -37731,6 +37741,7 @@ fn capability_restore_stops_at_the_category_bound_without_pruning() {
         last_seen_ms: 1,
         ctrl_freshness_proved: false,
         last_reset_ms: 0,
+        svc_sealed_proved: false,
     })
     .unwrap();
     counting

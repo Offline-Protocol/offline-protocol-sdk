@@ -174,8 +174,11 @@ pub struct KeyPackagePayload {
     /// whether a body is readable by every hop, so the receiver honours it
     /// only from a signed key package, as it does `nostr_pubkey`. Stripping it
     /// downgrades the peer's service bodies to signed plaintext; replaying an
-    /// older signed package inside the control-frame freshness window does the
-    /// same until a genuine one arrives. Forging it onto a legacy peer makes
+    /// older signed package does the same until a genuine one arrives, and no
+    /// freshness window bounds that replay, since a key package signed under
+    /// `offline-ctrl-v1` is admitted at any age. Neither reaches a peer that
+    /// has already sent a sealed service frame: the receiver keeps that proof
+    /// in a ratchet no key package clears. Forging it onto a legacy peer makes
     /// us send sealed frames it surfaces as chat text, which only the
     /// sender's own key could have produced, so it grants an attacker nothing.
     #[serde(default)]

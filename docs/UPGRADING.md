@@ -52,8 +52,10 @@ for the new member. It also breaks one thing at run time: iOS's peer-stream
 slot moves from MultipeerConnectivity to Network framework, so an iPhone on
 `v0.28` does not see one on `v0.27` or earlier over that slot
 ([§26](#26-behaviour-that-changes-without-a-compile-error-v0280)). The
-unreleased changes break no build; Android's peer-stream slot joins the Wi-Fi
-network it is on
+unreleased changes break one build, narrowly: Rust code that names every field
+of `Event::ServiceRequestReceived` or `Event::ServiceResponseReceived` needs
+the new `encrypted` field or a `..`. Android's peer-stream slot joins the Wi-Fi
+network it is on, and service bodies are sealed between peers on this release
 ([§27](#27-behaviour-that-changes-without-a-compile-error-unreleased)).
 
 Otherwise, where a later section documents an
@@ -2505,7 +2507,8 @@ default. `ProtocolManager` already passes it; only code that builds an
 
 ## 27. Behaviour that changes without a compile error *(unreleased)*
 
-Everything compiles unchanged. Each paragraph says what to check.
+Everything compiles unchanged except one narrow case, the first paragraph
+under the service bodies below. Each paragraph says what to check.
 
 **Android: the peer-stream slot joins the Wi-Fi network.** With
 `wifiDirect: { enabled: true }`, an Android phone now advertises its address
@@ -2558,6 +2561,27 @@ about 3.6 times the plaintext one.
 **`service_request_received.sender` is proven a second way.** For a sealed
 request it is the sender MLS authenticated, rather than the sender a control
 signature proved. The field and its value are unchanged.
+
+**The two service events carry `encrypted`.** `service_request_received` and
+`service_response_received` say whether the frame arrived sealed. Check it
+if a body must never have crossed the mesh readable. This is the one build
+break in this release: Rust code that destructures
+`Event::ServiceRequestReceived` or `Event::ServiceResponseReceived` naming
+every field, or builds one, needs `encrypted` or a `..`, and a TypeScript
+object literal typed as either event needs `encrypted`. Code that reads the
+events compiles unchanged, and the JSON only gains a field.
+
+**A service send can now fail where it used to succeed.** When sealing fails
+on a session that is already confirmed (an MLS or storage fault),
+`send_service_request` and `respond_to_service_request` return the error, as
+`send_message` does. The body used to leave as signed plaintext instead. A
+failure while the session is still being set up keeps the old behaviour: the
+body leaves signed, because that is the documented first-contact window.
+
+**A peer that has sent you a sealed service frame stays sealed.** The proof is
+durable, kept in the same record as the control-freshness ratchet, and no key
+package clears it, including a replayed one that does not advertise support.
+Blocking and then unblocking the peer does not clear it either.
 
 ---
 

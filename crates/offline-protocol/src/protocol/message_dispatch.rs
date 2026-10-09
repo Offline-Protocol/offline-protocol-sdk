@@ -163,6 +163,12 @@ impl OfflineProtocol {
             // confidentiality decision rather than a rendering one. The gate
             // refuses unsigned key packages today, so the check costs a branch
             // and keeps the posture from depending on that staying true.
+            //
+            // This is the advertised half only, and the removal below is
+            // what a replayed older key package can reach. A peer that has
+            // sent us a sealed service frame stays in
+            // `svc_sealed_proved_peers`, which nothing here touches, and the
+            // send path seals on either set.
             let advertises_svc_sealed = signed && payload.svc_versions.contains(&SVC_SEALED_V1);
             if self.config.encryption.encrypt_service_messages && advertises_svc_sealed {
                 self.record_svc_sealed_peer(sender);
@@ -2226,7 +2232,6 @@ impl OfflineProtocol {
         }
     }
 
-    /// Handles service discovery and request/response messages.
     /// Routes a service frame that arrived sealed in the 1:1 session with
     /// `sender` into the service layer.
     ///
@@ -2241,22 +2246,41 @@ impl OfflineProtocol {
     /// here: the service protocol has no group form.
     ///
     /// A peer that sealed a service frame has proved it routes them, and no
-    /// replay of an older key package can fake that, so with the switch on the
-    /// sender is recorded as able to receive the sealed form. That closes the
-    /// window in which a provider would otherwise answer a sealed request in
-    /// plaintext because the requester's fresh key package has not landed yet.
+    /// replay of an older key package can fake that, so the sender is
+    /// recorded in the durable ratchet `svc_sealed_proved_peers`, which no key
+    /// package can clear. That closes two windows: a provider answering a
+    /// sealed request in plaintext because the requester's fresh key package
+    /// has not landed yet, and a replayed older key package removing the peer
+    /// from the advertised set. Recorded whatever our switch says (knowledge,
+    /// not policy); the switch gates only whether we seal.
     fn handle_sealed_service_frame(&mut self, sender: &str, content: &str, message: &Message) {
-        if self.config.encryption.encrypt_service_messages {
+        // The frame decrypted in a 1:1 session with `sender`, which is the
+        // encryption-capability fact itself. Recorded first because the
+        // ratchet below is a subset of that set and refuses anyone outside it.
+        self.record_encryption_capable(sender);
+        self.record_svc_sealed_proved(sender);
+        if !self.svc_sealed_proved_peers.contains(sender)
+            && self.config.encryption.encrypt_service_messages
+        {
+            // The ratchet refused a peer outside the capped encryption-capable
+            // set. Keep the proof for this run at least, so the reply is
+            // sealed.
             self.record_svc_sealed_peer(sender);
         }
-        self.handle_service_message(sender, content, message);
+        self.handle_service_message(sender, content, message, true);
     }
 
+    /// Handles service discovery and request/response messages.
+    ///
+    /// `sealed` says whether the frame arrived inside the 1:1 MLS session
+    /// with `sender`, and is reported to the application as the `encrypted`
+    /// field of the request and response events.
     pub(crate) fn handle_service_message(
         &mut self,
         sender: &str,
         content: &str,
         message: &Message,
+        sealed: bool,
     ) {
         let peers: Vec<String> = self
             .known_peers
@@ -2286,7 +2310,13 @@ impl OfflineProtocol {
                 }
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
                     for svc_event in events_to_emit {
-                        state.emit_event(Event::from(svc_event));
+                        let mut event = Event::from(svc_event);
+                        if let Event::ServiceRequestReceived { encrypted, .. }
+                        | Event::ServiceResponseReceived { encrypted, .. } = &mut event
+                        {
+                            *encrypted = sealed;
+                        }
+                        state.emit_event(event);
                     }
                 }
             }

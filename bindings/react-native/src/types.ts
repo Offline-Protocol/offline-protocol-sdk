@@ -2255,6 +2255,12 @@ export interface ServiceRequestReceivedEvent extends BaseEvent {
   method: string;
   body: string;
   sender: string;
+  /**
+   * Whether the request arrived sealed inside the 1:1 MLS session with
+   * `sender`. `false` means it arrived as signed plaintext that every device
+   * carrying it could read (an older peer, or no confirmed session yet).
+   */
+  encrypted: boolean;
 }
 
 /**
@@ -2267,6 +2273,11 @@ export interface ServiceResponseReceivedEvent extends BaseEvent {
   status: string;
   body: string;
   provider_peer_id: string;
+  /**
+   * Whether the response arrived sealed inside the 1:1 MLS session with the
+   * provider. `false` means it arrived as signed plaintext.
+   */
+  encrypted: boolean;
 }
 
 // ============================================================================

@@ -443,10 +443,23 @@ requester. A body still travels as signed plaintext:
   first request to a provider this device has never met**: the attempt to
   seal it is what starts the session, and the request goes out signed rather
   than being held or dropped,
-- after an attacker strips `svc_versions` from a key package in transit, or
-  replays an older signed package from before the peer upgraded, inside the
-  control-frame freshness window, until a genuine package or a sealed frame
-  from that peer arrives.
+- toward a peer that has **never sent us a sealed service frame**, after an
+  attacker strips `svc_versions` from its key package in transit or replays
+  an older signed package from before it upgraded, until a genuine package or
+  a sealed frame from that peer arrives. No freshness window bounds the
+  replay: a key package signed under `offline-ctrl-v1` is admitted at any age
+  (the key-package escape in the control-frame gate).
+
+A peer that has sent us a sealed service frame is past all three. The frame
+proves it routes the sealed form, which no replay can fake, and the receiver
+records that in a durable ratchet beside the control-freshness one, which no
+key package can clear. From then on its bodies are sealed whatever its key
+packages say.
+
+A failure to seal on a **confirmed** session (an MLS or storage fault) is
+returned to the caller as an error, never sent in plaintext instead. The
+fallback covers a peer this device cannot seal to yet, not a fault on one it
+can.
 
 The plaintext fallback is a stated exception to the capability rule that a
 downgrade loses the feature rather than the confidentiality
@@ -455,16 +468,17 @@ the signed plaintext form is the floor every older peer depends on.
 
 **Impact:** A1 and A3 read the full discovery pattern, and any service body that
 took the fallback. Between two peers running this release with a confirmed
-session, they read neither body.
+session, they read neither body. The receiving application can tell which form
+arrived: `service_request_received` and `service_response_received` carry
+`encrypted`.
 
 **What application teams must do today:** treat the first request to a provider
 as readable by the hops that carry it, or make sure a session exists first (any
 exchanged direct message does it). A body that must never travel in plaintext
 goes in an ordinary direct message instead, as the HTTP front does.
 
-**Follow-up:** a durable record of a peer that has proved it routes sealed
-service frames (today it is held in memory only), and a strict mode under
-`require_encryption` that refuses the fallback toward such a peer.
+**Follow-up:** a strict mode under `require_encryption` that refuses the
+fallback toward a peer that advertised or proved the sealed form.
 
 ### R10. Gateways are unauthenticated for delivery, and see who is in the zone
 

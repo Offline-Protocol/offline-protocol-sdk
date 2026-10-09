@@ -6,11 +6,15 @@
 //! `service_request_received.sender` is the MLS-authenticated sender; a peer
 //! that does not advertise it still gets signed plaintext; a request before
 //! the session confirms falls back and starts the session; the automatic
-//! answer to a sealed request is sealed even on the owner's first decrypt; and
-//! a sealed request retried after a re-key is sealed again rather than
-//! replayed dead.
+//! answer to a sealed request is sealed even on the owner's first decrypt; a
+//! sealed request retried after a re-key is sealed again rather than
+//! replayed dead; a peer that sent a sealed frame stays sealed through a
+//! replayed key package and a restart; a seal failure on a confirmed session
+//! is an error rather than plaintext; and the service events say which form
+//! arrived.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use offline_protocol_core::{Message, ServiceDescriptor, ServiceId};
@@ -22,10 +26,10 @@ use offline_protocol_transport::{MockTransport, Transport, TransportType};
 use super::{
     create_test_config, create_test_config_for_user, establish_confirmed_session, signed_frame,
 };
-use crate::mls::InMemoryStorage;
+use crate::mls::{InMemoryStorage, MlsStorage};
 use crate::protocol::prefixes::internal_prefixes;
 use crate::protocol::types::KeyPackagePayload;
-use crate::protocol::{OfflineProtocol, TestProtocolStateStorage};
+use crate::protocol::{OfflineProtocol, TestProtocolStateStorage, MAX_KEY_PACKAGE_SENT_TO};
 use crate::test_identity::id;
 use crate::{Event, ProtocolConfig};
 use offline_protocol_sealed::SVC_SEALED_V1;
@@ -215,6 +219,20 @@ impl Pair {
     }
 }
 
+/// The `encrypted` flag of every service request and response event emitted.
+fn service_event_flags(events: &Arc<Mutex<Vec<Event>>>) -> Vec<bool> {
+    events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::ServiceRequestReceived { encrypted, .. }
+            | Event::ServiceResponseReceived { encrypted, .. } => Some(*encrypted),
+            _ => None,
+        })
+        .collect()
+}
+
 fn service_frames<'a>(frames: &[&'a Message]) -> Vec<&'a Message> {
     frames
         .iter()
@@ -229,14 +247,21 @@ fn encrypted(
     label: &str,
     tweak: impl FnOnce(&mut ProtocolConfig),
 ) -> (OfflineProtocol, MockTransport, Arc<Mutex<Vec<Event>>>) {
+    encrypted_on(label, Arc::new(InMemoryStorage::new()), tweak)
+}
+
+/// [`encrypted`] over a storage the test supplies.
+fn encrypted_on(
+    label: &str,
+    storage: Arc<dyn MlsStorage>,
+    tweak: impl FnOnce(&mut ProtocolConfig),
+) -> (OfflineProtocol, MockTransport, Arc<Mutex<Vec<Event>>>) {
     let mut config = create_test_config_for_user(label);
     config.encryption.enabled = true;
     config.encryption.store_pending = true;
     tweak(&mut config);
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    protocol
-        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
-        .unwrap();
+    protocol.initialize_mls_for_test(storage).unwrap();
     let transport = MockTransport::new(TransportType::BLE);
     transport.start().unwrap();
     let handle = transport.clone();
@@ -511,6 +536,16 @@ fn service_request_and_response_are_sealed_between_capable_peers() {
         pair.alice.chat().is_empty() && pair.bob.chat().is_empty(),
         "a sealed service frame must never surface as a chat message"
     );
+    assert_eq!(
+        service_event_flags(&pair.bob.events),
+        vec![true],
+        "the provider must be told the request arrived sealed"
+    );
+    assert_eq!(
+        service_event_flags(&pair.alice.events),
+        vec![true],
+        "the requester must be told the response arrived sealed"
+    );
 }
 
 /// A peer that does not advertise the sealed form (a release from before it,
@@ -545,6 +580,11 @@ fn service_request_to_a_legacy_peer_stays_signed_plaintext() {
     // The gate refuses unsigned control frames, so the provider handling it
     // proves it left signed.
     assert_eq!(pair.bob.requests().len(), 1);
+    assert_eq!(
+        service_event_flags(&pair.bob.events),
+        vec![false],
+        "a plaintext request must not be reported sealed"
+    );
 }
 
 /// A request to a capable peer before the session confirms leaves as signed
@@ -659,8 +699,9 @@ fn the_automatic_reply_to_the_first_sealed_request_is_sealed() {
 }
 
 /// A sealed service frame proves its sender routes them, which a replayed key
-/// package cannot, so bob answers sealed even though he never received a key
-/// package from alice that advertised it.
+/// package cannot, so bob records alice in the proved ratchet and answers
+/// sealed even though he never received a key package from her that
+/// advertised it.
 #[test]
 fn a_sealed_service_request_marks_its_sender_capable() {
     let (mut alice, alice_h, _) = encrypted("alice", |_| {});
@@ -674,7 +715,7 @@ fn a_sealed_service_request_marks_its_sender_capable() {
         .send_service_request(&id("bob"), "echo", "ping", "x")
         .unwrap();
     deliver(&alice_h, &id("alice"), &mut bob, &bob_h);
-    assert!(bob.peer_svc_sealed.contains(&id("alice")));
+    assert!(bob.svc_sealed_proved_peers.contains(&id("alice")));
     assert!(bob_events
         .lock()
         .unwrap()
@@ -692,8 +733,8 @@ fn a_sealed_service_request_marks_its_sender_capable() {
 
 /// Routing a sealed service frame is parsing, and parsing is never gated by a
 /// kill switch: with the switch off bob still hands alice's sealed request to
-/// his service layer (rather than surfacing it as chat text), but he neither
-/// records her as capable nor seals his answer.
+/// his service layer (rather than surfacing it as chat text). He records the
+/// proof, which is knowledge rather than policy, but does not seal his answer.
 #[test]
 fn a_receiver_with_the_switch_off_still_routes_a_sealed_service_frame() {
     let (mut alice, alice_h, _) = encrypted("alice", |_| {});
@@ -718,6 +759,7 @@ fn a_receiver_with_the_switch_off_still_routes_a_sealed_service_frame() {
         .iter()
         .any(|event| matches!(event, Event::MessageReceived { .. })));
     assert!(!bob.peer_svc_sealed.contains(&id("alice")));
+    assert!(bob.svc_sealed_proved_peers.contains(&id("alice")));
 
     bob.respond_to_service_request(&request_id, &id("alice"), "echo", "ok", "y")
         .unwrap();
@@ -872,4 +914,240 @@ fn require_encryption_seals_service_frames_to_a_capable_confirmed_peer() {
     assert!(sent
         .iter()
         .all(|frame| frame.content.starts_with(internal_prefixes::ENCRYPTED)));
+}
+
+// ---------------------------------------------------------------------------
+// The proof ratchet
+// ---------------------------------------------------------------------------
+
+/// The review finding this pins: a signed key package that does not advertise
+/// the sealed form, replayed after the peer has sent us a sealed service
+/// frame, must not send that peer's service bodies in plaintext again. The
+/// advertised half follows the key package; the proved half does not, and
+/// sealing needs only one of them.
+#[test]
+fn a_replayed_key_package_cannot_unseal_a_peer_that_sent_a_sealed_frame() {
+    let (mut alice, alice_h, _) = encrypted("alice", |_| {});
+    let (mut bob, bob_h, _) = encrypted("bob", |_| {});
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+    alice.record_svc_sealed_peer(&id("bob"));
+    register(&mut bob, "echo");
+
+    let request_id = alice
+        .send_service_request(&id("bob"), "echo", "ping", "x")
+        .unwrap();
+    deliver(&alice_h, &id("alice"), &mut bob, &bob_h);
+    assert!(bob.svc_sealed_proved_peers.contains(&id("alice")));
+
+    // A key package from before alice upgraded, signed by her and replayed.
+    let replay = signed_frame(
+        &id("alice"),
+        &id("bob"),
+        format!(
+            "{}{}",
+            internal_prefixes::KEY_PACKAGE,
+            key_package_body(&id("alice"), Vec::new())
+        ),
+    );
+    bob.process_internal_message(&replay);
+    assert!(
+        !bob.peer_svc_sealed.contains(&id("alice")),
+        "the advertised half follows the key package"
+    );
+    assert!(bob.svc_sealed_proved_peers.contains(&id("alice")));
+
+    bob_h.clear_sent_messages();
+    bob.respond_to_service_request(&request_id, &id("alice"), "echo", "ok", "y")
+        .unwrap();
+    let sent = bob_h.sent_messages();
+    assert!(
+        !sent
+            .iter()
+            .any(|frame| frame.content.starts_with(SVC_MESSAGE_PREFIX)),
+        "the replay downgraded the response to plaintext"
+    );
+    assert!(sent
+        .iter()
+        .any(|frame| frame.content.starts_with(internal_prefixes::ENCRYPTED)));
+}
+
+/// The proof survives a restart, and survives every other write of the
+/// record it lives in: each one rewrites the whole record, so a writer that
+/// forgot the field would clear the ratchet silently.
+#[test]
+fn the_sealed_service_proof_is_durable_and_no_other_write_clears_it() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let peer = id("provider");
+    let mut protocol = super::protocol_with_mls_storage(storage.clone());
+    protocol.record_encryption_capable(&peer);
+    protocol.record_svc_sealed_proved(&peer);
+    protocol.record_reset_spent(&peer, 5);
+    protocol.record_control_freshness_proved(&peer);
+
+    let mut restarted = super::protocol_with_mls_storage(storage);
+    assert!(
+        restarted.svc_sealed_proved_peers.contains(&peer),
+        "a restart must not cost a proved peer its sealed service bodies"
+    );
+    feed_signed_key_package(&mut restarted, &peer, Vec::new());
+    assert!(restarted.svc_sealed_proved_peers.contains(&peer));
+}
+
+/// Refused outside the capped encryption-capable set, like the
+/// control-freshness ratchet it sits beside, so the set the cap bounds also
+/// bounds this one.
+#[test]
+fn the_sealed_service_proof_is_a_subset_of_the_capable_set() {
+    let mut protocol = super::protocol_with_mls_storage(Arc::new(InMemoryStorage::new()));
+    protocol.record_svc_sealed_proved(&id("stranger"));
+    assert!(!protocol.svc_sealed_proved_peers.contains(&id("stranger")));
+}
+
+/// The advertised set is bounded like `key_package_sent_to`: full, it is
+/// cleared rather than grown.
+#[test]
+fn the_advertised_set_is_bounded() {
+    let mut protocol = negotiating_protocol(|_| {});
+    for i in 0..MAX_KEY_PACKAGE_SENT_TO {
+        protocol.record_svc_sealed_peer(&format!("peer-{i}"));
+    }
+    assert_eq!(protocol.peer_svc_sealed.len(), MAX_KEY_PACKAGE_SENT_TO);
+    protocol.record_svc_sealed_peer("one-more");
+    assert_eq!(protocol.peer_svc_sealed.len(), 1);
+    assert!(protocol.peer_svc_sealed.contains("one-more"));
+}
+
+// ---------------------------------------------------------------------------
+// A seal failure on a confirmed session
+// ---------------------------------------------------------------------------
+
+/// MLS storage that refuses the group-state write encryption makes, on
+/// demand, and passes everything else through, so a confirmed session fails
+/// to seal while signing a plaintext frame still works.
+struct GroupStateWriteFails {
+    inner: InMemoryStorage,
+    fail: AtomicBool,
+}
+
+impl MlsStorage for GroupStateWriteFails {
+    fn store(
+        &self,
+        key_type: &str,
+        key_id: &str,
+        data: &[u8],
+    ) -> offline_protocol_mls::storage::StorageResult<()> {
+        if self.fail.load(Ordering::SeqCst)
+            && key_type == offline_protocol_mls::types::StorageKeyType::GroupState.as_str()
+        {
+            return Err(offline_protocol_mls::StorageError::StoreFailed(
+                "forced group-state write failure".to_string(),
+            ));
+        }
+        self.inner.store(key_type, key_id, data)
+    }
+
+    fn load(
+        &self,
+        key_type: &str,
+        key_id: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<Option<Vec<u8>>> {
+        self.inner.load(key_type, key_id)
+    }
+
+    fn delete(
+        &self,
+        key_type: &str,
+        key_id: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<()> {
+        self.inner.delete(key_type, key_id)
+    }
+
+    fn list_keys(
+        &self,
+        key_type: &str,
+    ) -> offline_protocol_mls::storage::StorageResult<Vec<String>> {
+        self.inner.list_keys(key_type)
+    }
+}
+
+/// The fallback to signed plaintext is for a peer we cannot seal to yet. On a
+/// confirmed session a seal failure is returned to the caller, as it is for a
+/// direct message, and nothing readable leaves.
+#[test]
+fn a_seal_failure_on_a_confirmed_session_is_an_error_not_plaintext() {
+    let storage = Arc::new(GroupStateWriteFails {
+        inner: InMemoryStorage::new(),
+        fail: AtomicBool::new(false),
+    });
+    let (mut alice, alice_h, _) = encrypted_on("alice", storage.clone(), |_| {});
+    let (mut bob, _bob_h, _) = encrypted("bob", |_| {});
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+    alice.record_svc_sealed_peer(&id("bob"));
+    alice_h.clear_sent_messages();
+
+    storage.fail.store(true, Ordering::SeqCst);
+    let result = alice.send_service_request(&id("bob"), "echo", "ping", "must-not-leak");
+    assert!(
+        result.is_err(),
+        "a seal failure on a confirmed session must be reported"
+    );
+    for frame in alice_h.sent_messages() {
+        assert!(
+            !frame.content.contains("must-not-leak"),
+            "the body left readable: {}",
+            frame.content
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A sealed frame that arrives before the session
+// ---------------------------------------------------------------------------
+
+/// A sealed request that reaches the provider before its session does is
+/// queued undecrypted, and the drain that runs when the session is ready
+/// routes it to the service layer like a live one: never surfaced as chat.
+#[test]
+fn a_sealed_request_queued_before_the_session_is_routed_when_it_drains() {
+    let (mut alice, alice_h, _) = encrypted("alice", |_| {});
+    let (mut bob, bob_h, bob_events) = encrypted("bob", |_| {});
+    register(&mut bob, "echo");
+
+    // Alice holds a session bob has not joined yet.
+    let welcome = {
+        let package = {
+            let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+            manager.get_or_create_key_package().unwrap()
+        };
+        let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        manager
+            .import_key_package(&id("bob"), &package.key_package_data)
+            .unwrap();
+        manager.create_session(&id("bob")).unwrap()
+    };
+    alice.confirmed_sessions.insert(id("bob"));
+    alice.record_svc_sealed_peer(&id("bob"));
+
+    alice
+        .send_service_request(&id("bob"), "echo", "ping", "early")
+        .unwrap();
+    let request = deliver(&alice_h, &id("alice"), &mut bob, &bob_h);
+    assert!(request[0].content.starts_with(internal_prefixes::ENCRYPTED));
+    assert!(
+        service_event_flags(&bob_events).is_empty(),
+        "with no session the frame must wait, not be handled"
+    );
+
+    {
+        let manager = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        manager.join_session(&welcome).unwrap();
+    }
+    bob.process_pending_decryption(&id("alice"));
+
+    assert_eq!(service_event_flags(&bob_events), vec![true]);
+    assert!(!bob_events
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|event| matches!(event, Event::MessageReceived { .. })));
 }

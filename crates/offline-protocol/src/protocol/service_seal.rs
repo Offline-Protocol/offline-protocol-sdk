@@ -7,6 +7,10 @@
 //! that peer is confirmed. Toward everyone else the signed plaintext form is
 //! still sent, because it is the floor every older peer depends on.
 //!
+//! A failure to seal on a session that is confirmed is returned as an error,
+//! never sent in plaintext instead: the fallback exists for a peer we cannot
+//! seal to yet, not for a fault on one we can.
+//!
 //! Discovery (`__SVC_DISC_Q__` / `__SVC_DISC_R__`) never comes through here
 //! sealed: it is a gossip every hop must read to match and forward, and it has
 //! no single recipient whose session could seal it.
@@ -29,6 +33,14 @@ impl OfflineProtocol {
     /// would break the service for a window the application cannot see. The
     /// encrypt attempt is also what starts that session, exactly as it does
     /// for a direct message, so the next request seals.
+    ///
+    /// The exception covers only that window. When the session is confirmed
+    /// and sealing still fails (an MLS or storage fault), the error is
+    /// returned, as `send_message` returns it for a direct message: a body the
+    /// caller expected sealed must not leave readable by every hop, and the
+    /// caller can retry a refused send but cannot see a downgraded one. A
+    /// session that vanished from storage is not this case: the confirmed
+    /// cache evicts it and reports `SessionNotReady`, which is the window.
     pub(crate) fn send_service_frame(
         &mut self,
         recipient: &str,
@@ -59,14 +71,23 @@ impl OfflineProtocol {
                 );
                 self.send_internal_message(recipient, content, priority)
             }
-            Err(err) => {
-                // A confirmed session that then fails to encrypt is the stale
-                // confirmed-cache case. Losing the request is worse than the
-                // exposure this fallback already accepts for an unconfirmed one.
+            Err(err) if self.confirmed_sessions.contains(recipient) => {
                 warn!(
                     recipient = %recipient,
                     error = %err,
-                    "Sealing a service frame failed; sent signed instead"
+                    "Sealing a service frame failed on a confirmed session; not sent"
+                );
+                Err(err)
+            }
+            Err(err) => {
+                // No confirmed session: the failure came from starting one
+                // (importing the key package, creating the group, sending the
+                // Welcome). That is the documented window, so the frame takes
+                // the floor exactly as it does on `SessionNotReady`.
+                debug!(
+                    recipient = %recipient,
+                    error = %err,
+                    "Starting a session with a sealed-service peer failed; service frame sent signed"
                 );
                 self.send_internal_message(recipient, content, priority)
             }
@@ -75,12 +96,15 @@ impl OfflineProtocol {
 
     /// Whether `content` addressed to `recipient` should be attempted sealed:
     /// a request or response (never discovery), our switch on, MLS available,
-    /// and a peer known to route the sealed form.
+    /// and a peer known to route the sealed form, either because its key
+    /// package advertises it or because it has sent us a sealed service frame
+    /// (the ratchet a replayed key package cannot clear).
     fn should_seal_service_frame(&self, recipient: &str, content: &str) -> bool {
         (content.starts_with(SVC_REQUEST) || content.starts_with(SVC_RESPONSE))
             && self.config.encryption.encrypt_service_messages
             && self.should_auto_encrypt()
-            && self.peer_svc_sealed.contains(recipient)
+            && (self.peer_svc_sealed.contains(recipient)
+                || self.svc_sealed_proved_peers.contains(recipient))
     }
 
     /// Records that `peer` routes sealed service frames, bounded like

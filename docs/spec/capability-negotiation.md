@@ -224,13 +224,22 @@ its bodies as ordinary sealed messages instead:
 - **Stripping** the field downgrades that peer's service bodies to signed
   plaintext until a genuine package arrives.
 - **Replaying** an older signed package from before the peer upgraded does the
-  same, inside the control-frame freshness window.
+  same. No freshness window bounds it: a key package signed under
+  `offline-ctrl-v1` is admitted at any age, so that the key package can always
+  re-teach capabilities.
 - **The first request** to a provider this device has no confirmed session with
   leaves in signed plaintext, because there is nothing yet to seal it with.
 
-A peer that sends a **sealed** service frame has proved it routes them, which
-no replay can fake, so a receiver MAY treat that frame as an advertisement of
-entry 1 for the sender. The reference implementation does, in memory.
+The first two reach only a peer that has never sent us a sealed service frame.
+A peer that sends one has proved it routes them, which no replay can fake, so a
+receiver SHOULD record that as a **ratchet**: durable, kept apart from the
+advertised record every key package overwrites, and never cleared by a key
+package. It then seals toward that peer whatever later key packages say. The
+reference implementation stores it in the peer's encryption-capability record,
+beside the control-freshness ratchet.
+
+A sender that cannot seal on a session it has confirmed MUST NOT fall back to
+plaintext. The fallback is for a peer it cannot seal to yet.
 
 ## Relay capabilities
 

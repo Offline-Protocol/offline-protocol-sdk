@@ -830,6 +830,21 @@ pub(crate) struct EncryptionCapableEntry {
     /// fixed.
     #[serde(default)]
     pub(crate) last_reset_ms: i64,
+    /// Whether this peer has ever sent us a service frame sealed inside the
+    /// 1:1 session, which proves it routes the sealed form.
+    ///
+    /// A **ratchet**, here rather than in [`PeerCapabilities`] for the reason
+    /// `ctrl_freshness_proved` is: that record is what a peer advertised and
+    /// every key package overwrites it. Kept there, one replayed key package
+    /// from before the peer upgraded would erase the proof and send that
+    /// peer's service bodies in signed plaintext again, and a key package
+    /// signed under `offline-ctrl-v1` is admitted at any age (the key-package
+    /// escape), so no freshness window bounds that replay.
+    ///
+    /// `#[serde(default)]` gives `false` for records written before the field
+    /// existed, which is correct: nothing was proved.
+    #[serde(default)]
+    pub(crate) svc_sealed_proved: bool,
 }
 
 /// Payload for key package exchange, and the compact envelope version it

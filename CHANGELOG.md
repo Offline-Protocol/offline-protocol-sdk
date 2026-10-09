@@ -36,9 +36,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   answer to a sealed request is sealed too, and a sealed request retried
   after a session re-key is sealed again rather than replayed as dead
   ciphertext. Discovery stays signed plaintext, because every hop reads it to
-  forward it. A new switch, `encryption.encryptServiceMessages`
-  (`encrypt_service_messages`, default on), turns sealing off without a
-  release; routing an inbound sealed frame does not depend on it
+  forward it. A peer that has sent a sealed service frame stays sealed
+  through any later or replayed key package, by a durable ratchet beside the
+  control-freshness one. A seal failure on a confirmed session is returned as
+  an error rather than sent in plaintext. `service_request_received` and
+  `service_response_received` carry a new `encrypted` field, so an
+  application can tell which form arrived; Rust code naming every field of
+  either variant needs it or a `..`. A new switch,
+  `encryption.encryptServiceMessages` (`encrypt_service_messages`, default
+  on), turns sealing off without a release; routing an inbound sealed frame
+  does not depend on it
   ([capability negotiation](docs/spec/capability-negotiation.md#the-exception-svc_versions)).
 
 - **Android peer streams on the Wi-Fi network.** With

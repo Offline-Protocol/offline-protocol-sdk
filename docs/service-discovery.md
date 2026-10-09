@@ -92,6 +92,10 @@ Service frames are internal control messages, not user content, so they are **ex
 - **Discovery** (`discover_services` and its answers) is always **signed plaintext** (Ed25519 control-message signing, not MLS). Every hop reads it to match the service and forward the query, and there is no single recipient whose session could seal it. Do not put anything sensitive in a service descriptor.
 - **Requests and responses** are **sealed inside the recipient's 1:1 MLS session** when `encryption.encryptServiceMessages` is on (the default), the recipient runs a release that advertises support, and the session with the recipient is confirmed. The provider's `service_request_received.sender` is then the MLS-authenticated requester.
 - Otherwise a request or response leaves as **signed plaintext**. That covers a peer on an older release, the switch off on either side, and any request sent before the session confirms, which includes **the first request to a provider this device has never met**. The attempt to seal that first request is what starts the session, so the next one is sealed.
+- Once a peer has sent this device a sealed request or response, its bodies stay sealed even if a later (or replayed) key package stops advertising support. That proof is durable.
+- If sealing fails on a confirmed session, `send_service_request` and `respond_to_service_request` return the error. The body is never sent in plaintext instead.
+
+Each `service_request_received` and `service_response_received` event carries `encrypted`, so the receiving app can tell which form arrived and refuse a plaintext one if it must.
 
 If a body must never travel in plaintext, make sure a session exists first (any exchanged direct message does it), or send it as an ordinary direct message instead of through the service API, as the HTTP front does. Threat model [R9](security/threat-model.md#r9-service-bodies-are-sealed-only-toward-capable-peers-discovery-is-signed-not-encrypted) records what the fallback leaves exposed.
 
@@ -205,6 +209,7 @@ Emitted on the **provider** node when a consumer sends a request to a locally re
 | `method` | `String` | Application-defined method name or action |
 | `body` | `String` | Request payload (typically JSON) |
 | `sender` | `String` | Peer ID of the requester (use as `requester` in response) |
+| `encrypted` | `bool` | Whether the request arrived sealed in the 1:1 MLS session. `false` means signed plaintext that every hop could read; see [Encryption Interaction](#encryption-interaction) |
 
 ```json
 {
@@ -213,7 +218,8 @@ Emitted on the **provider** node when a consumer sends a request to a locally re
   "service_id": "weather.v1",
   "method": "get_forecast",
   "body": "{\"city\": \"NYC\"}",
-  "sender": "alice"
+  "sender": "alice",
+  "encrypted": true
 }
 ```
 
@@ -228,6 +234,7 @@ Emitted on the **consumer** node when a provider responds to a request.
 | `status` | `String` | One of `"ok"`, `"not_found"`, `"error"`; a response with any other status is dropped before this event |
 | `body` | `String` | Response payload |
 | `provider_peer_id` | `String` | Peer ID of the provider |
+| `encrypted` | `bool` | Whether the response arrived sealed in the 1:1 MLS session |
 
 ```json
 {
@@ -236,7 +243,8 @@ Emitted on the **consumer** node when a provider responds to a request.
   "service_id": "weather.v1",
   "status": "ok",
   "body": "{\"temp\": 72, \"unit\": \"F\"}",
-  "provider_peer_id": "bob"
+  "provider_peer_id": "bob",
+  "encrypted": true
 }
 ```
 
