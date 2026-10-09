@@ -992,6 +992,18 @@ dictionary ProtocolConfig {
     // MANY DIFFERENT peers, which is the clock; one peer while others are fine
     // is that peer. Defaulted so existing callers keep compiling.
     boolean control_freshness_enforced = true;
+    // Whether service request and response bodies are sealed inside the
+    // recipient's 1:1 MLS session instead of crossing every hop as signed
+    // plaintext (default on). Takes effect only toward a peer that advertised
+    // support in a signed key package, or proved it by sending a sealed
+    // service frame, and only once the session with that peer is confirmed.
+    // Toward everyone else, and before the session confirms, the body still
+    // leaves as signed plaintext, so the first request to a provider this
+    // device has never met is readable by the hops that carry it. Discovery
+    // is never sealed. Routing an inbound sealed service frame does not depend
+    // on this switch. Appended last because the Swift initializer is
+    // positional; defaulted so existing callers keep compiling.
+    boolean encrypt_service_messages = true;
 };
 
 // ========================================================================

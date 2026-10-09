@@ -23,6 +23,7 @@ struct EncryptionConfigValues: Equatable {
     var compactEnvelopeEnabled: Bool
     var richPayloadEnabled: Bool
     var cryptoRecoveryEnabled: Bool
+    var encryptServiceMessages: Bool
     var maxPendingPerPeer: UInt64
     var maxPendingGlobal: UInt64
     var pendingTtlMs: UInt64
@@ -58,6 +59,9 @@ enum EncryptionConfigReader {
         let cryptoRecoveryEnabled = bool(nested, "cryptoRecoveryEnabled", "crypto_recovery_enabled")
             ?? bool(raw, "cryptoRecoveryEnabled", "crypto_recovery_enabled")
             ?? true
+        let encryptServiceMessages = bool(nested, "encryptServiceMessages", "encrypt_service_messages")
+            ?? bool(raw, "encryptServiceMessages", "encrypt_service_messages")
+            ?? true
 
         let pendingQueue = (nested["pendingQueue"] as? [String: Any])
             ?? (nested["pending_queue"] as? [String: Any])
@@ -83,6 +87,7 @@ enum EncryptionConfigReader {
             compactEnvelopeEnabled: compactEnvelopeEnabled,
             richPayloadEnabled: richPayloadEnabled,
             cryptoRecoveryEnabled: cryptoRecoveryEnabled,
+            encryptServiceMessages: encryptServiceMessages,
             maxPendingPerPeer: maxPendingPerPeer,
             maxPendingGlobal: maxPendingGlobal,
             pendingTtlMs: pendingTtlMs,

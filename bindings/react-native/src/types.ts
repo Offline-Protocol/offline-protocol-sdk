@@ -715,6 +715,20 @@ export interface EncryptionConfig {
    */
   cryptoRecoveryEnabled?: boolean;
   /**
+   * Seal service request and response bodies inside the recipient's 1:1 MLS
+   * session instead of sending them as signed plaintext that every hop can
+   * read. Default: `true`.
+   *
+   * Takes effect only toward a peer that advertised support (an SDK release
+   * with this switch on) and only once the session with that peer is
+   * confirmed. Toward everyone else, and before the session confirms, the body
+   * still leaves as signed plaintext: the first request to a provider this
+   * device has never met is readable by the devices that carry it. Discovery is
+   * never sealed. If a body must never travel in plaintext, send it as an
+   * ordinary message instead of through the service API.
+   */
+  encryptServiceMessages?: boolean;
+  /**
    * Bounds and policy for encrypted messages received before session readiness.
    */
   pendingQueue?: PendingQueueConfig;
