@@ -5447,6 +5447,51 @@ fn a_resent_or_restored_sync_frame_keeps_its_no_alert_marker() {
     assert_eq!(no_alert(restored), Some("1"));
 }
 
+/// A document carried over the media path is the SDK's own traffic like any
+/// other sync frame, and it prefers the relay, so every chunk is marked. A
+/// file the user sends is not.
+#[test]
+fn a_document_carried_as_media_is_marked_no_alert_and_a_users_file_is_not() {
+    let (mut alice, bob) = pair();
+    // More than one chunk, so the marker is shown past chunk 0, the only one
+    // that carries the purpose.
+    let bytes = vec![7u8; 100 * 1024];
+    let send = |alice: &mut Node, purpose| {
+        alice
+            .protocol
+            .send_media_inner(
+                bob.address.clone(),
+                bytes.clone(),
+                "notes".to_string(),
+                offline_protocol_core::ContentType::File,
+                crate::protocol::types::MediaSendOptions::default(),
+                purpose,
+            )
+            .expect("the transfer starts");
+        drain_sent(alice)
+            .into_iter()
+            .filter(|m| m.content_type == offline_protocol_core::ContentType::FileChunk)
+            .collect::<Vec<_>>()
+    };
+
+    let snapshot = send(
+        &mut alice,
+        Some(crate::media_envelope::DataPurpose::Snapshot {
+            doc: "notes".to_string(),
+        }),
+    );
+    assert!(snapshot.len() > 1, "{} chunks", snapshot.len());
+    for chunk in &snapshot {
+        assert_eq!(no_alert(chunk), Some("1"));
+    }
+
+    let file = send(&mut alice, None);
+    assert!(!file.is_empty());
+    for chunk in &file {
+        assert_eq!(no_alert(chunk), None);
+    }
+}
+
 /// Hand `node` a key package for `peer`, as one arriving over the wire would.
 fn hold_key_package(node: &mut Node, peer: &str) {
     let kp = crate::test_identity::manager_for(peer, Arc::new(InMemoryStorage::new()))

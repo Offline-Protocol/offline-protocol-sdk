@@ -252,9 +252,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   Every engine-originated frame now carries `metadata["no_alert"] = "1"` in
   the cleartext envelope for the relay to honour. User messages (plain, rich,
   forwarded, media), connection requests and accepts, group chat messages and
-  group invites do not; a 1:1 Welcome carries it only when no user message is
-  waiting on the session, decided again on every resend. The key is unsigned
-  and receivers ignore it. See
+  group invites do not. A document carried over the media path is the SDK's
+  own, so every one of its chunks carries it. A 1:1 Welcome carries it only
+  when no user message is waiting on the session, decided again on every
+  resend. The key is unsigned and receivers ignore it. See
   [Reserved metadata keys](docs/spec/wire-format.md#reserved-metadata-keys).
 - **A message the mesh carried settles when its recipient answers.** A direct
   message to a peer no carrier could reach was handed to neighbours to carry,

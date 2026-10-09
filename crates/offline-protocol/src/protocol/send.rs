@@ -2943,6 +2943,14 @@ impl OfflineProtocol {
                     content_type.to_string(),
                 );
             }
+            // A document-layer transfer is the SDK's own traffic, like the
+            // `__DATA_V1__` frames beside it. The purpose rides sealed in
+            // chunk 0 only, so every chunk is marked here, where it is known.
+            if data_purpose.is_some() {
+                message
+                    .metadata
+                    .insert(crate::constants::NO_ALERT_KEY.to_string(), "1".to_string());
+            }
             self.outbound_media_chunks
                 .insert(message.id.clone(), (file_id.to_string(), chunk_index));
 
