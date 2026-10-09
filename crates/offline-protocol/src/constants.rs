@@ -33,7 +33,7 @@ pub const ACK_STATUS_UNDECRYPTABLE: &str = "undecryptable";
 /// Welcome no user message is waiting on.
 ///
 /// Set to `"1"` in the cleartext envelope so the relay can tell these from
-/// the user's own messages — both are opaque `__MLS_ENC__` ciphertext to it —
+/// the user's own messages (both are opaque `__MLS_ENC__` ciphertext to it)
 /// and skip the "new message" push for an offline recipient. Frames built
 /// for the application's user-content sends never carry it. Unsigned like
 /// all metadata; receivers ignore it.

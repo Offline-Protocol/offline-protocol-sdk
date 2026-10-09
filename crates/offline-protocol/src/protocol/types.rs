@@ -1675,8 +1675,8 @@ pub(crate) enum InternalMessageResult {
     ///   up before the session confirmed still learns of delivery).
     /// - **Envelope parse failure** with `crypto_recovery_enabled`: the
     ///   `__MLS_ENC__` payload did not parse in any envelope form, so there is
-    ///   no ciphertext to decrypt. Not queued — an unparseable frame can never
-    ///   become parseable — and not answered, since for an injector silence
+    ///   no ciphertext to decrypt. Not queued (an unparseable frame can never
+    ///   become parseable) and not answered, since for an injector silence
     ///   reveals less than an answer. Recovery is the sender's resend.
     ///
     /// See `docs/state-machines/delivery-and-acks.md` for the
@@ -1687,7 +1687,7 @@ pub(crate) enum InternalMessageResult {
     /// or a crypto/transport failure with `crypto_recovery_enabled` (OpenMLS
     /// spent the ratchet generation on the failed attempt). Not queued.
     ///
-    /// Handled like `Deferred` — id unmarked, no delivery ACK — except that
+    /// Handled like `Deferred` (id unmarked, no delivery ACK) except that
     /// the frame is answered with an `undecryptable` ACK
     /// ([`crate::constants::ACK_STATUS_UNDECRYPTABLE`]) when it arrived over
     /// the internet relay and its sender advertised that it reads one; any

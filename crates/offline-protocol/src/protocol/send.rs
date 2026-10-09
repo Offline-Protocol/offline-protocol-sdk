@@ -4997,7 +4997,7 @@ impl OfflineProtocol {
     /// Answers a frame that can never decrypt: a delivery ACK in shape (so a
     /// relay holding the frame drops it) carrying
     /// `ack_status = "undecryptable"`, which the sender settles without
-    /// `message_delivered` — see [`Self::handle_undecryptable_ack`]. Only for
+    /// `message_delivered` (see [`Self::handle_undecryptable_ack`]). Only for
     /// a frame that asked for an answer; the plain ACK's rules otherwise apply.
     ///
     /// The one gate for every path that gives up on a frame (receive loop,

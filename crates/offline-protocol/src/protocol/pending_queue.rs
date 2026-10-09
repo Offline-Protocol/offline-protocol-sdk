@@ -141,9 +141,10 @@ impl OfflineProtocol {
     /// so neither the file_id nor the text can be named here.)
     ///
     /// Under the deferred-ACK model this is **advisory, not terminal**: an
-    /// evicted frame was never ACKed, so a sender still retrying resends it, and
-    /// the resend re-enters the queue and can still complete once the session
-    /// confirms. The event says the message is *at risk*, not that it has
+    /// evicted frame is never delivery-ACKed (one that came over the relay is
+    /// answered `undecryptable`, see `answer_dropped_pending`), so a sender
+    /// still retrying resends it, and the resend re-enters the queue and can
+    /// still complete once the session confirms. The event says the message is *at risk*, not that it has
     /// failed — for media the terminal signal is `FileReceiveFailed`. It is
     /// emitted for text as well as for chunks: text drops used to be
     /// metrics-only, which left an app with no way to distinguish "the sender
@@ -428,7 +429,7 @@ impl OfflineProtocol {
                         // drained frame reaches this arm is session not ready
                         // (unexpected post-confirmation), and
                         // `handle_encrypted_message` re-queued it itself before
-                        // returning `Deferred` — `enqueue` is idempotent by id.
+                        // returning `Deferred`, and `enqueue` is idempotent by id.
                         // (A queued frame parsed at receipt, so the unparseable
                         // shape cannot occur here.)
                         debug!(
@@ -437,9 +438,9 @@ impl OfflineProtocol {
                         );
                     }
                     InternalMessageResult::Undecryptable => {
-                        // Dead ciphertext — the drain's attempt spent the
+                        // Dead ciphertext (the drain's attempt spent the
                         // ratchet generation, or it is sealed to an epoch that
-                        // is not ours — so the queue gives up on it. Not
+                        // is not ours), so the queue gives up on it. Not
                         // re-queued: a re-enqueue would miss `enqueue`'s
                         // idempotency check (the drain removed the entry) and
                         // restart the TTL of a frame that can never decrypt.

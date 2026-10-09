@@ -509,15 +509,17 @@ The delivery system emits events at each stage of the message lifecycle:
 does not settle anything. A message that fails to decrypt is not delivery-ACKed.
 A frame that can never decrypt (spent ratchet generation, dead epoch, or one the
 pending-decryption queue gave up on) is answered with an `ack_status:
-"undecryptable"` ACK instead, when it arrived over the internet relay and its sender advertised `ack_versions` entry 1
-(otherwise it is left unanswered, as before): the sender re-seals the DM once under its current
-session and resends it with the same id (verbatim when the plaintext is gone,
-as for a restored outbox entry); it never emits `MessageDelivered` for it, and a
-second such answer for the same id leaves the entry to its retry ladder. The event therefore fires once per failed *attempt* rather than once per
-message — bounded by the sender's ACK retry budget. `sealed_at_ms` (sender clock,
-from the envelope) and `session_established_at_ms` (local clock) let an app tell
-a stale frame — sealed before the current session existed — from one that says
-something about the session now. Treat it as
+"undecryptable"` ACK instead, when it arrived over the internet relay and its
+sender advertised `ack_versions` entry 1 (otherwise it is left unanswered, as
+before): the sender re-seals the DM once under its current session and resends
+it with the same id (verbatim when the plaintext is gone, as for a restored
+outbox entry); it never emits `MessageDelivered` for it, and a second such
+answer for the same id leaves the entry to its retry ladder. The event
+therefore fires once per failed *attempt* rather than once per message, bounded
+by the sender's ACK retry budget. `sealed_at_ms` (sender clock, from the
+envelope) and `session_established_at_ms` (local clock) let an app tell a stale
+frame (sealed before the current session existed) from one that says something
+about the session now. Treat it as
 "this attempt did not decrypt"; the terminal signal is `MessageFailed` on the
 sender, or `FileReceiveFailed` for media. See
 [Crypto-Failure Recovery](mls-integration.md#crypto-failure-recovery).

@@ -1436,7 +1436,7 @@ impl OfflineProtocol {
                     // diverged). Trigger a rate-limited re-key to heal the channel
                     // for future traffic, and return Undecryptable so the receive
                     // loop unmarks the id and answers `undecryptable` instead of
-                    // "delivered" — the sender's ACK was a lie before (message
+                    // "delivered": the sender's ACK was a lie before (message
                     // dropped, sender told "delivered").
                     //
                     // We deliberately do NOT enqueue: unlike the not-yet-ready
@@ -1502,8 +1502,8 @@ impl OfflineProtocol {
                         ));
                     }
                     if retriable {
-                        // Not enqueued: like a desync, this ciphertext is dead
-                        // — OpenMLS consumed the ratchet generation on the
+                        // Not enqueued: like a desync, this ciphertext is dead.
+                        // OpenMLS consumed the ratchet generation on the
                         // failed attempt, so a queued copy could never drain.
                         // Recovery is the sender's re-sealed resend, not this
                         // frame.

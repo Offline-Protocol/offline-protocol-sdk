@@ -1312,11 +1312,12 @@ for dedup and ACK correlation. Tier 1 makes the failure honest; Tier 2 is what
 makes the message actually arrive.
 
 What is deliberately **excluded from the re-key**: failures that are *not* an
-epoch mismatch — an AEAD/authentication failure, a discarded past ratchet
-generation, a malformed frame — are answered exactly like an epoch mismatch
-(an `undecryptable` ACK over the relay rather than a delivery ACK, so the sender re-seals the
-message once and a relay holding the dead frame drops it; Tier 2 still applies
-to every retry), but they never trigger a re-key. Widening the *re-key* trigger to
+epoch mismatch (an AEAD/authentication failure, a discarded past ratchet
+generation, a malformed frame). They are answered exactly like an epoch
+mismatch: never a delivery ACK, and an `undecryptable` ACK when the frame came
+over the relay, so the sender re-seals the message once and the relay drops the
+dead frame. Tier 2 still applies to every retry. But they never trigger a
+re-key. Widening the *re-key* trigger to
 cover them would turn every malformed frame into a session teardown, which is an
 unbounded churn vector; withholding an ACK carries no such cost, because the
 recovery it enables is the sender's own retry.
