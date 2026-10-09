@@ -5326,3 +5326,188 @@ fn a_carried_snapshot_outside_the_interest_is_refused_before_it_is_reassembled()
         "the same transfer must be admitted for a document inside the interest"
     );
 }
+
+fn no_alert(message: &offline_protocol_core::Message) -> Option<&str> {
+    message
+        .metadata
+        .get(crate::constants::NO_ALERT_KEY)
+        .map(String::as_str)
+}
+
+/// Take what `node` sent since the last call.
+fn drain_sent(node: &Node) -> Vec<offline_protocol_core::Message> {
+    let sent = node.transport.sent_messages();
+    node.transport.clear_sent_messages();
+    sent
+}
+
+/// The relay sees an MLS-encrypted sync offer and a user's text as the same
+/// opaque ciphertext, and pushed "new message" for both. Every frame the
+/// SDK sends on its own carries the cleartext marker; nothing the user sent
+/// does.
+#[test]
+fn frames_the_sdk_sends_itself_are_marked_no_alert_and_user_messages_are_not() {
+    let (mut alice, bob) = pair();
+    let space = Node::space_for(&bob);
+    let bob_id = bob.address.clone();
+
+    write(&mut alice, &space, "notes", "title", "hello");
+    alice.protocol.kick_data_sync(&space, "peer_rediscovered");
+    let sync = drain_sent(&alice);
+    assert!(sync.len() >= 2, "a delta and an offer, got {}", sync.len());
+
+    alice.protocol.send_key_package_to(&bob_id, false).unwrap();
+    alice
+        .protocol
+        .send_read_receipt(
+            &bob_id,
+            vec![offline_protocol_core::MessageId::new().as_str()],
+        )
+        .unwrap();
+    alice
+        .protocol
+        .send_typing_indicator(&bob_id, "chat", true)
+        .unwrap();
+    alice.protocol.reject_connection_request(&bob_id).unwrap();
+    let control = drain_sent(&alice);
+    assert_eq!(control.len(), 4);
+
+    for message in sync.iter().chain(&control) {
+        assert_eq!(no_alert(message), Some("1"), "{:.40}", message.content);
+    }
+
+    // User content: a plain DM, a sealed rich DM, a forward, and the
+    // connection request and accept the user is meant to hear about.
+    alice.protocol.peer_rich_payload.insert(bob_id.clone());
+    let plain = alice
+        .protocol
+        .send_message(&bob_id, "plain", None, None::<String>)
+        .unwrap();
+    let rich = alice
+        .protocol
+        .send_message_with(
+            &bob_id,
+            "rich",
+            crate::SendMessageOptions {
+                reply_context: Some(offline_protocol_core::ReplyContext {
+                    sender: offline_protocol_core::UserId::new(&bob_id).unwrap(),
+                    text: "quoted".to_string(),
+                    timestamp: None,
+                    reply_media_label: None,
+                    reply_content_type: Some("text".to_string()),
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    // Forwarding takes a received message; the outbox copy stands in for one.
+    let mut original = alice.protocol.outbox[&plain].message.clone();
+    original.content = "forwarded".to_string();
+    alice
+        .protocol
+        .forward_message(&original, &bob_id, None)
+        .unwrap();
+    alice
+        .protocol
+        .send_connection_request(&bob_id, "Alice", None, None)
+        .unwrap();
+    alice
+        .protocol
+        .accept_connection_request(&bob_id, "Alice", None)
+        .unwrap();
+    let user = drain_sent(&alice);
+    assert_eq!(user.len(), 5);
+    for message in &user {
+        assert_eq!(no_alert(message), None, "{:.40}", message.content);
+    }
+    assert!(user.iter().any(|m| m.id == rich));
+}
+
+/// The marker rides the outbox copy, so a resend, a re-seal against a new
+/// epoch, and a restart all keep it.
+#[test]
+fn a_resent_or_restored_sync_frame_keeps_its_no_alert_marker() {
+    let (mut alice, bob) = pair();
+    let space = Node::space_for(&bob);
+
+    write(&mut alice, &space, "notes", "title", "hello");
+    let frame = drain_sent(&alice).pop().expect("a delta");
+    assert_eq!(no_alert(&frame), Some("1"));
+
+    let mut resend = alice.protocol.outbox[&frame.id].message.clone();
+    alice.protocol.reseal_for_resend_in_place(&mut resend);
+    assert_ne!(
+        resend.content, frame.content,
+        "the resend was not re-sealed"
+    );
+    assert_eq!(no_alert(&resend), Some("1"));
+
+    alice.restart(&bob.address);
+    let restored = &alice.protocol.outbox[&frame.id].message;
+    assert_eq!(no_alert(restored), Some("1"));
+}
+
+/// Hand `node` a key package for `peer`, as one arriving over the wire would.
+fn hold_key_package(node: &mut Node, peer: &str) {
+    let kp = crate::test_identity::manager_for(peer, Arc::new(InMemoryStorage::new()))
+        .get_or_create_key_package()
+        .unwrap();
+    node.protocol.pending_key_packages.insert(
+        id(peer),
+        crate::protocol::types::ReceivedKeyPackage {
+            key_package_data: kp.key_package_data,
+            local_expires_at_ms: chrono::Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+}
+
+fn sent_welcome(node: &Node) -> offline_protocol_core::Message {
+    drain_sent(node)
+        .into_iter()
+        .rev()
+        .find(|m| {
+            m.content
+                .starts_with(crate::protocol::prefixes::internal_prefixes::WELCOME)
+        })
+        .expect("a Welcome on the wire")
+}
+
+/// A first DM to a new contact waits behind the Welcome, and the Welcome's
+/// push is the only one the recipient gets for it. So a 1:1 Welcome alerts
+/// exactly while user content waits on it, decided again on every send.
+#[test]
+fn a_welcome_alerts_only_while_a_user_message_waits_on_it() {
+    let (mut alice, _bob) = pair();
+
+    // A send that creates the session: the DM queues behind the Welcome.
+    hold_key_package(&mut alice, "carol");
+    let carol = id("carol");
+    alice
+        .protocol
+        .send_message(&carol, "hi", None, None::<String>)
+        .unwrap();
+    assert!(!alice.protocol.pending_encrypted_messages[&carol].is_empty());
+    assert_eq!(no_alert(&sent_welcome(&alice)), None);
+
+    // A retry alerts while the DM is still queued, and not once it is gone.
+    alice
+        .protocol
+        .try_send_welcome(&carol, "test_retry", false)
+        .unwrap();
+    assert_eq!(no_alert(&sent_welcome(&alice)), None);
+    alice.protocol.pending_encrypted_messages.remove(&carol);
+    alice
+        .protocol
+        .try_send_welcome(&carol, "test_retry", false)
+        .unwrap();
+    assert_eq!(no_alert(&sent_welcome(&alice)), Some("1"));
+
+    // An establishment nothing the user wrote waits on is silent.
+    hold_key_package(&mut alice, "dave");
+    alice
+        .protocol
+        .establish_secure_session(&id("dave"))
+        .unwrap()
+        .expect("a session was created");
+    assert_eq!(no_alert(&sent_welcome(&alice)), Some("1"));
+}

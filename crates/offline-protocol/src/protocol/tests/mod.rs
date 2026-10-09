@@ -13140,7 +13140,7 @@ fn test_welcome_no_carrier_ticks_keep_lifecycle_alive() {
     // Far more no-carrier attempts than max_retries — none may expire the
     // Welcome, and the retry budget must not accumulate.
     for _ in 0..10 {
-        let _ = protocol.try_send_welcome(&id("bob"), "test_no_carrier_tick");
+        let _ = protocol.try_send_welcome(&id("bob"), "test_no_carrier_tick", false);
     }
 
     let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
@@ -13210,7 +13210,7 @@ fn test_no_carrier_welcome_parks_without_churn() {
         None::<String>,
     );
     for _ in 0..10 {
-        let _ = protocol.try_send_welcome(&id("bob"), "test_no_carrier_tick");
+        let _ = protocol.try_send_welcome(&id("bob"), "test_no_carrier_tick", false);
     }
 
     let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
@@ -13376,7 +13376,7 @@ fn test_welcome_sends_when_carrier_appears() {
         .add_transport(TransportType::BLE, Box::new(mock));
 
     protocol
-        .try_send_welcome(&id("bob"), "test_carrier_appeared")
+        .try_send_welcome(&id("bob"), "test_carrier_appeared", false)
         .unwrap();
 
     let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();

@@ -2493,3 +2493,58 @@ fn pass_group_frames(alice: &mut Member, bob: &mut Member, carol: &mut Member) -
     }
     carried
 }
+
+/// A group chat message and a replication frame are the same
+/// `__GRP_MLS_MSG__` ciphertext to the relay; only the replication frame may
+/// carry the no-alert marker. An invite alerts the invitee; the commit that
+/// tells the rest of the roster does not.
+#[test]
+fn only_group_frames_the_sdk_sends_itself_are_marked_no_alert() {
+    let (mut alice, _bob, _carol, group) = trio();
+    let no_alert = |m: &offline_protocol_core::Message| {
+        m.metadata.get(crate::constants::NO_ALERT_KEY).cloned()
+    };
+
+    write(&mut alice, &group, "notes", "title", "hello");
+    let replication = alice.transport.sent_messages();
+    alice.transport.clear_sent_messages();
+    assert_eq!(replication.len(), 2);
+    assert!(replication
+        .iter()
+        .all(|m| no_alert(m).as_deref() == Some("1")));
+
+    alice
+        .protocol
+        .send_group_message(&group, "hi all", None, None)
+        .unwrap();
+    let chat = alice.transport.sent_messages();
+    alice.transport.clear_sent_messages();
+    assert_eq!(chat.len(), 2);
+    assert!(chat.iter().all(|m| no_alert(m).is_none()));
+
+    let dave = id("dave");
+    let kp = crate::test_identity::manager_for("dave", Arc::new(InMemoryStorage::new()))
+        .get_or_create_key_package()
+        .unwrap();
+    alice.protocol.pending_key_packages.insert(
+        dave.clone(),
+        crate::protocol::types::ReceivedKeyPackage {
+            key_package_data: kp.key_package_data,
+            local_expires_at_ms: chrono::Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+    alice.protocol.invite_to_group(&group, &dave).unwrap();
+    let invite = alice.transport.sent_messages();
+    let welcome = invite
+        .iter()
+        .find(|m| m.content.starts_with(internal_prefixes::GROUP_MLS_WELCOME))
+        .expect("a group Welcome to the invitee");
+    assert_eq!(welcome.recipient.as_str(), dave);
+    assert_eq!(no_alert(welcome), None);
+    let commits: Vec<_> = invite
+        .iter()
+        .filter(|m| m.content.starts_with(internal_prefixes::GROUP_MLS_COMMIT))
+        .collect();
+    assert!(!commits.is_empty());
+    assert!(commits.iter().all(|m| no_alert(m).as_deref() == Some("1")));
+}

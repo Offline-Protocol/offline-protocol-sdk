@@ -342,6 +342,7 @@ observed on the wire:
 | `ack_transport` | Transport the acknowledged message arrived on |
 | `transport_preference` | Requested transport for this message |
 | `original_content_type` | Pre-chunking content type of a file transfer |
+| `no_alert` | `"1"` on a frame the engine sent on its own (control traffic, key packages, data-sync frames, receipts, typing, presence, and a 1:1 Welcome no user message waits on); a relay skips the "new message" push for it. Absent on user content, connection requests and accepts, group chat messages and group invites. Unsigned; receivers ignore it |
 | `__custody` | The class a depositor asserts for its own frame when it offers it into custody; engine-written, unsigned, and stripped by every device that forwards the frame, so it travels one hop. See [Custody](custody.md) |
 | `__ctrl_sig` | Base64 Ed25519 signature over the control-message canonical payload |
 | `__ctrl_pk` | Base64 Ed25519 public key of the signer, 32 raw bytes |

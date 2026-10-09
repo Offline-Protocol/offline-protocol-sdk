@@ -345,7 +345,7 @@ impl OfflineProtocol {
 
         // Create and dispatch the forwarded message
         let mut message =
-            self.create_message(&recipient_str, final_content, Some(priority), None)?;
+            self.create_message_for_app(&recipient_str, final_content, Some(priority), None, None)?;
         message.forwarded_from = Some(forward_info);
         message.content_type = original_message.content_type;
         message.media_metadata = original_message.media_metadata.clone();
@@ -524,6 +524,21 @@ impl OfflineProtocol {
         content: String,
         priority: MessagePriority,
     ) -> Result<MessageId> {
+        self.send_internal_message_alerting(recipient, content, priority, false)
+    }
+
+    /// [`Self::send_internal_message`], with `alert` choosing whether the
+    /// relay may push for the frame. `true` only for the control frames that
+    /// carry something the user acts on or reads: a connection request or
+    /// accept, and a group chat message. Everything else is
+    /// [`crate::constants::NO_ALERT_KEY`]-marked.
+    pub(crate) fn send_internal_message_alerting(
+        &mut self,
+        recipient: &str,
+        content: String,
+        priority: MessagePriority,
+        alert: bool,
+    ) -> Result<MessageId> {
         {
             let state = lock_shared_state(&self.shared_state)?;
             if state.state != ProtocolState::Running {
@@ -531,7 +546,11 @@ impl OfflineProtocol {
             }
         }
 
-        let mut message = self.create_message(recipient, content, Some(priority), None)?;
+        let mut message = if alert {
+            self.create_message_for_app(recipient, content, Some(priority), None, None)?
+        } else {
+            self.create_message(recipient, content, Some(priority), None)?
+        };
         self.sign_control_message(&mut message)?;
         let message_id = message.id.clone();
 
@@ -606,10 +625,14 @@ impl OfflineProtocol {
     /// sent over a forced transport. A hint frame is not user traffic, and
     /// announcing a switch for one would report a transport change the app's
     /// messages did not take.
+    ///
+    /// `alert` is false for a registration and true for a broadcast, which
+    /// carries a group chat message (see [`Self::send_internal_message_alerting`]).
     pub(crate) fn send_relay_hint_message(
         &mut self,
         content: String,
         priority: MessagePriority,
+        alert: bool,
     ) -> Result<MessageId> {
         {
             let state = lock_shared_state(&self.shared_state)?;
@@ -619,7 +642,11 @@ impl OfflineProtocol {
         }
 
         let self_id = self.local_id.clone();
-        let mut message = self.create_message(&self_id, content, Some(priority), None)?;
+        let mut message = if alert {
+            self.create_message_for_app(&self_id, content, Some(priority), None, None)?
+        } else {
+            self.create_message(&self_id, content, Some(priority), None)?
+        };
         // Set before signing for clarity; the canonical payload covers only
         // sender/id/recipient/content, so ordering is not security-relevant.
         message.requires_ack = false;
@@ -745,6 +772,11 @@ impl OfflineProtocol {
     /// to the engine, not to an application, so they always carry
     /// [`crate::ProtocolConfig::app_id`]. Only an application's own send
     /// can name another id, through [`Self::create_message_for_app`].
+    ///
+    /// For the same reason every frame built here carries
+    /// [`crate::constants::NO_ALERT_KEY`]: nothing the user wrote is in it,
+    /// so the relay must not push "new message" for it. User content is
+    /// built through [`Self::create_message_for_app`], which does not mark.
     pub(super) fn create_message(
         &mut self,
         recipient: impl Into<String>,
@@ -752,7 +784,12 @@ impl OfflineProtocol {
         priority: Option<MessagePriority>,
         reply_to_msg: Option<MessageId>,
     ) -> Result<Message> {
-        self.create_message_for_app(recipient, content, priority, reply_to_msg, None)
+        let mut message =
+            self.create_message_for_app(recipient, content, priority, reply_to_msg, None)?;
+        message
+            .metadata
+            .insert(crate::constants::NO_ALERT_KEY.to_string(), "1".to_string());
+        Ok(message)
     }
 
     /// Validates a per-send app id from the rich send surface.
@@ -768,7 +805,8 @@ impl OfflineProtocol {
     }
 
     /// Like [`Self::create_message`], stamping `app_id` when given and the
-    /// configured id otherwise.
+    /// configured id otherwise, and without the no-alert marker: this is the
+    /// builder for user content, which the relay should push.
     pub(super) fn create_message_for_app(
         &mut self,
         recipient: impl Into<String>,
@@ -941,7 +979,10 @@ impl OfflineProtocol {
                         );
                     }
 
-                    let welcome_sent = self.send_welcome_message(recipient, &welcome)?;
+                    // Only a send creates a session here (text or media; the
+                    // session-confirm marker follows an adopted session), and
+                    // a text send queues behind this Welcome right after.
+                    let welcome_sent = self.send_welcome_message(recipient, &welcome, true)?;
 
                     debug!(
                         recipient = %recipient,
@@ -5542,7 +5583,8 @@ impl OfflineProtocol {
             serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
         let content = format!("{}{}", internal_prefixes::CONN_REQUEST, serialized);
 
-        let message_id = self.send_internal_message(recipient, content, MessagePriority::High)?;
+        let message_id =
+            self.send_internal_message_alerting(recipient, content, MessagePriority::High, true)?;
         self.track_pending_connection_request(&message_id, recipient);
         info!(recipient = %recipient, "Sent connection request");
         Ok(message_id)
@@ -5612,7 +5654,8 @@ impl OfflineProtocol {
             serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
         let content = format!("{}{}", internal_prefixes::CONN_ACCEPT, serialized);
 
-        let message_id = self.send_internal_message(recipient, content, MessagePriority::High)?;
+        let message_id =
+            self.send_internal_message_alerting(recipient, content, MessagePriority::High, true)?;
         info!(recipient = %recipient, "Accepted connection request");
         Ok(message_id)
     }

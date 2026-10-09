@@ -3017,7 +3017,7 @@ impl OfflineProtocol {
                 self.mark_encryption_capable(peer_id);
 
                 // Send welcome message to peer
-                let welcome_sent = self.send_welcome_message(peer_id, &welcome)?;
+                let welcome_sent = self.send_welcome_message(peer_id, &welcome, false)?;
 
                 // All operations succeeded, now safe to remove the key package
                 self.pending_key_packages.remove(peer_id);

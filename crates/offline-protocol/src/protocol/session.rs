@@ -1113,10 +1113,14 @@ impl OfflineProtocol {
     // WELCOME LIFECYCLE
     // ========================================================================
 
+    /// `user_send` is true when a user's own send created the session: their
+    /// message waits on this Welcome, so its first send must alert (see
+    /// [`Self::try_send_welcome`]).
     pub(super) fn send_welcome_message(
         &mut self,
         recipient: &str,
         welcome: &WelcomeMessage,
+        user_send: bool,
     ) -> Result<bool> {
         let serialized =
             serde_json::to_string(welcome).map_err(|e| Error::Serialization(e.to_string()))?;
@@ -1127,7 +1131,7 @@ impl OfflineProtocol {
         let group_id = welcome.group_id.as_str().to_string();
 
         self.upsert_welcome_lifecycle(recipient, &group_id, message, "welcome_created")?;
-        self.try_send_welcome(recipient, "welcome_initial_send")
+        self.try_send_welcome(recipient, "welcome_initial_send", user_send)
     }
 
     /// Parks a Welcome that currently has no transport carrier: refresh the
@@ -1184,7 +1188,19 @@ impl OfflineProtocol {
         Ok(false)
     }
 
-    pub(super) fn try_send_welcome(&mut self, peer_id: &str, source_event: &str) -> Result<bool> {
+    /// The Welcome is the frame that wakes an offline peer for a first
+    /// message queued behind it, so the relay push is decided per send rather
+    /// than baked into the stored frame: it alerts when `user_send` (the
+    /// message is being queued right now) or when user content is already
+    /// waiting for the peer, and is otherwise
+    /// [`crate::constants::NO_ALERT_KEY`]-marked. Metadata is outside the
+    /// control signature, so changing it here leaves the frame verifiable.
+    pub(super) fn try_send_welcome(
+        &mut self,
+        peer_id: &str,
+        source_event: &str,
+        user_send: bool,
+    ) -> Result<bool> {
         let now = Utc::now();
         let mut record = self
             .welcome_lifecycles
@@ -1259,8 +1275,16 @@ impl OfflineProtocol {
         // path below and the peer's probe or decrypt is still what settles
         // it. A carried one waits the mesh confirmation timeout, since a
         // neighbour is a mesh link whatever the selector last picked.
+        let mut welcome = record.welcome_message.clone();
+        if user_send || self.has_user_content_waiting_for(peer_id) {
+            welcome.metadata.remove(crate::constants::NO_ALERT_KEY);
+        } else {
+            welcome
+                .metadata
+                .insert(crate::constants::NO_ALERT_KEY.to_string(), "1".to_string());
+        }
         let sent = self
-            .send_or_carry_handshake(&record.welcome_message)
+            .send_or_carry_handshake(&welcome)
             .map(|handed_to_mesh| {
                 if handed_to_mesh > 0 {
                     None
@@ -1380,7 +1404,7 @@ impl OfflineProtocol {
                     entry.expires_at =
                         Utc::now() + ChronoDuration::seconds(WELCOME_LIFECYCLE_TTL_SECS);
                 }
-                if let Err(err) = self.try_send_welcome(peer_id, source_event) {
+                if let Err(err) = self.try_send_welcome(peer_id, source_event, false) {
                     warn!(
                         peer_id = %peer_id,
                         error = %err,
@@ -1404,7 +1428,7 @@ impl OfflineProtocol {
                     );
                     return;
                 }
-                if let Err(err) = self.try_send_welcome(peer_id, source_event) {
+                if let Err(err) = self.try_send_welcome(peer_id, source_event, false) {
                     warn!(
                         peer_id = %peer_id,
                         error = %err,
@@ -1686,7 +1710,7 @@ impl OfflineProtocol {
             );
             return;
         }
-        if let Err(err) = self.try_send_welcome(peer_id, source_event) {
+        if let Err(err) = self.try_send_welcome(peer_id, source_event, false) {
             warn!(
                 peer_id = %peer_id,
                 error = %err,
@@ -2412,7 +2436,7 @@ impl OfflineProtocol {
             .collect();
 
         for peer_id in due_peers {
-            if let Err(err) = self.try_send_welcome(&peer_id, "welcome_retry") {
+            if let Err(err) = self.try_send_welcome(&peer_id, "welcome_retry", false) {
                 warn!(
                     peer_id = %peer_id,
                     error = %err,
@@ -2428,5 +2452,21 @@ impl OfflineProtocol {
         self.welcome_lifecycles
             .get(peer_id)
             .is_some_and(|record| matches!(record.state, WelcomeDeliveryState::Expired))
+    }
+
+    /// Whether a message the user sent is waiting for `peer_id`: queued
+    /// behind session establishment, or on the outbox unmarked (an entry
+    /// restored from before the marker existed counts, the safe direction).
+    fn has_user_content_waiting_for(&self, peer_id: &str) -> bool {
+        self.pending_encrypted_messages
+            .get(peer_id)
+            .is_some_and(|queued| !queued.is_empty())
+            || self.outbox.values().any(|entry| {
+                entry.message.recipient.as_str() == peer_id
+                    && !entry
+                        .message
+                        .metadata
+                        .contains_key(crate::constants::NO_ALERT_KEY)
+            })
     }
 }

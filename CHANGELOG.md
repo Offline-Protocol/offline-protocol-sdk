@@ -205,6 +205,17 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **Frames the SDK sends on its own no longer push "new message" to an
+  offline peer.** A data-sync offer, a key package or a typing frame is the
+  same MLS ciphertext to the relay as a user's text, so a device that
+  reconnected or heard from a peer sent pushes with nothing behind them.
+  Every engine-originated frame now carries `metadata["no_alert"] = "1"` in
+  the cleartext envelope for the relay to honour. User messages (plain, rich,
+  forwarded, media), connection requests and accepts, group chat messages and
+  group invites do not; a 1:1 Welcome carries it only when no user message is
+  waiting on the session, decided again on every resend. The key is unsigned
+  and receivers ignore it. See
+  [Reserved metadata keys](docs/spec/wire-format.md#reserved-metadata-keys).
 - **A message the mesh carried settles when its recipient answers.** A direct
   message to a peer no carrier could reach was handed to neighbours to carry,
   but registered no pending acknowledgement, and an acknowledgement with none
