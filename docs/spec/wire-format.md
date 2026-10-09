@@ -339,7 +339,7 @@ observed on the wire:
 |-----|---------|
 | `ack_for` | This message acknowledges the named message id |
 | `ack_hop_count` | Hop count observed by the acknowledging party |
-| `ack_status` | On an `ack_for` frame: `"undecryptable"` when the recipient can never decrypt the named frame (spent ratchet generation, dead epoch, or the pending-decryption queue gave up on it). The sender resends the message once (re-sealed under its current session when it still holds the plaintext, verbatim otherwise) and never reports it delivered. Sent only to a peer that advertised `ack_versions` entry 1 ([Capability negotiation](capability-negotiation.md)), since an SDK that does not know it reads it as a delivery ACK. Absent on a delivery ACK |
+| `ack_status` | On an `ack_for` frame: `"undecryptable"` when the recipient can never decrypt the named frame (spent ratchet generation, dead epoch, or the pending-decryption queue gave up on it). The sender resends the message once (re-sealed under its current session when it still holds the plaintext, verbatim otherwise) and never reports it delivered. Sent only for a frame that arrived over the internet relay, and only to a peer that advertised `ack_versions` entry 1 ([Capability negotiation](capability-negotiation.md)), since an SDK that does not know it reads it as a delivery ACK. Absent on a delivery ACK |
 | `ack_transport` | Transport the acknowledged message arrived on |
 | `transport_preference` | Requested transport for this message |
 | `original_content_type` | Pre-chunking content type of a file transfer |

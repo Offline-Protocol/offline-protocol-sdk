@@ -91,8 +91,8 @@ deduplicator keeps identifiers for 7 days by default, persisted across
 restarts: the sender's redelivery window (`REDELIVERY_WINDOW_MS`), the longest a
 sender re-sends one identifier. With a shorter window a late re-send is not a
 duplicate. It reaches the ratchet, fails to decrypt because that generation is
-spent, and is answered `undecryptable`: the sender resends it once, re-sealed
-when it still holds the plaintext.
+spent, and is answered `undecryptable` when it came over the relay: the
+sender resends it once, re-sealed when it still holds the plaintext.
 
 **An acknowledgement nothing can carry is held, not dropped.** It is owed from
 the moment the frame is accepted, and the usual reason no route takes it is a
@@ -217,8 +217,13 @@ flowchart TD
 An `undecryptable` answer is a delivery ACK in shape (`ack_for`, empty content,
 `requires_ack: false`) with `ack_status: "undecryptable"`, so a relay holding the
 frame drops it instead of redelivering the same dead ciphertext on every
-connect. It goes only to a sender that advertised `ack_versions` entry 1; any
-other sender is answered with nothing, the identifier unmarked, as before the
+connect. It goes only to a frame that arrived over the internet relay, and
+only to a sender that advertised `ack_versions` entry 1. Every failure in these
+rows happens before anything is authenticated, so on a mesh or peer-stream
+link the answer would confirm liveness to an injector in range (the
+security-refusal row's leak); the relay already knows the device is connected
+([R25](../security/threat-model.md#r25-the-relay-learns-which-of-its-frames-a-device-could-not-decrypt)).
+Any other frame or sender is answered with nothing, the identifier unmarked, as before the
 status existed, because it would read the answer as a delivery. The sender never reports it delivered: it re-seals an encrypted DM
 under its current session and resends it once with the same identifier, and
 ignores a second answer for the same identifier, leaving the entry to its retry
@@ -286,7 +291,7 @@ acknowledgement there would burn the sender's whole retry budget to no purpose.
 A queued frame that hard-fails when the drain retries it is `Undecryptable`:
 an `undecryptable` answer, no re-mark, and **the queued copy is dropped rather
 than re-enqueued**. A frame the queue evicts (overflow or time-to-live) is
-answered `undecryptable` too, on the transport it arrived on.
+answered `undecryptable` too, when it arrived over the relay.
 
 That last part is not an optimization. The drain **removes** the entry before
 processing it, so a re-enqueue misses the idempotency check and re-stamps the

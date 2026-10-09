@@ -5004,13 +5004,23 @@ impl OfflineProtocol {
     /// queue drain, queue eviction): only a sender that advertised
     /// [`ACK_UNDECRYPTABLE_V1`](offline_protocol_sealed::ACK_UNDECRYPTABLE_V1)
     /// is answered. An older SDK reads any ACK as a delivery, so it gets what
-    /// it always got — nothing — and keeps its retries.
+    /// it always got (nothing) and keeps its retries.
+    ///
+    /// And only a frame that arrived over the internet relay. Every frame this
+    /// answers failed before anything authenticated it: garbage ciphertext in
+    /// a derivable session slot, or a parked frame whose sender is only a
+    /// claim. Answering on a mesh or peer-stream link would tell an injector
+    /// in radio range that the target is live and processing, which the
+    /// threat model's acknowledgement rule withholds. The relay already knows
+    /// the device is connected, and its mailbox is the one thing that
+    /// redelivers a dead frame forever, so it is the one carrier answered.
     pub(super) fn send_undecryptable_ack(
         &mut self,
         message: &Message,
         inbound_transport: TransportType,
     ) {
-        if !message.requires_ack
+        if inbound_transport != TransportType::Internet
+            || !message.requires_ack
             || !self
                 .peer_undecryptable_ack
                 .contains(message.sender.as_str())

@@ -1689,8 +1689,9 @@ pub(crate) enum InternalMessageResult {
     ///
     /// Handled like `Deferred` — id unmarked, no delivery ACK — except that
     /// the frame is answered with an `undecryptable` ACK
-    /// ([`crate::constants::ACK_STATUS_UNDECRYPTABLE`]) when its sender
-    /// advertised that it reads one; an older sender gets no answer. Silence left a relay
+    /// ([`crate::constants::ACK_STATUS_UNDECRYPTABLE`]) when it arrived over
+    /// the internet relay and its sender advertised that it reads one; any
+    /// other frame gets no answer. Silence left a relay
     /// holding the frame to redeliver it on every connect, failing again each
     /// time; the answer lets the relay drop it and tells the sender to resend
     /// the message once, re-sealed under its current session when it can.

@@ -160,10 +160,11 @@ impl OfflineProtocol {
         self.emit_pending_drop_events(events);
     }
 
-    /// The queue gave up on these frames, so they are answered `undecryptable`:
-    /// a relay holding a copy drops it instead of redelivering it into the same
-    /// queue on every connect, and the sender re-seals the message once or
-    /// fails it (see `send_undecryptable_ack`). Media chunks are left alone:
+    /// The queue gave up on these frames, so those that came over the relay
+    /// are answered `undecryptable`: the relay drops its copy instead of
+    /// redelivering it into the same queue on every connect, and the sender
+    /// resends the message once (see `send_undecryptable_ack`, which also
+    /// holds the transport and capability gates). Media chunks are left alone:
     /// their recovery is the transfer's own resend, not a re-seal. A frame
     /// with no recorded arrival transport stays unanswered, as before.
     fn answer_dropped_pending(&mut self, dropped: &[DroppedPendingMessage]) {
@@ -442,13 +443,13 @@ impl OfflineProtocol {
                         // re-queued: a re-enqueue would miss `enqueue`'s
                         // idempotency check (the drain removed the entry) and
                         // restart the TTL of a frame that can never decrypt.
-                        // Answered so the sender re-seals.
+                        // Answered (relay arrivals only) so the sender re-seals.
                         if let Some(transport) = received_via {
                             self.send_undecryptable_ack(&msg, transport);
                         }
                         debug!(
                             message_id = %msg.id,
-                            "Delayed message undecryptable during drain; answered undecryptable"
+                            "Delayed message undecryptable during drain; dropping the queued copy"
                         );
                     }
                     InternalMessageResult::SecurityRejected => {

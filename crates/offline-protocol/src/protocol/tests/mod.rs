@@ -14453,11 +14453,11 @@ fn test_desync_dm_withholds_ack_and_triggers_rekey() {
     bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
-    let bob_transport = MockTransport::new(TransportType::BLE);
+    let bob_transport = MockTransport::new(TransportType::Internet);
     bob_transport.start().unwrap();
     let bob_handle = bob_transport.clone();
     bob.transport_manager_mut()
-        .add_transport(TransportType::BLE, Box::new(bob_transport));
+        .add_transport(TransportType::Internet, Box::new(bob_transport));
 
     let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let received_handle = Arc::clone(&received);
@@ -14563,11 +14563,11 @@ fn hard_failure_pair(
     bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
-    let bob_transport = MockTransport::new(TransportType::BLE);
+    let bob_transport = MockTransport::new(TransportType::Internet);
     bob_transport.start().unwrap();
     let bob_handle = bob_transport.clone();
     bob.transport_manager_mut()
-        .add_transport(TransportType::BLE, Box::new(bob_transport));
+        .add_transport(TransportType::Internet, Box::new(bob_transport));
     bob.start().unwrap();
 
     let alice_manager =
@@ -14722,8 +14722,7 @@ fn test_hard_decrypt_failure_withholds_ack_and_does_not_rekey() {
     );
     let got = failures.lock().unwrap();
     assert!(
-        got.iter()
-            .any(|(r, _, _)| r.contains("answered undecryptable")),
+        got.iter().any(|(r, _, _)| r.contains("not delivery-ACKed")),
         "the failure event must read as advisory, not terminal, got {got:?}"
     );
     // The frame-age fields the app's split-brain breaker compares.
@@ -14757,12 +14756,46 @@ fn test_undecryptable_frame_from_peer_without_capability_is_not_answered() {
     assert!(!bob.pending_queue.contains_peer("alice"));
 
     // The queue paths go through the same gate.
-    bob.enqueue_pending_decryption_via("alice", &wire, Some(TransportType::BLE));
+    bob.enqueue_pending_decryption_via("alice", &wire, Some(TransportType::Internet));
     bob.process_pending_decryption("alice");
     assert_eq!(
         acks_for(&bob_handle.sent_messages(), &msg_id.as_str()),
         (0, 0)
     );
+}
+
+/// The frames answered `undecryptable` failed before anything authenticated
+/// them, so an answer on a mesh link would confirm to an injector in radio
+/// range that the target is live. Only a relay arrival is answered; the same
+/// frame over Bluetooth LE, live or drained from the queue, gets nothing.
+#[test]
+fn test_undecryptable_frame_off_the_relay_is_not_answered() {
+    let (mut bob, internet_handle, alice_manager) = hard_failure_pair(true);
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    let ble_handle = ble.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+
+    let wire = encrypted_wire(&corrupt_ciphertext_for(&alice_manager), None);
+    let msg_id = wire.id.as_str().to_string();
+    let answers = || {
+        let (internet, ble) = (
+            acks_for(&internet_handle.sent_messages(), &msg_id),
+            acks_for(&ble_handle.sent_messages(), &msg_id),
+        );
+        (internet.0 + ble.0, internet.1 + ble.1)
+    };
+    internet_handle.clear_sent_messages();
+
+    ble_handle.queue_message(wire.clone());
+    while bob.receive_message().is_some() {}
+    assert_eq!(answers(), (0, 0), "a BLE arrival is never answered");
+    assert!(!bob.deduplicator.is_duplicate(&wire.id));
+
+    bob.enqueue_pending_decryption_via("alice", &wire, Some(TransportType::BLE));
+    bob.process_pending_decryption("alice");
+    assert_eq!(answers(), (0, 0), "nor is one drained from the queue");
 }
 
 /// The recovery half: because the ACK was withheld and the id unmarked, the
@@ -14882,7 +14915,7 @@ fn test_drained_message_that_hard_fails_is_not_acked() {
     // Queue it with a recorded arrival transport, so the drain would genuinely
     // be able to ACK it — with `received_via: None` the ACK is a no-op and this
     // test would pass vacuously.
-    bob.enqueue_pending_decryption_via("alice", &wire, Some(TransportType::BLE));
+    bob.enqueue_pending_decryption_via("alice", &wire, Some(TransportType::Internet));
     assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
 
     bob_handle.clear_sent_messages();
@@ -16618,11 +16651,11 @@ fn test_evicted_pending_message_recovers_on_resend_after_session_ready() {
     bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
-    let bob_transport = MockTransport::new(TransportType::BLE);
+    let bob_transport = MockTransport::new(TransportType::Internet);
     bob_transport.start().unwrap();
     let bob_handle = bob_transport.clone();
     bob.transport_manager_mut()
-        .add_transport(TransportType::BLE, Box::new(bob_transport));
+        .add_transport(TransportType::Internet, Box::new(bob_transport));
 
     let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let received_handle = Arc::clone(&received);
@@ -20241,19 +20274,19 @@ fn test_pending_queue_ttl_drop_answers_undecryptable_once() {
     config.encryption.enabled = true;
     config.encryption.pending_queue.pending_ttl_ms = 1_000;
     let mut protocol = OfflineProtocol::new(config).unwrap();
-    let transport = MockTransport::new(TransportType::BLE);
+    let transport = MockTransport::new(TransportType::Internet);
     transport.start().unwrap();
     let handle = transport.clone();
     protocol
         .transport_manager_mut()
-        .add_transport(TransportType::BLE, Box::new(transport));
+        .add_transport(TransportType::Internet, Box::new(transport));
     protocol.start().unwrap();
     protocol.peer_undecryptable_ack.insert(id("sender123"));
 
     let msg = pending_test_message(&id("sender123"), "parked");
     let legacy = pending_test_message(&id("legacy"), "parked");
-    protocol.enqueue_pending_decryption_via("sender123", &msg, Some(TransportType::BLE));
-    protocol.enqueue_pending_decryption_via("legacy", &legacy, Some(TransportType::BLE));
+    protocol.enqueue_pending_decryption_via("sender123", &msg, Some(TransportType::Internet));
+    protocol.enqueue_pending_decryption_via("legacy", &legacy, Some(TransportType::Internet));
     let past = Instant::now() - Duration::from_millis(2_000);
     protocol
         .pending_queue

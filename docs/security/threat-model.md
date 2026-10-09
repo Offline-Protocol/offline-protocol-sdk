@@ -202,7 +202,14 @@ The rule the protocol settled on:
   resolves as a policy refusal is never acknowledged, because the arrival path
   withheld the acknowledgement already.
 - A frame that failed for a **recoverable** reason gets no acknowledgement, so
-  the sender's resend is the recovery path.
+  the sender's resend is the recovery path. One exception: a frame that can
+  never decrypt (a dead epoch, a spent ratchet generation, or one the
+  pending-decryption queue gave up on) is answered `ack_status:
+  "undecryptable"` when it arrived over the **internet relay** and its sender
+  advertised that it reads the status. These failures happen before anything
+  is authenticated, so the answer is withheld on every other carrier, where an
+  injector in radio range would read it. See
+  [R25](#r25-the-relay-learns-which-of-its-frames-a-device-could-not-decrypt).
 
 Both refusals are permanent, so what separates them is neither authentication
 nor recoverability: a **policy** refusal is a statement about a *frame*, while a
@@ -1030,6 +1037,27 @@ the 5000 most recent it tracks). A device that declines to carry
 (`allowRelay` off) carries none of this for others. The
 same flood from a direct neighbour or over the relay was possible before and
 is unchanged.
+
+### R25. The relay learns which of its frames a device could not decrypt
+
+A frame that can never decrypt is answered with an `undecryptable` ACK when it
+arrived over the internet relay, so the relay drops its mailbox copy instead
+of redelivering it on every connect. Every such failure happens before
+authentication, so anyone able to inject on the relay ingest path, under a
+claimed sender that advertised the status, gets an answer for a garbage frame
+in that sender's derivable session slot.
+
+**Why it stands:** silence left a relay redelivering dead ciphertext forever,
+and each redelivery failed again on the recipient. The relay is the only
+carrier with a mailbox that does that.
+
+**What bounds it:** the answer is addressed to the claimed sender and routed
+by the relay, which already knows the device is connected (A3), so it adds the
+fact that one named frame was processed and failed, not liveness. It is never
+sent on a mesh or peer-stream link, where an A1 or A2 neighbour would read it.
+It goes only to a sender whose key package advertised `ack_versions` entry 1,
+and the sender reacts with one resend of a message it already holds, never a
+delivery.
 
 ## Network egress
 

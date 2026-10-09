@@ -232,7 +232,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   redelivered the same dead ciphertext on every connect, where it failed
   again. The recipient now answers it with a delivery ACK carrying
   `metadata["ack_status"] = "undecryptable"`, which a relay settles like any
-  ACK, but only when the sender advertised `ack_versions: [1]` in its key
+  ACK, but only when the frame arrived over the internet relay (these
+  failures are unauthenticated, so an answer on a mesh link would confirm
+  liveness to an injector in range) and the sender advertised `ack_versions: [1]` in its key
   package (see Added). A sender that has not, or whose key package this
   device has not seen since it upgraded, is answered with nothing, exactly as
   before. The sender never reports such a message delivered: it re-seals the DM

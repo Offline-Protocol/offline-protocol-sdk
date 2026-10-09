@@ -1289,7 +1289,7 @@ impl OfflineProtocol {
                                         sender = %sender,
                                         error = %e,
                                         error_code = session_state_error.code(),
-                                        "Failed to decrypt message; answering undecryptable so the sender can re-seal"
+                                        "Failed to decrypt message; withholding the delivery ACK so the sender can re-seal"
                                     );
                                     DecryptResult::Failed {
                                         sender: sender.to_string(),
@@ -1480,14 +1480,14 @@ impl OfflineProtocol {
                     };
                     if let Ok(state) = lock_shared_state(&self.shared_state) {
                         // On the retriable path this event is **advisory, not
-                        // terminal**: the frame is answered `undecryptable`, so
-                        // the sender re-seals the message once under its
-                        // current session, and a resend that still fails
-                        // reports again. The sender's retry ladder settles it
+                        // terminal**: the frame is never delivery-ACKed (and is
+                        // answered `undecryptable` when it came over the relay),
+                        // so the sender re-seals the message under its current
+                        // session, and a resend that still fails reports again. The sender's retry ladder settles it
                         // as an honest `MessageFailed` if it never decrypts.
                         let reason = if retriable {
                             format!(
-                                "Failed to decrypt MLS message ({kind:?}); answered undecryptable, so the sender can re-seal it"
+                                "Failed to decrypt MLS message ({kind:?}); not delivery-ACKed, so the sender can re-seal it"
                             )
                         } else {
                             format!("Failed to decrypt MLS message ({kind:?})")
