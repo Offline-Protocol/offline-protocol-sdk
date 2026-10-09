@@ -87,9 +87,13 @@ Service discovery broadcasts to **known peers**, not just those with established
 
 ### Encryption Interaction
 
-Service discovery, requests, and responses use `send_internal_message()` and are sent as **signed plaintext control messages** (Ed25519 control-message signing, not MLS). They are internal control messages — not user content — so they are **exempt from `require_encryption`**: service APIs work unchanged under the default fail-closed encryption policy (`require_encryption = true`), just like key packages, Welcome messages, and connection requests.
+Service frames are internal control messages, not user content, so they are **exempt from `require_encryption`**: service APIs work unchanged under the default fail-closed encryption policy, just like key packages, Welcome messages and connection requests. What is encrypted depends on the frame.
 
-Treat service payloads accordingly: anything passed through service discovery/request/response bodies travels unencrypted on the wire. Do not put sensitive user content in them.
+- **Discovery** (`discover_services` and its answers) is always **signed plaintext** (Ed25519 control-message signing, not MLS). Every hop reads it to match the service and forward the query, and there is no single recipient whose session could seal it. Do not put anything sensitive in a service descriptor.
+- **Requests and responses** are **sealed inside the recipient's 1:1 MLS session** when `encryption.encryptServiceMessages` is on (the default), the recipient runs a release that advertises support, and the session with the recipient is confirmed. The provider's `service_request_received.sender` is then the MLS-authenticated requester.
+- Otherwise a request or response leaves as **signed plaintext**. That covers a peer on an older release, the switch off on either side, and any request sent before the session confirms, which includes **the first request to a provider this device has never met**. The attempt to seal that first request is what starts the session, so the next one is sealed.
+
+If a body must never travel in plaintext, make sure a session exists first (any exchanged direct message does it), or send it as an ordinary direct message instead of through the service API, as the HTTP front does. Threat model [R9](security/threat-model.md#r9-service-bodies-are-sealed-only-toward-capable-peers-discovery-is-signed-not-encrypted) records what the fallback leaves exposed.
 
 ## Rust API
 
@@ -369,7 +373,7 @@ Service discovery is built on top of existing protocol infrastructure:
 
 - **Transport**: All service messages route through the DORS multi-transport selector (BLE, WiFi Direct, Internet, Reticulum). The best available transport is chosen automatically.
 - **Reliability**: ACK/retry mechanisms from the reliability layer are automatically applied to request/response messages.
-- **Encryption**: Service messages are signed plaintext control messages, exempt from `require_encryption` (they bootstrap connectivity before sessions exist). Do not put sensitive user content in service payloads.
+- **Encryption**: Discovery is signed plaintext. Requests and responses are sealed in the 1:1 MLS session toward peers that advertise support once the session is confirmed, and signed plaintext otherwise; see [Encryption Interaction](#encryption-interaction). All are exempt from `require_encryption`.
 - **Routing**: Discovery queries use the existing gossip and message forwarding infrastructure with the same deduplication and hop-counting as other mesh messages.
 - **Events**: Integrated with the existing `EventCallback` system — no separate event subscription needed.
 

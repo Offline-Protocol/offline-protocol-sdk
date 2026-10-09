@@ -21,6 +21,26 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Service request and response bodies are sealed end to end.** A body sent
+  with `send_service_request` or `respond_to_service_request` used to cross
+  every hop as signed plaintext, readable by each device that carried it
+  (threat model R9). It is now sealed inside the recipient's 1:1 MLS session
+  when the recipient advertises the new `svc_versions` capability in a signed
+  key package (or has already sent a sealed service frame) and the session
+  with it is confirmed, and the provider's `service_request_received.sender`
+  is then the MLS-authenticated requester. Toward an older peer, and before
+  the session confirms, the body still leaves as signed plaintext, so the
+  first request to a provider this device has never met is readable by the
+  hops that carry it; the attempt to seal it starts the session, as a direct
+  message does, and the next request is sealed. The automatic `not_found`
+  answer to a sealed request is sealed too, and a sealed request retried
+  after a session re-key is sealed again rather than replayed as dead
+  ciphertext. Discovery stays signed plaintext, because every hop reads it to
+  forward it. A new switch, `encryption.encryptServiceMessages`
+  (`encrypt_service_messages`, default on), turns sealing off without a
+  release; routing an inbound sealed frame does not depend on it
+  ([capability negotiation](docs/spec/capability-negotiation.md#the-exception-svc_versions)).
+
 - **Android peer streams on the Wi-Fi network.** With
   `wifiDirect: { enabled: true }`, the Android manager advertises and browses
   DNS-SD `_offlineprotocol._tcp` through `NsdManager` on the Wi-Fi network it

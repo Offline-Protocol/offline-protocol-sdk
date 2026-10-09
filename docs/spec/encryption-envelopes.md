@@ -263,6 +263,22 @@ queued behind session establishment re-makes the seal decision when it flushes,
 and a seal-time failure there would re-queue the message forever. Bounding at
 the boundary means every queued blob is already known to seal.
 
+## Sealed service frames
+
+A service request or response sealed toward a peer is not a new envelope. The
+whole `__SVC_REQ__` or `__SVC_RESP__` frame, prefix included, is the MLS
+plaintext of an ordinary 1:1 `__MLS_ENC__` message, exactly as a `__DATA_V1__`
+sync frame is. It is negotiated by `svc_versions`, honoured only from a signed
+key package, and sent only once the 1:1 session is confirmed.
+
+A receiver routes it only from a 1:1 session slot (`session:`). The service
+protocol has no group form, so a service prefix inside a group ciphertext is
+left alone. The receiver confirms the session from the decrypt **before** it
+handles the frame. The failure this ordering prevents: a reply the service
+layer sends while handling the frame, such as the automatic `not_found`, would
+otherwise find the session unconfirmed on the owner's first decrypt and leave
+in plaintext.
+
 ## Group sealing gate
 
 In a group, the sealed body is used only when **every** other member is known to

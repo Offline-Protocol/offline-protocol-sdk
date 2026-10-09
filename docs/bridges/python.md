@@ -372,7 +372,7 @@ other, so every rule of [the local API bridge](local-api.md) holds for it
 unchanged: it declares one application id, its sends are stamped with it,
 and the server holds its inbound messages while it is away. It sends every
 request and response as a direct message, never on the service request path,
-whose bodies are plaintext, and it acts only on a `message_received` the
+which falls back to signed plaintext whenever it cannot seal, and it acts only on a `message_received` the
 engine reports as `encrypted`. Discovery is the one thing it takes from the
 service path. It runs one per service, since every client under one
 application id receives each request. Everything a handler can wait on

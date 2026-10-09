@@ -80,7 +80,7 @@ class MainActivity : AppCompatActivity() {
             maxPendingGlobal = 1_000.toULong(),
             pendingTtlMs = 86_400_000.toULong(),  // 24 h (the SDK default)
             overflowPolicy = OverflowPolicy.DROP_OLDEST,
-            // These 9 use their defaults: requireEncryption (true),
+            // These 10 use their defaults: requireEncryption (true),
             // maxGroupMembers (256u), groupRelayEnabled (true),
             // groupRelayBroadcastEnabled (true — capability-gated, and it
             // falls back to per-member fan-out against any relay that did not
@@ -88,7 +88,7 @@ class MainActivity : AppCompatActivity() {
             // docs/configuration.md#group-configuration),
             // requireTransportIdentity (false), binaryWireEnabled (true),
             // compactEnvelopeEnabled (true), richPayloadEnabled (true),
-            // cryptoRecoveryEnabled (true).
+            // cryptoRecoveryEnabled (true), encryptServiceMessages (true).
         )
 
         protocol = OfflineProtocol(config)

@@ -2534,6 +2534,31 @@ and the relays carry traffic meanwhile.
 LAN, so they meet a phone on this release only inside a Wi-Fi Direct group,
 as before.
 
+**Service bodies are sealed between peers on this release.** A request or
+response to a peer that also runs this release, once your session with it is
+confirmed, now crosses the mesh as an ordinary `__MLS_ENC__` message instead
+of signed plaintext. Nothing changes toward an older peer, and the first
+request to a provider you have never met still leaves as signed plaintext.
+Turn it off with `encryption.encryptServiceMessages: false`
+(`encrypt_service_messages` in Rust and Python), which stops your device from
+advertising, recording and sealing; a peer's sealed frame is still routed to
+your service handlers.
+
+**A sealed service body is about a third larger on the wire.** With the
+compact envelope, which every release that seals service bodies advertises
+unless it is switched off, the frame is about 1.34 times the plaintext one: a
+64 KiB body, the service layer's limit, becomes a frame of about 86 KiB.
+Bodies above about 52 KB no longer cross Bluetooth LE at the 185-byte MTU
+floor, where every body under the limit did, and bodies above about 47 KiB no
+longer fit a Nostr relay's 64 KiB event limit. If a provider answers with
+large bodies over those carriers, keep bodies under those sizes or switch the
+sealing off. Toward a peer with the compact envelope switched off the frame is
+about 3.6 times the plaintext one.
+
+**`service_request_received.sender` is proven a second way.** For a sealed
+request it is the sender MLS authenticated, rather than the sender a control
+signature proved. The field and its value are unchanged.
+
 ---
 
 ## Appendix A: limits reference
