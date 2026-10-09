@@ -715,6 +715,20 @@ export interface EncryptionConfig {
    */
   cryptoRecoveryEnabled?: boolean;
   /**
+   * Seal service request and response bodies inside the recipient's 1:1 MLS
+   * session instead of sending them as signed plaintext that every hop can
+   * read. Default: `true`.
+   *
+   * Takes effect only toward a peer that advertised support (an SDK release
+   * with this switch on) and only once the session with that peer is
+   * confirmed. Toward everyone else, and before the session confirms, the body
+   * still leaves as signed plaintext: the first request to a provider this
+   * device has never met is readable by the devices that carry it. Discovery is
+   * never sealed. If a body must never travel in plaintext, send it as an
+   * ordinary message instead of through the service API.
+   */
+  encryptServiceMessages?: boolean;
+  /**
    * Bounds and policy for encrypted messages received before session readiness.
    */
   pendingQueue?: PendingQueueConfig;
@@ -2254,6 +2268,12 @@ export interface ServiceRequestReceivedEvent extends BaseEvent {
   method: string;
   body: string;
   sender: string;
+  /**
+   * Whether the request arrived sealed inside the 1:1 MLS session with
+   * `sender`. `false` means it arrived as signed plaintext that every device
+   * carrying it could read (an older peer, or no confirmed session yet).
+   */
+  encrypted: boolean;
 }
 
 /**
@@ -2266,6 +2286,11 @@ export interface ServiceResponseReceivedEvent extends BaseEvent {
   status: string;
   body: string;
   provider_peer_id: string;
+  /**
+   * Whether the response arrived sealed inside the 1:1 MLS session with the
+   * provider. `false` means it arrived as signed plaintext.
+   */
+  encrypted: boolean;
 }
 
 // ============================================================================

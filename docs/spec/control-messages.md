@@ -149,10 +149,24 @@ treats the registry as a set of mutually non-prefixing frame tags fails on this
 entry alone; the correct reading is that `__SVC_` bounds a namespace and the
 four spellings above name the frames currently in it.
 
-They are signature-gated like any control frame, but they are **exempt from the
-encryption requirement**, so discovery gossip and the application-supplied
-request and response bodies are sent in cleartext. See
-[residual risk R9](../security/threat-model.md#r9-service-discovery-and-service-bodies-are-signed-not-encrypted).
+They are signature-gated like any control frame, and they are **exempt from the
+encryption requirement**. Discovery gossip is always sent in cleartext.
+
+`__SVC_REQ__` and `__SVC_RESP__` MAY instead travel inside `__MLS_ENC__`
+toward a peer that advertised `svc_versions` entry 1
+([capability negotiation](capability-negotiation.md)), once the 1:1 session
+with that peer is confirmed. The sealed form is unsigned, as every 1:1
+envelope is: MLS authenticates its sender. A receiver that decrypts a plaintext
+beginning `__SVC_REQ__` or `__SVC_RESP__` from a 1:1 session slot MUST hand
+it to its service layer with the MLS-authenticated sender. It MUST NOT surface
+any decrypted `__SVC_` plaintext as a message, and it drops any other service
+frame found there: discovery is never sealed, and a receiver that routed a
+sealed query would forward it onward as plaintext gossip. It
+routes the frame whatever its own configuration says, because parsing is never
+gated. The signed plaintext form remains the floor. Neither form changes the
+exemption classes in this chapter, since the sealed form is `__MLS_ENC__`. See
+[residual risk R9](../security/threat-model.md#r9-service-bodies-are-sealed-only-toward-capable-peers-discovery-is-signed-not-encrypted) for what the
+fallback leaves exposed.
 
 ### Custody
 

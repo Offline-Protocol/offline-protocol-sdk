@@ -3199,6 +3199,16 @@ impl OfflineProtocol {
             {
                 self.peer_rich_payload.insert(peer_id.clone());
             }
+            // Skipping this would send a peer met before the restart its
+            // service bodies in signed plaintext until its next key package,
+            // which is a confidentiality loss with no symptom.
+            if self.config.encryption.encrypt_service_messages
+                && caps
+                    .svc_versions
+                    .contains(&offline_protocol_sealed::SVC_SEALED_V1)
+            {
+                self.peer_svc_sealed.insert(peer_id.clone());
+            }
             // Not gated on a config flag, unlike its neighbours. There is no
             // kill switch for *which payload we sign*: signing the older one
             // at a peer that has proved it signs the newer is exactly the

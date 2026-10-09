@@ -156,6 +156,7 @@ interface NativeConfig {
   compactEnvelopeEnabled: boolean;
   richPayloadEnabled: boolean;
   cryptoRecoveryEnabled: boolean;
+  encryptServiceMessages: boolean;
   maxPendingPerPeer?: number;
   maxPendingGlobal?: number;
   pendingTtlMs?: number;
@@ -168,6 +169,7 @@ interface NativeConfig {
     compactEnvelopeEnabled: boolean;
     richPayloadEnabled: boolean;
     cryptoRecoveryEnabled: boolean;
+    encryptServiceMessages: boolean;
     pendingQueue: {
       maxPendingPerPeer: number;
       maxPendingGlobal: number;
@@ -552,6 +554,7 @@ export class OfflineProtocol {
       compactEnvelopeEnabled: encryptionSource?.compactEnvelopeEnabled ?? true,
       richPayloadEnabled: encryptionSource?.richPayloadEnabled ?? true,
       cryptoRecoveryEnabled: encryptionSource?.cryptoRecoveryEnabled ?? true,
+      encryptServiceMessages: encryptionSource?.encryptServiceMessages ?? true,
       pendingQueue: {
         maxPendingPerPeer: encryptionSource?.pendingQueue?.maxPendingPerPeer ?? 64,
         maxPendingGlobal: encryptionSource?.pendingQueue?.maxPendingGlobal ?? 4096,
@@ -593,6 +596,7 @@ export class OfflineProtocol {
       compactEnvelopeEnabled: encryption.compactEnvelopeEnabled,
       richPayloadEnabled: encryption.richPayloadEnabled,
       cryptoRecoveryEnabled: encryption.cryptoRecoveryEnabled,
+      encryptServiceMessages: encryption.encryptServiceMessages,
       maxPendingPerPeer: encryption.pendingQueue.maxPendingPerPeer,
       maxPendingGlobal: encryption.pendingQueue.maxPendingGlobal,
       pendingTtlMs: encryption.pendingQueue.pendingTtlMs,

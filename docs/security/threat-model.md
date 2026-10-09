@@ -426,24 +426,73 @@ timeout and frames are retransmitted before they were ever written. Duplicates
 are absorbed by deduplication, so this is wasted work rather than loss, but it
 is a real scaling cliff.
 
-### R9. Service discovery and service bodies are signed, not encrypted
+### R9. Service bodies are sealed only toward capable peers; discovery is signed, not encrypted
 
 The service prefix family (`__SVC_DISC_Q__`, `__SVC_DISC_R__`, `__SVC_REQ__`,
-`__SVC_RESP__`, and the generic service message) is control-plane: every frame
-is signature-gated, so its sender is proven, and every frame is **exempt from
-the encryption requirement**. Discovery gossip and the application-supplied
-request and response bodies therefore travel in cleartext.
+`__SVC_RESP__`, and the generic service message) is control-plane: every
+plaintext frame is signature-gated, so its sender is proven, and the family is
+**exempt from the encryption requirement**.
 
-**Impact:** A1 and A3 read service bodies and the full discovery pattern. This
-is the one application-supplied payload that boundary 5 does **not** cover, so
-"MLS protects application content" does not hold here.
+**Discovery** gossip always travels in cleartext. It is a broadcast to peers
+with whom no session necessarily exists, and every hop must read `service_id`
+to match and forward it, so there is no group to encrypt it to.
 
-**Why it stands:** discovery is a broadcast to peers with whom no session
-necessarily exists, so there is no established group to encrypt to; encrypting
-request and response bodies is not implemented.
+**Request and response bodies** are sealed inside the recipient's 1:1 MLS
+session when all of these hold: the sender's `encrypt_service_messages` is on
+(the default), the recipient advertised `svc_versions` entry 1 in a signed key
+package or proved it by sending a sealed service frame, and the session with
+the recipient is confirmed. The provider then sees the MLS-authenticated
+requester. A body still travels as signed plaintext:
 
-**What application teams must do today:** treat a service body as public, and
-encrypt anything sensitive above the SDK before handing it over.
+- toward a peer on a release from before this capability, or with the switch
+  off,
+- toward a capable peer before the session confirms, which includes **the
+  first request to a provider this device has never met**: the attempt to
+  seal it is what starts the session, and the request goes out signed rather
+  than being held or dropped,
+- toward a peer that has **never sent us a sealed service frame**, after an
+  attacker strips `svc_versions` from its key package in transit or replays
+  an older signed package from before it upgraded, until a genuine package or
+  a sealed frame from that peer arrives. No freshness window bounds the
+  replay: a key package signed under `offline-ctrl-v1` is admitted at any age
+  (the key-package escape in the control-frame gate).
+
+A peer that has sent us a sealed service frame is past the first and the
+third. The frame proves it routes the sealed form, which no replay can fake,
+and the receiver records that in a durable ratchet beside the control-freshness
+one, which no key package can clear. From then on its bodies are sealed
+whatever its key packages say, except while the session is not confirmed: a
+request sent while a desync re-key rebuilds the session takes the second
+fallback, toward a proved peer too.
+
+The advertised capability cannot be flushed by a flood either. The set that
+holds it is a subset of the capped encryption-capable set and refuses new
+peers at the cap rather than evicting old ones, so a stream of fresh
+identities costs only the later identities the capability.
+
+A failure to seal on a **confirmed** session (an MLS or storage fault) is
+returned to the caller as an error, never sent in plaintext instead. The
+fallback covers a peer this device cannot seal to yet, not a fault on one it
+can.
+
+The plaintext fallback is a stated exception to the capability rule that a
+downgrade loses the feature rather than the confidentiality
+([capability negotiation](../spec/capability-negotiation.md#the-exception-svc_versions)):
+the signed plaintext form is the floor every older peer depends on.
+
+**Impact:** A1 and A3 read the full discovery pattern, and any service body that
+took the fallback. Between two peers running this release with a confirmed
+session, they read neither body. The receiving application can tell which form
+arrived: `service_request_received` and `service_response_received` carry
+`encrypted`.
+
+**What application teams must do today:** treat the first request to a provider
+as readable by the hops that carry it, or make sure a session exists first (any
+exchanged direct message does it). A body that must never travel in plaintext
+goes in an ordinary direct message instead, as the HTTP front does.
+
+**Follow-up:** a strict mode under `require_encryption` that refuses the
+fallback toward a peer that advertised or proved the sealed form.
 
 ### R10. Gateways are unauthenticated for delivery, and see who is in the zone
 

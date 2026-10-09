@@ -160,6 +160,30 @@ pub struct KeyPackagePayload {
     #[serde(default)]
     pub ctrl_versions: Vec<u8>,
 
+    /// Sealed service frame versions the sender **routes** (e.g. `[1]` for
+    /// [`SVC_SEALED_V1`]): a `__SVC_REQ__` or `__SVC_RESP__` found inside a
+    /// decrypted 1:1 MLS plaintext is handed to its service layer rather than
+    /// surfaced as a chat message. Absent on legacy nodes
+    /// (`#[serde(default)]` gives empty), and toward them service bodies stay
+    /// signed plaintext, which is the floor for this frame family.
+    ///
+    /// End to end, like `rich_versions`: it describes the far end's parser,
+    /// not any carrier.
+    ///
+    /// Trust boundary: unlike the feature lists above, this one decides
+    /// whether a body is readable by every hop, so the receiver honours it
+    /// only from a signed key package, as it does `nostr_pubkey`. Stripping it
+    /// downgrades the peer's service bodies to signed plaintext; replaying an
+    /// older signed package does the same until a genuine one arrives, and no
+    /// freshness window bounds that replay, since a key package signed under
+    /// `offline-ctrl-v1` is admitted at any age. Neither reaches a peer that
+    /// has already sent a sealed service frame: the receiver keeps that proof
+    /// in a ratchet no key package clears. Forging it onto a legacy peer makes
+    /// us send sealed frames it surfaces as chat text, which only the
+    /// sender's own key could have produced, so it grants an attacker nothing.
+    #[serde(default)]
+    pub svc_versions: Vec<u8>,
+
     /// Delivery-acknowledgement statuses the sender reads (e.g. `[1]` for
     /// [`ACK_UNDECRYPTABLE_V1`]). Absent on legacy nodes (`#[serde(default)]`
     /// gives empty, meaning plain delivery ACKs only).
@@ -235,6 +259,12 @@ pub const MLS_ENVELOPE_COMPACT_V1: u8 = 1;
 ///
 /// [`control_signing_payload_v2`]: crate::canonical::control_signing_payload_v2
 pub const CTRL_SIGN_V2: u8 = 2;
+
+/// Sealed service frame version advertised in
+/// [`KeyPackagePayload::svc_versions`]: the sender routes a `__SVC_REQ__` or
+/// `__SVC_RESP__` it finds inside a decrypted 1:1 MLS plaintext into its
+/// service layer, with the MLS-authenticated sender as the requester.
+pub const SVC_SEALED_V1: u8 = 1;
 
 /// Acknowledgement version advertised in [`KeyPackagePayload::ack_versions`]:
 /// the sender reads `ack_status = "undecryptable"` on a delivery ACK as "the
@@ -322,6 +352,7 @@ mod spec_vectors {
                 ("rich_versions", &got.rich_versions),
                 ("data_versions", &got.data_versions),
                 ("ctrl_versions", &got.ctrl_versions),
+                ("svc_versions", &got.svc_versions),
                 ("ack_versions", &got.ack_versions),
             ] {
                 assert_eq!(got, &u8s(&want[field]), "[{name}] {field}");
@@ -360,6 +391,7 @@ mod spec_vectors {
             rich_versions: Vec::new(),
             data_versions: Vec::new(),
             ctrl_versions: Vec::new(),
+            svc_versions: Vec::new(),
             ack_versions: Vec::new(),
             nostr_pubkey: None,
         };
@@ -396,6 +428,7 @@ mod spec_vectors {
             "rich_versions",
             "data_versions",
             "ctrl_versions",
+            "svc_versions",
             "ack_versions",
             "nostr_pubkey",
             "session_reset",
@@ -409,6 +442,10 @@ mod spec_vectors {
         assert!(
             text.contains(&format!("Entry {CTRL_SIGN_V2} means")),
             "the chapter no longer states what ctrl_versions entry {CTRL_SIGN_V2} means"
+        );
+        assert!(
+            text.contains(&format!("Entry {SVC_SEALED_V1} means the peer routes")),
+            "the chapter no longer states what svc_versions entry {SVC_SEALED_V1} means"
         );
     }
 }

@@ -6,8 +6,8 @@ list and the error tokens are literals here and pinned as literals in
 this module would agree with any edit.
 
 The envelope is the content of an ordinary direct message, which the engine
-seals with MLS. It is never sent on the service request path, whose bodies
-are signed plaintext (threat model R9).
+seals with MLS. It is never sent on the service request path, which falls
+back to signed plaintext whenever it cannot seal (threat model R9).
 """
 
 from __future__ import annotations

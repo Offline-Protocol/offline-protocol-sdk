@@ -668,6 +668,9 @@ class OfflineProtocolModule: RCTEventEmitter {
         // flips it on would keep forcing `false` for every app that omits the
         // section, exactly as `config.relay` sat at its defaults for several
         // releases.
+        // Always assigned: the reader resolves it with the same default the
+        // UDL declares, so there is no literal here to outlive a change to it.
+        config.encryptServiceMessages = encryption.encryptServiceMessages
         if let dataEnabled {
             config.dataEnabled = dataEnabled
         }

@@ -9,7 +9,7 @@ and a classification in ``dispatch.py``.
 
 from __future__ import annotations
 
-UDL_SHA256 = "db1022f43254c9843ac4164e4993169e1d4886901be23f1340d6aed5652e43bc"
+UDL_SHA256 = "fde449d34b2410e5d6ab608bd964ce0c22691a66689dff84cc9433a012015e05"
 
 TABLE = {'callbacks': ('MlsStorageProvider',
                'ProtocolStateStorageProvider',
@@ -763,7 +763,8 @@ TABLE = {'callbacks': ('MlsStorageProvider',
                                 ('mesh_relay', 'MeshRelayConfig?', True),
                                 ('custody', 'CustodyConfig?', True),
                                 ('data_enabled', 'boolean', True),
-                                ('control_freshness_enforced', 'boolean', True)),
+                                ('control_freshness_enforced', 'boolean', True),
+                                ('encrypt_service_messages', 'boolean', True)),
              'ProtocolLockDiagnostics': (('held', 'boolean', False),
                                          ('holder_location', 'string', False),
                                          ('holder_thread', 'string', False),

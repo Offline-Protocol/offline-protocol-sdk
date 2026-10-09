@@ -288,6 +288,7 @@ Controls automatic MLS end-to-end encryption. See [MLS Integration Guide](./mls-
 | `compactEnvelopeEnabled` | boolean | true | Emit the compact MLS envelope to recipients that advertise support (kill switch — see [Wire Format Kill Switches](#wire-format-kill-switches)) |
 | `richPayloadEnabled` | boolean | true | Seal rich extras (reply context, media metadata, forward attribution) inside the MLS ciphertext for capable recipients (kill switch — see [Wire Format Kill Switches](#wire-format-kill-switches)) |
 | `cryptoRecoveryEnabled` | boolean | true | Recover an undecryptable 1:1 message instead of dropping it and ACKing anyway (kill switch — see [Crypto-Failure Recovery](#crypto-failure-recovery)) |
+| `encryptServiceMessages` | boolean | true | Seal service request and response bodies inside the 1:1 MLS session toward peers that advertise support, once the session is confirmed. Otherwise they stay signed plaintext (see [Service Discovery](service-discovery.md#encryption-interaction)) |
 | `pendingQueue.maxPendingPerPeer` | number | 64 | Max inbound encrypted messages held per peer awaiting session readiness |
 | `pendingQueue.maxPendingGlobal` | number | 4096 | Max inbound encrypted messages held across all peers |
 | `pendingQueue.pendingTtlMs` | number | 86400000 | TTL for held encrypted messages (24 hours; the queue is also persisted, see `docs/mls-integration.md`) |

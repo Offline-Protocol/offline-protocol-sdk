@@ -168,6 +168,12 @@ pub struct EncryptionConfig {
     /// unauthenticated by construction — safe because it is bounded, not
     /// because it is trusted; see Crypto-Failure Recovery. (default: true)
     pub crypto_recovery_enabled: bool,
+    /// Seal service request and response bodies inside the recipient's 1:1
+    /// MLS session, toward a peer that advertised svc_versions entry 1 (or
+    /// sent a sealed service frame) once the session is confirmed. Signed
+    /// plaintext otherwise, including the first request to a provider this
+    /// device has never met. Discovery is never sealed. (default: true)
+    pub encrypt_service_messages: bool,
 }
 ```
 
@@ -187,6 +193,7 @@ interface EncryptionConfig {
   compactEnvelopeEnabled?: boolean; // Default: true
   richPayloadEnabled?: boolean;     // Default: true
   cryptoRecoveryEnabled?: boolean;  // Default: true
+  encryptServiceMessages?: boolean; // Default: true
 }
 ```
 
@@ -200,7 +207,9 @@ pre-session queue is separate and has its own bounds; see
 See [Wire Format Kill Switches](configuration.md#wire-format-kill-switches) for
 what `compactEnvelopeEnabled` and `richPayloadEnabled` gate, and
 [Crypto-Failure Recovery](configuration.md#crypto-failure-recovery) for
-`cryptoRecoveryEnabled`.
+`cryptoRecoveryEnabled`, and
+[Service Discovery](service-discovery.md#encryption-interaction) for
+`encryptServiceMessages`.
 
 ### DorsConfig
 

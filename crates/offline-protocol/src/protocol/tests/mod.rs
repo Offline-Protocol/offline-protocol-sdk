@@ -10,6 +10,7 @@ mod file_stores;
 mod leaf_pairing;
 mod mesh_session;
 mod per_send_app_id;
+mod service_seal;
 
 use super::*;
 use crate::constants::{
@@ -1878,6 +1879,7 @@ fn feed_key_package(protocol: &mut OfflineProtocol, sender: &str, wire_versions:
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
@@ -1959,6 +1961,7 @@ fn feed_key_package_with_env(protocol: &mut OfflineProtocol, sender: &str, env_v
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
@@ -2156,6 +2159,7 @@ pub(crate) fn feed_key_package_with_capabilities(
         rich_versions,
         data_versions,
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
@@ -2276,6 +2280,7 @@ fn feed_key_package_with_caps(
         rich_versions,
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
@@ -2419,6 +2424,7 @@ fn key_package_message_with_nostr_pubkey(
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: nostr_pubkey.map(str::to_string),
     };
@@ -2755,6 +2761,7 @@ fn feed_key_package_with_data(
         rich_versions: Vec::new(),
         data_versions,
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
@@ -3141,6 +3148,7 @@ fn peer_undecryptable_ack_capability_is_learned_and_survives_restart() {
             rich_versions: Vec::new(),
             data_versions: Vec::new(),
             ctrl_versions: Vec::new(),
+            svc_versions: Vec::new(),
             ack_versions,
             nostr_pubkey: None,
         };
@@ -3185,6 +3193,7 @@ fn peer_capability_restore_prunes_overflow() {
         rich_versions: vec![RICH_PAYLOAD_V1],
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
@@ -3327,6 +3336,7 @@ fn peer_capability_restore_prefers_session_peers() {
         rich_versions: vec![RICH_PAYLOAD_V1],
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
@@ -3935,6 +3945,7 @@ fn test_process_internal_message_key_package() {
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
@@ -15589,6 +15600,7 @@ fn feed_session_reset_key_package(
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
@@ -20682,6 +20694,7 @@ fn test_lamport_clock_merge_on_internal_message() {
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
@@ -20894,6 +20907,7 @@ fn test_key_package_remaining_lifetime_ms() {
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
@@ -20980,6 +20994,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             rich_versions: Vec::new(),
             data_versions: Vec::new(),
             ctrl_versions: Vec::new(),
+            svc_versions: Vec::new(),
             ack_versions: Vec::new(),
             nostr_pubkey: None,
         };
@@ -21069,6 +21084,7 @@ fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
@@ -21121,6 +21137,7 @@ fn test_received_key_package_lifetime_is_clamped() {
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
@@ -22672,6 +22689,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             rich_versions: Vec::new(),
             data_versions: Vec::new(),
             ctrl_versions: Vec::new(),
+            svc_versions: Vec::new(),
             ack_versions: Vec::new(),
             nostr_pubkey: None,
         };
@@ -22931,7 +22949,12 @@ fn test_process_svc_request_registered_emits_event() {
             method,
             body,
             sender,
+            encrypted,
         } => {
+            assert!(
+                !encrypted,
+                "a signed plaintext request is not reported sealed"
+            );
             assert_eq!(request_id, "req-002");
             assert_eq!(service_id, "echo");
             assert_eq!(method, "ping");
@@ -22978,7 +23001,12 @@ fn test_process_svc_response_emits_event() {
             status,
             body,
             provider_peer_id,
+            encrypted,
         } => {
+            assert!(
+                !encrypted,
+                "a signed plaintext response is not reported sealed"
+            );
             assert_eq!(request_id, "req-003");
             assert_eq!(service_id, "echo");
             assert_eq!(status, "ok");
@@ -23018,37 +23046,6 @@ fn test_discover_services_no_peers() {
         .mesh_services()
         .seen_discovery_queries()
         .contains_key(&query_id));
-}
-
-#[test]
-fn test_require_encryption_allows_service_control_messages() {
-    let mut config = create_test_config();
-    config.encryption.enabled = true;
-    config.encryption.require_encryption = true;
-
-    let mut protocol = OfflineProtocol::new(config).unwrap();
-
-    let mock_transport = MockTransport::new(TransportType::BLE);
-    mock_transport.start().unwrap();
-    protocol
-        .transport_manager_mut()
-        .add_transport(TransportType::BLE, Box::new(mock_transport));
-    protocol.start().unwrap();
-
-    // Service messages are internal protocol messages (not user content),
-    // so they must work even with require_encryption=true.
-    // discover_services with no known peers returns Ok with empty broadcast.
-    let discover_result = protocol.discover_services(None);
-    assert!(discover_result.is_ok());
-
-    // Add a known peer so service request has a target
-    protocol.on_neighbor_discovered("bob");
-    let request_result = protocol.send_service_request("bob", "echo.v1", "ping", "{}");
-    assert!(request_result.is_ok());
-
-    let respond_result =
-        protocol.respond_to_service_request("req-1", "alice", "echo.v1", "ok", "pong");
-    assert!(respond_result.is_ok());
 }
 
 #[test]
@@ -38135,6 +38132,7 @@ fn capability_restore_stops_at_the_category_bound_without_pruning() {
         last_seen_ms: 1,
         ctrl_freshness_proved: false,
         last_reset_ms: 0,
+        svc_sealed_proved: false,
     })
     .unwrap();
     counting
@@ -40264,6 +40262,7 @@ fn key_package_frame_body(sender: &str, session_reset: bool, ctrl_versions: Vec<
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions,
+        svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
@@ -42023,6 +42022,7 @@ fn the_ordinary_handshake_starts_a_latency_without_any_session_missing() {
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         ack_versions: Vec::new(),
         nostr_pubkey: None,
     };

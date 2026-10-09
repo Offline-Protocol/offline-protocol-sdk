@@ -1268,6 +1268,7 @@ def build_key_package_vectors() -> dict:
                     "rich_versions": [],
                     "data_versions": [],
                     "ctrl_versions": [],
+                    "svc_versions": [],
                     "ack_versions": [],
                     "nostr_pubkey": None,
                 },
@@ -1281,7 +1282,7 @@ def build_key_package_vectors() -> dict:
                 '"remaining_lifetime_ms":2419200000,"timestamp_ms":1700000000000,'
                 '"session_reset":true,"wire_versions":[1],"env_versions":[1],'
                 '"rich_versions":[1],"data_versions":[1,2,3],"ctrl_versions":[2],'
-                '"ack_versions":[1],"nostr_pubkey":"abcd"}',
+                '"svc_versions":[1],"ack_versions":[1],"nostr_pubkey":"abcd"}',
                 "expect": {
                     "user_id": "off1abc",
                     "key_package_data": [],
@@ -1293,6 +1294,7 @@ def build_key_package_vectors() -> dict:
                     "rich_versions": [1],
                     "data_versions": [1, 2, 3],
                     "ctrl_versions": [2],
+                    "svc_versions": [1],
                     "ack_versions": [1],
                     "nostr_pubkey": "abcd",
                 },
@@ -1314,6 +1316,7 @@ def build_key_package_vectors() -> dict:
                     "rich_versions": [],
                     "data_versions": [],
                     "ctrl_versions": [],
+                    "svc_versions": [],
                     "ack_versions": [],
                     "nostr_pubkey": None,
                 },
@@ -1336,6 +1339,7 @@ def build_key_package_vectors() -> dict:
                     "rich_versions": [],
                     "data_versions": [],
                     "ctrl_versions": [],
+                    "svc_versions": [],
                     "ack_versions": [],
                     "nostr_pubkey": None,
                 },
@@ -1350,7 +1354,7 @@ def build_key_package_vectors() -> dict:
             "example": '{"user_id":"off1abc","key_package_data":[],'
             '"remaining_lifetime_ms":0,"timestamp_ms":0,"session_reset":false,'
             '"wire_versions":[],"env_versions":[],"rich_versions":[],'
-            '"data_versions":[],"ctrl_versions":[],"ack_versions":[]}',
+            '"data_versions":[],"ctrl_versions":[],"svc_versions":[],"ack_versions":[]}',
             "nostr_pubkey_absent_is_omitted_not_null": True,
         },
     }

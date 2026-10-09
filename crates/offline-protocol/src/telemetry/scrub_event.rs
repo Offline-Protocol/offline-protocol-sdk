@@ -721,6 +721,7 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             service_id: _,
             method: _,
             body: _,
+            encrypted: _,
         } => {
             hash_string(sender, scrubber);
         }
@@ -730,6 +731,7 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             service_id: _,
             status: _,
             body: _,
+            encrypted: _,
         } => {
             hash_string(provider_peer_id, scrubber);
         }
