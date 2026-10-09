@@ -426,8 +426,10 @@ pub struct OfflineProtocol {
     /// The **advertised** half: learned only from a **signed** key package,
     /// like the sets above (persisted as [`PeerCapabilities`], restored on
     /// `initialize_mls`), and rewritten by every key package, so a fresh one
-    /// that stops advertising removes the peer. Bounded like
-    /// `key_package_sent_to`. The proved half is
+    /// that stops advertising removes the peer. A strict subset of
+    /// [`Self::encryption_capable_peers`], refused at its cap rather than
+    /// cleared when full: clearing would send every established peer's
+    /// service bodies in plaintext on a flood. The proved half is
     /// [`Self::svc_sealed_proved_peers`], and either one is enough to seal.
     ///
     /// [`SVC_SEALED_V1`]: offline_protocol_sealed::SVC_SEALED_V1

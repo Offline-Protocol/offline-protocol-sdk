@@ -29,7 +29,7 @@ use super::{
 use crate::mls::{InMemoryStorage, MlsStorage};
 use crate::protocol::prefixes::internal_prefixes;
 use crate::protocol::types::KeyPackagePayload;
-use crate::protocol::{OfflineProtocol, TestProtocolStateStorage, MAX_KEY_PACKAGE_SENT_TO};
+use crate::protocol::{OfflineProtocol, TestProtocolStateStorage, MAX_ENCRYPTION_CAPABLE_PEERS};
 use crate::test_identity::id;
 use crate::{Event, ProtocolConfig};
 use offline_protocol_sealed::SVC_SEALED_V1;
@@ -339,6 +339,14 @@ fn feed_signed_key_package(protocol: &mut OfflineProtocol, sender: &str, svc_ver
     );
     let message = signed_frame(sender, &id("user123"), &content);
     protocol.process_internal_message(&message);
+}
+
+/// Records that `peer` advertised the sealed form, as a signed key package
+/// that passed the gate would: the gate marks the signed sender
+/// encryption-capable first, and the advertised set is a subset of that one.
+fn advertise(protocol: &mut OfflineProtocol, peer: &str) {
+    protocol.record_encryption_capable(peer);
+    protocol.record_svc_sealed_peer(peer);
 }
 
 fn negotiating_protocol(tweak: impl FnOnce(&mut ProtocolConfig)) -> OfflineProtocol {
@@ -665,8 +673,8 @@ fn the_automatic_reply_to_the_first_sealed_request_is_sealed() {
     let (mut bob, bob_h, _) = encrypted("bob", |_| {});
     establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
     bob.confirmed_sessions.remove(&id("alice"));
-    alice.record_svc_sealed_peer(&id("bob"));
-    bob.record_svc_sealed_peer(&id("alice"));
+    advertise(&mut alice, &id("bob"));
+    advertise(&mut bob, &id("alice"));
 
     alice
         .send_service_request(&id("bob"), "nobody-here", "ping", "x")
@@ -707,7 +715,7 @@ fn a_sealed_service_request_marks_its_sender_capable() {
     let (mut alice, alice_h, _) = encrypted("alice", |_| {});
     let (mut bob, bob_h, bob_events) = encrypted("bob", |_| {});
     establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
-    alice.record_svc_sealed_peer(&id("bob"));
+    advertise(&mut alice, &id("bob"));
     assert!(!bob.peer_svc_sealed.contains(&id("alice")));
     register(&mut bob, "echo");
 
@@ -742,7 +750,7 @@ fn a_receiver_with_the_switch_off_still_routes_a_sealed_service_frame() {
         config.encryption.encrypt_service_messages = false;
     });
     establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
-    alice.record_svc_sealed_peer(&id("bob"));
+    advertise(&mut alice, &id("bob"));
     register(&mut bob, "echo");
 
     let request_id = alice
@@ -797,7 +805,7 @@ fn a_sealed_service_request_is_resealed_on_resend_after_a_rekey() {
         alice.confirmed_sessions.insert(id("bob"));
     };
     join(&mut alice);
-    alice.record_svc_sealed_peer(&id("bob"));
+    advertise(&mut alice, &id("bob"));
 
     alice
         .send_service_request(&id("bob"), "echo", "ping", "retry-me")
@@ -900,7 +908,7 @@ fn require_encryption_seals_service_frames_to_a_capable_confirmed_peer() {
     let (mut alice, alice_h, _) = strict("alice");
     let (mut bob, _bob_h, _) = strict("bob");
     establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
-    alice.record_svc_sealed_peer(&id("bob"));
+    advertise(&mut alice, &id("bob"));
     alice_h.clear_sent_messages();
 
     alice
@@ -930,7 +938,7 @@ fn a_replayed_key_package_cannot_unseal_a_peer_that_sent_a_sealed_frame() {
     let (mut alice, alice_h, _) = encrypted("alice", |_| {});
     let (mut bob, bob_h, _) = encrypted("bob", |_| {});
     establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
-    alice.record_svc_sealed_peer(&id("bob"));
+    advertise(&mut alice, &id("bob"));
     register(&mut bob, "echo");
 
     let request_id = alice
@@ -1003,18 +1011,32 @@ fn the_sealed_service_proof_is_a_subset_of_the_capable_set() {
     assert!(!protocol.svc_sealed_proved_peers.contains(&id("stranger")));
 }
 
-/// The advertised set is bounded like `key_package_sent_to`: full, it is
-/// cleared rather than grown.
+/// The advertised set is a subset of the capped encryption-capable set and
+/// refuses at that cap rather than evicting. The failure this pins: a set that
+/// cleared itself when full let a flood of fresh identities, one keygen each,
+/// send every established peer's service bodies in plaintext.
 #[test]
-fn the_advertised_set_is_bounded() {
+fn a_flood_of_identities_cannot_unseal_an_established_peer() {
     let mut protocol = negotiating_protocol(|_| {});
-    for i in 0..MAX_KEY_PACKAGE_SENT_TO {
-        protocol.record_svc_sealed_peer(&format!("peer-{i}"));
+    advertise(&mut protocol, &id("established"));
+    for i in 0..MAX_ENCRYPTION_CAPABLE_PEERS + 10 {
+        advertise(&mut protocol, &format!("flood-{i}"));
     }
-    assert_eq!(protocol.peer_svc_sealed.len(), MAX_KEY_PACKAGE_SENT_TO);
-    protocol.record_svc_sealed_peer("one-more");
-    assert_eq!(protocol.peer_svc_sealed.len(), 1);
-    assert!(protocol.peer_svc_sealed.contains("one-more"));
+    assert!(
+        protocol.peer_svc_sealed.contains(&id("established")),
+        "the flood evicted an established peer from the advertised set"
+    );
+    assert!(protocol.peer_svc_sealed.len() <= MAX_ENCRYPTION_CAPABLE_PEERS);
+    assert!(!protocol.peer_svc_sealed.contains("flood-8200"));
+}
+
+/// Outside the encryption-capable set the advertisement is refused, so the
+/// cap that bounds that set bounds this one.
+#[test]
+fn the_advertised_set_is_a_subset_of_the_capable_set() {
+    let mut protocol = negotiating_protocol(|_| {});
+    protocol.record_svc_sealed_peer(&id("stranger"));
+    assert!(!protocol.peer_svc_sealed.contains(&id("stranger")));
 }
 
 // ---------------------------------------------------------------------------
@@ -1082,7 +1104,7 @@ fn a_seal_failure_on_a_confirmed_session_is_an_error_not_plaintext() {
     let (mut alice, alice_h, _) = encrypted_on("alice", storage.clone(), |_| {});
     let (mut bob, _bob_h, _) = encrypted("bob", |_| {});
     establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
-    alice.record_svc_sealed_peer(&id("bob"));
+    advertise(&mut alice, &id("bob"));
     alice_h.clear_sent_messages();
 
     storage.fail.store(true, Ordering::SeqCst);
@@ -1126,7 +1148,7 @@ fn a_sealed_request_queued_before_the_session_is_routed_when_it_drains() {
         manager.create_session(&id("bob")).unwrap()
     };
     alice.confirmed_sessions.insert(id("bob"));
-    alice.record_svc_sealed_peer(&id("bob"));
+    advertise(&mut alice, &id("bob"));
 
     alice
         .send_service_request(&id("bob"), "echo", "ping", "early")

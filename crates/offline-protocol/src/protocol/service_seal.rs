@@ -15,7 +15,7 @@
 //! sealed: it is a gossip every hop must read to match and forward, and it has
 //! no single recipient whose session could seal it.
 
-use super::{OfflineProtocol, OutboxReseal, MAX_KEY_PACKAGE_SENT_TO};
+use super::{OfflineProtocol, OutboxReseal};
 use crate::{Error, Result};
 use offline_protocol_core::{ContentType, MessageId, MessagePriority};
 use offline_protocol_services::{SVC_REQUEST, SVC_RESPONSE};
@@ -107,14 +107,21 @@ impl OfflineProtocol {
                 || self.svc_sealed_proved_peers.contains(recipient))
     }
 
-    /// Records that `peer` routes sealed service frames, bounded like
-    /// `key_package_sent_to`: the set is keyed by a sender id, and forgetting a
-    /// peer costs only signed plaintext toward them until the next signal.
+    /// Records that `peer` routes sealed service frames.
+    ///
+    /// Bounded as a strict subset of the capped encryption-capable set,
+    /// refused rather than evicted, unlike the feature sets beside it that
+    /// clear themselves when full. Those can, because forgetting a peer there
+    /// costs a feature and never confidentiality. Here forgetting a peer sends
+    /// its service bodies in signed plaintext, so a flood of fresh identities
+    /// (one keygen each) that cleared the set would downgrade every
+    /// established peer with no symptom. Refusing at the cap costs a flood's
+    /// later peers the capability and never costs an earlier peer the sealing
+    /// it had. The security gate marks a signed sender encryption-capable
+    /// before any key package reaches dispatch, so a genuine peer passes.
     pub(super) fn record_svc_sealed_peer(&mut self, peer: &str) {
-        if !self.peer_svc_sealed.contains(peer)
-            && self.peer_svc_sealed.len() >= MAX_KEY_PACKAGE_SENT_TO
-        {
-            self.peer_svc_sealed.clear();
+        if !self.is_encryption_capable(peer) {
+            return;
         }
         self.peer_svc_sealed.insert(peer.to_string());
     }

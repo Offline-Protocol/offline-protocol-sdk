@@ -450,11 +450,18 @@ requester. A body still travels as signed plaintext:
   replay: a key package signed under `offline-ctrl-v1` is admitted at any age
   (the key-package escape in the control-frame gate).
 
-A peer that has sent us a sealed service frame is past all three. The frame
-proves it routes the sealed form, which no replay can fake, and the receiver
-records that in a durable ratchet beside the control-freshness one, which no
-key package can clear. From then on its bodies are sealed whatever its key
-packages say.
+A peer that has sent us a sealed service frame is past the first and the
+third. The frame proves it routes the sealed form, which no replay can fake,
+and the receiver records that in a durable ratchet beside the control-freshness
+one, which no key package can clear. From then on its bodies are sealed
+whatever its key packages say, except while the session is not confirmed: a
+request sent while a desync re-key rebuilds the session takes the second
+fallback, toward a proved peer too.
+
+The advertised capability cannot be flushed by a flood either. The set that
+holds it is a subset of the capped encryption-capable set and refuses new
+peers at the cap rather than evicting old ones, so a stream of fresh
+identities costs only the later identities the capability.
 
 A failure to seal on a **confirmed** session (an MLS or storage fault) is
 returned to the caller as an error, never sent in plaintext instead. The

@@ -2253,20 +2253,18 @@ impl OfflineProtocol {
     /// has not landed yet, and a replayed older key package removing the peer
     /// from the advertised set. Recorded whatever our switch says (knowledge,
     /// not policy); the switch gates only whether we seal.
+    ///
+    /// One case still answers in plaintext: a both-create owner whose decrypt
+    /// `can_confirm_from_source` refused to confirm on holds an unconfirmed
+    /// session, so a reply sent from inside the handler (the automatic
+    /// `not_found`) takes the documented "before the session confirms"
+    /// fallback even though the proof was just recorded.
     fn handle_sealed_service_frame(&mut self, sender: &str, content: &str, message: &Message) {
         // The frame decrypted in a 1:1 session with `sender`, which is the
         // encryption-capability fact itself. Recorded first because the
         // ratchet below is a subset of that set and refuses anyone outside it.
         self.record_encryption_capable(sender);
         self.record_svc_sealed_proved(sender);
-        if !self.svc_sealed_proved_peers.contains(sender)
-            && self.config.encryption.encrypt_service_messages
-        {
-            // The ratchet refused a peer outside the capped encryption-capable
-            // set. Keep the proof for this run at least, so the reply is
-            // sealed.
-            self.record_svc_sealed_peer(sender);
-        }
         self.handle_service_message(sender, content, message, true);
     }
 
