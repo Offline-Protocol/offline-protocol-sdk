@@ -1483,8 +1483,8 @@ impl OfflineProtocol {
                         // terminal**: the frame is answered `undecryptable`, so
                         // the sender re-seals the message once under its
                         // current session, and a resend that still fails
-                        // reports again. The sender settles the message as an
-                        // honest `MessageFailed` when it cannot re-seal.
+                        // reports again. The sender's retry ladder settles it
+                        // as an honest `MessageFailed` if it never decrypts.
                         let reason = if retriable {
                             format!(
                                 "Failed to decrypt MLS message ({kind:?}); answered undecryptable, so the sender can re-seal it"

@@ -91,8 +91,8 @@ deduplicator keeps identifiers for 7 days by default, persisted across
 restarts: the sender's redelivery window (`REDELIVERY_WINDOW_MS`), the longest a
 sender re-sends one identifier. With a shorter window a late re-send is not a
 duplicate. It reaches the ratchet, fails to decrypt because that generation is
-spent, and is answered `undecryptable`: the sender re-seals it once, or fails
-it when the plaintext is gone.
+spent, and is answered `undecryptable`: the sender resends it once, re-sealed
+when it still holds the plaintext.
 
 **An acknowledgement nothing can carry is held, not dropped.** It is owed from
 the moment the frame is accepted, and the usual reason no route takes it is a
@@ -220,9 +220,13 @@ frame drops it instead of redelivering the same dead ciphertext on every
 connect. It goes only to a sender that advertised `ack_versions` entry 1; any
 other sender is answered with nothing, the identifier unmarked, as before the
 status existed, because it would read the answer as a delivery. The sender never reports it delivered: it re-seals an encrypted DM
-under its current session and resends it once with the same identifier, emits
-`MessageFailed` when the plaintext is gone, and ignores a second answer for the
-same identifier, leaving the entry to its retry ladder.
+under its current session and resends it once with the same identifier, and
+ignores a second answer for the same identifier, leaving the entry to its retry
+ladder. When the plaintext is gone (an entry restored after a restart) the one
+resend is verbatim rather than a failure: a frame the pending-decryption queue
+dropped was never attempted, so the same ciphertext still decrypts, and failing
+it would let anyone who can fill that queue (a parked frame's sender is
+unauthenticated) turn a delay into a lost message.
 
 The policy-refusal and security-refusal rows are the two halves of "can never
 become decryptable", and they are deliberately opposite. Both refusals are

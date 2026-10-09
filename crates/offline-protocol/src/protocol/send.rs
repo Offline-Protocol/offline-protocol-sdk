@@ -5382,13 +5382,18 @@ impl OfflineProtocol {
         }
     }
 
-    /// Settles an `undecryptable` answer: the recipient can never decrypt the
-    /// copy it holds. An encrypted DM whose plaintext is still in memory is
-    /// re-sealed under the current session and resent once, same id (the
-    /// flush path re-seals); one without it — restored after a restart, so
-    /// every retry would replay the dead ciphertext — is dropped with
-    /// `message_failed`. A second answer for an id already resent leaves the
-    /// entry to its retry ladder, which re-seals on every attempt anyway: that
+    /// Settles an `undecryptable` answer: the recipient cannot decrypt the
+    /// copy it holds. An encrypted DM is resent once, same id: re-sealed under
+    /// the current session when its plaintext is still in memory (the flush
+    /// path re-seals), verbatim when it is not (an entry restored after a
+    /// restart). Verbatim is not futile: a frame the recipient's
+    /// pending-decryption queue gave up on (TTL or overflow) was never
+    /// attempted, so the same ciphertext decrypts once the session is up.
+    /// Failing it here instead would turn a recoverable drop into a terminal
+    /// one, and since a parked frame's sender is unauthenticated, anyone
+    /// able to fill the queue could trigger that. A second answer for an id
+    /// already resent leaves the entry to its retry ladder, which re-seals on
+    /// every attempt it can and ends in `message_failed` at max retries: that
     /// bounds two devices trading answers and resends at network speed, and
     /// keeps a split-brain pair's message deliverable once the session is
     /// rebuilt. Anything else (no entry left, plaintext, media) is ignored,
@@ -5404,28 +5409,13 @@ impl OfflineProtocol {
         {
             return;
         }
-        if entry.reseal.is_none() {
-            let retry_count = self
-                .retire_undeliverable_message(message_id, "recipient cannot decrypt")
-                .map_or(0, |entry| entry.attempt_count);
-            warn!(
-                message_id = %message_id,
-                "Recipient cannot decrypt this message and its plaintext is gone; failing it"
-            );
-            self.emit_event(Event::message_failed(
-                message_id.clone(),
-                "Recipient cannot decrypt the message",
-                retry_count,
-            ));
-            return;
-        }
         if !self.undecryptable_resent.insert(message_id.clone()) {
             return;
         }
         let (message, attempt_count) = (entry.message.clone(), entry.attempt_count);
         debug!(
             message_id = %message_id,
-            "Recipient cannot decrypt this copy; re-sealing and resending once"
+            "Recipient cannot decrypt this copy; resending once"
         );
         self.retry_queue.remove(&message_id.as_str());
         self.ack_manager.remove_ack(message_id);

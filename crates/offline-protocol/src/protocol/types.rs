@@ -1692,8 +1692,8 @@ pub(crate) enum InternalMessageResult {
     /// ([`crate::constants::ACK_STATUS_UNDECRYPTABLE`]) when its sender
     /// advertised that it reads one; an older sender gets no answer. Silence left a relay
     /// holding the frame to redeliver it on every connect, failing again each
-    /// time; the answer lets the relay drop it and tells the sender to re-seal
-    /// the message under its current session, or to fail it.
+    /// time; the answer lets the relay drop it and tells the sender to resend
+    /// the message once, re-sealed under its current session when it can.
     Undecryptable,
     /// Message was decrypted, here's the plaintext.
     Decrypted(String),

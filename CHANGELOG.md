@@ -236,10 +236,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   package (see Added). A sender that has not, or whose key package this
   device has not seen since it upgraded, is answered with nothing, exactly as
   before. The sender never reports such a message delivered: it re-seals the DM
-  under its current session and resends it once with the same id, or emits
-  `message_failed` when the plaintext is gone (an outbox entry restored after
-  a restart); a second answer for the same id resends nothing and leaves the
-  entry to its retry ladder. Media chunks and frames whose envelope does not
+  under its current session and resends it once with the same id (verbatim
+  when the plaintext is gone, as for an outbox entry restored after a restart,
+  since a frame the recipient's queue dropped unattempted still decrypts); a
+  second answer for the same id resends nothing and leaves the entry to its
+  retry ladder, which ends in `message_failed` at max retries. Media chunks and frames whose envelope does not
   parse keep their old handling. See
   [Reserved metadata keys](docs/spec/wire-format.md#reserved-metadata-keys).
 - **Frames the SDK sends on its own no longer push "new message" to an

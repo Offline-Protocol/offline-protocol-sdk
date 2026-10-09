@@ -166,7 +166,7 @@ pub struct KeyPackagePayload {
     ///
     /// Like `ctrl_versions` this says what the sender *accepts*: a peer
     /// advertising entry 1 settles an ACK carrying
-    /// `ack_status = "undecryptable"` as "not delivered" (re-seal or fail).
+    /// `ack_status = "undecryptable"` as "not delivered" (resend once).
     /// One without it would read that ACK as a delivery, so a receiver answers
     /// an undecryptable frame from such a peer with nothing at all.
     ///

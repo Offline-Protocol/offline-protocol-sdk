@@ -23,7 +23,7 @@ pub const ACK_STATUS_KEY: &str = "ack_status";
 
 /// [`ACK_STATUS_KEY`] value: the recipient can never decrypt the frame it
 /// names (a spent ratchet generation, a dead epoch, or the pending-decryption
-/// queue gave up on it). The sender re-seals once or fails the message; it is
+/// queue gave up on it). The sender resends the message once; it is
 /// never `message_delivered`. Still a delivery ACK in shape, so a relay holding
 /// the frame drops it.
 pub const ACK_STATUS_UNDECRYPTABLE: &str = "undecryptable";

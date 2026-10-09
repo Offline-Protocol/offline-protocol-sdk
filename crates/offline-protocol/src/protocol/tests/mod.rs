@@ -15393,17 +15393,37 @@ fn test_undecryptable_ack_reseals_once_and_never_reports_delivered() {
 /// Without the plaintext (a restored entry, so every retry would replay the
 /// ciphertext that just failed) the message is failed, never delivered.
 #[test]
-fn test_undecryptable_ack_without_plaintext_fails_the_message() {
+fn test_undecryptable_ack_without_plaintext_replays_once_and_keeps_the_entry() {
+    // An entry restored after a restart has no plaintext to re-seal. The
+    // answer may come from a pending-queue drop, whose ciphertext was never
+    // attempted and still decrypts, so the entry is replayed rather than
+    // failed.
     let (mut alice, alice_handle, _bob_manager, msg_id, events) = alice_with_sealed_dm();
     alice.outbox.get_mut(&msg_id).unwrap().reseal = None;
+    let original = alice.outbox.get(&msg_id).unwrap().message.content.clone();
 
     alice.handle_ack_message(&undecryptable_ack_from_bob(&alice, &msg_id));
 
-    assert_eq!(delivered_or_failed(&events, &msg_id), (0, 1));
-    assert!(!alice.outbox.contains_key(&msg_id));
+    let resent: Vec<Message> = alice_handle
+        .sent_messages()
+        .into_iter()
+        .filter(|m| m.id == msg_id)
+        .collect();
+    assert_eq!(resent.len(), 1, "exactly one resend");
+    assert_eq!(resent[0].content, original, "replayed verbatim");
+    assert_eq!(delivered_or_failed(&events, &msg_id), (0, 0));
+    assert!(alice.outbox.contains_key(&msg_id), "not failed");
+
+    alice_handle.clear_sent_messages();
+    alice.handle_ack_message(&undecryptable_ack_from_bob(&alice, &msg_id));
     assert!(
         alice_handle.sent_messages().iter().all(|m| m.id != msg_id),
-        "nothing is resent"
+        "a second answer must not resend"
+    );
+    assert_eq!(delivered_or_failed(&events, &msg_id), (0, 0));
+    assert!(
+        alice.outbox.contains_key(&msg_id),
+        "left to the retry ladder"
     );
 }
 
