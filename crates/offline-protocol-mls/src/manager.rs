@@ -1142,12 +1142,16 @@ impl MlsManager {
     }
 
     /// Deletes a 1:1 session.
+    ///
+    /// The establishment stamp goes first: an `Err` must mean the session is
+    /// still there, because callers clean up their own state for the peer
+    /// only once this succeeds. Deleting the session first and then failing
+    /// on the stamp left a peer recorded as confirmed with no session.
     pub fn delete_session(&self, other_user_id: &str) -> Result<()> {
-        self.session_manager.delete_session(other_user_id)?;
         let session_id = self.session_manager.get_session_id(other_user_id)?;
         self.storage
             .delete(StorageKeyType::GroupMetadata.as_str(), session_id.as_str())?;
-        Ok(())
+        self.session_manager.delete_session(other_user_id)
     }
 
     // ========================================================================
@@ -3455,6 +3459,53 @@ mod tests {
         let welcome = alice.create_session(&addr("bob")).unwrap();
         bob.join_session(&welcome).unwrap();
         (alice, bob)
+    }
+
+    use crate::storage::{StorageError, StorageResult};
+
+    /// Storage that refuses to delete a session's establishment stamp.
+    struct StampDeleteFails(InMemoryStorage);
+
+    impl MlsStorage for StampDeleteFails {
+        fn store(&self, key_type: &str, key_id: &str, data: &[u8]) -> StorageResult<()> {
+            self.0.store(key_type, key_id, data)
+        }
+        fn load(&self, key_type: &str, key_id: &str) -> StorageResult<Option<Vec<u8>>> {
+            self.0.load(key_type, key_id)
+        }
+        fn delete(&self, key_type: &str, key_id: &str) -> StorageResult<()> {
+            if key_type == StorageKeyType::GroupMetadata.as_str() {
+                return Err(StorageError::DeleteFailed("refused".to_string()));
+            }
+            self.0.delete(key_type, key_id)
+        }
+        fn list_keys(&self, key_type: &str) -> StorageResult<Vec<String>> {
+            self.0.list_keys(key_type)
+        }
+    }
+
+    /// The engine clears a peer's confirmed-session state only once
+    /// `delete_session` returns `Ok`, so an `Err` must leave the session
+    /// where it was, not half deleted.
+    #[test]
+    fn a_failed_delete_session_leaves_the_session_in_place() {
+        let storage: Arc<dyn MlsStorage> = Arc::new(StampDeleteFails(InMemoryStorage::new()));
+        let (keys, address) = test_identity("alice");
+        seed_identity(&storage, &keys);
+        let alice = MlsManager::new(address.to_string(), storage).unwrap();
+        let bob = create_test_manager("bob");
+        let bob_kp = bob.generate_key_package().unwrap();
+        alice
+            .import_key_package(&addr("bob"), &bob_kp.key_package_data)
+            .unwrap();
+        alice.create_session(&addr("bob")).unwrap();
+
+        assert!(alice.delete_session(&addr("bob")).is_err());
+        assert!(alice.has_session(&addr("bob")).unwrap());
+        assert!(alice
+            .session_established_at_ms(&addr("bob"))
+            .unwrap()
+            .is_some());
     }
 
     #[test]
