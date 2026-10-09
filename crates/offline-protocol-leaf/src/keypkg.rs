@@ -98,8 +98,9 @@ pub(crate) fn mint(client: &Client<impl MlsConfig>, now_unix_secs: u64) -> Resul
 ///
 /// The compact envelope and the binary hop encoding, because both are pure
 /// parsing work that saves radio time on a link that has very little. Nothing
-/// else: `rich_versions` and `data_versions` stay empty, so a peer sends plain
-/// text and no document sync frames, which by the protocol's own rule is a
+/// else: `rich_versions`, `data_versions` and `svc_versions` stay empty, so a
+/// peer sends plain text, no document sync frames and no sealed service frames
+/// (a leaf has no service registry), which by the protocol's own rule is a
 /// downgrade to the floor rather than an error. A device that advertised a
 /// capability it does not implement would be sent frames it renders as
 /// literal text.
@@ -129,6 +130,7 @@ pub(crate) fn payload(
         // legacy leaf to be compatible with: this crate's first release is
         // the one that introduced the device at all.
         ctrl_versions: alloc::vec![CTRL_SIGN_V2],
+        svc_versions: Vec::new(),
         nostr_pubkey: None,
     }
 }

@@ -5825,6 +5825,7 @@ impl OfflineProtocol {
             // the peer-capability record that closes the downgrade could then
             // never be written.
             ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
+            svc_versions: Vec::new(),
             // Present only when the Nostr transport is installed. Advertised
             // regardless of the sealing kill switch, which gates what *we*
             // publish, not what a peer may seal to us: withholding it would

@@ -1441,6 +1441,7 @@ mod tests {
             rich_versions: Vec::new(),
             data_versions: Vec::new(),
             ctrl_versions: Vec::new(),
+            svc_versions: Vec::new(),
             nostr_pubkey: None,
         };
         let content = serde_json::to_string(&reset_payload).unwrap();

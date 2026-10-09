@@ -83,7 +83,7 @@ pub use identity_assertion::{
     encode_identity_assertion, parse_identity_assertion, IdentityAssertion, ED25519_SIGNATURE_LEN,
     IDENTITY_ASSERTION_MIN_LEN,
 };
-pub use keypackage::{KeyPackagePayload, CTRL_SIGN_V2, MLS_ENVELOPE_COMPACT_V1};
+pub use keypackage::{KeyPackagePayload, CTRL_SIGN_V2, MLS_ENVELOPE_COMPACT_V1, SVC_SEALED_V1};
 
 #[cfg(all(test, feature = "std"))]
 mod manifest_guard_tests {

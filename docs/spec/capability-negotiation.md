@@ -12,6 +12,7 @@ Peers advertise what they can parse in the key package payload, the body of a
 | `rich_versions` | End to end | Whether we may seal a `__RICH_V1__` body, and the v2 media envelope | Plain text only, extras dropped |
 | `data_versions` | End to end | Whether we may send `__DATA_V1__` document sync frames, and which document encoding they carry. Entry 1 is 1:1 replication; entry 2 additionally means the peer intercepts these frames inside a *group* ciphertext; entry 3 additionally means the peer speaks the blob-fetch frames and routes a data-purposed media transfer into its document layer; entry 4 additionally means the peer reads the removals a version offer carries; entry 5 additionally means it answers inside the interest an offer declares; entry 6 additionally means it carries attachment bytes inside a group; entry 7 additionally means it parses the custody receipt, so a custodian may answer its deposits | No replication with that peer |
 | `ctrl_versions` | End to end | Which control-frame signing payload we build for this peer. Entry 2 means the peer verifies `offline-ctrl-v2`, which binds the frame's timestamp | Build `offline-ctrl-v1`, which states no freshness |
+| `svc_versions` | End to end | Whether a service request or response may travel sealed inside `__MLS_ENC__` toward this peer. Entry 1 means the peer routes a decrypted `__SVC_REQ__` or `__SVC_RESP__` into its service layer, with the MLS-authenticated sender as the requester | Signed plaintext service frames |
 | `nostr_pubkey` | End to end | Which key metadata is sealed to on the Nostr path | Seal to the publicly computable key |
 
 The key package payload also carries `user_id`, the MLS key package itself, a
@@ -55,9 +56,18 @@ Where a capability gates a security-relevant payload, the non-capable path
 **drops** the payload rather than sending it in a weaker form. Rich extras
 toward a non-capable recipient are dropped, never sent in cleartext.
 
+`svc_versions` is the one stated exception. Service request and response
+bodies were signed plaintext before the capability existed, so that form is
+the floor every peer depends on, and dropping a request toward a peer that
+cannot parse the sealed form would break interoperability rather than protect
+anything. A sender therefore falls back to the signed plaintext form toward a
+peer that has not advertised entry 1, and toward a capable peer before their
+session is confirmed. See [the exception](#the-exception-svc_versions) for
+what that leaves exposed.
+
 ## Persistence
 
-`env_versions`, `rich_versions` and `data_versions` are **end to end**: they
+`env_versions`, `rich_versions`, `data_versions` and `svc_versions` are **end to end**: they
 describe what a recipient parses after an arbitrary number of relay hops. They
 MUST persist across restarts and be restored before any queued send flushes.
 Otherwise a restart silently downgrades every established peer until the next
@@ -200,6 +210,28 @@ Stripping it remains possible and downgrades to the bootstrap key. That is a
 privacy downgrade, not a disclosure to the attacker, and one they could equally
 achieve by dropping the packet.
 
+### The exception: `svc_versions`
+
+This field decides whether a service body is readable by every hop, so like
+`nostr_pubkey` it sits next to a confidentiality decision and is honoured
+**only from a signed key package**. It is signed today whenever it reaches
+dispatch, for the same reason `nostr_pubkey` is; the receiver checks anyway, so
+the posture does not depend on the gate staying that way.
+
+Three things remain exposed, and an application that cannot accept them sends
+its bodies as ordinary sealed messages instead:
+
+- **Stripping** the field downgrades that peer's service bodies to signed
+  plaintext until a genuine package arrives.
+- **Replaying** an older signed package from before the peer upgraded does the
+  same, inside the control-frame freshness window.
+- **The first request** to a provider this device has no confirmed session with
+  leaves in signed plaintext, because there is nothing yet to seal it with.
+
+A peer that sends a **sealed** service frame has proved it routes them, which
+no replay can fake, so a receiver MAY treat that frame as an advertisement of
+entry 1 for the sender. The reference implementation does, in memory.
+
 ## Relay capabilities
 
 The relay advertises its own capability set, which is separate from peer
@@ -247,6 +279,7 @@ A minimal leaf advertises little and works fully:
 | `rich_versions` | Empty | Peers send plain text and drop extras rather than sending them in a weaker form |
 | `data_versions` | Empty | No document replication with this peer |
 | `ctrl_versions` | `[2]`, always | Not optional, unlike every other row: a leaf verifies the freshness-bound payload on every control frame except `__MLS_KEY_PKG__`, so a peer that never learned this and kept sending the older one would have its Welcome refused and never complete a pairing |
+| `svc_versions` | Empty | A leaf has no service registry; peers send it signed plaintext service frames, which it never receives in practice |
 | `nostr_pubkey` | Absent unless the device is reachable over that carrier | Peers seal to the publicly computable key |
 
 Two consequences follow from the universal rules above, and both are easy to

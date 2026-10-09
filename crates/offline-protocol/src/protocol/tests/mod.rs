@@ -1876,6 +1876,7 @@ fn feed_key_package(protocol: &mut OfflineProtocol, sender: &str, wire_versions:
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -1956,6 +1957,7 @@ fn feed_key_package_with_env(protocol: &mut OfflineProtocol, sender: &str, env_v
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -2152,6 +2154,7 @@ pub(crate) fn feed_key_package_with_capabilities(
         rich_versions,
         data_versions,
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -2271,6 +2274,7 @@ fn feed_key_package_with_caps(
         rich_versions,
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -2413,6 +2417,7 @@ fn key_package_message_with_nostr_pubkey(
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         nostr_pubkey: nostr_pubkey.map(str::to_string),
     };
     let content = format!(
@@ -2748,6 +2753,7 @@ fn feed_key_package_with_data(
         rich_versions: Vec::new(),
         data_versions,
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -3876,6 +3882,7 @@ fn test_process_internal_message_key_package() {
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -15267,6 +15274,7 @@ fn feed_session_reset_key_package(
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -20298,6 +20306,7 @@ fn test_lamport_clock_merge_on_internal_message() {
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -20509,6 +20518,7 @@ fn test_key_package_remaining_lifetime_ms() {
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -20594,6 +20604,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             rich_versions: Vec::new(),
             data_versions: Vec::new(),
             ctrl_versions: Vec::new(),
+            svc_versions: Vec::new(),
             nostr_pubkey: None,
         };
         let content = format!(
@@ -20682,6 +20693,7 @@ fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -20733,6 +20745,7 @@ fn test_received_key_package_lifetime_is_clamped() {
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -22283,6 +22296,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             rich_versions: Vec::new(),
             data_versions: Vec::new(),
             ctrl_versions: Vec::new(),
+            svc_versions: Vec::new(),
             nostr_pubkey: None,
         };
         let content = format!(
@@ -39874,6 +39888,7 @@ fn key_package_frame_body(sender: &str, session_reset: bool, ctrl_versions: Vec<
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions,
+        svc_versions: Vec::new(),
         nostr_pubkey: None,
     };
     format!(
@@ -41632,6 +41647,7 @@ fn the_ordinary_handshake_starts_a_latency_without_any_session_missing() {
         rich_versions: Vec::new(),
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
+        svc_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
