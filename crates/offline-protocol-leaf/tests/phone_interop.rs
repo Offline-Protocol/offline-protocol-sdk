@@ -509,6 +509,7 @@ fn a_key_package_that_claims_another_owner_is_refused() {
         data_versions: vec![],
         ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
 
@@ -1139,6 +1140,7 @@ fn a_peer_that_already_has_a_key_package_is_not_sent_another() {
         data_versions: vec![],
         ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let frame = phone_control_frame(
@@ -1723,6 +1725,7 @@ fn a_replayed_session_reset_does_not_tear_down_the_new_session() {
         data_versions: vec![],
         ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let reset_frame = phone_control_frame(
@@ -1822,6 +1825,7 @@ fn a_flood_of_strangers_cannot_displace_an_established_peer() {
         data_versions: vec![],
         ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let frame = phone_control_frame(
@@ -1854,6 +1858,7 @@ fn a_flood_of_strangers_cannot_displace_an_established_peer() {
             data_versions: vec![],
             ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
             svc_versions: Vec::new(),
+            ack_versions: Vec::new(),
             nostr_pubkey: None,
         };
         let frame = phone_control_frame(
@@ -2280,6 +2285,7 @@ fn advertisement_body(user_id: &str) -> String {
         data_versions: vec![],
         ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     format!(
@@ -3209,6 +3215,7 @@ fn a_reset_older_than_the_last_one_acted_on_is_refused() {
             data_versions: vec![],
             ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
             svc_versions: Vec::new(),
+            ack_versions: Vec::new(),
             nostr_pubkey: None,
         };
         phone_control_frame_at(
@@ -3270,6 +3277,7 @@ fn a_spent_reset_stays_spent_across_a_power_cycle() {
         data_versions: vec![],
         ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let reset_frame = phone_control_frame_at(
@@ -3421,6 +3429,7 @@ fn a_session_reset_that_states_no_time_is_refused_its_teardown() {
         data_versions: vec![],
         ctrl_versions: vec![offline_protocol_sealed::CTRL_SIGN_V2],
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(

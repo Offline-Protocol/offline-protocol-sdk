@@ -1343,6 +1343,19 @@ export interface MessageDecryptionFailedEvent extends BaseEvent {
   sender: string;
   code: DecryptionFailureCode;
   reason: string;
+  /**
+   * When the sender sealed the frame (sender clock, ms), from the cleartext
+   * envelope. Unauthenticated: a hint, never a security input. `null` unless
+   * this was a 1:1 decrypt attempt.
+   */
+  sealed_at_ms: number | null;
+  /**
+   * When this device's current session with `sender` was created or adopted
+   * (local clock, ms); `null` when unknown. A frame sealed before it cannot
+   * have been sealed under this session, so its failure says nothing about
+   * whether the two sides hold the same session now.
+   */
+  session_established_at_ms: number | null;
 }
 
 /**

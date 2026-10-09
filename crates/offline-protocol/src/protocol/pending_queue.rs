@@ -49,7 +49,9 @@ impl OfflineProtocol {
         self.delete_pending_decrypt_entries_from_storage(
             outcome.dropped.iter().map(|entry| &entry.message.id),
         );
-        let events = Self::pending_drop_events(outcome.dropped.into_iter().chain(outcome.refused));
+        let gone: Vec<_> = outcome.dropped.into_iter().chain(outcome.refused).collect();
+        self.answer_dropped_pending(&gone);
+        let events = Self::pending_drop_events(gone);
         self.emit_pending_drop_events(events);
         if outcome.admitted {
             self.persist_pending_decrypt_entry(
@@ -139,9 +141,10 @@ impl OfflineProtocol {
     /// so neither the file_id nor the text can be named here.)
     ///
     /// Under the deferred-ACK model this is **advisory, not terminal**: an
-    /// evicted frame was never ACKed, so a sender still retrying resends it, and
-    /// the resend re-enters the queue and can still complete once the session
-    /// confirms. The event says the message is *at risk*, not that it has
+    /// evicted frame is never delivery-ACKed (one that came over the relay is
+    /// answered `undecryptable`, see `answer_dropped_pending`), so a sender
+    /// still retrying resends it, and the resend re-enters the queue and can
+    /// still complete once the session confirms. The event says the message is *at risk*, not that it has
     /// failed — for media the terminal signal is `FileReceiveFailed`. It is
     /// emitted for text as well as for chunks: text drops used to be
     /// metrics-only, which left an app with no way to distinguish "the sender
@@ -153,8 +156,27 @@ impl OfflineProtocol {
         // to mirror what the queue holds, and a record that outlived its entry
         // would be restored, re-dropped and re-reported on the next launch.
         self.delete_pending_decrypt_entries_from_storage(dropped.iter().map(|e| &e.message.id));
+        self.answer_dropped_pending(&dropped);
         let events = Self::pending_drop_events(dropped);
         self.emit_pending_drop_events(events);
+    }
+
+    /// The queue gave up on these frames, so those that came over the relay
+    /// are answered `undecryptable`: the relay drops its copy instead of
+    /// redelivering it into the same queue on every connect, and the sender
+    /// resends the message once (see `send_undecryptable_ack`, which also
+    /// holds the transport and capability gates). Media chunks are left alone:
+    /// their recovery is the transfer's own resend, not a re-seal. A frame
+    /// with no recorded arrival transport stays unanswered, as before.
+    fn answer_dropped_pending(&mut self, dropped: &[DroppedPendingMessage]) {
+        for entry in dropped {
+            if entry.message.content_type == ContentType::FileChunk {
+                continue;
+            }
+            if let Some(transport) = entry.received_via {
+                self.send_undecryptable_ack(&entry.message, transport);
+            }
+        }
     }
 
     /// Logs each dropped frame and builds its `PendingQueueDropped` event
@@ -398,40 +420,37 @@ impl OfflineProtocol {
                         debug!(message_id = %msg.id, "Delayed message was consumed internally");
                     }
                     InternalMessageResult::Deferred => {
-                        // Still undecryptable during a drain. Not ACKed and the
-                        // id is not re-marked, so the sender's resend still
+                        // Still not decryptable during a drain. Not ACKed and
+                        // the id is not re-marked, so the sender's resend still
                         // recovers the message instead of being told
                         // "delivered" for a frame we dropped.
                         //
-                        // Deliberately does NOT re-queue here, because each of
-                        // the three ways a drained frame reaches this arm has
-                        // already settled the question:
-                        //
-                        // - Session not ready (unexpected post-confirmation):
-                        //   `handle_encrypted_message` re-queued it itself
-                        //   before returning `Deferred`, so a re-queue here is
-                        //   redundant — `enqueue` is idempotent by id.
-                        // - Epoch desync, and a hard crypto/transport failure
-                        //   (the routine case): both refuse to enqueue on the
-                        //   live path for a reason that holds just as well
-                        //   here — the ciphertext is sealed to a dead epoch, or
-                        //   the failed attempt already spent its ratchet
-                        //   generation, so no number of later drains can make
-                        //   this frame decrypt.
-                        //
-                        // Re-queuing the latter two used to look free, but the
-                        // drain *removes* the entry before processing, so the
-                        // re-enqueue missed `enqueue`'s idempotency check and
-                        // re-stamped `received_at`. A frame that can never
-                        // decrypt then had its TTL restarted by every drain,
-                        // outliving its budget and re-reporting an advisory
-                        // decrypt failure each time — including after the
-                        // sender's re-sealed resend had already delivered the
-                        // same id. Dropping it costs nothing the un-ACK does
-                        // not already cover.
+                        // Deliberately does NOT re-queue here: the only way a
+                        // drained frame reaches this arm is session not ready
+                        // (unexpected post-confirmation), and
+                        // `handle_encrypted_message` re-queued it itself before
+                        // returning `Deferred`, and `enqueue` is idempotent by id.
+                        // (A queued frame parsed at receipt, so the unparseable
+                        // shape cannot occur here.)
                         debug!(
                             message_id = %msg.id,
-                            "Delayed message still undecryptable during drain; dropping the queued copy (recovery is the sender's resend)"
+                            "Delayed message still not decryptable during drain"
+                        );
+                    }
+                    InternalMessageResult::Undecryptable => {
+                        // Dead ciphertext (the drain's attempt spent the
+                        // ratchet generation, or it is sealed to an epoch that
+                        // is not ours), so the queue gives up on it. Not
+                        // re-queued: a re-enqueue would miss `enqueue`'s
+                        // idempotency check (the drain removed the entry) and
+                        // restart the TTL of a frame that can never decrypt.
+                        // Answered (relay arrivals only) so the sender re-seals.
+                        if let Some(transport) = received_via {
+                            self.send_undecryptable_ack(&msg, transport);
+                        }
+                        debug!(
+                            message_id = %msg.id,
+                            "Delayed message undecryptable during drain; dropping the queued copy"
                         );
                     }
                     InternalMessageResult::SecurityRejected => {

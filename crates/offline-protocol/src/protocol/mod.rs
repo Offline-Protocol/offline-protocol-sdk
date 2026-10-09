@@ -183,6 +183,12 @@ pub struct OfflineProtocol {
     /// lives on the `OutboxEntry` itself. See [`OutboxReseal`].
     pending_reseal: HashMap<MessageId, OutboxReseal>,
 
+    /// Outbox ids already re-sealed and resent once in answer to an
+    /// `undecryptable` ACK. A second such answer leaves the entry to its retry
+    /// ladder, so two devices cannot trade undecryptable ACKs and resends at
+    /// network speed. Cleared with the outbox entry.
+    undecryptable_resent: HashSet<MessageId>,
+
     /// Dedicated outbox for file chunk messages, separate from the main outbox
     /// to prevent large file transfers from evicting regular messages.
     media_outbox: HashMap<MessageId, OutboxEntry>,
@@ -375,6 +381,14 @@ pub struct OfflineProtocol {
     ///
     /// [`CTRL_SIGN_V2`]: offline_protocol_sealed::CTRL_SIGN_V2
     peer_ctrl_freshness: std::collections::HashSet<String>,
+
+    /// Peers that read an `undecryptable` ACK as "not delivered"
+    /// ([`ACK_UNDECRYPTABLE_V1`] in `ack_versions`). Only these are answered
+    /// when a frame of theirs can never decrypt: an older SDK reads any ACK as
+    /// a delivery. Same lifecycle as `peer_ctrl_freshness` above.
+    ///
+    /// [`ACK_UNDECRYPTABLE_V1`]: offline_protocol_sealed::ACK_UNDECRYPTABLE_V1
+    pub(crate) peer_undecryptable_ack: std::collections::HashSet<String>,
 
     /// Peers that have presented a control-frame signature over the
     /// freshness-bound payload, so their frames under the older one are
@@ -1176,6 +1190,7 @@ impl OfflineProtocol {
             shared_state: Arc::new(Mutex::new(SharedState::new())),
             outbox: HashMap::new(),
             pending_reseal: HashMap::new(),
+            undecryptable_resent: HashSet::new(),
             media_outbox: HashMap::new(),
             dm_unreachable_parks: HashMap::new(),
             unrouted_acks: VecDeque::new(),
@@ -1193,6 +1208,7 @@ impl OfflineProtocol {
             encryption_capable_peers: std::collections::HashSet::new(),
             peer_compact_envelope: std::collections::HashSet::new(),
             peer_ctrl_freshness: std::collections::HashSet::new(),
+            peer_undecryptable_ack: std::collections::HashSet::new(),
             control_freshness_peers: std::collections::HashSet::new(),
             control_reset_watermark: std::collections::HashMap::new(),
             peer_rich_payload: std::collections::HashSet::new(),
@@ -1401,6 +1417,7 @@ impl OfflineProtocol {
         let previous_outbox = self.outbox.clone();
         let previous_peer_compact_envelope = self.peer_compact_envelope.clone();
         let previous_peer_ctrl_freshness = self.peer_ctrl_freshness.clone();
+        let previous_peer_undecryptable_ack = self.peer_undecryptable_ack.clone();
         // Snapshotted with its siblings so a failed re-initialize restores it
         // too. It is a ratchet, so the direction that matters is that a
         // rollback must not *lose* it: a peer we hold to the newer payload has
@@ -1572,6 +1589,7 @@ impl OfflineProtocol {
             self.outbox = previous_outbox;
             self.peer_compact_envelope = previous_peer_compact_envelope;
             self.peer_ctrl_freshness = previous_peer_ctrl_freshness;
+            self.peer_undecryptable_ack = previous_peer_undecryptable_ack;
             self.control_freshness_peers = previous_control_freshness_peers;
             self.control_reset_watermark = previous_control_reset_watermark;
             self.peer_rich_payload = previous_peer_rich_payload;
@@ -3057,7 +3075,7 @@ impl OfflineProtocol {
                 self.mark_encryption_capable(peer_id);
 
                 // Send welcome message to peer
-                let welcome_sent = self.send_welcome_message(peer_id, &welcome)?;
+                let welcome_sent = self.send_welcome_message(peer_id, &welcome, false)?;
 
                 // All operations succeeded, now safe to remove the key package
                 self.pending_key_packages.remove(peer_id);

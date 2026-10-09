@@ -18,7 +18,8 @@ use super::{
 };
 use super::{classify_transport_send_error, send_failure_token};
 use crate::constants::{
-    ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
+    ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_STATUS_KEY, ACK_STATUS_UNDECRYPTABLE, ACK_TRANSPORT_KEY,
+    MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
 };
 use crate::events::{DecryptionFailureCode, Event, PresenceStatus};
 use crate::file_transfer::{FileChunk, OutboundTransferState};
@@ -345,7 +346,7 @@ impl OfflineProtocol {
 
         // Create and dispatch the forwarded message
         let mut message =
-            self.create_message(&recipient_str, final_content, Some(priority), None)?;
+            self.create_message_for_app(&recipient_str, final_content, Some(priority), None, None)?;
         message.forwarded_from = Some(forward_info);
         message.content_type = original_message.content_type;
         message.media_metadata = original_message.media_metadata.clone();
@@ -524,6 +525,21 @@ impl OfflineProtocol {
         content: String,
         priority: MessagePriority,
     ) -> Result<MessageId> {
+        self.send_internal_message_alerting(recipient, content, priority, false)
+    }
+
+    /// [`Self::send_internal_message`], with `alert` choosing whether the
+    /// relay may push for the frame. `true` only for the control frames that
+    /// carry something the user acts on or reads: a connection request or
+    /// accept, and a group chat message. Everything else is
+    /// [`crate::constants::NO_ALERT_KEY`]-marked.
+    pub(crate) fn send_internal_message_alerting(
+        &mut self,
+        recipient: &str,
+        content: String,
+        priority: MessagePriority,
+        alert: bool,
+    ) -> Result<MessageId> {
         {
             let state = lock_shared_state(&self.shared_state)?;
             if state.state != ProtocolState::Running {
@@ -531,7 +547,11 @@ impl OfflineProtocol {
             }
         }
 
-        let mut message = self.create_message(recipient, content, Some(priority), None)?;
+        let mut message = if alert {
+            self.create_message_for_app(recipient, content, Some(priority), None, None)?
+        } else {
+            self.create_message(recipient, content, Some(priority), None)?
+        };
         self.sign_control_message(&mut message)?;
         self.dispatch_internal_message(message)
     }
@@ -644,10 +664,14 @@ impl OfflineProtocol {
     /// sent over a forced transport. A hint frame is not user traffic, and
     /// announcing a switch for one would report a transport change the app's
     /// messages did not take.
+    ///
+    /// `alert` is false for a registration and true for a broadcast, which
+    /// carries a group chat message (see [`Self::send_internal_message_alerting`]).
     pub(crate) fn send_relay_hint_message(
         &mut self,
         content: String,
         priority: MessagePriority,
+        alert: bool,
     ) -> Result<MessageId> {
         {
             let state = lock_shared_state(&self.shared_state)?;
@@ -657,7 +681,11 @@ impl OfflineProtocol {
         }
 
         let self_id = self.local_id.clone();
-        let mut message = self.create_message(&self_id, content, Some(priority), None)?;
+        let mut message = if alert {
+            self.create_message_for_app(&self_id, content, Some(priority), None, None)?
+        } else {
+            self.create_message(&self_id, content, Some(priority), None)?
+        };
         // Set before signing for clarity; the canonical payload covers only
         // sender/id/recipient/content, so ordering is not security-relevant.
         message.requires_ack = false;
@@ -783,6 +811,11 @@ impl OfflineProtocol {
     /// to the engine, not to an application, so they always carry
     /// [`crate::ProtocolConfig::app_id`]. Only an application's own send
     /// can name another id, through [`Self::create_message_for_app`].
+    ///
+    /// For the same reason every frame built here carries
+    /// [`crate::constants::NO_ALERT_KEY`]: nothing the user wrote is in it,
+    /// so the relay must not push "new message" for it. User content is
+    /// built through [`Self::create_message_for_app`], which does not mark.
     pub(super) fn create_message(
         &mut self,
         recipient: impl Into<String>,
@@ -790,7 +823,12 @@ impl OfflineProtocol {
         priority: Option<MessagePriority>,
         reply_to_msg: Option<MessageId>,
     ) -> Result<Message> {
-        self.create_message_for_app(recipient, content, priority, reply_to_msg, None)
+        let mut message =
+            self.create_message_for_app(recipient, content, priority, reply_to_msg, None)?;
+        message
+            .metadata
+            .insert(crate::constants::NO_ALERT_KEY.to_string(), "1".to_string());
+        Ok(message)
     }
 
     /// Validates a per-send app id from the rich send surface.
@@ -806,7 +844,8 @@ impl OfflineProtocol {
     }
 
     /// Like [`Self::create_message`], stamping `app_id` when given and the
-    /// configured id otherwise.
+    /// configured id otherwise, and without the no-alert marker: this is the
+    /// builder for user content, which the relay should push.
     pub(super) fn create_message_for_app(
         &mut self,
         recipient: impl Into<String>,
@@ -878,7 +917,10 @@ impl OfflineProtocol {
             return self.encrypt_bytes_confirmed_session(&mls, recipient, plaintext);
         }
 
-        self.ensure_session_establishment(&mls, recipient)?;
+        // Every caller is a text send, whose message queues behind the
+        // Welcome; the session-confirm marker also lands here, but only
+        // after adopting a session, so it never creates one.
+        self.ensure_session_establishment(&mls, recipient, true)?;
 
         // Only encrypt if session is confirmed (Welcome processed or successful decrypt).
         // Confirmation truth comes from persisted session state.
@@ -910,10 +952,15 @@ impl OfflineProtocol {
     /// key package remains (expired). Returns `Err(SessionNotReady)` when no
     /// key package is available, or right after creating a session with
     /// `store_pending` enabled (the session cannot be confirmed yet).
+    ///
+    /// `user_send` is whether something the user sent prompted this, and so
+    /// whether a Welcome it sends may alert (see
+    /// [`Self::send_welcome_message`]).
     pub(super) fn ensure_session_establishment(
         &mut self,
         mls: &Arc<RwLock<MlsManager>>,
         recipient: &str,
+        user_send: bool,
     ) -> Result<()> {
         // Check for existing session (requires storage I/O via load_group)
         let has_session = {
@@ -979,7 +1026,7 @@ impl OfflineProtocol {
                         );
                     }
 
-                    let welcome_sent = self.send_welcome_message(recipient, &welcome)?;
+                    let welcome_sent = self.send_welcome_message(recipient, &welcome, user_send)?;
 
                     debug!(
                         recipient = %recipient,
@@ -1681,7 +1728,7 @@ impl OfflineProtocol {
                         // expected "created, awaiting confirmation" outcome;
                         // the message queues regardless.
                         if let Some(mls) = self.mls_manager.clone() {
-                            match self.ensure_session_establishment(&mls, recipient) {
+                            match self.ensure_session_establishment(&mls, recipient, true) {
                                 Ok(()) | Err(Error::SessionNotReady(_)) => {}
                                 Err(err) => {
                                     warn!(
@@ -2668,7 +2715,13 @@ impl OfflineProtocol {
                 // confirmed synchronously, so callers retry after
                 // `secure_session_established`.
                 if let Some(mls) = self.mls_manager.clone() {
-                    self.ensure_session_establishment(&mls, &recipient_str)?;
+                    // A document-layer transfer is the SDK's own: the
+                    // Welcome it opens must not alert.
+                    self.ensure_session_establishment(
+                        &mls,
+                        &recipient_str,
+                        data_purpose.is_none(),
+                    )?;
                 }
                 return Err(Error::SessionNotReady(
                     self.establishment_state(&recipient_str)?,
@@ -2938,6 +2991,14 @@ impl OfflineProtocol {
                     ORIGINAL_CONTENT_TYPE_KEY.to_string(),
                     content_type.to_string(),
                 );
+            }
+            // A document-layer transfer is the SDK's own traffic, like the
+            // `__DATA_V1__` frames beside it. The purpose rides sealed in
+            // chunk 0 only, so every chunk is marked here, where it is known.
+            if data_purpose.is_some() {
+                message
+                    .metadata
+                    .insert(crate::constants::NO_ALERT_KEY.to_string(), "1".to_string());
             }
             self.outbound_media_chunks
                 .insert(message.id.clone(), (file_id.to_string(), chunk_index));
@@ -3311,6 +3372,7 @@ impl OfflineProtocol {
         // staging is consumed at entry creation; this covers the id being torn
         // down before that ever happened.
         self.pending_reseal.remove(message_id);
+        self.undecryptable_resent.remove(message_id);
         // A receipt names an outbox entry; with the entry gone it names
         // nothing, and keeping it would only grow the map.
         self.custody_receipts.remove(message_id);
@@ -4986,22 +5048,110 @@ impl OfflineProtocol {
         message: &Message,
         inbound_transport: TransportType,
     ) -> Result<()> {
+        self.send_ack_with_status(message, inbound_transport, None)
+    }
+
+    /// Answers a frame that can never decrypt: a delivery ACK in shape (so a
+    /// relay holding the frame drops it) carrying
+    /// `ack_status = "undecryptable"`, which the sender settles without
+    /// `message_delivered` (see [`Self::handle_undecryptable_ack`]). Only for
+    /// a frame that asked for an answer; the plain ACK's rules otherwise apply.
+    ///
+    /// The one gate for every path that gives up on a frame (receive loop,
+    /// queue drain, queue eviction): only a sender that advertised
+    /// [`ACK_UNDECRYPTABLE_V1`](offline_protocol_sealed::ACK_UNDECRYPTABLE_V1)
+    /// is answered. An older SDK reads any ACK as a delivery, so it gets what
+    /// it always got (nothing) and keeps its retries.
+    ///
+    /// And only a frame that arrived over the internet relay. Every frame this
+    /// answers failed before anything authenticated it: garbage ciphertext in
+    /// a derivable session slot, or a parked frame whose sender is only a
+    /// claim. Answering on a mesh or peer-stream link would tell an injector
+    /// in radio range that the target is live and processing, which the
+    /// threat model's acknowledgement rule withholds. The relay already knows
+    /// the device is connected, and its mailbox is the one thing that
+    /// redelivers a dead frame forever, so it is the one carrier answered.
+    pub(super) fn send_undecryptable_ack(
+        &mut self,
+        message: &Message,
+        inbound_transport: TransportType,
+    ) {
+        if inbound_transport != TransportType::Internet
+            || !message.requires_ack
+            || !self
+                .peer_undecryptable_ack
+                .contains(message.sender.as_str())
+        {
+            return;
+        }
+        let ack = match self.build_ack(message, inbound_transport, Some(ACK_STATUS_UNDECRYPTABLE)) {
+            Ok(ack) => ack,
+            Err(err) => {
+                error!(
+                    message_id = %message.id,
+                    error = %err,
+                    "Failed to build undecryptable ACK"
+                );
+                return;
+            }
+        };
+        // Pinned to the relay, never the ACK ladder: `route_ack` falls back to
+        // the mesh and to whatever DORS picks when the relay is down, and a
+        // held ACK re-runs that same ladder later. Either would put this
+        // answer on a radio link, where R25 says it never goes. Dropped
+        // instead: the relay mailbox redelivers the frame on the next
+        // connect, and the live path answers it then.
+        let sent = self
+            .transport_manager
+            .can_address_via(TransportType::Internet, message.sender.as_str())
+            && self
+                .transport_manager
+                .send_via_transport(&ack, TransportType::Internet)
+                .is_ok();
+        if !sent {
+            debug!(
+                message_id = %message.id,
+                "Relay unavailable; undecryptable ACK dropped until the frame is redelivered"
+            );
+        }
+    }
+
+    fn send_ack_with_status(
+        &mut self,
+        message: &Message,
+        inbound_transport: TransportType,
+        status: Option<&str>,
+    ) -> Result<()> {
+        let ack = self.build_ack(message, inbound_transport, status)?;
+        self.route_ack(&ack, inbound_transport)
+    }
+
+    /// Builds the acknowledgement for `message`, optionally carrying
+    /// [`ACK_STATUS_KEY`]. Routing is the caller's.
+    fn build_ack(
+        &self,
+        message: &Message,
+        inbound_transport: TransportType,
+        status: Option<&str>,
+    ) -> Result<Message> {
         let sender = UserId::new(&self.local_id)?;
         let recipient = message.sender.clone();
         let app_id = AppId::new(&self.config.app_id)?;
         let ttl = TTL::new(self.config.initial_ttl).unwrap_or_else(|_| TTL::default());
 
-        let ack_message = Message::builder(sender, recipient, app_id)
+        let mut builder = Message::builder(sender, recipient, app_id)
             .content(String::new())
             .priority(MessagePriority::Low)
             .ttl(ttl)
             .requires_ack(false)
             .metadata(ACK_FOR_KEY, message.id.as_str())
             .metadata(ACK_HOP_COUNT_KEY, message.hop_count.value().to_string())
-            .metadata(ACK_TRANSPORT_KEY, Self::transport_label(inbound_transport))
-            .build();
+            .metadata(ACK_TRANSPORT_KEY, Self::transport_label(inbound_transport));
+        if let Some(status) = status {
+            builder = builder.metadata(ACK_STATUS_KEY, status);
+        }
 
-        self.route_ack(&ack_message, inbound_transport)
+        Ok(builder.build())
     }
 
     /// Gets an acknowledgement back to whoever sent us the message it answers.
@@ -5226,6 +5376,14 @@ impl OfflineProtocol {
                     return;
                 }
 
+                // Answered, not delivered: never `message_delivered`.
+                if message.metadata.get(ACK_STATUS_KEY).map(String::as_str)
+                    == Some(ACK_STATUS_UNDECRYPTABLE)
+                {
+                    self.handle_undecryptable_ack(&message_id);
+                    return;
+                }
+
                 // A delivery ack settles an outbound connection request:
                 // the recipient provably received it, so a later stale
                 // recipient_unreachable signal must not fire a false
@@ -5322,6 +5480,46 @@ impl OfflineProtocol {
                 }
             }
         }
+    }
+
+    /// Settles an `undecryptable` answer: the recipient cannot decrypt the
+    /// copy it holds. An encrypted DM is resent once, same id: re-sealed under
+    /// the current session when its plaintext is still in memory (the flush
+    /// path re-seals), verbatim when it is not (an entry restored after a
+    /// restart). Verbatim is not futile: a frame the recipient's
+    /// pending-decryption queue gave up on (TTL or overflow) was never
+    /// attempted, so the same ciphertext decrypts once the session is up.
+    /// Failing it here instead would turn a recoverable drop into a terminal
+    /// one, and since a parked frame's sender is unauthenticated, anyone
+    /// able to fill the queue could trigger that. A second answer for an id
+    /// already resent leaves the entry to its retry ladder, which re-seals on
+    /// every attempt it can and ends in `message_failed` at max retries: that
+    /// bounds two devices trading answers and resends at network speed, and
+    /// keeps a split-brain pair's message deliverable once the session is
+    /// rebuilt. Anything else (no entry left, plaintext, media) is ignored,
+    /// which is exactly what the frame's failure used to cost it.
+    fn handle_undecryptable_ack(&mut self, message_id: &MessageId) {
+        let Some(entry) = self.outbox.get(message_id) else {
+            return;
+        };
+        if !entry
+            .message
+            .content
+            .starts_with(internal_prefixes::ENCRYPTED)
+        {
+            return;
+        }
+        if !self.undecryptable_resent.insert(message_id.clone()) {
+            return;
+        }
+        let (message, attempt_count) = (entry.message.clone(), entry.attempt_count);
+        debug!(
+            message_id = %message_id,
+            "Recipient cannot decrypt this copy; resending once"
+        );
+        self.retry_queue.remove(&message_id.as_str());
+        self.ack_manager.remove_ack(message_id);
+        self.try_flush_send(message, attempt_count);
     }
 
     /// Whether `ack` comes from the peer the message it answers was addressed
@@ -5580,7 +5778,8 @@ impl OfflineProtocol {
             serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
         let content = format!("{}{}", internal_prefixes::CONN_REQUEST, serialized);
 
-        let message_id = self.send_internal_message(recipient, content, MessagePriority::High)?;
+        let message_id =
+            self.send_internal_message_alerting(recipient, content, MessagePriority::High, true)?;
         self.track_pending_connection_request(&message_id, recipient);
         info!(recipient = %recipient, "Sent connection request");
         Ok(message_id)
@@ -5650,7 +5849,8 @@ impl OfflineProtocol {
             serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
         let content = format!("{}{}", internal_prefixes::CONN_ACCEPT, serialized);
 
-        let message_id = self.send_internal_message(recipient, content, MessagePriority::High)?;
+        let message_id =
+            self.send_internal_message_alerting(recipient, content, MessagePriority::High, true)?;
         info!(recipient = %recipient, "Accepted connection request");
         Ok(message_id)
     }
@@ -5877,6 +6077,9 @@ impl OfflineProtocol {
             // publish, not what a peer may seal to us: withholding it would
             // downgrade the peer's traffic to the bootstrap key as a side
             // effect of a local setting.
+            // Read unconditionally: an `undecryptable` ACK is settled as "not
+            // delivered" whatever our config, so a peer may always send us one.
+            ack_versions: vec![offline_protocol_sealed::ACK_UNDECRYPTABLE_V1],
             nostr_pubkey: self.transport_manager.nostr_public_key(),
         }
     }

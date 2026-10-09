@@ -325,6 +325,7 @@ fn key_package_body(sender: &str, svc_versions: Vec<u8>) -> String {
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
         svc_versions,
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     serde_json::to_string(&payload).unwrap()

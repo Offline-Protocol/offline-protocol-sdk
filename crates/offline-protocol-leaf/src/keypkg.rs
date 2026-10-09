@@ -131,6 +131,7 @@ pub(crate) fn payload(
         // the one that introduced the device at all.
         ctrl_versions: alloc::vec![CTRL_SIGN_V2],
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     }
 }

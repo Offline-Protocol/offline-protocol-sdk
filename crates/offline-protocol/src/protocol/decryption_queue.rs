@@ -48,6 +48,9 @@ struct EntryRef {
 pub(crate) struct DroppedPendingMessage {
     pub(crate) message: Message,
     pub(crate) reason: &'static str,
+    /// Transport the frame arrived on, when known: the route its
+    /// `undecryptable` answer takes.
+    pub(crate) received_via: Option<TransportType>,
 }
 
 /// What [`PendingDecryptionQueue::enqueue_via`] did with the incoming frame,
@@ -589,6 +592,7 @@ impl PendingDecryptionQueue {
                 expired_entries.push(DroppedPendingMessage {
                     message: expired.message,
                     reason: DropReason::TtlExpired.as_str(),
+                    received_via: expired.received_via,
                 });
             }
         }
@@ -650,6 +654,7 @@ impl PendingDecryptionQueue {
                 evicted.push(DroppedPendingMessage {
                     message: expired.message,
                     reason: DropReason::TtlExpired.as_str(),
+                    received_via: expired.received_via,
                 });
             } else {
                 self.global_order.pop_front();
@@ -709,6 +714,7 @@ impl PendingDecryptionQueue {
             refused: (admission == Admission::Refused).then(|| DroppedPendingMessage {
                 message: message.clone(),
                 reason: DropReason::OverflowDropNewest.as_str(),
+                received_via: arrival_transport,
             }),
         }
     }
@@ -806,6 +812,7 @@ impl PendingDecryptionQueue {
                             dropped.push(DroppedPendingMessage {
                                 message: evicted.message,
                                 reason: DropReason::OverflowDropOldest.as_str(),
+                                received_via: evicted.received_via,
                             });
                             evicted_any = true;
                         }
@@ -882,6 +889,7 @@ impl PendingDecryptionQueue {
                         dropped.push(DroppedPendingMessage {
                             message: evicted.message,
                             reason: DropReason::OverflowDropOldest.as_str(),
+                            received_via: evicted.received_via,
                         });
                     }
                     None => {
@@ -930,6 +938,7 @@ impl PendingDecryptionQueue {
                             Some(evicted) => dropped.push(DroppedPendingMessage {
                                 message: evicted.message,
                                 reason: DropReason::OverflowDropOldest.as_str(),
+                                received_via: evicted.received_via,
                             }),
                             None => {
                                 self.record_eviction_failure(
@@ -980,6 +989,7 @@ impl PendingDecryptionQueue {
                     Some(evicted) => dropped.push(DroppedPendingMessage {
                         message: evicted.message,
                         reason: DropReason::OverflowDropOldest.as_str(),
+                        received_via: evicted.received_via,
                     }),
                     None => {
                         self.record_eviction_failure(

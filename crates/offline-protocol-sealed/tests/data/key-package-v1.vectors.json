@@ -33,13 +33,14 @@
         "data_versions": [],
         "ctrl_versions": [],
         "svc_versions": [],
+        "ack_versions": [],
         "nostr_pubkey": null
       },
       "note": "Every absent list defaults to empty, and empty selects the floor. This is rule 2 of capability negotiation expressed as a parse: absence is never an error."
     },
     {
       "name": "a fully capable peer",
-      "json": "{\"user_id\":\"off1abc\",\"key_package_data\":[],\"remaining_lifetime_ms\":2419200000,\"timestamp_ms\":1700000000000,\"session_reset\":true,\"wire_versions\":[1],\"env_versions\":[1],\"rich_versions\":[1],\"data_versions\":[1,2,3],\"ctrl_versions\":[2],\"svc_versions\":[1],\"nostr_pubkey\":\"abcd\"}",
+      "json": "{\"user_id\":\"off1abc\",\"key_package_data\":[],\"remaining_lifetime_ms\":2419200000,\"timestamp_ms\":1700000000000,\"session_reset\":true,\"wire_versions\":[1],\"env_versions\":[1],\"rich_versions\":[1],\"data_versions\":[1,2,3],\"ctrl_versions\":[2],\"svc_versions\":[1],\"ack_versions\":[1],\"nostr_pubkey\":\"abcd\"}",
       "expect": {
         "user_id": "off1abc",
         "key_package_data": [],
@@ -66,6 +67,9 @@
         "svc_versions": [
           1
         ],
+        "ack_versions": [
+          1
+        ],
         "nostr_pubkey": "abcd"
       },
       "note": "data_versions entries are read independently, so [1,2,3] is not a single level."
@@ -85,6 +89,7 @@
         "data_versions": [],
         "ctrl_versions": [],
         "svc_versions": [],
+        "ack_versions": [],
         "nostr_pubkey": null
       },
       "note": "An unknown field is ignored rather than refused. A decoder that rejects it cannot be sent a newer key package, which is the frame that carries every other capability."
@@ -104,6 +109,7 @@
         "data_versions": [],
         "ctrl_versions": [],
         "svc_versions": [],
+        "ack_versions": [],
         "nostr_pubkey": null
       },
       "note": "Absent and null mean the same thing on the way in. On the way out the field is omitted rather than written null."
@@ -111,7 +117,7 @@
   ],
   "emission_is_not_pinned": {
     "note": "Illustrative only. A conforming peer parses this; it is not required to produce these bytes, and this file does not assert that it does.",
-    "example": "{\"user_id\":\"off1abc\",\"key_package_data\":[],\"remaining_lifetime_ms\":0,\"timestamp_ms\":0,\"session_reset\":false,\"wire_versions\":[],\"env_versions\":[],\"rich_versions\":[],\"data_versions\":[],\"ctrl_versions\":[],\"svc_versions\":[]}",
+    "example": "{\"user_id\":\"off1abc\",\"key_package_data\":[],\"remaining_lifetime_ms\":0,\"timestamp_ms\":0,\"session_reset\":false,\"wire_versions\":[],\"env_versions\":[],\"rich_versions\":[],\"data_versions\":[],\"ctrl_versions\":[],\"svc_versions\":[],\"ack_versions\":[]}",
     "nostr_pubkey_absent_is_omitted_not_null": true
   }
 }

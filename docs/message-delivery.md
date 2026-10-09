@@ -503,13 +503,23 @@ The delivery system emits events at each stage of the message lifecycle:
 | `MessageDelivered` | ACK received from recipient | `message_id`, `latency_ms`, `hop_count`, `transport` |
 | `MessageFailed` | Terminal failure (max ACK retries, outbox lifetime or capacity exceeded) | `message_id`, `reason`, `retry_count` |
 | `MediaResendRequired` | Interrupted outbound media transfer detected at `start()`; app must re-supply the bytes via `send_media` with the same `file_id` | `file_id`, `recipient`, `file_name`, `file_size` |
-| `MessageDecryptionFailed` | An inbound encrypted message failed to decrypt on this attempt; **advisory, not terminal** (see below) | `message_id`, `sender`, `code`, `reason` |
+| `MessageDecryptionFailed` | An inbound encrypted message failed to decrypt on this attempt; **advisory, not terminal** (see below) | `message_id`, `sender`, `code`, `reason`, `sealed_at_ms`, `session_established_at_ms` |
 
 `MessageDecryptionFailed` is the one receiver-side event on this list, and it
-does not settle anything. A message that fails to decrypt is not delivery-ACKed
-(so the sender keeps retrying, and each resend of a DM is re-sealed against the
-current session), which means the event fires once per failed *attempt* rather
-than once per message — bounded by the sender's ACK retry budget. Treat it as
+does not settle anything. A message that fails to decrypt is not delivery-ACKed.
+A frame that can never decrypt (spent ratchet generation, dead epoch, or one the
+pending-decryption queue gave up on) is answered with an `ack_status:
+"undecryptable"` ACK instead, when it arrived over the internet relay and its
+sender advertised `ack_versions` entry 1 (otherwise it is left unanswered, as
+before): the sender re-seals the DM once under its current session and resends
+it with the same id (verbatim when the plaintext is gone, as for a restored
+outbox entry); it never emits `MessageDelivered` for it, and a second such
+answer for the same id leaves the entry to its retry ladder. The event
+therefore fires once per failed *attempt* rather than once per message, bounded
+by the sender's ACK retry budget. `sealed_at_ms` (sender clock, from the
+envelope) and `session_established_at_ms` (local clock) let an app tell a stale
+frame (sealed before the current session existed) from one that says something
+about the session now. Treat it as
 "this attempt did not decrypt"; the terminal signal is `MessageFailed` on the
 sender, or `FileReceiveFailed` for media. See
 [Crypto-Failure Recovery](mls-integration.md#crypto-failure-recovery).

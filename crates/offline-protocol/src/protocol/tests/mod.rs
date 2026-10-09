@@ -13,7 +13,9 @@ mod per_send_app_id;
 mod service_seal;
 
 use super::*;
-use crate::constants::{ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY};
+use crate::constants::{
+    ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_STATUS_KEY, ACK_STATUS_UNDECRYPTABLE, ACK_TRANSPORT_KEY,
+};
 use crate::events::{DecryptionFailureCode, PresenceSource, PresenceStatus, SecurityWarningCode};
 use crate::mls_observability::{
     DecryptionFailureKind, MlsErrorCategory, MlsLifecycleEvent, MlsOperationContext,
@@ -1878,6 +1880,7 @@ fn feed_key_package(protocol: &mut OfflineProtocol, sender: &str, wire_versions:
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -1959,6 +1962,7 @@ fn feed_key_package_with_env(protocol: &mut OfflineProtocol, sender: &str, env_v
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -2156,6 +2160,7 @@ pub(crate) fn feed_key_package_with_capabilities(
         data_versions,
         ctrl_versions: Vec::new(),
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -2276,6 +2281,7 @@ fn feed_key_package_with_caps(
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -2419,6 +2425,7 @@ fn key_package_message_with_nostr_pubkey(
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: nostr_pubkey.map(str::to_string),
     };
     let content = format!(
@@ -2755,6 +2762,7 @@ fn feed_key_package_with_data(
         data_versions,
         ctrl_versions: Vec::new(),
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -3122,6 +3130,56 @@ fn peer_capability_unblock_clears_record() {
     );
 }
 
+/// `ack_versions` is learned from a key package, dropped by one that stops
+/// advertising it, and survives a restart like the other capabilities.
+#[test]
+fn peer_undecryptable_ack_capability_is_learned_and_survives_restart() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let mut protocol = protocol_with_mls_storage(storage.clone());
+    let feed = |protocol: &mut OfflineProtocol, sender: &str, ack_versions: Vec<u8>| {
+        let payload = KeyPackagePayload {
+            user_id: sender.to_string(),
+            key_package_data: vec![1, 2, 3, 4],
+            remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
+            timestamp_ms: 0,
+            session_reset: false,
+            wire_versions: Vec::new(),
+            env_versions: Vec::new(),
+            rich_versions: Vec::new(),
+            data_versions: Vec::new(),
+            ctrl_versions: Vec::new(),
+            svc_versions: Vec::new(),
+            ack_versions,
+            nostr_pubkey: None,
+        };
+        let content = format!(
+            "{}{}",
+            internal_prefixes::KEY_PACKAGE,
+            serde_json::to_string(&payload).unwrap()
+        );
+        protocol.process_internal_message(&signed_frame(sender, &id("user123"), &content));
+    };
+    feed(
+        &mut protocol,
+        &id("peer"),
+        vec![offline_protocol_sealed::ACK_UNDECRYPTABLE_V1],
+    );
+    feed(&mut protocol, &id("legacy"), Vec::new());
+    assert!(protocol.peer_undecryptable_ack.contains(&id("peer")));
+    assert!(!protocol.peer_undecryptable_ack.contains(&id("legacy")));
+
+    let mut restarted = protocol_with_mls_storage(storage.clone());
+    assert!(restarted.peer_undecryptable_ack.contains(&id("peer")));
+    assert!(!restarted.peer_undecryptable_ack.contains(&id("legacy")));
+
+    // A downgrade drops it in memory and on disk.
+    feed(&mut restarted, &id("peer"), Vec::new());
+    assert!(!restarted.peer_undecryptable_ack.contains(&id("peer")));
+    assert!(!protocol_with_mls_storage(storage)
+        .peer_undecryptable_ack
+        .contains(&id("peer")));
+}
+
 #[test]
 fn peer_capability_restore_prunes_overflow() {
     // A durable store inflated past the cap (e.g. by a forged-sender flood
@@ -3136,6 +3194,7 @@ fn peer_capability_restore_prunes_overflow() {
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let encoded = serde_json::to_vec(&caps).unwrap();
@@ -3278,6 +3337,7 @@ fn peer_capability_restore_prefers_session_peers() {
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let encoded = serde_json::to_vec(&caps).unwrap();
@@ -3886,6 +3946,7 @@ fn test_process_internal_message_key_package() {
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -13150,7 +13211,7 @@ fn test_welcome_no_carrier_ticks_keep_lifecycle_alive() {
     // Far more no-carrier attempts than max_retries — none may expire the
     // Welcome, and the retry budget must not accumulate.
     for _ in 0..10 {
-        let _ = protocol.try_send_welcome(&id("bob"), "test_no_carrier_tick");
+        let _ = protocol.try_send_welcome(&id("bob"), "test_no_carrier_tick", false);
     }
 
     let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
@@ -13220,7 +13281,7 @@ fn test_no_carrier_welcome_parks_without_churn() {
         None::<String>,
     );
     for _ in 0..10 {
-        let _ = protocol.try_send_welcome(&id("bob"), "test_no_carrier_tick");
+        let _ = protocol.try_send_welcome(&id("bob"), "test_no_carrier_tick", false);
     }
 
     let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
@@ -13386,7 +13447,7 @@ fn test_welcome_sends_when_carrier_appears() {
         .add_transport(TransportType::BLE, Box::new(mock));
 
     protocol
-        .try_send_welcome(&id("bob"), "test_carrier_appeared")
+        .try_send_welcome(&id("bob"), "test_carrier_appeared", false)
         .unwrap();
 
     let lifecycle = protocol.welcome_lifecycles.get(&id("bob")).unwrap();
@@ -14403,11 +14464,11 @@ fn test_desync_dm_withholds_ack_and_triggers_rekey() {
     bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
-    let bob_transport = MockTransport::new(TransportType::BLE);
+    let bob_transport = MockTransport::new(TransportType::Internet);
     bob_transport.start().unwrap();
     let bob_handle = bob_transport.clone();
     bob.transport_manager_mut()
-        .add_transport(TransportType::BLE, Box::new(bob_transport));
+        .add_transport(TransportType::Internet, Box::new(bob_transport));
 
     let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let received_handle = Arc::clone(&received);
@@ -14417,6 +14478,7 @@ fn test_desync_dm_withholds_ack_and_triggers_rekey() {
         }
     });
     bob.start().unwrap();
+    bob.peer_undecryptable_ack.insert(id("alice"));
 
     // Establish bob's session with alice via a real Welcome.
     let alice_manager =
@@ -14468,11 +14530,11 @@ fn test_desync_dm_withholds_ack_and_triggers_rekey() {
     while bob.receive_message().is_some() {}
 
     let sent = bob_handle.sent_messages();
-    let acks = sent
-        .iter()
-        .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&msg_id_str))
-        .count();
-    assert_eq!(acks, 0, "a desync DM must NOT be delivery-ACKed");
+    assert_eq!(
+        acks_for(&sent, &msg_id_str),
+        (0, 1),
+        "a desync DM must NOT be delivery-ACKed, only answered undecryptable"
+    );
 
     assert!(
         received.lock().unwrap().is_empty(),
@@ -14512,11 +14574,11 @@ fn hard_failure_pair(
     bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
-    let bob_transport = MockTransport::new(TransportType::BLE);
+    let bob_transport = MockTransport::new(TransportType::Internet);
     bob_transport.start().unwrap();
     let bob_handle = bob_transport.clone();
     bob.transport_manager_mut()
-        .add_transport(TransportType::BLE, Box::new(bob_transport));
+        .add_transport(TransportType::Internet, Box::new(bob_transport));
     bob.start().unwrap();
 
     let alice_manager =
@@ -14540,6 +14602,10 @@ fn hard_failure_pair(
     );
     bob_handle.queue_message(welcome_wire);
     while bob.receive_message().is_some() {}
+    // Alice's SDK reads an `undecryptable` answer; see
+    // `test_undecryptable_frame_from_peer_without_capability_is_not_answered`
+    // for one that does not.
+    bob.peer_undecryptable_ack.insert(id("alice"));
 
     (bob, bob_handle, alice_manager)
 }
@@ -14564,6 +14630,21 @@ fn encrypted_wire(
         wire.id = id;
     }
     wire
+}
+
+/// The ACKs `sent` holds for `msg_id`, split into (delivery, undecryptable).
+fn acks_for(sent: &[Message], msg_id: &str) -> (usize, usize) {
+    let answers: Vec<_> = sent
+        .iter()
+        .filter(|m| m.metadata.get(ACK_FOR_KEY).map(String::as_str) == Some(msg_id))
+        .collect();
+    let undecryptable = answers
+        .iter()
+        .filter(|m| {
+            m.metadata.get(ACK_STATUS_KEY).map(String::as_str) == Some(ACK_STATUS_UNDECRYPTABLE)
+        })
+        .count();
+    (answers.len() - undecryptable, undecryptable)
 }
 
 /// A structurally valid envelope for the live session whose MLS ciphertext is
@@ -14593,19 +14674,29 @@ fn test_hard_decrypt_failure_withholds_ack_and_does_not_rekey() {
 
     let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let received_handle = Arc::clone(&received);
-    let failures: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    #[allow(clippy::type_complexity)]
+    let failures: Arc<Mutex<Vec<(String, Option<u64>, Option<u64>)>>> =
+        Arc::new(Mutex::new(Vec::new()));
     let failures_handle = Arc::clone(&failures);
     bob.on_event(move |event| match event {
         Event::MessageReceived { content, .. } => {
             received_handle.lock().unwrap().push(content.clone())
         }
-        Event::MessageDecryptionFailed { reason, .. } => {
-            failures_handle.lock().unwrap().push(reason.clone())
-        }
+        Event::MessageDecryptionFailed {
+            reason,
+            sealed_at_ms,
+            session_established_at_ms,
+            ..
+        } => failures_handle.lock().unwrap().push((
+            reason.clone(),
+            sealed_at_ms,
+            session_established_at_ms,
+        )),
         _ => {}
     });
 
-    let wire = encrypted_wire(&corrupt_ciphertext_for(&alice_manager), None);
+    let corrupt = corrupt_ciphertext_for(&alice_manager);
+    let wire = encrypted_wire(&corrupt, None);
     assert!(wire.requires_ack, "delivery ACK must be in play");
     let msg_id = wire.id.clone();
     let msg_id_str = msg_id.as_str().to_string();
@@ -14616,11 +14707,9 @@ fn test_hard_decrypt_failure_withholds_ack_and_does_not_rekey() {
 
     let sent = bob_handle.sent_messages();
     assert_eq!(
-        sent.iter()
-            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&msg_id_str))
-            .count(),
-        0,
-        "a hard decrypt failure must NOT be delivery-ACKed"
+        acks_for(&sent, &msg_id_str),
+        (0, 1),
+        "a hard decrypt failure must NOT be delivery-ACKed, only answered undecryptable once"
     );
     assert_eq!(
         sent.iter()
@@ -14644,9 +14733,80 @@ fn test_hard_decrypt_failure_withholds_ack_and_does_not_rekey() {
     );
     let got = failures.lock().unwrap();
     assert!(
-        got.iter().any(|r| r.contains("not acknowledged")),
+        got.iter().any(|(r, _, _)| r.contains("not delivery-ACKed")),
         "the failure event must read as advisory, not terminal, got {got:?}"
     );
+    // The frame-age fields the app's split-brain breaker compares.
+    let (_, sealed_at_ms, session_established_at_ms) = &got[0];
+    assert_eq!(*sealed_at_ms, Some(corrupt.timestamp_ms));
+    assert!(
+        session_established_at_ms.is_some(),
+        "a session joined by this SDK records when it was established"
+    );
+}
+
+/// A sender that never advertised `ack_versions` gets exactly what 0.28 gave
+/// it: no answer at all (an older SDK reads any ACK as a delivery), the id
+/// unmarked so its re-sealed retry still lands, nothing queued.
+#[test]
+fn test_undecryptable_frame_from_peer_without_capability_is_not_answered() {
+    let (mut bob, bob_handle, alice_manager) = hard_failure_pair(true);
+    bob.peer_undecryptable_ack.remove(&id("alice"));
+
+    let wire = encrypted_wire(&corrupt_ciphertext_for(&alice_manager), None);
+    let msg_id = wire.id.clone();
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(wire.clone());
+    while bob.receive_message().is_some() {}
+
+    assert_eq!(
+        acks_for(&bob_handle.sent_messages(), &msg_id.as_str()),
+        (0, 0)
+    );
+    assert!(!bob.deduplicator.is_duplicate(&msg_id));
+    assert!(!bob.pending_queue.contains_peer("alice"));
+
+    // The queue paths go through the same gate.
+    bob.enqueue_pending_decryption_via("alice", &wire, Some(TransportType::Internet));
+    bob.process_pending_decryption("alice");
+    assert_eq!(
+        acks_for(&bob_handle.sent_messages(), &msg_id.as_str()),
+        (0, 0)
+    );
+}
+
+/// The frames answered `undecryptable` failed before anything authenticated
+/// them, so an answer on a mesh link would confirm to an injector in radio
+/// range that the target is live. Only a relay arrival is answered; the same
+/// frame over Bluetooth LE, live or drained from the queue, gets nothing.
+#[test]
+fn test_undecryptable_frame_off_the_relay_is_not_answered() {
+    let (mut bob, internet_handle, alice_manager) = hard_failure_pair(true);
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    let ble_handle = ble.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+
+    let wire = encrypted_wire(&corrupt_ciphertext_for(&alice_manager), None);
+    let msg_id = wire.id.as_str().to_string();
+    let answers = || {
+        let (internet, ble) = (
+            acks_for(&internet_handle.sent_messages(), &msg_id),
+            acks_for(&ble_handle.sent_messages(), &msg_id),
+        );
+        (internet.0 + ble.0, internet.1 + ble.1)
+    };
+    internet_handle.clear_sent_messages();
+
+    ble_handle.queue_message(wire.clone());
+    while bob.receive_message().is_some() {}
+    assert_eq!(answers(), (0, 0), "a BLE arrival is never answered");
+    assert!(!bob.deduplicator.is_duplicate(&wire.id));
+
+    bob.enqueue_pending_decryption_via("alice", &wire, Some(TransportType::BLE));
+    bob.process_pending_decryption("alice");
+    assert_eq!(answers(), (0, 0), "nor is one drained from the queue");
 }
 
 /// The recovery half: because the ACK was withheld and the id unmarked, the
@@ -14669,13 +14829,8 @@ fn test_hard_decrypt_failure_recovers_on_resealed_resend() {
     let corrupt = encrypted_wire(&corrupt_ciphertext_for(&alice_manager), None);
     let msg_id = corrupt.id.clone();
     let msg_id_str = msg_id.as_str().to_string();
-    let acks = |handle: &MockTransport| -> usize {
-        handle
-            .sent_messages()
-            .into_iter()
-            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&msg_id_str))
-            .count()
-    };
+    let acks =
+        |handle: &MockTransport| -> usize { acks_for(&handle.sent_messages(), &msg_id_str).0 };
 
     bob_handle.clear_sent_messages();
     bob_handle.queue_message(corrupt);
@@ -14771,20 +14926,16 @@ fn test_drained_message_that_hard_fails_is_not_acked() {
     // Queue it with a recorded arrival transport, so the drain would genuinely
     // be able to ACK it — with `received_via: None` the ACK is a no-op and this
     // test would pass vacuously.
-    bob.enqueue_pending_decryption_via("alice", &wire, Some(TransportType::BLE));
+    bob.enqueue_pending_decryption_via("alice", &wire, Some(TransportType::Internet));
     assert_eq!(bob.pending_queue.peer_queue_len("alice"), 1);
 
     bob_handle.clear_sent_messages();
     bob.process_pending_decryption("alice");
 
     assert_eq!(
-        bob_handle
-            .sent_messages()
-            .iter()
-            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&msg_id_str))
-            .count(),
-        0,
-        "a message that hard-fails on drain must NOT be ACKed"
+        acks_for(&bob_handle.sent_messages(), &msg_id_str),
+        (0, 1),
+        "a message that hard-fails on drain must NOT be ACKed, only answered undecryptable"
     );
     assert!(
         !bob.deduplicator.is_duplicate(&msg_id),
@@ -15148,6 +15299,216 @@ fn test_reseal_is_noop_without_provenance() {
     );
 }
 
+/// An alice with a confirmed session to a bare bob manager, one encrypted DM
+/// in her outbox, and her transport handle cleared. Events land in the vec.
+fn alice_with_sealed_dm() -> (
+    OfflineProtocol,
+    MockTransport,
+    MlsManager,
+    MessageId,
+    Arc<Mutex<Vec<Event>>>,
+) {
+    let mut alice_config = create_test_config_for_user("alice");
+    alice_config.encryption.enabled = true;
+    alice_config.encryption.store_pending = true;
+    alice_config.encryption.compact_envelope_enabled = false;
+    let mut alice = OfflineProtocol::new(alice_config).unwrap();
+    alice
+        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+    let alice_transport = MockTransport::new(TransportType::BLE);
+    alice_transport.start().unwrap();
+    let alice_handle = alice_transport.clone();
+    alice
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(alice_transport));
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    alice.on_event(move |event| events_handle.lock().unwrap().push(event));
+    alice.start().unwrap();
+
+    let bob_manager =
+        crate::test_identity::manager_for("bob", Arc::new(crate::mls::InMemoryStorage::new()));
+    let bob_kp = bob_manager.get_or_create_key_package().unwrap();
+    let welcome = {
+        let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        mgr.import_key_package(&id("bob"), &bob_kp.key_package_data)
+            .unwrap();
+        mgr.create_session(&id("bob")).unwrap()
+    };
+    bob_manager.join_session(&welcome).unwrap();
+    alice.confirmed_sessions.insert(id("bob"));
+
+    let msg_id = alice
+        .send_message(&id("bob"), "hello", None, None::<String>)
+        .unwrap();
+    assert!(alice.outbox.get(&msg_id).unwrap().reseal.is_some());
+    alice_handle.clear_sent_messages();
+    events.lock().unwrap().clear();
+    (alice, alice_handle, bob_manager, msg_id, events)
+}
+
+/// Bob's `undecryptable` answer to `msg_id`.
+fn undecryptable_ack_from_bob(alice: &OfflineProtocol, msg_id: &MessageId) -> Message {
+    Message::builder(
+        UserId::new(id("bob")).unwrap(),
+        UserId::new(alice.local_id.clone()).unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(String::new())
+    .requires_ack(false)
+    .metadata(ACK_FOR_KEY, msg_id.as_str())
+    .metadata(ACK_STATUS_KEY, ACK_STATUS_UNDECRYPTABLE)
+    .build()
+}
+
+fn delivered_or_failed(events: &Mutex<Vec<Event>>, msg_id: &MessageId) -> (usize, usize) {
+    let events = events.lock().unwrap();
+    let id = msg_id.as_str();
+    let delivered = events
+        .iter()
+        .filter(|e| matches!(e, Event::MessageDelivered { message_id, .. } if *message_id == id))
+        .count();
+    let failed = events
+        .iter()
+        .filter(|e| matches!(e, Event::MessageFailed { message_id, .. } if *message_id == id))
+        .count();
+    (delivered, failed)
+}
+
+/// An `undecryptable` answer is not a delivery: the sender re-seals the DM
+/// under its current session and resends it once, same id, fresh ciphertext
+/// the recipient can open. A second answer for the same id resends nothing, so
+/// two devices cannot ping-pong; the entry stays for its retry ladder, and a
+/// real delivery ACK still settles it.
+#[test]
+fn test_undecryptable_ack_reseals_once_and_never_reports_delivered() {
+    let (mut alice, alice_handle, bob_manager, msg_id, events) = alice_with_sealed_dm();
+    let original = alice.outbox.get(&msg_id).unwrap().message.content.clone();
+
+    alice.handle_ack_message(&undecryptable_ack_from_bob(&alice, &msg_id));
+
+    let resent: Vec<Message> = alice_handle
+        .sent_messages()
+        .into_iter()
+        .filter(|m| m.id == msg_id)
+        .collect();
+    assert_eq!(resent.len(), 1, "exactly one re-sealed resend");
+    assert_ne!(
+        resent[0].content, original,
+        "the resend carries new ciphertext"
+    );
+    let enc: offline_protocol_mls::EncryptedMessage = serde_json::from_str(
+        resent[0]
+            .content
+            .strip_prefix(internal_prefixes::ENCRYPTED)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        bob_manager
+            .decrypt_from_user(&enc, &id("alice"))
+            .unwrap()
+            .as_deref(),
+        Some(&b"hello"[..])
+    );
+    assert_eq!(delivered_or_failed(&events, &msg_id), (0, 0));
+
+    // The resend failed too: no second resend, still not delivered.
+    alice_handle.clear_sent_messages();
+    alice.handle_ack_message(&undecryptable_ack_from_bob(&alice, &msg_id));
+    assert!(
+        alice_handle.sent_messages().iter().all(|m| m.id != msg_id),
+        "a second undecryptable answer must not resend (no ping-pong)"
+    );
+    assert_eq!(delivered_or_failed(&events, &msg_id), (0, 0));
+    assert!(
+        alice.outbox.contains_key(&msg_id),
+        "left to the retry ladder, not dropped"
+    );
+
+    // A genuine delivery ACK still settles it.
+    let mut delivered = undecryptable_ack_from_bob(&alice, &msg_id);
+    delivered.metadata.remove(ACK_STATUS_KEY);
+    alice.handle_ack_message(&delivered);
+    assert_eq!(delivered_or_failed(&events, &msg_id), (1, 0));
+}
+
+/// A relay arrival answered while the relay is down (a drain, a prune, an
+/// eviction) must not fall back to the ACK ladder's mesh or DORS routes: the
+/// answer goes over the relay or not at all, and it is not held for a later
+/// carrier edge, which would re-run the same ladder.
+#[test]
+fn test_undecryptable_ack_is_never_rerouted_off_the_relay() {
+    let (mut bob, internet_handle, alice_manager) = hard_failure_pair(true);
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    let ble_handle = ble.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+
+    let wire = encrypted_wire(&corrupt_ciphertext_for(&alice_manager), None);
+    let msg_id = wire.id.as_str().to_string();
+    internet_handle.clear_sent_messages();
+    ble_handle.clear_sent_messages();
+
+    bob.enqueue_pending_decryption_via("alice", &wire, Some(TransportType::Internet));
+    internet_handle.set_status(offline_protocol_transport::TransportStatus::Unavailable);
+    bob.process_pending_decryption("alice");
+
+    assert_eq!(acks_for(&ble_handle.sent_messages(), &msg_id), (0, 0));
+    assert_eq!(acks_for(&internet_handle.sent_messages(), &msg_id), (0, 0));
+    assert!(
+        bob.unrouted_acks.is_empty(),
+        "nothing held to re-route later"
+    );
+
+    // With the relay back, the redelivered frame is answered over it.
+    internet_handle.set_status(offline_protocol_transport::TransportStatus::Available);
+    internet_handle.queue_message(wire);
+    while bob.receive_message().is_some() {}
+    assert_eq!(acks_for(&internet_handle.sent_messages(), &msg_id), (0, 1));
+    assert_eq!(acks_for(&ble_handle.sent_messages(), &msg_id), (0, 0));
+}
+
+/// Without the plaintext (a restored entry) the one resend replays the
+/// ciphertext verbatim and the entry stays for its retry ladder: never
+/// delivered, never failed outright.
+#[test]
+fn test_undecryptable_ack_without_plaintext_replays_once_and_keeps_the_entry() {
+    // An entry restored after a restart has no plaintext to re-seal. The
+    // answer may come from a pending-queue drop, whose ciphertext was never
+    // attempted and still decrypts, so the entry is replayed rather than
+    // failed.
+    let (mut alice, alice_handle, _bob_manager, msg_id, events) = alice_with_sealed_dm();
+    alice.outbox.get_mut(&msg_id).unwrap().reseal = None;
+    let original = alice.outbox.get(&msg_id).unwrap().message.content.clone();
+
+    alice.handle_ack_message(&undecryptable_ack_from_bob(&alice, &msg_id));
+
+    let resent: Vec<Message> = alice_handle
+        .sent_messages()
+        .into_iter()
+        .filter(|m| m.id == msg_id)
+        .collect();
+    assert_eq!(resent.len(), 1, "exactly one resend");
+    assert_eq!(resent[0].content, original, "replayed verbatim");
+    assert_eq!(delivered_or_failed(&events, &msg_id), (0, 0));
+    assert!(alice.outbox.contains_key(&msg_id), "not failed");
+
+    alice_handle.clear_sent_messages();
+    alice.handle_ack_message(&undecryptable_ack_from_bob(&alice, &msg_id));
+    assert!(
+        alice_handle.sent_messages().iter().all(|m| m.id != msg_id),
+        "a second answer must not resend"
+    );
+    assert_eq!(delivered_or_failed(&events, &msg_id), (0, 0));
+    assert!(
+        alice.outbox.contains_key(&msg_id),
+        "left to the retry ladder"
+    );
+}
+
 /// Like [`make_encrypted_protocol`], but takes the **production** identity
 /// path: the address is derived from a freshly minted identity key rather than
 /// forced to the profile string, so the instance runs as a real `off1…`
@@ -15278,6 +15639,7 @@ fn feed_session_reset_key_package(
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -16339,11 +16701,11 @@ fn test_evicted_pending_message_recovers_on_resend_after_session_ready() {
     bob.initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
         .unwrap();
 
-    let bob_transport = MockTransport::new(TransportType::BLE);
+    let bob_transport = MockTransport::new(TransportType::Internet);
     bob_transport.start().unwrap();
     let bob_handle = bob_transport.clone();
     bob.transport_manager_mut()
-        .add_transport(TransportType::BLE, Box::new(bob_transport));
+        .add_transport(TransportType::Internet, Box::new(bob_transport));
 
     let received: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let received_handle = Arc::clone(&received);
@@ -16353,6 +16715,7 @@ fn test_evicted_pending_message_recovers_on_resend_after_session_ready() {
         }
     });
     bob.start().unwrap();
+    bob.peer_undecryptable_ack.insert(id("alice"));
 
     let alice_manager =
         crate::test_identity::manager_for("alice", Arc::new(crate::mls::InMemoryStorage::new()));
@@ -16393,13 +16756,8 @@ fn test_evicted_pending_message_recovers_on_resend_after_session_ready() {
     let evictor_wire = wire(&encrypted_evictor);
     let evicted_id = evicted_wire.id.clone();
     let evicted_id_str = evicted_id.as_str().to_string();
-    let acks_for_evicted = |handle: &MockTransport| -> usize {
-        handle
-            .sent_messages()
-            .into_iter()
-            .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&evicted_id_str))
-            .count()
-    };
+    let acks_for_evicted =
+        |handle: &MockTransport| -> usize { acks_for(&handle.sent_messages(), &evicted_id_str).0 };
 
     // 1) Evicted message arrives, session not ready: queued, unmarked, not ACKed.
     bob_handle.queue_message(evicted_wire.clone());
@@ -16422,6 +16780,11 @@ fn test_evicted_pending_message_recovers_on_resend_after_session_ready() {
         acks_for_evicted(&bob_handle),
         0,
         "the evicted message was never ACKed — that is what keeps recovery possible"
+    );
+    assert_eq!(
+        acks_for(&bob_handle.sent_messages(), &evicted_id_str),
+        (0, 1),
+        "the queue gave up on it, so it is answered undecryptable exactly once"
     );
 
     // 3) Welcome establishes the session and drains the queue. Only the evictor
@@ -18312,7 +18675,7 @@ fn test_encrypted_message_decryption_failure_emits_app_error_event() {
             message_id,
             sender,
             code,
-            reason,
+            reason, ..
         } if message_id == &message.id.as_str()
             && sender == &id("sender123")
             && code == &DecryptionFailureCode::NotInitialized
@@ -18357,7 +18720,7 @@ fn test_invalid_encrypted_payload_emits_app_error_event_and_is_deferred() {
             message_id,
             sender,
             code,
-            reason,
+            reason, ..
         } if message_id == &message.id.as_str()
             && sender == &id("sender123")
             && code == &DecryptionFailureCode::InvalidPayload
@@ -18705,6 +19068,7 @@ fn test_pending_queue_overflow_emits_pending_queue_dropped_for_text() {
             sender,
             code,
             reason,
+            ..
         } = event
         {
             dropped_clone
@@ -18965,6 +19329,7 @@ fn test_pending_decrypt_record_past_persisted_max_age_is_dropped_with_event() {
                 sender,
                 code,
                 reason,
+                ..
             } => Some((message_id.clone(), sender.clone(), *code, reason.clone())),
             _ => None,
         })
@@ -19950,6 +20315,64 @@ fn test_pending_queue_ttl_expiration_is_deterministic_and_monotonic() {
     );
 }
 
+/// A frame the pending queue gives up on (TTL) is answered `undecryptable`
+/// exactly once when its sender advertised the status, and not at all otherwise, so a relay holding it drops it instead of redelivering it
+/// into the same queue on every connect.
+#[test]
+fn test_pending_queue_ttl_drop_answers_undecryptable_once() {
+    let mut config = create_test_config();
+    config.encryption.enabled = true;
+    config.encryption.pending_queue.pending_ttl_ms = 1_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let transport = MockTransport::new(TransportType::Internet);
+    transport.start().unwrap();
+    let handle = transport.clone();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(transport));
+    protocol.start().unwrap();
+    protocol.peer_undecryptable_ack.insert(id("sender123"));
+
+    let msg = pending_test_message(&id("sender123"), "parked");
+    let legacy = pending_test_message(&id("legacy"), "parked");
+    protocol.enqueue_pending_decryption_via("sender123", &msg, Some(TransportType::Internet));
+    protocol.enqueue_pending_decryption_via("legacy", &legacy, Some(TransportType::Internet));
+    let past = Instant::now() - Duration::from_millis(2_000);
+    protocol
+        .pending_queue
+        .set_front_received_at("sender123", past);
+    protocol.pending_queue.set_front_received_at("legacy", past);
+    handle.clear_sent_messages();
+
+    assert_eq!(
+        protocol.prune_expired_pending_global_front(Instant::now(), 10),
+        2
+    );
+    assert_eq!(
+        protocol.prune_expired_pending_global_front(Instant::now(), 10),
+        0
+    );
+    assert!(
+        handle
+            .sent_messages()
+            .iter()
+            .all(|m| m.metadata.get(ACK_FOR_KEY) != Some(&legacy.id.as_str())),
+        "a sender that never advertised the status gets no answer"
+    );
+
+    let answer = handle
+        .sent_messages()
+        .into_iter()
+        .filter(|m| m.metadata.get(ACK_FOR_KEY) == Some(&msg.id.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(answer.len(), 1, "exactly one answer for the dropped frame");
+    assert_eq!(
+        answer[0].metadata.get(ACK_STATUS_KEY).map(String::as_str),
+        Some(ACK_STATUS_UNDECRYPTABLE)
+    );
+    assert!(!answer[0].requires_ack && answer[0].content.is_empty());
+}
+
 #[test]
 fn test_pending_messages_replay_decrypt_after_session_readiness() {
     let mut bob_config = create_test_config_for_user("bob");
@@ -20310,6 +20733,7 @@ fn test_lamport_clock_merge_on_internal_message() {
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -20522,6 +20946,7 @@ fn test_key_package_remaining_lifetime_ms() {
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -20608,6 +21033,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             data_versions: Vec::new(),
             ctrl_versions: Vec::new(),
             svc_versions: Vec::new(),
+            ack_versions: Vec::new(),
             nostr_pubkey: None,
         };
         let content = format!(
@@ -20697,6 +21123,7 @@ fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -20749,6 +21176,7 @@ fn test_received_key_package_lifetime_is_clamped() {
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(
@@ -22300,6 +22728,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             data_versions: Vec::new(),
             ctrl_versions: Vec::new(),
             svc_versions: Vec::new(),
+            ack_versions: Vec::new(),
             nostr_pubkey: None,
         };
         let content = format!(
@@ -39872,6 +40301,7 @@ fn key_package_frame_body(sender: &str, session_reset: bool, ctrl_versions: Vec<
         data_versions: Vec::new(),
         ctrl_versions,
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     format!(
@@ -41631,6 +42061,7 @@ fn the_ordinary_handshake_starts_a_latency_without_any_session_missing() {
         data_versions: Vec::new(),
         ctrl_versions: Vec::new(),
         svc_versions: Vec::new(),
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     };
     let content = format!(

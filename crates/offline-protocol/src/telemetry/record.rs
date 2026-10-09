@@ -436,6 +436,8 @@ pub(crate) mod tests {
                 sender: String::new(),
                 code: crate::events::DecryptionFailureCode::Unknown,
                 reason: String::new(),
+                sealed_at_ms: None,
+                session_established_at_ms: None,
             },
             Event::TransportSwitched {
                 from: None,
