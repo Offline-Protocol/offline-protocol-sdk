@@ -879,7 +879,10 @@ impl OfflineProtocol {
             return self.encrypt_bytes_confirmed_session(&mls, recipient, plaintext);
         }
 
-        self.ensure_session_establishment(&mls, recipient)?;
+        // Every caller is a text send, whose message queues behind the
+        // Welcome; the session-confirm marker also lands here, but only
+        // after adopting a session, so it never creates one.
+        self.ensure_session_establishment(&mls, recipient, true)?;
 
         // Only encrypt if session is confirmed (Welcome processed or successful decrypt).
         // Confirmation truth comes from persisted session state.
@@ -911,10 +914,15 @@ impl OfflineProtocol {
     /// key package remains (expired). Returns `Err(SessionNotReady)` when no
     /// key package is available, or right after creating a session with
     /// `store_pending` enabled (the session cannot be confirmed yet).
+    ///
+    /// `user_send` is whether something the user sent prompted this, and so
+    /// whether a Welcome it sends may alert (see
+    /// [`Self::send_welcome_message`]).
     pub(super) fn ensure_session_establishment(
         &mut self,
         mls: &Arc<RwLock<MlsManager>>,
         recipient: &str,
+        user_send: bool,
     ) -> Result<()> {
         // Check for existing session (requires storage I/O via load_group)
         let has_session = {
@@ -980,10 +988,7 @@ impl OfflineProtocol {
                         );
                     }
 
-                    // Only a send creates a session here (text or media; the
-                    // session-confirm marker follows an adopted session), and
-                    // a text send queues behind this Welcome right after.
-                    let welcome_sent = self.send_welcome_message(recipient, &welcome, true)?;
+                    let welcome_sent = self.send_welcome_message(recipient, &welcome, user_send)?;
 
                     debug!(
                         recipient = %recipient,
@@ -1685,7 +1690,7 @@ impl OfflineProtocol {
                         // expected "created, awaiting confirmation" outcome;
                         // the message queues regardless.
                         if let Some(mls) = self.mls_manager.clone() {
-                            match self.ensure_session_establishment(&mls, recipient) {
+                            match self.ensure_session_establishment(&mls, recipient, true) {
                                 Ok(()) | Err(Error::SessionNotReady(_)) => {}
                                 Err(err) => {
                                     warn!(
@@ -2672,7 +2677,13 @@ impl OfflineProtocol {
                 // confirmed synchronously, so callers retry after
                 // `secure_session_established`.
                 if let Some(mls) = self.mls_manager.clone() {
-                    self.ensure_session_establishment(&mls, &recipient_str)?;
+                    // A document-layer transfer is the SDK's own: the
+                    // Welcome it opens must not alert.
+                    self.ensure_session_establishment(
+                        &mls,
+                        &recipient_str,
+                        data_purpose.is_none(),
+                    )?;
                 }
                 return Err(Error::SessionNotReady(
                     self.establishment_state(&recipient_str)?,

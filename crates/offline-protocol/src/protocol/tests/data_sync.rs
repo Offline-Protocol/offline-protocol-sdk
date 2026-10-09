@@ -5555,4 +5555,32 @@ fn a_welcome_alerts_only_while_a_user_message_waits_on_it() {
         .unwrap()
         .expect("a session was created");
     assert_eq!(no_alert(&sent_welcome(&alice)), Some("1"));
+
+    // Media is never queued behind a session, so the path differs: the send
+    // opens the session and fails not-ready. A user's file alerts; a
+    // document the data layer carries is the SDK's own, so it is silent.
+    let mut open_with_media = |peer: &str, purpose| {
+        hold_key_package(&mut alice, peer);
+        let peer = id(peer);
+        alice.protocol.peer_data_sync.insert(peer.clone());
+        alice.protocol.peer_data_media.insert(peer.clone());
+        let err = alice
+            .protocol
+            .send_media_inner(
+                peer,
+                b"bytes".to_vec(),
+                "notes".to_string(),
+                offline_protocol_core::ContentType::File,
+                crate::protocol::types::MediaSendOptions::default(),
+                purpose,
+            )
+            .expect_err("no confirmed session yet");
+        assert!(matches!(err, crate::Error::SessionNotReady(_)), "{err}");
+        sent_welcome(&alice)
+    };
+    assert_eq!(no_alert(&open_with_media("erin", None)), None);
+    let snapshot = Some(crate::media_envelope::DataPurpose::Snapshot {
+        doc: "notes".to_string(),
+    });
+    assert_eq!(no_alert(&open_with_media("frank", snapshot)), Some("1"));
 }

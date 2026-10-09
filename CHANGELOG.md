@@ -255,7 +255,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   group invites do not. A document carried over the media path is the SDK's
   own, so every one of its chunks carries it. A 1:1 Welcome carries it only
   when no user message is waiting on the session, decided again on every
-  resend. The key is unsigned and receivers ignore it. See
+  resend, and never for a session a document transfer opens. The key is
+  unsigned and receivers ignore it. See
   [Reserved metadata keys](docs/spec/wire-format.md#reserved-metadata-keys).
 - **A message the mesh carried settles when its recipient answers.** A direct
   message to a peer no carrier could reach was handed to neighbours to carry,
