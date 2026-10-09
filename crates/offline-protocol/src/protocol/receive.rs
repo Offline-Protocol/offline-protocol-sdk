@@ -247,11 +247,9 @@ impl OfflineProtocol {
                                 // The message was not delivered, but the sender
                                 // can still recover it by resending: it could not
                                 // be decrypted *yet* (session not ready, so queued
-                                // for delayed decryption), or it is undecryptable
-                                // as it stands (epoch desync, or a hard crypto
-                                // failure while `crypto_recovery_enabled`) and was
-                                // dropped without queueing. See the three
-                                // conditions on `InternalMessageResult::Deferred`.
+                                // for delayed decryption), or its envelope did not
+                                // parse. See the conditions on
+                                // `InternalMessageResult::Deferred`.
                                 //
                                 // Do NOT send a delivery ACK and do NOT keep the id
                                 // dedup-marked: the message is not delivered, so the
@@ -261,10 +259,18 @@ impl OfflineProtocol {
                                 // confirming drains it: the message is surfaced and
                                 // the id re-marked (see `process_pending_decryption`),
                                 // so the sender's next resend is then deduped +
-                                // re-ACKed. For the other two, recovery is that
-                                // resend itself — re-sealed against a live
-                                // generation by Tier 2.
+                                // re-ACKed. For an unparseable envelope, recovery
+                                // is that resend itself.
                                 self.unmark_seen_persisted(&message.id);
+                                continue;
+                            }
+                            InternalMessageResult::Undecryptable => {
+                                // As `Deferred`, but answered: the sender's
+                                // re-sealed resend must still re-enter
+                                // processing, and whoever holds this copy
+                                // must stop redelivering it.
+                                self.unmark_seen_persisted(&message.id);
+                                self.send_undecryptable_ack(&message, transport_used);
                                 continue;
                             }
                             InternalMessageResult::Decrypted(plaintext) => {

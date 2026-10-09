@@ -1478,6 +1478,14 @@ pub(crate) struct PeerCapabilities {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) ctrl_versions: Vec<u8>,
 
+    /// Delivery-ACK statuses the peer reads, from
+    /// [`KeyPackagePayload::ack_versions`]. Persisted for the same reason as
+    /// the lists above: a peer met before a restart would otherwise get no
+    /// `undecryptable` answer until its next key package, and a relay mailbox
+    /// would keep redelivering its dead frames meanwhile.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) ack_versions: Vec<u8>,
+
     /// The peer's Nostr public key, from [`KeyPackagePayload::nostr_pubkey`].
     ///
     /// Persisted for the same reason as the capability lists: the cached key
@@ -1522,6 +1530,7 @@ impl PeerCapabilities {
         rich_versions: &[u8],
         data_versions: &[u8],
         ctrl_versions: &[u8],
+        ack_versions: &[u8],
         nostr_pubkey: Option<&str>,
     ) -> Self {
         Self {
@@ -1545,6 +1554,11 @@ impl PeerCapabilities {
                 .copied()
                 .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
                 .collect(),
+            ack_versions: ack_versions
+                .iter()
+                .copied()
+                .take(MAX_PERSISTED_CAPABILITY_VERSIONS)
+                .collect(),
             attested_rich_versions: Vec::new(),
             attested_data_versions: Vec::new(),
             nostr_pubkey: nostr_pubkey.and_then(normalize_nostr_pubkey),
@@ -1558,6 +1572,7 @@ impl PeerCapabilities {
             || !self.rich_versions.is_empty()
             || !self.data_versions.is_empty()
             || !self.ctrl_versions.is_empty()
+            || !self.ack_versions.is_empty()
             || !self.attested_rich_versions.is_empty()
             || !self.attested_data_versions.is_empty()
             || self.nostr_pubkey.is_some()
@@ -1649,8 +1664,7 @@ pub(crate) enum InternalMessageResult {
     /// loop responds by unmarking the id (so a resend re-enters processing
     /// instead of hitting the duplicate re-ACK path) and skipping the ACK.
     ///
-    /// Four conditions produce it, differing in whether the *frame* is worth
-    /// keeping:
+    /// Two conditions produce it:
     ///
     /// - **Session not ready**: the MLS session/group is not established yet,
     ///   so the frame is queued for delayed decryption
@@ -1659,24 +1673,28 @@ pub(crate) enum InternalMessageResult {
     ///   (`process_pending_decryption`), which also sends the deferred delivery
     ///   ACK directly on the recorded arrival transport (so a sender that gave
     ///   up before the session confirmed still learns of delivery).
-    /// - **Epoch desync**: the frame is sealed to a dead epoch, so it is *not*
-    ///   queued (it could never drain) and a rate-limited re-key is triggered.
-    /// - **Crypto/transport failure** with `crypto_recovery_enabled`: OpenMLS
-    ///   consumed the ratchet generation on the failed attempt, so the frame is
-    ///   likewise not queued — and no re-key is triggered, which stays
-    ///   desync-only.
     /// - **Envelope parse failure** with `crypto_recovery_enabled`: the
     ///   `__MLS_ENC__` payload did not parse in any envelope form, so there is
-    ///   no ciphertext to decrypt. Not queued either — an unparseable frame can
-    ///   never become parseable.
+    ///   no ciphertext to decrypt. Not queued — an unparseable frame can never
+    ///   become parseable — and not answered, since for an injector silence
+    ///   reveals less than an answer. Recovery is the sender's resend.
     ///
-    /// In the latter three, recovery is the sender's *resend* rather than this
-    /// frame: Tier 2 re-seals each resend of an encrypted DM against a live
-    /// generation, and a message that stays undeliverable settles as an honest
-    /// `MessageFailed` instead of a lying "delivered". See
-    /// `docs/state-machines/delivery-and-acks.md` for the deferred-acknowledgement
-    /// atom and the decrypt-failure classification.
+    /// See `docs/state-machines/delivery-and-acks.md` for the
+    /// deferred-acknowledgement atom and the decrypt-failure classification.
     Deferred,
+    /// The frame can never decrypt, though the message behind it may: an epoch
+    /// desync (sealed to an epoch that is not ours, and a re-key is scheduled)
+    /// or a crypto/transport failure with `crypto_recovery_enabled` (OpenMLS
+    /// spent the ratchet generation on the failed attempt). Not queued.
+    ///
+    /// Handled like `Deferred` — id unmarked, no delivery ACK — except that
+    /// the frame is answered with an `undecryptable` ACK
+    /// ([`crate::constants::ACK_STATUS_UNDECRYPTABLE`]) when its sender
+    /// advertised that it reads one; an older sender gets no answer. Silence left a relay
+    /// holding the frame to redeliver it on every connect, failing again each
+    /// time; the answer lets the relay drop it and tells the sender to re-seal
+    /// the message under its current session, or to fail it.
+    Undecryptable,
     /// Message was decrypted, here's the plaintext.
     Decrypted(String),
 }

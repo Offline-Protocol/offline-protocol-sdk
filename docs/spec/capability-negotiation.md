@@ -12,6 +12,7 @@ Peers advertise what they can parse in the key package payload, the body of a
 | `rich_versions` | End to end | Whether we may seal a `__RICH_V1__` body, and the v2 media envelope | Plain text only, extras dropped |
 | `data_versions` | End to end | Whether we may send `__DATA_V1__` document sync frames, and which document encoding they carry. Entry 1 is 1:1 replication; entry 2 additionally means the peer intercepts these frames inside a *group* ciphertext; entry 3 additionally means the peer speaks the blob-fetch frames and routes a data-purposed media transfer into its document layer; entry 4 additionally means the peer reads the removals a version offer carries; entry 5 additionally means it answers inside the interest an offer declares; entry 6 additionally means it carries attachment bytes inside a group; entry 7 additionally means it parses the custody receipt, so a custodian may answer its deposits | No replication with that peer |
 | `ctrl_versions` | End to end | Which control-frame signing payload we build for this peer. Entry 2 means the peer verifies `offline-ctrl-v2`, which binds the frame's timestamp | Build `offline-ctrl-v1`, which states no freshness |
+| `ack_versions` | End to end | Which delivery-ACK statuses we may send this peer. Entry 1 means the peer reads `ack_status: "undecryptable"` as "this frame can never decrypt" (it re-seals the message or fails it) rather than as a delivery | Never answer an undecryptable frame; leave it unacknowledged |
 | `nostr_pubkey` | End to end | Which key metadata is sealed to on the Nostr path | Seal to the publicly computable key |
 
 The key package payload also carries `user_id`, the MLS key package itself, a
@@ -142,6 +143,13 @@ member, which today is entries 2 and 6, read independently. It opens the
 package from that peer overrides it in both directions. Absence of an attestation means "no information" and MUST NOT be
 read as a downgrade.
 
+`ack_versions` persists with the rest. A peer that has not advertised entry 1,
+or whose advertisement this device has not yet received, is sent no
+`undecryptable` answer at all: an older sender reads any ACK as a delivery, so
+answering it would mark as delivered a message its recipient could not read.
+The cost of not knowing is the older behaviour, an unanswered frame that a relay
+mailbox keeps redelivering until the sender's next key package arrives.
+
 `wire_versions` is **hop-local** and deliberately in-memory only. It describes
 what the next hop decodes, and it is re-exchanged on connect.
 
@@ -247,6 +255,7 @@ A minimal leaf advertises little and works fully:
 | `rich_versions` | Empty | Peers send plain text and drop extras rather than sending them in a weaker form |
 | `data_versions` | Empty | No document replication with this peer |
 | `ctrl_versions` | `[2]`, always | Not optional, unlike every other row: a leaf verifies the freshness-bound payload on every control frame except `__MLS_KEY_PKG__`, so a peer that never learned this and kept sending the older one would have its Welcome refused and never complete a pairing |
+| `ack_versions` | Empty | Peers leave a frame the leaf can never decrypt unanswered rather than answering `undecryptable` |
 | `nostr_pubkey` | Absent unless the device is reachable over that carrier | Peers seal to the publicly computable key |
 
 Two consequences follow from the universal rules above, and both are easy to

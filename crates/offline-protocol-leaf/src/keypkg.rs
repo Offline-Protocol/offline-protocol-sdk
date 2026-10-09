@@ -129,6 +129,7 @@ pub(crate) fn payload(
         // legacy leaf to be compatible with: this crate's first release is
         // the one that introduced the device at all.
         ctrl_versions: alloc::vec![CTRL_SIGN_V2],
+        ack_versions: Vec::new(),
         nostr_pubkey: None,
     }
 }

@@ -144,6 +144,7 @@ impl OfflineProtocol {
         // would make "block, then unblock" a way to walk a peer's own
         // protection back, requestable by anyone who can get a user to do it.
         self.peer_ctrl_freshness.remove(user_id);
+        self.peer_undecryptable_ack.remove(user_id);
         self.peer_rich_payload.remove(user_id);
         self.peer_rich_attested.remove(user_id);
         self.forget_data_sync_peer(user_id);
@@ -1441,6 +1442,7 @@ mod tests {
             rich_versions: Vec::new(),
             data_versions: Vec::new(),
             ctrl_versions: Vec::new(),
+            ack_versions: Vec::new(),
             nostr_pubkey: None,
         };
         let content = serde_json::to_string(&reset_payload).unwrap();

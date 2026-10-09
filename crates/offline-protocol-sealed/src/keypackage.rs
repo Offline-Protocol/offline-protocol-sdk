@@ -160,6 +160,24 @@ pub struct KeyPackagePayload {
     #[serde(default)]
     pub ctrl_versions: Vec<u8>,
 
+    /// Delivery-acknowledgement statuses the sender reads (e.g. `[1]` for
+    /// [`ACK_UNDECRYPTABLE_V1`]). Absent on legacy nodes (`#[serde(default)]`
+    /// gives empty, meaning plain delivery ACKs only).
+    ///
+    /// Like `ctrl_versions` this says what the sender *accepts*: a peer
+    /// advertising entry 1 settles an ACK carrying
+    /// `ack_status = "undecryptable"` as "not delivered" (re-seal or fail).
+    /// One without it would read that ACK as a delivery, so a receiver answers
+    /// an undecryptable frame from such a peer with nothing at all.
+    ///
+    /// Trust boundary: a plaintext field like the lists above. Stripping it
+    /// returns the peer to unanswered undecryptable frames (the old
+    /// behaviour); forging it onto a legacy peer makes us send it ACKs it
+    /// reads as deliveries, which an attacker in that position could equally
+    /// forge directly. A feature negotiation, never a security control.
+    #[serde(default)]
+    pub ack_versions: Vec<u8>,
+
     /// This install's Nostr public key (x-only, 64-char lowercase hex), so a
     /// peer can seal Nostr gift wraps to a key only this install holds.
     ///
@@ -217,6 +235,11 @@ pub const MLS_ENVELOPE_COMPACT_V1: u8 = 1;
 ///
 /// [`control_signing_payload_v2`]: crate::canonical::control_signing_payload_v2
 pub const CTRL_SIGN_V2: u8 = 2;
+
+/// Acknowledgement version advertised in [`KeyPackagePayload::ack_versions`]:
+/// the sender reads `ack_status = "undecryptable"` on a delivery ACK as "the
+/// recipient can never decrypt this frame" rather than as a delivery.
+pub const ACK_UNDECRYPTABLE_V1: u8 = 1;
 
 /// The conformance vectors for the key package payload.
 ///
@@ -299,6 +322,7 @@ mod spec_vectors {
                 ("rich_versions", &got.rich_versions),
                 ("data_versions", &got.data_versions),
                 ("ctrl_versions", &got.ctrl_versions),
+                ("ack_versions", &got.ack_versions),
             ] {
                 assert_eq!(got, &u8s(&want[field]), "[{name}] {field}");
             }
@@ -336,6 +360,7 @@ mod spec_vectors {
             rich_versions: Vec::new(),
             data_versions: Vec::new(),
             ctrl_versions: Vec::new(),
+            ack_versions: Vec::new(),
             nostr_pubkey: None,
         };
         let rendered = serde_json::to_string(&payload).expect("it serializes");
@@ -371,6 +396,7 @@ mod spec_vectors {
             "rich_versions",
             "data_versions",
             "ctrl_versions",
+            "ack_versions",
             "nostr_pubkey",
             "session_reset",
         ] {

@@ -736,6 +736,17 @@ pub enum Event {
         code: DecryptionFailureCode,
         /// Clear failure reason for application handling/logging.
         reason: String,
+        /// When the sender sealed the frame (sender clock, ms), read from the
+        /// cleartext envelope. Unauthenticated: a hint for local heuristics,
+        /// never for security decisions. `None` when the failure is not a 1:1
+        /// decrypt attempt (pending-queue drop, unparseable envelope, group).
+        sealed_at_ms: Option<u64>,
+        /// When this device's current session with `sender` was created or
+        /// adopted (local clock, ms). `None` when there is no session, or it
+        /// was established by an SDK that did not record the time. A frame
+        /// sealed before this cannot have been sealed under this session, so
+        /// its failure says nothing about whether the two sides agree now.
+        session_established_at_ms: Option<u64>,
     },
 
     /// Transport was switched by DORS.
@@ -2025,6 +2036,29 @@ impl Event {
             sender,
             code,
             reason,
+            sealed_at_ms: None,
+            session_established_at_ms: None,
+        }
+    }
+
+    /// Creates a MessageDecryptionFailed event for a failed 1:1 decrypt,
+    /// carrying the frame's seal time and the current session's
+    /// establishment time (see the variant's fields).
+    pub fn message_decryption_failed_for_frame(
+        message_id: MessageId,
+        sender: String,
+        code: DecryptionFailureCode,
+        reason: String,
+        sealed_at_ms: u64,
+        session_established_at_ms: Option<u64>,
+    ) -> Self {
+        Self::MessageDecryptionFailed {
+            message_id: message_id.as_str(),
+            sender,
+            code,
+            reason,
+            sealed_at_ms: Some(sealed_at_ms),
+            session_established_at_ms,
         }
     }
 
@@ -3111,12 +3145,16 @@ impl fmt::Debug for Event {
                 sender: _,
                 code,
                 reason,
+                sealed_at_ms,
+                session_established_at_ms,
             } => f
                 .debug_struct("MessageDecryptionFailed")
                 .field("message_id", message_id)
                 .field("sender", &"[REDACTED]")
                 .field("code", code)
                 .field("reason", reason)
+                .field("sealed_at_ms", sealed_at_ms)
+                .field("session_established_at_ms", session_established_at_ms)
                 .finish(),
             Self::TransportSwitched { from, to, reason } => f
                 .debug_struct("TransportSwitched")

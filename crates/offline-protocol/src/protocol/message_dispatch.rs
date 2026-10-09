@@ -153,6 +153,25 @@ impl OfflineProtocol {
                 self.peer_ctrl_freshness.remove(sender);
             }
 
+            // Record whether this peer reads an `undecryptable` ACK as "not
+            // delivered", so a frame of theirs that can never decrypt may be
+            // answered with one. Same shape as the capabilities above; not
+            // gated on our config, since what it gates is our reply to them.
+            // Forgetting a peer costs the old behaviour: no answer at all.
+            if payload
+                .ack_versions
+                .contains(&offline_protocol_sealed::ACK_UNDECRYPTABLE_V1)
+            {
+                if !self.peer_undecryptable_ack.contains(sender)
+                    && self.peer_undecryptable_ack.len() >= MAX_KEY_PACKAGE_SENT_TO
+                {
+                    self.peer_undecryptable_ack.clear();
+                }
+                self.peer_undecryptable_ack.insert(sender.to_string());
+            } else {
+                self.peer_undecryptable_ack.remove(sender);
+            }
+
             // Record whether this peer replicates documents, so the data
             // layer may push `__DATA_V1__` frames to them. Same shape again:
             // gated by our own kill switch, removed when a fresh key package
@@ -345,6 +364,7 @@ impl OfflineProtocol {
                 &payload.rich_versions,
                 &payload.data_versions,
                 &payload.ctrl_versions,
+                &payload.ack_versions,
                 advertised_nostr_pubkey.as_deref(),
             );
             if caps.is_any() {
@@ -1249,9 +1269,10 @@ impl OfflineProtocol {
                                 // the *message* is not lost — Tier 2 re-seals
                                 // every resend against the peer's current
                                 // session, so the sender's next attempt carries
-                                // a fresh generation that can decrypt. Withhold
-                                // the ACK (the receive loop's `Deferred` arm) so
-                                // the sender keeps that lever, exactly like the
+                                // a fresh generation that can decrypt. Answer
+                                // `undecryptable` rather than "delivered" (the
+                                // receive loop's `Undecryptable` arm) so the
+                                // sender pulls that lever, exactly like the
                                 // desync path above.
                                 //
                                 // What this must NOT do is re-key. Desync stays
@@ -1268,7 +1289,7 @@ impl OfflineProtocol {
                                         sender = %sender,
                                         error = %e,
                                         error_code = session_state_error.code(),
-                                        "Failed to decrypt message; withholding ACK so the sender can resend"
+                                        "Failed to decrypt message; answering undecryptable so the sender can re-seal"
                                     );
                                     DecryptResult::Failed {
                                         sender: sender.to_string(),
@@ -1413,9 +1434,10 @@ impl OfflineProtocol {
                 } => {
                     // The session exists but is out of epoch sync (the two sides
                     // diverged). Trigger a rate-limited re-key to heal the channel
-                    // for future traffic, and return Deferred so the receive loop
-                    // withholds the ACK and unmarks the id — the sender's ACK was
-                    // a lie before (message dropped, sender told "delivered").
+                    // for future traffic, and return Undecryptable so the receive
+                    // loop unmarks the id and answers `undecryptable` instead of
+                    // "delivered" — the sender's ACK was a lie before (message
+                    // dropped, sender told "delivered").
                     //
                     // We deliberately do NOT enqueue: unlike the not-yet-ready
                     // case, this ciphertext is sealed to the now-dead epoch and
@@ -1426,7 +1448,7 @@ impl OfflineProtocol {
                     // retries surface an honest undeliverable instead of silent
                     // loss, which is strictly better than the lying ACK.
                     self.schedule_session_rekey(&sender_owned);
-                    Some(InternalMessageResult::Deferred)
+                    Some(InternalMessageResult::Undecryptable)
                 }
                 DecryptResult::Failed {
                     sender: sender_owned,
@@ -1440,36 +1462,52 @@ impl OfflineProtocol {
                         kind,
                         MlsOperationContext::Receive,
                     );
+                    // The app's split-brain heuristics need to tell a stale
+                    // frame (sealed before this session existed) from a live
+                    // one; only a 1:1 session has a single establishment time.
+                    let session_established_at_ms = if group_id.starts_with("session:") {
+                        self.mls_manager
+                            .as_ref()
+                            .and_then(|mls| mls.read().ok())
+                            .and_then(|manager| {
+                                manager
+                                    .session_established_at_ms(&sender_owned)
+                                    .ok()
+                                    .flatten()
+                            })
+                    } else {
+                        None
+                    };
                     if let Ok(state) = lock_shared_state(&self.shared_state) {
                         // On the retriable path this event is **advisory, not
-                        // terminal**, and fires once per failed attempt rather
-                        // than once per message: the frame was not ACKed, so the
-                        // sender resends and each resend that still fails
-                        // reports again. It is bounded by the sender's ACK retry
-                        // budget, after which the sender settles the message as
-                        // an honest `MessageFailed`.
+                        // terminal**: the frame is answered `undecryptable`, so
+                        // the sender re-seals the message once under its
+                        // current session, and a resend that still fails
+                        // reports again. The sender settles the message as an
+                        // honest `MessageFailed` when it cannot re-seal.
                         let reason = if retriable {
                             format!(
-                                "Failed to decrypt MLS message ({kind:?}); not acknowledged, so the sender's resend can still deliver it"
+                                "Failed to decrypt MLS message ({kind:?}); answered undecryptable, so the sender can re-seal it"
                             )
                         } else {
                             format!("Failed to decrypt MLS message ({kind:?})")
                         };
-                        state.emit_event(Event::message_decryption_failed(
+                        state.emit_event(Event::message_decryption_failed_for_frame(
                             message.id.clone(),
                             sender_owned.clone(),
                             Self::decryption_failure_code_from_kind(kind),
                             reason,
+                            encrypted.timestamp_ms,
+                            session_established_at_ms,
                         ));
                     }
                     if retriable {
-                        // Reuses the Deferred atom (skip ACK + `unmark_seen`)
-                        // without enqueueing: like a desync, this ciphertext is
-                        // dead — OpenMLS consumed the ratchet generation on the
+                        // Not enqueued: like a desync, this ciphertext is dead
+                        // — OpenMLS consumed the ratchet generation on the
                         // failed attempt, so a queued copy could never drain.
                         // Recovery is the sender's re-sealed resend, not this
                         // frame.
-                        Some(InternalMessageResult::Deferred)
+                        Some(InternalMessageResult::Undecryptable)
                     } else {
                         Some(InternalMessageResult::Consumed)
                     }

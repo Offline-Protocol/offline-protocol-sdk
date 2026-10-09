@@ -18,7 +18,8 @@ use super::{
 };
 use super::{classify_transport_send_error, send_failure_token};
 use crate::constants::{
-    ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
+    ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_STATUS_KEY, ACK_STATUS_UNDECRYPTABLE, ACK_TRANSPORT_KEY,
+    MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
 };
 use crate::events::{DecryptionFailureCode, Event, PresenceStatus};
 use crate::file_transfer::{FileChunk, OutboundTransferState};
@@ -3314,6 +3315,7 @@ impl OfflineProtocol {
         // staging is consumed at entry creation; this covers the id being torn
         // down before that ever happened.
         self.pending_reseal.remove(message_id);
+        self.undecryptable_resent.remove(message_id);
         // A receipt names an outbox entry; with the entry gone it names
         // nothing, and keeping it would only grow the map.
         self.custody_receipts.remove(message_id);
@@ -4989,22 +4991,67 @@ impl OfflineProtocol {
         message: &Message,
         inbound_transport: TransportType,
     ) -> Result<()> {
+        self.send_ack_with_status(message, inbound_transport, None)
+    }
+
+    /// Answers a frame that can never decrypt: a delivery ACK in shape (so a
+    /// relay holding the frame drops it) carrying
+    /// `ack_status = "undecryptable"`, which the sender settles without
+    /// `message_delivered` — see [`Self::handle_undecryptable_ack`]. Only for
+    /// a frame that asked for an answer; the plain ACK's rules otherwise apply.
+    ///
+    /// The one gate for every path that gives up on a frame (receive loop,
+    /// queue drain, queue eviction): only a sender that advertised
+    /// [`ACK_UNDECRYPTABLE_V1`](offline_protocol_sealed::ACK_UNDECRYPTABLE_V1)
+    /// is answered. An older SDK reads any ACK as a delivery, so it gets what
+    /// it always got — nothing — and keeps its retries.
+    pub(super) fn send_undecryptable_ack(
+        &mut self,
+        message: &Message,
+        inbound_transport: TransportType,
+    ) {
+        if !message.requires_ack
+            || !self
+                .peer_undecryptable_ack
+                .contains(message.sender.as_str())
+        {
+            return;
+        }
+        if let Err(err) =
+            self.send_ack_with_status(message, inbound_transport, Some(ACK_STATUS_UNDECRYPTABLE))
+        {
+            error!(
+                message_id = %message.id,
+                error = %err,
+                "Failed to send undecryptable ACK"
+            );
+        }
+    }
+
+    fn send_ack_with_status(
+        &mut self,
+        message: &Message,
+        inbound_transport: TransportType,
+        status: Option<&str>,
+    ) -> Result<()> {
         let sender = UserId::new(&self.local_id)?;
         let recipient = message.sender.clone();
         let app_id = AppId::new(&self.config.app_id)?;
         let ttl = TTL::new(self.config.initial_ttl).unwrap_or_else(|_| TTL::default());
 
-        let ack_message = Message::builder(sender, recipient, app_id)
+        let mut builder = Message::builder(sender, recipient, app_id)
             .content(String::new())
             .priority(MessagePriority::Low)
             .ttl(ttl)
             .requires_ack(false)
             .metadata(ACK_FOR_KEY, message.id.as_str())
             .metadata(ACK_HOP_COUNT_KEY, message.hop_count.value().to_string())
-            .metadata(ACK_TRANSPORT_KEY, Self::transport_label(inbound_transport))
-            .build();
+            .metadata(ACK_TRANSPORT_KEY, Self::transport_label(inbound_transport));
+        if let Some(status) = status {
+            builder = builder.metadata(ACK_STATUS_KEY, status);
+        }
 
-        self.route_ack(&ack_message, inbound_transport)
+        self.route_ack(&builder.build(), inbound_transport)
     }
 
     /// Gets an acknowledgement back to whoever sent us the message it answers.
@@ -5229,6 +5276,14 @@ impl OfflineProtocol {
                     return;
                 }
 
+                // Answered, not delivered: never `message_delivered`.
+                if message.metadata.get(ACK_STATUS_KEY).map(String::as_str)
+                    == Some(ACK_STATUS_UNDECRYPTABLE)
+                {
+                    self.handle_undecryptable_ack(&message_id);
+                    return;
+                }
+
                 // A delivery ack settles an outbound connection request:
                 // the recipient provably received it, so a later stale
                 // recipient_unreachable signal must not fire a false
@@ -5325,6 +5380,56 @@ impl OfflineProtocol {
                 }
             }
         }
+    }
+
+    /// Settles an `undecryptable` answer: the recipient can never decrypt the
+    /// copy it holds. An encrypted DM whose plaintext is still in memory is
+    /// re-sealed under the current session and resent once, same id (the
+    /// flush path re-seals); one without it — restored after a restart, so
+    /// every retry would replay the dead ciphertext — is dropped with
+    /// `message_failed`. A second answer for an id already resent leaves the
+    /// entry to its retry ladder, which re-seals on every attempt anyway: that
+    /// bounds two devices trading answers and resends at network speed, and
+    /// keeps a split-brain pair's message deliverable once the session is
+    /// rebuilt. Anything else (no entry left, plaintext, media) is ignored,
+    /// which is exactly what the frame's failure used to cost it.
+    fn handle_undecryptable_ack(&mut self, message_id: &MessageId) {
+        let Some(entry) = self.outbox.get(message_id) else {
+            return;
+        };
+        if !entry
+            .message
+            .content
+            .starts_with(internal_prefixes::ENCRYPTED)
+        {
+            return;
+        }
+        if entry.reseal.is_none() {
+            let retry_count = self
+                .retire_undeliverable_message(message_id, "recipient cannot decrypt")
+                .map_or(0, |entry| entry.attempt_count);
+            warn!(
+                message_id = %message_id,
+                "Recipient cannot decrypt this message and its plaintext is gone; failing it"
+            );
+            self.emit_event(Event::message_failed(
+                message_id.clone(),
+                "Recipient cannot decrypt the message",
+                retry_count,
+            ));
+            return;
+        }
+        if !self.undecryptable_resent.insert(message_id.clone()) {
+            return;
+        }
+        let (message, attempt_count) = (entry.message.clone(), entry.attempt_count);
+        debug!(
+            message_id = %message_id,
+            "Recipient cannot decrypt this copy; re-sealing and resending once"
+        );
+        self.retry_queue.remove(&message_id.as_str());
+        self.ack_manager.remove_ack(message_id);
+        self.try_flush_send(message, attempt_count);
     }
 
     /// Whether `ack` comes from the peer the message it answers was addressed
@@ -5873,6 +5978,9 @@ impl OfflineProtocol {
             // publish, not what a peer may seal to us: withholding it would
             // downgrade the peer's traffic to the bootstrap key as a side
             // effect of a local setting.
+            // Read unconditionally: an `undecryptable` ACK is settled as "not
+            // delivered" whatever our config, so a peer may always send us one.
+            ack_versions: vec![offline_protocol_sealed::ACK_UNDECRYPTABLE_V1],
             nostr_pubkey: self.transport_manager.nostr_public_key(),
         }
     }

@@ -163,6 +163,25 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   Found while running it: a message that a direct stream took and then lost
   (a device that went away without closing the stream) is retried over
   direct carriers only and never handed to the mesh (#541).
+- **`message_decryption_failed` says how old the frame is.** Two new fields,
+  `sealed_at_ms` (when the sender sealed the frame, sender clock, from the
+  cleartext envelope) and `session_established_at_ms` (when this device's
+  current 1:1 session with the sender was created or adopted, local clock),
+  both `null` when unknown. A frame sealed before the session existed cannot
+  have been sealed under it, so its failure is not evidence that the two sides
+  hold different sessions; an app's split-brain breaker can now leave it out.
+  The session time is recorded from this version on; a session established
+  earlier reports `null` until it is rebuilt.
+- **Key packages advertise `ack_versions`.** A new capability list on the
+  key package payload, persisted per peer with the others. Entry 1
+  (`ACK_UNDECRYPTABLE_V1`) says the sender reads `ack_status:
+  "undecryptable"` as "not delivered"; this version advertises it
+  unconditionally, and answers an undecryptable frame only to a peer that
+  advertised it, because an older SDK reads any ACK as a delivery. A peer
+  learns it from our next key package, which this SDK pushes on the first
+  discovery of each peer per launch (any inbound frame from them, a BLE
+  sighting, or a presence edge). Leaf devices do not advertise it. See
+  [Capability negotiation](docs/spec/capability-negotiation.md).
 
 ### Changed
 
@@ -205,6 +224,24 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A frame that can never decrypt gets an answer, and is not redelivered
+  forever.** A frame that failed with a spent ratchet generation or a dead
+  epoch, or that the pending-decryption queue gave up on, was left
+  unacknowledged so the sender would resend it re-sealed. A relay holding the
+  frame for an offline recipient read the silence as "not delivered yet" and
+  redelivered the same dead ciphertext on every connect, where it failed
+  again. The recipient now answers it with a delivery ACK carrying
+  `metadata["ack_status"] = "undecryptable"`, which a relay settles like any
+  ACK, but only when the sender advertised `ack_versions: [1]` in its key
+  package (see Added). A sender that has not, or whose key package this
+  device has not seen since it upgraded, is answered with nothing, exactly as
+  before. The sender never reports such a message delivered: it re-seals the DM
+  under its current session and resends it once with the same id, or emits
+  `message_failed` when the plaintext is gone (an outbox entry restored after
+  a restart); a second answer for the same id resends nothing and leaves the
+  entry to its retry ladder. Media chunks and frames whose envelope does not
+  parse keep their old handling. See
+  [Reserved metadata keys](docs/spec/wire-format.md#reserved-metadata-keys).
 - **Frames the SDK sends on its own no longer push "new message" to an
   offline peer.** A data-sync offer, a key package or a typing frame is the
   same MLS ciphertext to the relay as a user's text, so a device that

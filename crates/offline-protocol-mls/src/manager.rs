@@ -992,13 +992,40 @@ impl MlsManager {
 
         let key_type = StorageKeyType::ContactKeyPackage.as_str();
         self.storage.delete(key_type, other_user_id)?;
+        self.stamp_session_established(&welcome.group_id);
 
         Ok(welcome)
     }
 
     /// Joins a session using a Welcome message.
     pub fn join_session(&self, welcome: &WelcomeMessage) -> Result<GroupInfo> {
-        self.session_manager.join_session(welcome)
+        let info = self.session_manager.join_session(welcome)?;
+        self.stamp_session_established(&welcome.group_id);
+        Ok(info)
+    }
+
+    /// When the current 1:1 session with `other_user_id` was created or
+    /// adopted on this device (local clock, ms), or `None` when there is no
+    /// session or it predates the stamp.
+    ///
+    /// A frame sealed before this moment cannot have been sealed under this
+    /// session, so its failure to decrypt says nothing about whether the two
+    /// sides hold the same session now.
+    pub fn session_established_at_ms(&self, other_user_id: &str) -> Result<Option<u64>> {
+        let session_id = self.session_manager.get_session_id(other_user_id)?;
+        Ok(self
+            .load_group_metadata(&session_id)?
+            .map(|metadata| metadata.created_at_ms))
+    }
+
+    /// Records the moment a session's group state was written, in the
+    /// group-metadata slot a 1:1 session otherwise leaves empty. Best effort:
+    /// the session exists either way, and a missing stamp only means
+    /// [`Self::session_established_at_ms`] answers `None`.
+    fn stamp_session_established(&self, session_id: &GroupId) {
+        if let Err(e) = self.save_group_metadata(session_id, &GroupMetadata::new(None)) {
+            warn!(session_id = %session_id, error = %e, "Failed to stamp session establishment time");
+        }
     }
 
     /// Replaces an existing session with an incoming Welcome message.
@@ -1032,7 +1059,7 @@ impl MlsManager {
         // Join using their Welcome. `join_session` adopts non-destructively
         // (stage-then-swap), so a retransmitted Welcome that re-stages is a safe
         // no-op rather than deleting and re-creating our existing session.
-        self.session_manager.join_session(welcome)
+        self.join_session(welcome)
     }
 
     /// Encrypts a message for a 1:1 session.
@@ -1116,7 +1143,11 @@ impl MlsManager {
 
     /// Deletes a 1:1 session.
     pub fn delete_session(&self, other_user_id: &str) -> Result<()> {
-        self.session_manager.delete_session(other_user_id)
+        self.session_manager.delete_session(other_user_id)?;
+        let session_id = self.session_manager.get_session_id(other_user_id)?;
+        self.storage
+            .delete(StorageKeyType::GroupMetadata.as_str(), session_id.as_str())?;
+        Ok(())
     }
 
     // ========================================================================
