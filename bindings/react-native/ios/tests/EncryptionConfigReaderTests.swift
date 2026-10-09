@@ -25,6 +25,7 @@ final class EncryptionConfigReaderTests: XCTestCase {
         XCTAssertTrue(values.compactEnvelopeEnabled)
         XCTAssertTrue(values.richPayloadEnabled)
         XCTAssertTrue(values.cryptoRecoveryEnabled)
+        XCTAssertTrue(values.encryptServiceMessages)
         XCTAssertEqual(values.maxPendingPerPeer, 64)
         XCTAssertEqual(values.maxPendingGlobal, 4096)
         // Mirrors DEFAULT_PENDING_TTL_MS (24 h). Pinned on the Rust side too
@@ -118,6 +119,22 @@ final class EncryptionConfigReaderTests: XCTestCase {
 
         let snake = try read(#"{"encryption":{"crypto_recovery_enabled":false}}"#)
         XCTAssertFalse(snake.cryptoRecoveryEnabled)
+    }
+
+    func testEncryptServiceMessagesReadsItsNestedHomeThenTopLevel() throws {
+        let nested = try read(
+            #"{"encryptServiceMessages":true,"encryption":{"encryptServiceMessages":false}}"#
+        )
+        XCTAssertFalse(nested.encryptServiceMessages)
+
+        let flat = try read(#"{"encryptServiceMessages":false,"encryption":{"enabled":true}}"#)
+        XCTAssertFalse(flat.encryptServiceMessages)
+
+        let snake = try read(#"{"encryption":{"encrypt_service_messages":false}}"#)
+        XCTAssertFalse(snake.encryptServiceMessages)
+
+        let flatSnake = try read(#"{"encrypt_service_messages":false}"#)
+        XCTAssertFalse(flatSnake.encryptServiceMessages)
     }
 
     func testPendingQueueNestedHomeWinsOverFlat() throws {

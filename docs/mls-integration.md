@@ -116,6 +116,7 @@ const protocol = new OfflineProtocol({
 | `compactEnvelopeEnabled` | `true` | Emit the compact MLS envelope to recipients that advertise `env_versions` |
 | `richPayloadEnabled` | `true` | Seal rich extras inside the MLS ciphertext for recipients that advertise `rich_versions` |
 | `cryptoRecoveryEnabled` | `true` | Recover an undecryptable 1:1 message instead of dropping it and ACKing anyway ([below](#crypto-failure-recovery)) |
+| `encryptServiceMessages` | `true` | Seal service request and response bodies toward peers that advertise `svc_versions`, once the session is confirmed; signed plaintext otherwise ([service discovery](service-discovery.md#encryption-interaction)) |
 
 The `pendingTtlMs` default is 24 hours (it was 2 minutes, then 30 minutes, in
 earlier releases): under the deferred-ACK model a message held here is not

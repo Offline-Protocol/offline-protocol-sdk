@@ -27,6 +27,7 @@ class ProtocolConfigParserTest {
         assertTrue(config.compactEnvelopeEnabled)
         assertTrue(config.richPayloadEnabled)
         assertTrue(config.cryptoRecoveryEnabled)
+        assertTrue(config.encryptServiceMessages)
     }
 
     @Test
@@ -236,6 +237,29 @@ class ProtocolConfigParserTest {
             """{"appId":"app","userId":"alice","encryption":{"crypto_recovery_enabled":false}}"""
         )
         assertFalse(snake.cryptoRecoveryEnabled)
+    }
+
+    @Test
+    fun encryptServiceMessagesReadsItsNestedEncryptionHomeThenTopLevel() {
+        val nested = parse(
+            """{"appId":"app","userId":"alice","encryptServiceMessages":true,"encryption":{"encryptServiceMessages":false}}"""
+        )
+        assertFalse(nested.encryptServiceMessages)
+
+        val flat = parse(
+            """{"appId":"app","userId":"alice","encryptServiceMessages":false,"encryption":{"enabled":true}}"""
+        )
+        assertFalse(flat.encryptServiceMessages)
+
+        val snake = parse(
+            """{"appId":"app","userId":"alice","encryption":{"encrypt_service_messages":false}}"""
+        )
+        assertFalse(snake.encryptServiceMessages)
+
+        val flatSnake = parse(
+            """{"appId":"app","userId":"alice","encrypt_service_messages":false}"""
+        )
+        assertFalse(flatSnake.encryptServiceMessages)
     }
 
     @Test

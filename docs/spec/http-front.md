@@ -31,8 +31,10 @@ breaks an invariant is wrong.
 1. **A body leaves the host only inside a sealed message.** Requests and
    responses travel as the content of an ordinary direct message, which the
    engine encrypts end to end with MLS. A front MUST NOT carry a request or
-   response body on the service request path, whose bodies are signed but
-   not encrypted ([R9](../security/threat-model.md#r9-service-discovery-and-service-bodies-are-signed-not-encrypted)).
+   response body on the service request path. That path seals a body only
+   toward a peer that advertised it and only once their session is
+   confirmed, and sends it as signed plaintext otherwise, which the sending
+   side cannot see before it happens ([R9](../security/threat-model.md#r9-service-bodies-are-sealed-only-toward-capable-peers-discovery-is-signed-not-encrypted)).
    The failure this prevents: every body readable by every device that
    forwards it, on a carrier with no hop encryption at all.
 2. **A front acts only on a message the engine decrypted.** It processes an

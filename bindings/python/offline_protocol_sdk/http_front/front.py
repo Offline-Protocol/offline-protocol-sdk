@@ -10,8 +10,9 @@ Two rules shape everything here, each with the failure it prevents:
 
 * **A body leaves the host only inside a sealed message.** Requests and
   responses go through ``send_message``, never the service request path,
-  whose bodies are signed plaintext: on a LAN with no hop encryption that
-  path shows every body to every forwarder.
+  which falls back to signed plaintext whenever it cannot seal (an older
+  peer, or no confirmed session yet): on a LAN with no hop encryption that
+  fallback shows the body to every forwarder.
 * **Only a message the engine decrypted is acted on.** The engine refuses a
   wire sender that differs from the MLS-authenticated one, so for an
   ``encrypted`` message ``sender`` is the device that sealed it, and that is

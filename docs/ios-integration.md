@@ -119,14 +119,14 @@ final class MeshController {
             maxPendingGlobal: 1000,
             pendingTtlMs: 86_400_000,   // 24 h (the SDK default)
             overflowPolicy: .dropOldest
-            // These 9 use their defaults: requireEncryption (true),
+            // These 10 use their defaults: requireEncryption (true),
             // maxGroupMembers (256), groupRelayEnabled (true),
             // groupRelayBroadcastEnabled (false — group sends fan out per
             // member so each copy gets the full delivery ladder; see
             // docs/configuration.md#group-configuration),
             // requireTransportIdentity (false), binaryWireEnabled (true),
             // compactEnvelopeEnabled (true), richPayloadEnabled (true),
-            // cryptoRecoveryEnabled (true).
+            // cryptoRecoveryEnabled (true), encryptServiceMessages (true).
         )
 
         do {

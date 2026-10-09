@@ -225,7 +225,7 @@ await protocol.start(); // MLS auto-initialized when encryption.enabled is true
 // Key packages are exchanged automatically when peers are discovered.
 ```
 
-Four runtime kill switches (all default `true`) let you disable a negotiated
+Five runtime kill switches (all default `true`) let you disable a negotiated
 format or the recovery path without an SDK release:
 
 | Flag | Disables |
@@ -234,6 +234,7 @@ format or the recovery path without an SDK release:
 | `encryption.compactEnvelopeEnabled` | Compact MLS envelope, back to the JSON floor |
 | `encryption.richPayloadEnabled` | Sealing rich extras — they drop rather than going cleartext |
 | `encryption.cryptoRecoveryEnabled` | Epoch-desync healing, back to legacy drop-and-ACK |
+| `encryption.encryptServiceMessages` | Sealed service request and response bodies, back to signed plaintext |
 
 Each degrades independently, and inbound parsing of every format stays on
 regardless, so a disabled fleet still interoperates with an enabled one. See
@@ -575,6 +576,7 @@ interface EncryptionConfig {
   compactEnvelopeEnabled?: boolean;  // default: true (kill switch)
   richPayloadEnabled?: boolean;      // default: true (kill switch)
   cryptoRecoveryEnabled?: boolean;   // default: true (kill switch)
+  encryptServiceMessages?: boolean;  // default: true (kill switch)
   pendingQueue?: PendingQueueConfig;
 }
 

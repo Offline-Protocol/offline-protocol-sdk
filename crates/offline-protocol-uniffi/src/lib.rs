@@ -2017,6 +2017,10 @@ pub struct ProtocolConfig {
     /// Kill switch for 1:1 MLS crypto-failure recovery (default on). See the UDL
     /// dictionary and `EncryptionConfig::crypto_recovery_enabled` for semantics.
     pub crypto_recovery_enabled: bool,
+    /// Whether service request and response bodies are sealed toward peers
+    /// that route the sealed form (default on). See the UDL dictionary and
+    /// `EncryptionConfig::encrypt_service_messages` for semantics.
+    pub encrypt_service_messages: bool,
     /// Mesh forwarding tunables. `None` (and any `None` field inside it)
     /// leaves the core default alone — see [`MeshRelayConfig`].
     pub mesh_relay: Option<MeshRelayConfig>,
@@ -2406,6 +2410,7 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.encryption.compact_envelope_enabled = config.compact_envelope_enabled;
         core_config.encryption.rich_payload_enabled = config.rich_payload_enabled;
         core_config.encryption.crypto_recovery_enabled = config.crypto_recovery_enabled;
+        core_config.encryption.encrypt_service_messages = config.encrypt_service_messages;
         core_config.dors.prefer_online = config.prefer_online;
         core_config.initial_ttl = config.initial_ttl;
         core_config.encryption.enabled = config.encryption_enabled;
@@ -8476,6 +8481,7 @@ mod tests {
             group_enforce_admin_commits: false,
             require_transport_identity: false,
             control_freshness_enforced: true,
+            encrypt_service_messages: true,
         }
     }
 
@@ -8515,6 +8521,7 @@ mod tests {
             group_enforce_admin_commits: false,
             require_transport_identity: false,
             control_freshness_enforced: true,
+            encrypt_service_messages: true,
         }
     }
 
@@ -8831,6 +8838,7 @@ mod tests {
             group_enforce_admin_commits: false,
             require_transport_identity: false,
             control_freshness_enforced: true,
+            encrypt_service_messages: true,
         }
     }
 
@@ -11516,6 +11524,94 @@ mod tests {
         }
         protocol.disable_telemetry().expect("disable");
         offline_protocol::telemetry::pipe::testing::stop_capturing_uploads();
+    }
+
+    /// Every encryption switch the flat UDL `ProtocolConfig` declares is read
+    /// by both native config readers, in both spellings, and carried by the
+    /// TypeScript wrapper in both the flat and the nested shape.
+    ///
+    /// The failure this catches: a switch added to the UDL and the Rust config
+    /// that one bridge never reads. The generated initializer supplies the
+    /// UDL default, so everything compiles and every test that does not set
+    /// the switch passes, while an app that turns it off on that platform is
+    /// silently ignored. That is a runtime-only failure (C1, C5), and until
+    /// this guard nothing pinned the encryption section across bridges.
+    #[test]
+    fn every_bridge_reads_the_encryption_config_section() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rn = manifest.join("../../bindings/react-native");
+        let read = |rel: std::path::PathBuf| -> String {
+            std::fs::read_to_string(&rel)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", rel.display()))
+        };
+        let udl = read(manifest.join("src/offline_protocol.udl"));
+        let swift_reader = read(rn.join("ios/EncryptionConfigReader.swift"));
+        let swift_module = read(rn.join("ios/OfflineProtocolModule.swift"));
+        let kotlin_parser =
+            read(rn.join("android/src/main/java/com/offlineprotocol/ProtocolConfigParser.kt"));
+        let index = read(rn.join("src/index.ts"));
+        let types = read(rn.join("src/types.ts"));
+
+        // The encryption switches a bridge reads from the `encryption`
+        // section, by their UDL (snake_case) name.
+        let switches = [
+            ("auto_key_exchange", "autoKeyExchange"),
+            ("store_pending", "storePending"),
+            ("require_encryption", "requireEncryption"),
+            ("compact_envelope_enabled", "compactEnvelopeEnabled"),
+            ("rich_payload_enabled", "richPayloadEnabled"),
+            ("crypto_recovery_enabled", "cryptoRecoveryEnabled"),
+            ("encrypt_service_messages", "encryptServiceMessages"),
+        ];
+        for (snake, camel) in switches {
+            assert!(
+                udl.contains(&format!("boolean {snake} = "))
+                    || udl.contains(&format!("boolean {snake};")),
+                "the UDL ProtocolConfig no longer declares {snake}"
+            );
+            for (name, source) in [
+                ("EncryptionConfigReader.swift", &swift_reader),
+                ("ProtocolConfigParser.kt", &kotlin_parser),
+            ] {
+                assert!(
+                    source.contains(&format!("\"{camel}\"")),
+                    "{name} does not read {camel}"
+                );
+                assert!(
+                    source.contains(&format!("\"{snake}\"")),
+                    "{name} does not read {snake}"
+                );
+            }
+            assert!(
+                swift_module.contains(&format!("encryption.{camel}")),
+                "OfflineProtocolModule.swift does not pass {camel} to the ProtocolConfig"
+            );
+            assert!(
+                kotlin_parser.contains(&format!("{camel} = {camel}")),
+                "ProtocolConfigParser.kt does not pass {camel} to the ProtocolConfig"
+            );
+            assert!(
+                types.contains(&format!("{camel}?: boolean")),
+                "types.ts does not declare {camel} on the encryption config"
+            );
+            // The effective value, the flat copy the bridges read, and the
+            // field on both the flat and the nested native config type: miss
+            // one and the two shapes diverge.
+            assert!(
+                index.contains(&format!("{camel}: encryptionSource?.{camel}")),
+                "index.ts does not resolve {camel} from the app's encryption config"
+            );
+            assert!(
+                index.contains(&format!("{camel}: encryption.{camel},")),
+                "index.ts does not copy {camel} into the flat shape"
+            );
+            assert!(
+                index.matches(&format!("{camel}: boolean")).count()
+                    + index.matches(&format!("{camel}?: boolean")).count()
+                    >= 2,
+                "index.ts does not declare {camel} on both the flat and the nested native config"
+            );
+        }
     }
 
     /// The telemetry config section must be read by every bridge that
