@@ -5084,13 +5084,34 @@ impl OfflineProtocol {
         {
             return;
         }
-        if let Err(err) =
-            self.send_ack_with_status(message, inbound_transport, Some(ACK_STATUS_UNDECRYPTABLE))
-        {
-            error!(
+        let ack = match self.build_ack(message, inbound_transport, Some(ACK_STATUS_UNDECRYPTABLE)) {
+            Ok(ack) => ack,
+            Err(err) => {
+                error!(
+                    message_id = %message.id,
+                    error = %err,
+                    "Failed to build undecryptable ACK"
+                );
+                return;
+            }
+        };
+        // Pinned to the relay, never the ACK ladder: `route_ack` falls back to
+        // the mesh and to whatever DORS picks when the relay is down, and a
+        // held ACK re-runs that same ladder later. Either would put this
+        // answer on a radio link, where R25 says it never goes. Dropped
+        // instead: the relay mailbox redelivers the frame on the next
+        // connect, and the live path answers it then.
+        let sent = self
+            .transport_manager
+            .can_address_via(TransportType::Internet, message.sender.as_str())
+            && self
+                .transport_manager
+                .send_via_transport(&ack, TransportType::Internet)
+                .is_ok();
+        if !sent {
+            debug!(
                 message_id = %message.id,
-                error = %err,
-                "Failed to send undecryptable ACK"
+                "Relay unavailable; undecryptable ACK dropped until the frame is redelivered"
             );
         }
     }
@@ -5101,6 +5122,18 @@ impl OfflineProtocol {
         inbound_transport: TransportType,
         status: Option<&str>,
     ) -> Result<()> {
+        let ack = self.build_ack(message, inbound_transport, status)?;
+        self.route_ack(&ack, inbound_transport)
+    }
+
+    /// Builds the acknowledgement for `message`, optionally carrying
+    /// [`ACK_STATUS_KEY`]. Routing is the caller's.
+    fn build_ack(
+        &self,
+        message: &Message,
+        inbound_transport: TransportType,
+        status: Option<&str>,
+    ) -> Result<Message> {
         let sender = UserId::new(&self.local_id)?;
         let recipient = message.sender.clone();
         let app_id = AppId::new(&self.config.app_id)?;
@@ -5118,7 +5151,7 @@ impl OfflineProtocol {
             builder = builder.metadata(ACK_STATUS_KEY, status);
         }
 
-        self.route_ack(&builder.build(), inbound_transport)
+        Ok(builder.build())
     }
 
     /// Gets an acknowledgement back to whoever sent us the message it answers.

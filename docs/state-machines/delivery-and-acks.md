@@ -208,7 +208,7 @@ flowchart TD
 | Session not ready | no | **yes** | no | It will become decryptable when the session arrives |
 | Session desync (epoch fork) | `undecryptable` | no | **yes** | Ciphertext is sealed to a dead epoch and can never drain |
 | Crypto failure (AEAD, corrupt, ratchet generation) | `undecryptable` | no | **no** | The attempt spent the generation; a queued copy could never drain |
-| Transport failure | no | no | no | Recoverable by resend |
+| Transport failure | `undecryptable` | no | no | Classified with crypto failures: the attempt may have spent the generation, so recovery is the sender's re-sealed resend |
 | Envelope parse failure | no | no | no | Unparseable now is unparseable forever; the resend is the fix |
 | Policy refusal (commit not authorized) | **yes** | no | no | Can never become decryptable, so retries are pure waste |
 | Security refusal (identity mismatch, foreign session slot) | **no**, identifier unmarked | no | no | An acknowledgement confirms to an injector that the target is live |

@@ -15434,8 +15434,46 @@ fn test_undecryptable_ack_reseals_once_and_never_reports_delivered() {
     assert_eq!(delivered_or_failed(&events, &msg_id), (1, 0));
 }
 
-/// Without the plaintext (a restored entry, so every retry would replay the
-/// ciphertext that just failed) the message is failed, never delivered.
+/// A relay arrival answered while the relay is down (a drain, a prune, an
+/// eviction) must not fall back to the ACK ladder's mesh or DORS routes: the
+/// answer goes over the relay or not at all, and it is not held for a later
+/// carrier edge, which would re-run the same ladder.
+#[test]
+fn test_undecryptable_ack_is_never_rerouted_off_the_relay() {
+    let (mut bob, internet_handle, alice_manager) = hard_failure_pair(true);
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    let ble_handle = ble.clone();
+    bob.transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble));
+
+    let wire = encrypted_wire(&corrupt_ciphertext_for(&alice_manager), None);
+    let msg_id = wire.id.as_str().to_string();
+    internet_handle.clear_sent_messages();
+    ble_handle.clear_sent_messages();
+
+    bob.enqueue_pending_decryption_via("alice", &wire, Some(TransportType::Internet));
+    internet_handle.set_status(offline_protocol_transport::TransportStatus::Unavailable);
+    bob.process_pending_decryption("alice");
+
+    assert_eq!(acks_for(&ble_handle.sent_messages(), &msg_id), (0, 0));
+    assert_eq!(acks_for(&internet_handle.sent_messages(), &msg_id), (0, 0));
+    assert!(
+        bob.unrouted_acks.is_empty(),
+        "nothing held to re-route later"
+    );
+
+    // With the relay back, the redelivered frame is answered over it.
+    internet_handle.set_status(offline_protocol_transport::TransportStatus::Available);
+    internet_handle.queue_message(wire);
+    while bob.receive_message().is_some() {}
+    assert_eq!(acks_for(&internet_handle.sent_messages(), &msg_id), (0, 1));
+    assert_eq!(acks_for(&ble_handle.sent_messages(), &msg_id), (0, 0));
+}
+
+/// Without the plaintext (a restored entry) the one resend replays the
+/// ciphertext verbatim and the entry stays for its retry ladder: never
+/// delivered, never failed outright.
 #[test]
 fn test_undecryptable_ack_without_plaintext_replays_once_and_keeps_the_entry() {
     // An entry restored after a restart has no plaintext to re-seal. The
