@@ -61,7 +61,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // ProtocolConfig has 16 required fields (+ 8 with defaults). See
+        // ProtocolConfig has 16 required fields (+ 19 with defaults). See
         // docs/configuration.md for what each one controls.
         val config = ProtocolConfig(
             appId = "my-android-app",
@@ -80,7 +80,7 @@ class MainActivity : AppCompatActivity() {
             maxPendingGlobal = 1_000.toULong(),
             pendingTtlMs = 86_400_000.toULong(),  // 24 h (the SDK default)
             overflowPolicy = OverflowPolicy.DROP_OLDEST,
-            // These 10 use their defaults: requireEncryption (true),
+            // Among those left at their defaults: requireEncryption (true),
             // maxGroupMembers (256u), groupRelayEnabled (true),
             // groupRelayBroadcastEnabled (true — capability-gated, and it
             // falls back to per-member fan-out against any relay that did not
@@ -216,6 +216,7 @@ Add to `AndroidManifest.xml`:
 <uses-permission android:name="android.permission.BLUETOOTH" />
 <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
 <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+<uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
 <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
 <!-- Location (required for BLE scanning on Android) -->

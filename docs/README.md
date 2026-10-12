@@ -66,6 +66,7 @@ implementation written against these documents should interoperate.
 | [Username discovery and invites](spec/username-discovery.md) | The self-certifying invite payload, the username directory, and the signing-domain registry |
 | [The gateway contract](spec/gateway-contract.md) | What a gateway is, the five verbs, the daemon wire protocol, and the backbone |
 | [The local API](spec/local-api.md) | One server, several local applications: JSON-RPC over a WebSocket, the method and event tables, routing, replay, errors |
+| [The HTTP front](spec/http-front.md) | Calling a service on another device with plain HTTP: the hostname, the sealed envelope, the limits, registration, browse and the error tokens |
 | [Custody](spec/custody.md) | Holding a neighbour's replication frame for hours: the deposit, the receipt that settles nothing, the hold, redelivery, quotas, erase |
 | [Conformance](spec/conformance.md) | The two profiles, what every implementation owes, and the vectors that decide it |
 
@@ -92,7 +93,7 @@ implementation written against these documents should interoperate.
 
 | Document | Scope |
 |----------|-------|
-| [ADR index](adr/README.md) | Twenty-six decisions that are expensive to reverse or easy to undo by accident |
+| [ADR index](adr/README.md) | Twenty-eight decisions that are expensive to reverse or easy to undo by accident |
 
 If something in the codebase looks redundant or over-engineered, check here
 before simplifying it.
@@ -127,6 +128,11 @@ in here fails **silently** when violated.
 | [Example App Integration Guide](../examples/react-native-app/INTEGRATION_GUIDE.md) | Step-by-step project integration walkthrough |
 | [Mesh Wiki](../examples/mesh-wiki/README.md) | Mesh services: a device answering queries over BLE with no internet |
 | [Storage adapters](../examples/storage-adapters/README.md) | SQLite `ProtocolStateStorage` implementations for Swift, Kotlin and Python |
+| [Offline first](../examples/offline-first/README.md) | Scenarios on three devices showing what the network does when a device is not there, each passing or failing on the engine's events |
+| [HTTP front](../examples/http-front/README.md) | Two programs that know nothing of the SDK calling a service on another host with plain HTTP |
+| [Offline Demo](../examples/demo-app/README.md) | The reference React Native app: discovery, 1:1 chat, groups, mesh services and telemetry in one place |
+| [Service Discovery](../examples/service-discovery-app/README.md) | React Native app registering, discovering and invoking services over the mesh |
+| [Nostr Transport](../examples/nostr-example/README.md) | Minimal React Native app using the Nostr relay transport |
 | `cargo run -p offline-protocol --example replicated_notes` | Replicated documents: open a store, edit, persist, reopen |
 | `cargo run -p offline-protocol-data --example offline_merge` | What two people editing the same document offline actually get back |
 

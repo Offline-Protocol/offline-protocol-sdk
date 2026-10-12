@@ -92,9 +92,13 @@ build. See [Cutting a Release](../../CONTRIBUTING.md#the-native-packages-and-pyp
 
 ## What an application has to declare
 
-`android.permission.INTERNET`, for the internet and Nostr transports. The
-library's manifest does not declare it, because the module's does not: a
-React Native application already has it.
+`android.permission.ACCESS_FINE_LOCATION`, if it supports Android 12 or
+lower, where Bluetooth LE scanning (11 and lower) and Wi-Fi Direct discovery
+(12 and lower) need it. The module's manifest leaves it to the application.
+The rest comes with the library: its manifest is the module's less the wake
+service and `WAKE_LOCK`, so it declares the Bluetooth, Wi-Fi, `INTERNET` and
+network-state permissions the transports need. The runtime ones are still
+the application's to request.
 
 ## Adding a source
 

@@ -244,8 +244,8 @@ only holder of that address.
 
 ### Notify or indicate
 
-The two shipped peripherals differ, and firmware should know why before
-choosing.
+The shipped peripherals (iOS, Android, and the Python service, which offers
+notification) differ, and firmware should know why before choosing.
 
 A peripheral MAY offer notification, indication, or both. A central MUST
 subscribe to whichever the peripheral offers, and MUST NOT require a particular

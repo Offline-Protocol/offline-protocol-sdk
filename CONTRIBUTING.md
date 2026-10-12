@@ -125,10 +125,11 @@ offline-protocol-sdk/
 │   ├── offline-protocol-mls/
 │   ├── offline-protocol-services/
 │   ├── offline-protocol-data/
+│   ├── offline-protocol-telemetry-wire/
 │   ├── offline-protocol/
 │   ├── offline-protocol-uniffi/
 │   └── offline-protocol-bench/
-├── bindings/        # Platform bindings (React Native)
+├── bindings/        # Platform bindings (React Native, Python, Swift, Kotlin)
 ├── docs/            # Documentation
 └── examples/        # Example applications
 ```

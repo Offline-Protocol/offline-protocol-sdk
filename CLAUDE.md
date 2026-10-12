@@ -303,7 +303,7 @@ Conventional Commits: `<type>(<scope>): <subject>`
 Types: `feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `chore`
 
 Scopes: `core`, `sealed`, `leaf`, `transport`, `router`, `reliability`,
-`services`, `protocol`, `uniffi`, `bindings`
+`mls`, `services`, `protocol`, `uniffi`, `bindings`
 
 ## Code style (Rust)
 

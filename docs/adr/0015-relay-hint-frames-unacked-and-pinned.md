@@ -1,6 +1,7 @@
 # 0015. Relay hint frames are unacknowledged and transport-pinned
 
 **Status:** Accepted
+**See also:** Wi-Fi Direct no longer accepts any recipient: since the peer-stream slot replaced it, it refuses one no stream has proved, as Bluetooth LE does (#540). Reticulum still accepts any recipient, so the pinning rule stands; see [Transport lifecycle](../state-machines/transport-lifecycle.md#what-sent-means-at-each-layer).
 
 ## Context
 

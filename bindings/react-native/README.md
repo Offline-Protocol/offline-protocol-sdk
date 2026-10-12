@@ -1179,9 +1179,7 @@ interface DedupStats {
 ```typescript
 interface FileProgress {
   file_id: string;
-  file_name: string;
-  file_size: number;
-  chunks_completed: number;
+  chunks_sent: number;
   total_chunks: number;
   percentage: number;
 }
@@ -1191,9 +1189,9 @@ interface FileProgress {
 
 ```typescript
 enum ProtocolState {
-  Stopped = 0,
-  Running = 1,
-  Paused = 2,
+  Stopped = 'Stopped',
+  Running = 'Running',
+  Paused = 'Paused',
 }
 ```
 
@@ -1347,15 +1345,15 @@ protocol.on('group_role_changed', (event) => {
 ### Acknowledgments
 
 - Messages require ACK for delivery confirmation
-- Default timeout: 5 seconds
+- Default timeout: 10 seconds
 - `message_delivered` event fires on ACK receipt
 
 ### Retry Queue
 
 - Failed messages are retried with exponential backoff
 - Initial delay: 1 second
-- Maximum delay: 30 seconds
-- Maximum retries: 5
+- Maximum delay: 300 seconds
+- Maximum retries: 10
 
 ### Deduplication
 
@@ -1372,9 +1370,9 @@ Prevents duplicate message processing:
 
 ```typescript
 const fileId = await protocol.sendFile({
-  filePath: '/path/to/file.pdf',
   recipient: 'user456',
-  fileName: 'document.pdf',  // optional
+  fileData: base64Contents,  // the file's bytes as base64; the app reads the file
+  fileName: 'document.pdf',
 });
 
 protocol.on('file_progress', (event) => {

@@ -238,7 +238,7 @@ When an ACK is received, the sender:
 Failed messages are queued for retry with exponential backoff:
 - **Initial Delay**: 1 second
 - **Backoff Factor**: 2x each retry (1s → 2s → 4s → 8s...)
-- **Maximum Delay**: 30 seconds
+- **Maximum Delay**: 5 minutes
 - **No attempt limit**: The retry queue is a pure scheduling mechanism. Only ACK timeouts (not transport failures) count toward the retry limit (default: 10).
 
 When a transport becomes available (peer discovered, internet reconnects), pending messages are flushed immediately — bypassing backoff timers.
@@ -248,8 +248,8 @@ For the full delivery lifecycle including client-side persistence patterns, see 
 ### Priority Ordering
 The retry queue processes messages by priority:
 1. **Critical**: Processed first, bypasses some safeguards
-2. **High**: Processed before normal messages
-3. **Normal**: Standard processing
+2. **High**: Processed before medium-priority messages
+3. **Medium**: Standard processing (the default)
 4. **Low**: Processed last, may be delayed under load
 
 Within the same priority, older messages go first.
@@ -267,8 +267,8 @@ Without deduplication, the same message could be processed multiple times. The d
 
 ### HashMap Mode (Default)
 Exact tracking with no false positives:
-- **Capacity**: 1,000 message IDs (configurable)
-- **Retention**: 1 hour (configurable)
+- **Capacity**: 5,000 message IDs (configurable)
+- **Retention**: 7 days, the outbox redelivery window (configurable)
 - **Eviction**: LRU when capacity is reached
 
 ### Bloom Filter Mode
@@ -723,7 +723,7 @@ replaced it: forwarding needs no help from the app.
 - `MessageSent`: Message queued for delivery
 - `MessageReceived`: Message received from peer
 - `MessageDelivered`: ACK received, delivery confirmed
-- `MessageFailed`: Max retries exceeded
+- `MessageFailed`: Max ACK retries exceeded, or the outbox lifetime or capacity was exceeded
 
 ### Connection Events (Native Layer)
 The native `MeshController` emits connection-related events that can be observed for debugging.
@@ -736,7 +736,9 @@ The native `MeshController` emits connection-related events that can be observed
 const config = {
   appId: 'my-app',
   profile: userId,
-  initialTtl: 8,  // Default message TTL
+  network: {
+    initialTtl: 8,  // Default message TTL
+  },
   
   reliability: {
     ack: {
@@ -746,7 +748,7 @@ const config = {
       maxRetries: 10,            // Max ACK retry attempts
       initialDelayMs: 1000,      // First retry after 1s
       maxDelayMs: 300000,        // Cap delay at 5 min (default)
-      backoffFactor: 2.0,        // Double delay each retry
+      backoffMultiplier: 2.0,    // Double delay each retry
     },
     dedup: {
       useBloomFilter: false,     // HashMap mode (default); set true for bloom filter
@@ -773,7 +775,7 @@ The native `MeshController` has additional settings:
 
 ### Message Priority
 - Use **Critical** sparingly (bypasses some safeguards)
-- **Normal** priority is appropriate for most messages
+- **Medium** priority (the default) is appropriate for most messages
 - **Low** priority for non-urgent background sync
 
 ### Network Monitoring

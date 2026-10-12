@@ -100,7 +100,7 @@ final class MeshController {
     private let eventHandler = MeshEventHandler()
 
     func startMesh() {
-        // ProtocolConfig has 16 required fields (+ 8 with defaults). See
+        // ProtocolConfig has 16 required fields (+ 19 with defaults). See
         // docs/configuration.md for what each one controls.
         let config = ProtocolConfig(
             appId: "my-ios-app",
@@ -119,10 +119,10 @@ final class MeshController {
             maxPendingGlobal: 1000,
             pendingTtlMs: 86_400_000,   // 24 h (the SDK default)
             overflowPolicy: .dropOldest
-            // These 10 use their defaults: requireEncryption (true),
+            // Among those left at their defaults: requireEncryption (true),
             // maxGroupMembers (256), groupRelayEnabled (true),
-            // groupRelayBroadcastEnabled (false — group sends fan out per
-            // member so each copy gets the full delivery ladder; see
+            // groupRelayBroadcastEnabled (true, used only against a relay
+            // that advertises group_delivery_v3; see
             // docs/configuration.md#group-configuration),
             // requireTransportIdentity (false), binaryWireEnabled (true),
             // compactEnvelopeEnabled (true), richPayloadEnabled (true),
@@ -246,8 +246,13 @@ manual XCFramework build in steps 1–4 above: build the `offline-protocol-uniff
 libraries for the device and simulator targets, package them into an XCFramework, and add
 it to your Xcode project alongside the UniFFI-generated Swift bindings.
 
-> A standalone CocoaPods pod and a Swift Package Manager manifest are not currently
-> published — use the npm module (React Native) or the manual XCFramework path (native).
+From 0.28.0 a release also builds a Swift package, `OfflineProtocolSDK`, from the
+same bridge sources the React Native module compiles, and it is distributed through
+the `Offline-Protocol/offline-protocol-swift` repository; see
+[bindings/swift](../bindings/swift/README.md) and
+[ADR 0025](adr/0025-native-packages-are-assembled-in-place.md). What is public in it
+is what the React Native module needed public, which leaves out the storage
+providers. A standalone CocoaPods pod is not published.
 
 ## Architecture
 

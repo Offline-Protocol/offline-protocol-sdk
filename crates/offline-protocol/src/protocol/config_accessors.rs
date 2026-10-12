@@ -409,10 +409,10 @@ impl OfflineProtocol {
     /// Broadcasts a service discovery query to all known peers.
     /// Returns a query_id. Responses arrive asynchronously as `ServiceDiscovered` events.
     ///
-    /// **Note:** Discovery responses currently travel only one hop back (to the
-    /// immediate sender of the query). Multi-hop response relay is not yet
-    /// implemented, so services more than one hop away will generate responses
-    /// that reach intermediate forwarders but not the original querier.
+    /// A provider more than one hop away answers toward the query's
+    /// originator, and each device in between forwards the response on to it
+    /// (`offline_protocol_services`), so discovery reaches as far as the query
+    /// was gossiped.
     pub fn discover_services(&mut self, service_id: Option<&str>) -> Result<String> {
         // Service discovery messages are internal control messages (not user
         // content), so they are exempt from require_encryption.

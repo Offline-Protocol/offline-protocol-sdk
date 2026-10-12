@@ -142,7 +142,7 @@ later copy could only waste work.
 verdicts, one layer below the receive loop. At the boundary the first stays
 `SecurityRejected` and the second becomes `Consumed`, which is why it is
 acknowledged. See
-[the four outcomes](delivery-and-acks.md#the-four-outcomes).
+[the five outcomes](delivery-and-acks.md#the-five-outcomes).
 
 **The obligation extends to the drain, and that half is not optional.** A relay
 copy can outrun its Welcome, so it buffers **before** any decrypt and its

@@ -1,6 +1,7 @@
 # 0006. The desync classification gates the re-key, not the acknowledgement
 
 **Status:** Accepted
+**See also:** since #543 both classes are answered `undecryptable` (never as delivered) when the frame arrived over the relay; see [Delivery and acknowledgements](../state-machines/delivery-and-acks.md#classifying-decrypt-failures).
 
 ## Context
 

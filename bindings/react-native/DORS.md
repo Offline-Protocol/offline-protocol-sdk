@@ -189,7 +189,7 @@ Configure DORS when initializing the protocol:
 ```typescript
 const config = {
   appId: 'my-app',
-  userId: userId,
+  profile: 'alice',
   
   dors: {
     preferOnline: false,           // Use mesh first, Internet as backup

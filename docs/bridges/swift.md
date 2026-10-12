@@ -337,7 +337,7 @@ swift test
 Roughly one second. There is no reason to skip it.
 
 The test target covers the policy and translation types that carry real logic,
-21 suites at the time of writing, including config reading, relay control-op
+37 suites at the time of writing, including config reading, relay control-op
 translation, fragment buffering, rate limiting, presence policy, identity
 binding, address declaration, legacy store adoption, the write-stall watchdog,
 the superseded latch, and the pinned prefix list. Read `Package.swift` for the

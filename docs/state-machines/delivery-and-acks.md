@@ -28,7 +28,7 @@ restarts its own time-to-live.
 frame that this device is live and processing. Refusals on security grounds
 therefore stay silent.
 
-## The four outcomes
+## The five outcomes
 
 Every inbound frame resolves to exactly one:
 
@@ -36,6 +36,7 @@ Every inbound frame resolves to exactly one:
 |---------|-----------|--------------|------------------------|--------|
 | **Consumed** | yes, **or permanently refused** | yes | yes | no |
 | **Deferred** | not yet | **no** | **no** | sometimes, see below |
+| **Undecryptable** | not yet | **no**, an `undecryptable` answer over the relay only, see below | **no** | no |
 | **SecurityRejected** | no | **no** | **no** | no |
 | **Duplicate** | no | usually, see below | yes | no |
 
@@ -53,16 +54,17 @@ stateDiagram-v2
     Gate --> Decrypt: gate passed
     Decrypt --> Consumed: plaintext recovered
     Decrypt --> Deferred: session not ready
-    Decrypt --> Deferred: recoverable crypto failure
+    Decrypt --> Undecryptable: recoverable crypto failure or epoch desync
     Decrypt --> Deferred: envelope parse failure
     Decrypt --> Consumed: terminal post-decrypt failure
     Decrypt --> Consumed: commit refused by enforcement
 
     Deferred --> [*]: unmark, NO ack, sender retains custody
+    Undecryptable --> [*]: unmark, undecryptable answer<br/>over the relay only, sender retains custody
     Consumed --> [*]: ack
 ```
 
-**A refused commit is not a fifth outcome.** A commit refused by membership
+**A refused commit is not a sixth outcome.** A commit refused by membership
 enforcement resolves to `Consumed`, which is what the "or permanently refused"
 column entry means: no delivery, but an acknowledgement and a mark that stays.
 That is deliberate, and it is the half of the refusal rule that is easy to lose.
@@ -104,9 +106,9 @@ re-sending to this device. At most 500 are held, oldest dropped first, each for
 at most 10 minutes. Losing one is recoverable: the sender re-sends, and the
 duplicate is re-acknowledged. The hold is in memory only.
 
-These four are the observable dispositions, not a mirror of any one type. The
-implementation's decrypt-result type also has four cases, but they are not the
-same four: it splits a delivered message out as its own case and does not model
+These five are the observable dispositions, not a mirror of any one type. The
+implementation's decrypt-result type also has five cases, but they are not the
+same five: it splits a delivered message out as its own case and does not model
 duplicates at all, because the duplicate check runs before it.
 
 ## The deferred-acknowledgement atom
@@ -149,7 +151,10 @@ loop unmarked it. Once the message is genuinely delivered, the deduplicator must
 know, or a later resend delivers it twice.
 
 **5. A time-to-live long enough to be useful.** 2 minutes is too short for
-session establishment across a mesh. 30 minutes is the value this protocol uses.
+session establishment across a mesh. 24 hours is the value this protocol uses
+(`DEFAULT_PENDING_TTL_MS`): with a relay that pushes ciphertext without keeping
+a copy, a frame has to outlive the handshake of a phone opened once a day. The
+queue is persisted, and the persisted copy is bounded separately at 7 days.
 
 **6. Acknowledge on drain, on the transport the frame arrived on.**
 
@@ -218,7 +223,10 @@ An `undecryptable` answer is a delivery ACK in shape (`ack_for`, empty content,
 `requires_ack: false`) with `ack_status: "undecryptable"`, so a relay holding the
 frame drops it instead of redelivering the same dead ciphertext on every
 connect. It goes only to a frame that arrived over the internet relay, and
-only to a sender that advertised `ack_versions` entry 1. Every failure in these
+only to a sender that advertised `ack_versions` entry 1. It is sent on the
+relay alone, never through the acknowledgement route ladder, and is dropped
+rather than held when the relay is down: the mailbox redelivers the frame on
+the next connect, and the live path answers it then. Every failure in these
 rows happens before anything is authenticated, so on a mesh or peer-stream
 link the answer would confirm liveness to an injector in range (the
 security-refusal row's leak); the relay already knows the device is connected
@@ -249,7 +257,8 @@ disposition, which is the bug the interception exists to prevent. See
 ### Why the desync split gates the re-key, not the acknowledgement
 
 **The classification split exists to gate the re-key. Both classes withhold the
-acknowledgement.**
+delivery acknowledgement**, and both get the same `undecryptable` answer over
+the relay.
 
 Drawing the no-acknowledgement boundary at desync alone was the original bug.
 Sender-side re-sealing means every resend is re-sealed against the peer's
