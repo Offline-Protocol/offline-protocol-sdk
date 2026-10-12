@@ -55,6 +55,7 @@ pub struct Message {
     pub requires_ack: bool,         // Whether ACK is required
     pub reply_to_msg: Option<MessageId>,    // Message this is replying to (threading)
     pub forwarded_from: Option<ForwardInfo>, // Forwarding attribution, if forwarded
+    pub reply_context: Option<ReplyContext>, // Quoted-reply context, if this quotes another
 }
 ```
 
@@ -85,11 +86,14 @@ pub struct ProtocolConfig {
     pub transport: TransportConfig, // Transport settings
     pub dors: DorsConfig,          // DORS settings
     pub relay: RelayConfig,        // Relay settings
+    pub mesh_relay: MeshRelayConfig, // How this device forwards for others
     pub reliability: ReliabilityConfig, // Reliability settings
     pub encryption: EncryptionConfig, // Auto-encryption (MLS) settings
     pub initial_ttl: u8,           // Initial TTL (default: 8)
     pub group: GroupConfig,        // Mesh group messaging settings
     pub security: SecurityConfig,  // Transport & control-message hardening
+    pub data: DataConfig,          // Replicated documents (default: enabled)
+    pub custody: CustodyConfig,    // Holding neighbours' frames for hours (default: off)
 }
 ```
 
@@ -253,7 +257,7 @@ Reliability layer configuration.
 pub struct ReliabilityConfig {
     pub ack: AckConfig,      // ACK timeout: 10000ms, max pending: 1000
     pub retry: RetryConfig,  // Max retries: 10, backoff: 2.0x
-    pub dedup: DeduplicatorConfig, // Max tracked: 1000, retention: 1 hour
+    pub dedup: DeduplicatorConfig, // Max tracked: 5000, retention: 7 days
 }
 ```
 
@@ -575,11 +579,11 @@ Similarly, `receive_message` automatically:
 
 **TypeScript Example**:
 ```typescript
-// Initialize encryption (required once after start)
-await protocol.initializeMlsWithSecureStorage();
+// start() initializes MLS with platform secure storage (encryption is on by default)
+await protocol.start();
 
 // Messages are automatically encrypted/decrypted!
-await protocol.sendMessage({ recipient: 'bob', content: 'Hello!' });
+await protocol.sendMessage({ recipient: peerAddress, content: 'Hello!' }); // an off1… address
 
 protocol.on('message_received', (event) => {
   console.log(event.content);    // Already decrypted
@@ -606,7 +610,14 @@ All events are serializable to JSON for cross-language use.
 ```rust
 MessageSent {
     message_id: String,
+    sender: String,
+    recipient: String,
+    content: String,
+    priority: String,
+    requires_ack: bool,
     timestamp: i64,
+    lamport_clock: u64,
+    forward_info: Option<ForwardInfoEvent>,
 }
 ```
 
@@ -669,6 +680,7 @@ dropped the message.
 ```rust
 MessageDeferred {
     message_id: String,
+    recipient: String,
     reason: String,
     retry_count: u32,
     next_retry_at: Option<i64>,
@@ -715,6 +727,7 @@ MediaResendRequired {
     recipient: String,
     file_name: String,
     file_size: u64,
+    app_id: Option<String>,  // the transfer's per-send app id, when it had one
 }
 ```
 
@@ -740,7 +753,7 @@ Emitted when DORS switches transport.
 ```rust
 RelayPromoted {
     connection_count: usize,
-    battery_level: u8,
+    battery_level: Option<u8>,  // None when the host never reported one
 }
 
 RelayDemoted {
@@ -845,13 +858,15 @@ GroupUnauthorizedMembershipChange {
     added: Vec<String>,      // sorted; empty for a pure removal
     removed: Vec<String>,    // sorted; empty for a pure addition
     reason: String,          // "sender_not_admin" | "affected_member_mismatch"
+    enforced: bool,          // true when group.enforce_admin_commits refused it
 }
 ```
 
-An MLS membership change was applied that its committer was not authorized
-to make. The change **has been applied** — refusing it would mean refusing
-the MLS merge, permanently forking this member from the group — so it is
-reported instead; the corresponding `GroupMemberAdded` / `GroupMemberRemoved`
+An MLS membership change arrived that its committer was not authorized
+to make. By default (`enforced: false`) the change **has been applied**: refusing it would mean refusing
+the MLS merge, permanently forking this member from the group, so it is
+reported instead. With `enforce_admin_commits` on, `enforced: true` means this
+device refused it and needs re-inviting (a partition alarm). When applied, the corresponding `GroupMemberAdded` / `GroupMemberRemoved`
 events still fire with `authorized: Some(false)`. The judgment runs against
 the local, best-effort role replica, so it can false-positive; treat it as a
 moderation signal for a human admin and never reverse automatically. Reports
@@ -946,7 +961,7 @@ pub fn get_group_roles(
 pub fn get_group_info(
     &self,
     group_id: &str,
-) -> Result<Option<MlsGroupInfo>>
+) -> Result<Option<offline_protocol_mls::GroupInfo>>
 ```
 
 Returns group metadata including members, epoch, and timestamps. Returns `None` if the group does not exist.
@@ -972,8 +987,8 @@ Renames a group and broadcasts the change to all members. Only admins can rename
 
 - The group creator is automatically assigned `Admin`.
 - Only admins can call `invite_to_group`, `remove_from_group`, `set_member_role`, and `rename_group`.
-- Membership changes (invite/remove) are **not** enforced on receive — an unauthorized commit is applied and reported via `GroupUnauthorizedMembershipChange`. See [Group authorization model](./mls-integration.md#group-authorization-model).
-- The last admin cannot be demoted, removed, or leave — returns `Error::LastAdmin`.
+- Membership changes (invite/remove) are **not** enforced on receive by default: an unauthorized commit is applied and reported via `GroupUnauthorizedMembershipChange` (opt-in refusal: `group.enforce_admin_commits`). See [Group authorization model](./mls-integration.md#group-authorization-model).
+- The last admin cannot be demoted, removed, or leave while other members remain; the call returns `Error::InvalidState`.
 - If the last admin leaves unexpectedly, deterministic election promotes the lexicographically smallest member.
 
 ## File Transfer
@@ -988,16 +1003,17 @@ pub fn chunk_file(
     file_id: String,
     file_name: String,
     file_data: Vec<u8>,
+    chunk_size_override: Option<usize>,
 ) -> Result<Vec<FileChunk>>
 ```
 
-Chunks a file for sending (default 32KB chunks).
+Chunks a file for sending (default 32KB chunks, unless overridden).
 
 ```rust
-pub fn process_chunk(&mut self, chunk: FileChunk) -> Option<FileProgress>
+pub fn process_chunk(&mut self, sender: &str, chunk: FileChunk) -> Result<FileProgress, ChunkRejection>
 ```
 
-Processes a received chunk. Returns progress.
+Processes a received chunk. Returns progress, or why the chunk was refused.
 
 ```rust
 pub fn finalize_file(&mut self, file_id: &str) -> Option<Vec<u8>>
@@ -1243,7 +1259,7 @@ room.
 
 ## UniFFI Bindings
 
-Native platform integration uses UniFFI-generated type-safe bindings for Swift and Kotlin. The bindings are auto-generated from the UDL definition in `crates/offline-protocol-uniffi/`.
+Native platform integration uses UniFFI-generated type-safe bindings for Swift, Kotlin and Python. The bindings are auto-generated from the UDL definition in `crates/offline-protocol-uniffi/src/offline_protocol.udl`.
 
 See [React Native Integration](react-native-integration.md) for the complete TypeScript API, [iOS Integration](ios-integration.md) for Swift usage, and [Android Integration](android-integration.md) for Kotlin usage.
 

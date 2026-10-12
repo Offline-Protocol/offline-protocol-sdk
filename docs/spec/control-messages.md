@@ -54,7 +54,7 @@ vector.
 
 ### Prefixes that never appear on the wire
 
-Two prefixes are reserved but travel only **inside** an encrypted envelope. They
+Three prefixes are reserved but travel only **inside** an encrypted envelope. They
 are listed in the registry so application content can never impersonate them.
 
 | Prefix | Where it lives | Purpose |
@@ -115,11 +115,11 @@ two mandatory properties, and both are load-bearing:
    did nothing wrong.
 2. They MUST be pinned to the internet transport rather than routed by the
    transport selector. The selector demotes the internet transport by design,
-   and some mesh transports swallow a self-addressed frame: Wi-Fi Direct and
-   Reticulum enqueue it unconditionally and report success. Bluetooth LE fails
-   closed, because self is never a connected peer, but that only helps on a
-   BLE-only device: a synchronous refusal is a fallback trigger, so the frame
-   reaches one of the others anyway. The caller then believes the broadcast
+   and some mesh transports swallow a self-addressed frame: Reticulum enqueues
+   it unconditionally and reports success. Bluetooth LE and Wi-Fi Direct (the
+   peer stream) fail closed, because self is never a connected or proved
+   peer, but a synchronous refusal is a fallback trigger, so the frame
+   reaches another carrier anyway. The caller then believes the broadcast
    succeeded and skips its per-member fallback, delivering to nobody. One such
    transport is enough to lose the frame, which is why the rule is a pin rather
    than a preference.
@@ -174,10 +174,10 @@ fallback leaves exposed.
 |--------|-----------|------|
 | `__CUSTODY_RECEIPT__` | custodian to depositor | JSON `{"v":1,"id":<held frame id>,"hold_ms":<u64>}`. Signature-gated like every control frame; introduces no signing domain of its own |
 
-The receipt is the one frame [Custody](custody.md) adds. It is reserved
-ahead of the implementation on the same terms `__DATA_V1__` was: the name is
-registered before any frame uses it, so no application message sent in the
-meantime can occupy it. A receipt settles nothing and is never routed as an
+The receipt is the one frame [Custody](custody.md) adds. It was reserved
+ahead of the implementation on the same terms `__DATA_V1__` was: the name was
+registered before any frame used it, so no application message sent in the
+meantime could occupy it. A receipt settles nothing and is never routed as an
 acknowledgement; a receiver that reserves the prefix but does not implement
 custody MUST NOT advertise `data_versions` entry 7, and then never receives
 one.

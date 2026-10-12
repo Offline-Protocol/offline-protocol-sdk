@@ -351,7 +351,7 @@ read the "cannot convert value of type ..." error) rather than inferring it.
 
 ```objective-c
 RCT_EXTERN_METHOD(myNewMethod:(NSString *)param1
-                  param2:(nonnull NSNumber *)param2
+                  param2:(NSInteger)param2
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 ```
@@ -369,14 +369,13 @@ await OfflineProtocolNativeModule.myNewMethod('value', 42);
 - **UniFFI UDL**: `crates/offline-protocol-uniffi/src/offline_protocol.udl`
 - **Generated Swift Bindings**: `ios/Generated/offline_protocol.swift`
 
-## Future Improvements
+## Automated Selector Check
 
-Consider creating a validation script that:
-1. Parses `@objc func` methods from Swift
-2. Parses `RCT_EXTERN_METHOD` declarations from Objective-C
-3. Compares them and reports mismatches
-
-This would help catch bridge sync issues during development.
+`react_native_ios_objc_shim_and_swift_agree_on_every_selector` in
+`offline-protocol-uniffi` parses the `@objc func` methods from Swift and the
+`RCT_EXTERN_METHOD` declarations from this bridge, and fails on any mismatch
+(see [Renamed Parameter Label](#renamed-parameter-label)). It compares
+selectors, not types: the type rules in Step 3 are still held by review.
 
 ## Invariant: `deinit` must never name `self` in a capture list
 

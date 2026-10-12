@@ -7,11 +7,20 @@ registers itself with the HTTP front on its own host at start. Standard
 library only.
 
     python3 provider.py --front http://127.0.0.1:8080 --port 9000
+    python3 provider.py --allow off1q9kd... --allow off1qx7j...
 
 A front started with ``--http-token-file`` refuses a registration without
 its token; pass the same file as ``--token-file``.
 
-Prints one JSON line once registered, ``{"registered": "timeofday", "port": N}``.
+With ``--allow``, a caller whose address is not listed is answered 403. The
+header is trustworthy only because the callback listens on loopback, where
+only programs in this host's network namespace (the front among them) can
+reach it: a callback other programs can reach must not authorize on it.
+
+Prints one JSON line once registered,
+``{"registered": "timeofday", "port": N, "address": "off1..."}``, where
+``address`` is this device's, for the calling host to name (``null`` when
+the front did not say).
 """
 
 from __future__ import annotations
@@ -31,6 +40,9 @@ SERVICE = "timeofday"
 
 
 class Handler(BaseHTTPRequestHandler):
+    #: Caller addresses served; empty serves every caller.
+    allowed: frozenset[str] = frozenset()
+
     def _answer(self) -> None:
         # Read any body before answering: a request whose body is left
         # unread can be reset by the kernel when the socket closes.
@@ -42,11 +54,15 @@ class Handler(BaseHTTPRequestHandler):
         if urlsplit(self.path).path != "/now":
             self._json(404, {"error": "no such path"})
             return
+        caller = self.headers.get("X-Offline-Protocol-Sender")
+        if self.allowed and caller not in self.allowed:
+            self._json(403, {"error": "caller not allowed", "caller": caller})
+            return
         self._json(
             200,
             {
                 "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "caller": self.headers.get("X-Offline-Protocol-Sender"),
+                "caller": caller,
             },
         )
 
@@ -65,24 +81,40 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write(f"{self.address_string()} {format % args}\n")
 
 
+def _front_headers(token_file: str | None) -> dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if token_file:
+        # Read at every attempt: the front writes a new token each start.
+        # A missing file is the front not having started yet; any other
+        # failure (a permission, a directory) will not fix itself.
+        try:
+            with open(token_file, encoding="utf-8") as handle:
+                headers["X-Offline-Protocol-Token"] = handle.read().strip()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise SystemExit(f"--token-file: {exc}") from None
+    return headers
+
+
+def own_address(front: str, token_file: str | None) -> str | None:
+    """This device's address from the front's ``GET /health``, or ``None``."""
+    request = urllib.request.Request(f"{front.rstrip('/')}/health", headers=_front_headers(token_file))
+    try:
+        with urllib.request.urlopen(request, timeout=5) as reply:
+            address = json.loads(reply.read()).get("local_address")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return address if isinstance(address, str) else None
+
+
 def register(front: str, port: int, deadline: float, token_file: str | None) -> None:
     """``PUT /services/timeofday`` on the front, retried while the front is
     starting: unreachable, or a 5xx while it connects to the service. A 4xx
     is the front refusing this registration, and is final."""
     body = json.dumps({"callback": f"http://127.0.0.1:{port}", "version": "1"}).encode()
     while True:
-        headers = {"Content-Type": "application/json"}
-        if token_file:
-            # Read at every attempt: the front writes a new token each start.
-            # A missing file is the front not having started yet; any other
-            # failure (a permission, a directory) will not fix itself.
-            try:
-                with open(token_file, encoding="utf-8") as handle:
-                    headers["X-Offline-Protocol-Token"] = handle.read().strip()
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                raise SystemExit(f"--token-file: {exc}") from None
+        headers = _front_headers(token_file)
         request = urllib.request.Request(
             f"{front.rstrip('/')}/services/{SERVICE}", data=body, method="PUT", headers=headers
         )
@@ -109,12 +141,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=9000, help="where to serve (0 picks a free port)")
     parser.add_argument("--token-file", help="the front's --http-token-file, when it has one")
     parser.add_argument("--wait", type=float, default=30, help="seconds to wait for the front to start")
+    parser.add_argument(
+        "--allow",
+        action="append",
+        default=[],
+        metavar="ADDRESS",
+        help="serve only this caller's address (repeat for more); without it, every caller",
+    )
     args = parser.parse_args(argv)
+    Handler.allowed = frozenset(args.allow)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     port = server.server_address[1]
     Thread(target=server.serve_forever, daemon=True).start()
     register(args.front, port, time.monotonic() + args.wait, args.token_file)
-    print(json.dumps({"registered": SERVICE, "port": port}), flush=True)
+    address = own_address(args.front, args.token_file)
+    print(json.dumps({"registered": SERVICE, "port": port, "address": address}), flush=True)
     try:
         while True:
             time.sleep(3600)

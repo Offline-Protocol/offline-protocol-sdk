@@ -283,7 +283,9 @@ strictly separate from ordinary decryption failure. See
 
 On a desync the receiver:
 
-1. **Withholds** the delivery acknowledgement and unmarks the identifier.
+1. **Withholds** the delivery acknowledgement and unmarks the identifier. A
+   frame that came over the relay is answered `undecryptable` instead, which
+   is never read as a delivery.
 2. Does **not** enqueue. The ciphertext is sealed to a dead epoch and can never
    drain.
 3. Schedules a re-key.

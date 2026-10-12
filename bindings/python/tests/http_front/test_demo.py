@@ -57,6 +57,104 @@ async def test_the_demo_provider_answers_through_two_fronts(hosts):
         await process.wait()
 
 
+
+CLIENT = PROVIDER.with_name("client.py")
+
+
+async def _start_provider(hosts, *extra: str) -> asyncio.subprocess.Process:
+    """The demo provider registered with host B's front, with ``extra``
+    arguments; the caller kills it."""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        str(PROVIDER),
+        "--front",
+        f"http://127.0.0.1:{hosts.b.port}",
+        "--port",
+        "0",
+        "--wait",
+        "10",
+        *extra,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    line = await asyncio.wait_for(process.stdout.readline(), 30)
+    if not line:
+        stderr = await asyncio.wait_for(process.stderr.read(), 5)
+        process.kill()
+        await process.wait()
+        pytest.fail(f"the provider exited before registering: {stderr.decode(errors='replace')}")
+    registered = json.loads(line)
+    assert registered["registered"] == "timeofday"
+    # The provider names its own device, for the calling host to use.
+    assert registered["address"] == hosts.manager_b.local_address
+    return process
+
+
+async def test_the_demo_provider_refuses_a_caller_off_its_allowlist(hosts):
+    if not PROVIDER.exists():
+        pytest.skip("the example ships with the repository only")
+    stranger = "off1" + "q" * 40
+    process = await _start_provider(hosts, "--allow", stranger)
+    try:
+        status, _, body = await hosts.request(
+            hosts.a, host_for("timeofday", "bob"), "/now", method="GET", body=None
+        )
+        assert status == 403
+        assert json.loads(body)["caller"] == hosts.manager_a.local_address
+    finally:
+        process.kill()
+        await process.wait()
+    process = await _start_provider(hosts, "--allow", hosts.manager_a.local_address)
+    try:
+        status, _, body = await hosts.request(
+            hosts.a, host_for("timeofday", "bob"), "/now", method="GET", body=None
+        )
+        assert status == 200
+        assert json.loads(body)["caller"] == hosts.manager_a.local_address
+    finally:
+        process.kill()
+        await process.wait()
+
+
+async def test_the_demo_client_calls_through_its_front_without_curl(hosts):
+    if not CLIENT.exists():
+        pytest.skip("the example ships with the repository only")
+    process = await _start_provider(hosts)
+    try:
+        client = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(CLIENT),
+            "bob",
+            "--front",
+            f"http://127.0.0.1:{hosts.a.port}",
+            "--timeout",
+            "10",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        stdout, stderr = await asyncio.wait_for(client.communicate(), 30)
+        assert client.returncode == 0, stderr.decode(errors="replace")
+        assert json.loads(stdout)["caller"] == hosts.manager_a.local_address
+        # An unknown alias is the front's own 404, reported with its token.
+        client = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(CLIENT),
+            "nobody",
+            "--front",
+            f"http://127.0.0.1:{hosts.a.port}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        _, stderr = await asyncio.wait_for(client.communicate(), 30)
+        assert client.returncode == 1
+        assert stderr.decode().startswith("404 unknown_device")
+    finally:
+        process.kill()
+        await process.wait()
+
 async def _run_provider_against(*answers: tuple[int, dict]) -> tuple[int, str, str, int]:
     """Runs the provider against a stub front that gives ``answers`` in turn
     (the last one repeated); returns its exit code, stdout, stderr and the

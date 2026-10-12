@@ -135,12 +135,12 @@ define_internal_prefixes! {
     /// Prefix for read receipt messages.
     READ_RECEIPT = "__READ_RECEIPT__",
     /// Prefix for the custody receipt a custodian answers a deposit with
-    /// (`docs/spec/custody.md`). Reserved ahead of the implementation on the
-    /// same terms as `DATA_V1`: the name is registered before any frame uses
-    /// it, so no user message sent in the meantime can occupy it. Not in
-    /// `DATA_PLANE_PREFIXES`, so it is signature-gated by construction; no
-    /// handler consumes it yet, and no peer is sent one until it advertises
-    /// the custody capability entry.
+    /// (`docs/spec/custody.md`). It was reserved ahead of the implementation
+    /// on the same terms as `DATA_V1`, so no user message sent in the meantime
+    /// could occupy it. Not in `DATA_PLANE_PREFIXES`, so it is signature-gated
+    /// by construction. The custodian handles it on arrival
+    /// (`custodian.rs`), and no peer is sent one until it advertises the
+    /// custody capability entry.
     CUSTODY_RECEIPT = "__CUSTODY_RECEIPT__",
 }
 

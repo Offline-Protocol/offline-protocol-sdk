@@ -33,8 +33,8 @@ The Offline Protocol SDK uses an extensible transport architecture that allows m
 │    ┌──────────┴────────┬─────────────┐            │
 │    │                   │              │            │
 │ ┌──▼────────┐  ┌──────▼──────┐  ┌───▼──────┐    │
-│ │BleManager │  │WifiManager  │  │NetManager│    │
-│ │(Impl)     │  │(Future)     │  │(Future)  │    │
+│ │BleManager │  │WifiDirect   │  │Internet  │    │
+│ │           │  │Manager      │  │Manager   │    │
 │ └───────────┘  └─────────────┘  └──────────┘    │
 └────────────────────┬────────────────────────────────┘
                      │
@@ -109,7 +109,7 @@ interface TransportManager {
 
 **Files**:
 - iOS: `bindings/react-native/ios/BleManager.swift`
-- Android: `bindings/react-native/android/.../BleManager.kt`
+- Android: `bindings/react-native/android/.../ble/BleTransportFacade.kt`
 
 **Features**:
 - Automatic scanning for nearby devices
@@ -129,7 +129,8 @@ interface TransportManager {
   when a peer runs several apps on this SDK, to pick this app's instance)
 - Hello Characteristic: `6E400006-B5A3-F393-E0A9-E50E24DCCA9E` (written once
   by a central with its identity assertion, so the peer maps the central's
-  address without dialling it back; optional, Android only so far)
+  address without dialling it back; optional: served by Android and the
+  Python service, written by iOS, Android and the Python service as centrals)
 
 These, the fragment header and the reassembly rules are specified normatively
 in [Bluetooth LE framing](spec/ble-framing.md), which is the authority; this
@@ -238,7 +239,7 @@ Device ←→ Platform Bridge ←→ Reticulum Stack ←→ LoRa/TCP/UDP/I2P ←
 - Disabled by default (`reticulumEnabled: false`) — requires external infrastructure
 - Low bandwidth (~0.7 KB/s typical, ~2.7 KB/s peak on LoRa), so excluded from media transfer
 - DORS gives it a low tie-break priority (3) — second only to Nostr (resilience fallback)
-- Connection timeout: 60 seconds (vs 30s for Internet)
+- Connection timeout: 60 seconds in the bundled managers (vs 10s for Internet)
 
 See the [Reticulum Transport Guide](reticulum.md) for full setup and integration details.
 
@@ -612,7 +613,7 @@ Test with mock protocol:
 
 ## Reference Implementation
 
-See `BleManager.swift` and `BleManager.kt` for complete, production-ready examples of the TransportManager pattern.
+See `BleManager.swift` and `ble/BleTransportFacade.kt` for complete, production-ready examples of the TransportManager pattern.
 
 ## Summary
 

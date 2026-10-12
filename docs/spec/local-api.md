@@ -624,7 +624,7 @@ and is the one a client is written against.
 | `message_received` | `message_id`, `sender`, `recipient`, `content`, `hop_count #`, `transport`, `timestamp #`, `lamport_clock #`, `reply_to_msg?`, `reply_context {ReplyContext}?`, `content_type`, `media_metadata {MediaMetadata}?`, `forward_info {ForwardInfo}?`, `encrypted !`, `app_id` | `app_id` |
 | `message_delivered` | `message_id`, `latency_ms #`, `hop_count #`, `transport` | `message_id` |
 | `message_failed` | `message_id`, `reason`, `retry_count #` | `message_id` |
-| `message_decryption_failed` | `message_id`, `sender`, `code <DecryptionFailureCode>`, `reason` | `all` |
+| `message_decryption_failed` | `message_id`, `sender`, `code <DecryptionFailureCode>`, `reason`, `sealed_at_ms #?`, `session_established_at_ms #?` | `all` |
 | `transport_switched` | `from?`, `to`, `reason` | `all` |
 | `relay_promoted` | `connection_count #`, `battery_level #?` | `all` |
 | `relay_demoted` | `reason` | `all` |
@@ -675,8 +675,8 @@ and is the one a client is written against.
 | `group_role_changed` | `group_id`, `user_id`, `new_role`, `changed_by` | `all` |
 | `group_renamed` | `group_id`, `new_name`, `old_name?`, `renamed_by` | `all` |
 | `service_discovered` | `query_id`, `service_id`, `version`, `provider_peer_id`, `capabilities` (object), `hop_count #` | `query_id` |
-| `service_request_received` | `request_id`, `service_id`, `method`, `body`, `sender` | `service_id` |
-| `service_response_received` | `request_id`, `service_id`, `status`, `body`, `provider_peer_id` | `request_id` |
+| `service_request_received` | `request_id`, `service_id`, `method`, `body`, `sender`, `encrypted !` | `service_id` |
+| `service_response_received` | `request_id`, `service_id`, `status`, `body`, `provider_peer_id`, `encrypted !` | `request_id` |
 | `presence_updated` | `peer_id`, `status <PresenceStatus>`, `timestamp #`, `last_seen_ms #?`, `source <PresenceSource>` | `all` |
 | `typing_indicator_received` | `sender`, `conversation_id`, `is_typing !`, `timestamp #` | `all` |
 | `read_receipt_received` | `sender`, `message_ids []`, `timestamp #` | `all` |

@@ -18,11 +18,17 @@ macOS, Linux, and Windows can use the Python binding's snake_case
   // Optional configurations
   transports?: TransportsConfig,
   binaryWireEnabled?: boolean,    // Binary wire-codec kill switch (default: true)
+  fileTransfer?: FileTransferConfig,
   encryption?: EncryptionConfig,  // NEW: Auto-encryption settings
+  group?: GroupConfig,
   dors?: DorsConfig,
+  meshRelay?: MeshRelayConfig,
+  custody?: CustodyConfig,
   relay?: RelayConfig,
-  reliability?: ReliabilityConfig,
   network?: NetworkConfig,
+  reliability?: ReliabilityConfig,
+  data?: DataConfig,
+  security?: SecurityConfig,
 }
 ```
 
@@ -235,11 +241,6 @@ macOS, Linux, and Windows can use the Python binding's snake_case
     rssiSwitchThreshold: -80,  // Switch earlier on poor signal
   },
   
-  path: {
-    forwardToTopK: 2,  // Fewer relays to reduce congestion
-    maxCongestionLevel: 0.6,  // Stricter congestion filtering
-  },
-  
   relay: {
     minBatteryForRelay: 50,  // Carry for others only well above half charge
   },
@@ -438,6 +439,20 @@ the `media_resend_required` path instead. See
 [MLS Integration](./mls-integration.md#crypto-failure-recovery) for the full
 mechanism.
 
+### Security Configuration
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `security.controlFreshnessEnforced` | boolean | true | Refuse a signed control frame stamped more than 30 days ago or more than 48 hours ahead of this device's clock (also accepted as a top-level `controlFreshnessEnforced`; the nested value wins) |
+
+The check is judged against this device's clock, so a device that comes up
+with an unset clock refuses every honest peer, key exchange included. A run of
+`STALE_CONTROL_FRAME` security warnings naming many different peers is that
+clock; one peer while others are fine is that peer. Setting the switch to
+`false` restores the earlier behaviour exactly (signatures still verified,
+nothing refused for its age). It is a recovery tool for a fleet whose clocks
+are wrong, not a setting to ship with.
+
 ### DORS Configuration
 
 | Parameter | Type | Default | Description |
@@ -541,13 +556,6 @@ const config: ProtocolConfig = {
 The counters are `getCustodyStats()`, and `eraseCustody()` drops every held
 frame; see [mesh.md](mesh.md#holding-a-frame-for-hours-custody) for what the
 numbers mean and what a custodian owes.
-
-### Path Configuration
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `forwardToTopK` | number | 3 | Number of relays to forward to |
-| `maxCongestionLevel` | number | 0.7 | Max congestion threshold (0-1) |
 
 ### Reliability Configuration
 
@@ -915,7 +923,7 @@ Two consequences worth knowing:
 **Available Transports**: Internet, BLE, Wi-Fi Direct, Reticulum, Nostr
 
 **Permissions Required**:
-- `BLUETOOTH`, `BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT`
+- `BLUETOOTH`, `BLUETOOTH_SCAN`, `BLUETOOTH_CONNECT`, `BLUETOOTH_ADVERTISE`
 - `ACCESS_FINE_LOCATION` (for BLE scanning)
 - `ACCESS_WIFI_STATE`, `NEARBY_WIFI_DEVICES`
 - `ACCESS_NETWORK_STATE`, `CHANGE_WIFI_MULTICAST_STATE` (declared by the SDK; the peer-stream slot's LAN carrier)
@@ -932,7 +940,7 @@ Two consequences worth knowing:
 {
   transports: {
     ble: { enabled: true },
-    wifiDirect: { enabled: false },  // Not available on iOS
+    wifiDirect: { enabled: false },  // The peer-stream slot (LAN or AWDL on iOS); enabling it needs NSBonjourServices
     internet: { enabled: true },
   }
 }
@@ -941,7 +949,8 @@ Two consequences worth knowing:
 ### Desktop (Python)
 
 The Python binding supports macOS, Linux, and Windows. Internet/WebSocket, BLE,
-Reticulum, and Nostr are available; Wi-Fi Direct is not implemented on desktop.
+Reticulum (a gateway client), and Nostr are available; the `wifi_direct` slot is
+a TCP peer stream over the LAN (`PeerStreamManager`), not Wi-Fi Direct.
 Configuration uses the generated snake_case fields:
 
 ```python
@@ -1016,9 +1025,6 @@ Build and package details are in
       outboxMaxLifetimeMs: 2592000000,  // 30 days
     }
   },
-  path: {
-    forwardToTopK: 5,  // More redundancy
-  }
 }
 ```
 

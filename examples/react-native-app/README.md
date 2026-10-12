@@ -38,8 +38,8 @@ A modern, user-friendly messaging application built with the Offline Protocol SD
 ## Architecture
 
 ### Modern React Native Stack
-- **React Navigation 7**: Tab and stack navigation with smooth transitions
-- **React Native Reanimated 3**: High-performance animations and gestures
+- **React Native 0.82**: Screen switching handled in-app (`MainAppScreen`), with no navigation library
+- **Animated API**: Animations use React Native's built-in `Animated`
 - **TypeScript**: Full type safety throughout the application
 - **Context API**: State management with React Context and hooks
 
@@ -57,7 +57,7 @@ A modern, user-friendly messaging application built with the Offline Protocol SD
 ## Getting Started
 
 ### Prerequisites
-- Node.js 18 or higher
+- Node.js 20 or higher
 - React Native development environment
 - iOS Simulator or Android Emulator
 - Physical devices for testing peer-to-peer functionality
@@ -172,16 +172,6 @@ const customTheme = {
     // ... other colors
   }
 };
-```
-
-### Animations
-Animations can be customized using the animation utilities:
-
-```typescript
-import { ANIMATION_PRESETS } from '../utils/animations';
-
-// Custom entrance animation
-const customAnimation = ANIMATION_PRESETS.fadeIn(500);
 ```
 
 ### Responsive Design

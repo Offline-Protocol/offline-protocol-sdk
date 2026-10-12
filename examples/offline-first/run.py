@@ -6,9 +6,15 @@ so a scenario passes on the engine's own events, not on a log read by eye:
 
   1 store and forward   B off, A sends, B on: B receives it, A gets B's receipt
   2 sender restarts     B off, A sends, A killed and restarted, B on: same
-  4 through the middle  A and C meet once, then share no network: C receives
+  4 through the middle  A and C share no network and never meet: C receives
                         A's message one hop away, B reports carrying it, and
-                        A gets C's receipt back the same way
+                        A gets C's receipt back the same way. On identities
+                        that ran it before (no --fresh), the session they
+                        formed through B is reused, and the table says so
+  5 carried for a sender that is off
+                        C off, A sends, B takes the message, A off, C on: C
+                        receives it from B while A is still off, and once A
+                        is back its queues drain
 
 Without --ssh the devices are the containers of compose.yml in
 this directory, and switching a device off is `docker stop`. With --ssh each
@@ -54,6 +60,10 @@ HOP_RECEIPT_S = 20
 #: service answering on its socket.
 PAIR_S = 90
 READY_S = 60
+#: Scenario 5: how long B has to take A's message before A is switched off,
+#: and how long A has, once back, to settle every message it queued.
+CARRIED_S = 30
+SETTLED_S = 90
 
 
 class ScenarioFailed(Exception):
@@ -123,6 +133,13 @@ class Device:
         if status != 0:
             raise ScenarioFailed(f"{self.name} could not send: {err}")
         return lines[-1]["sent"]["message_id"]
+
+    def state(self, *peers: "Device") -> dict:
+        flags = [arg for peer in peers for arg in ("--peer", peer.address)]
+        status, lines, err = self.verify("state", *flags, timeout=30)
+        if status != 0:
+            raise ScenarioFailed(f"{self.name} did not report its state: {err}")
+        return lines[-1]["state"]
 
 
 def _json_lines(text: str) -> list[dict]:
@@ -215,12 +232,6 @@ class Runner:
     def kill(self, device: str) -> None:
         raise NotImplementedError
 
-    def join_a_and_c(self) -> None:
-        raise NotImplementedError
-
-    def part_a_and_c(self) -> None:
-        raise NotImplementedError
-
     def restore(self) -> None:
         """Every device on again after a scenario that failed part-way, so
         the next one does not fail for a device the last one left off."""
@@ -260,37 +271,7 @@ class DockerRunner(Runner):
     def kill(self, device: str) -> None:
         self._docker("kill", "--signal", "KILL", f"{PROJECT}-{device}")
 
-    def _c_on_net_ab(self) -> bool:
-        networks = subprocess.run(
-            ["docker", "inspect", "--format", "{{json .NetworkSettings.Networks}}", f"{PROJECT}-c"],
-            check=True, capture_output=True, text=True,
-        ).stdout
-        return f"{PROJECT}_net-ab" in json.loads(networks)
-
-    def join_a_and_c(self) -> None:
-        # A run that stopped between this and part_a_and_c leaves C on net-ab,
-        # where `compose up` does not take it off; connecting it again fails.
-        if not self._c_on_net_ab():
-            self._docker("network", "connect", f"{PROJECT}_net-ab", f"{PROJECT}-c")
-
-    def part_a_and_c(self) -> None:
-        # Stopped while still on net-ab, so A sees the stream close. Taken off
-        # the network first, C would leave A a stream that looks open until
-        # keepalive ends it (about 30 s), and a message A sends in that window
-        # goes down it and is retried down it, reaching the mesh only on the
-        # first retry after keepalive, past HOP_RECEIVED_S.
-        self._docker("stop", f"{PROJECT}-c")
-        self._docker("network", "disconnect", f"{PROJECT}_net-ab", f"{PROJECT}-c")
-        self._docker("start", f"{PROJECT}-c")
-
     def restore(self) -> None:
-        # A scenario 4 that failed between join_a_and_c and part_a_and_c
-        # leaves C on net-ab, linked to A: every later scenario would run on
-        # a graph where B is not the only way between them. Parted the same
-        # way part_a_and_c does it, stopped first so A sees the stream close.
-        if self._c_on_net_ab():
-            self._docker("stop", f"{PROJECT}-c")
-            self._docker("network", "disconnect", f"{PROJECT}_net-ab", f"{PROJECT}-c")
         # `docker start` leaves a running container as it is.
         self._docker("start", *(f"{PROJECT}-{d}" for d in "abc"))
 
@@ -323,12 +304,6 @@ class SshRunner(Runner):
 
     def kill(self, device: str) -> None:
         self._ask(f"cut {device}'s power, or kill -9 its service")
-
-    def join_a_and_c(self) -> None:
-        self._ask("put a and c where they hear each other directly")
-
-    def part_a_and_c(self) -> None:
-        self._ask("move a and c apart so only b hears both (restart c's service to drop the old link)")
 
     def restore(self) -> None:
         self._ask("make sure a, b and c are all on")
@@ -375,13 +350,12 @@ class Lab:
 
     def through_the_middle(self, allow_missing_receipt: bool) -> Result:
         name = "4 through the middle"
-        self.runner.join_a_and_c()
-        self.c.wait_ready()
-        self.pair(self.a, self.c)
-        self.runner.part_a_and_c()
-        self.c.wait_ready()
+        # A and C are never put on one network: whatever session they have,
+        # they formed through B, in this run or an earlier one.
         self.pair(self.b, self.c)
         self.pair(self.a, self.b)
+        before = self.a.state(self.c)["sessions"][self.c.address]
+        met = "A and C had never met" if before == "NoKeyPackage" else f"A and C met through B before ({before})"
 
         # Both watches start before the send: the receipt on A, and B's
         # report of carrying the frame, are not held for a late client.
@@ -401,13 +375,65 @@ class Lab:
         relayed = _saw(watched_b, "message_relayed", message_id)
         if hops != 1 or relayed is None:
             return Result(name, False, elapsed, f"received at hop {hops}, B relayed it: {relayed is not None}")
-        detail = "C received it at hop 1, B relayed it"
+        detail = f"{met}; C received it at hop 1, B relayed it"
         receipt = _saw(watched_a, "message_delivered", message_id)
         if receipt is not None:
             return Result(name, True, elapsed, detail + f"; A's receipt at hop {receipt['hop_count']}")
         if allow_missing_receipt:
             return Result(name, True, elapsed, detail + "; A's receipt did not come back (allowed)")
         return Result(name, False, elapsed, detail + "; A's receipt never came back")
+
+    def carried_for_a_sender_that_is_off(self) -> Result:
+        name = "5 carried, sender off"
+        self.pair(self.b, self.c)
+        self.pair(self.a, self.b)
+        # A message for C is sealed in A's session with C. With none yet (a
+        # fresh run that skipped 4), one message through B forms it.
+        if self.a.state(self.c)["sessions"][self.c.address] != "SessionConfirmed":
+            first = self.a.send(self.c, f"{name} session {time.strftime('%H:%M:%S')}")
+            status, _, err = self.c.verify("await", first, "--until", "received", "--timeout", str(PAIR_S))
+            if status != 0:
+                return Result(name, False, 0.0, f"no session between A and C through B: {err}")
+            self.pair(self.a, self.c)
+
+        self.runner.off("c")
+        taken_before = self.b.state()["mesh_relay_stats"]["queued"]
+        message_id = self.a.send(self.c, f"{name} {time.strftime('%H:%M:%S')}")
+        # A is switched off only once B has the message: before that, A's
+        # own retries are the only copy.
+        deadline = time.monotonic() + CARRIED_S
+        while self.b.state()["mesh_relay_stats"]["queued"] <= taken_before:
+            if time.monotonic() > deadline:
+                return Result(name, False, 0.0, f"B did not take the message within {CARRIED_S} s")
+            time.sleep(0.5)
+        self.runner.off("a")
+
+        started = time.monotonic()
+        self.runner.on("c")
+        self.c.wait_ready()
+        status, lines, err = self.c.verify("await", message_id, "--until", "received",
+                                           "--timeout", str(DELIVERY_AFTER_RETURN_S))
+        elapsed = time.monotonic() - started
+        if status != 0:
+            return Result(name, False, elapsed, f"C did not receive it from B within {DELIVERY_AFTER_RETURN_S} s: {err}")
+        hops = lines[-1]["event"]["hop_count"]
+        if hops != 1:
+            return Result(name, False, elapsed, f"C received it at hop {hops}, not from B")
+        detail = "C received it from B at hop 1 while A was off"
+
+        # A's receipt went nowhere while A was off. Its own retry, once back,
+        # reaches C, which acknowledges the copy it already has.
+        self.runner.on("a")
+        self.a.wait_ready()
+        deadline = time.monotonic() + SETTLED_S
+        while True:
+            report = self.a.state()
+            if report["retry_queue_size"] == 0 and report["pending_ack_count"] == 0:
+                return Result(name, True, elapsed, detail + "; A's queues drained once it was back")
+            if time.monotonic() > deadline:
+                return Result(name, False, elapsed, detail + f"; A still holds {report['retry_queue_size']} "
+                              f"to retry and {report['pending_ack_count']} unacknowledged after {SETTLED_S} s")
+            time.sleep(1)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -422,7 +448,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--fresh", action="store_true", help="Docker: remove the devices and their identities first")
     parser.add_argument("--no-build", action="store_true",
                         help="Docker: use the image offline-protocol-service:offline-first as it is")
-    parser.add_argument("--scenario", action="append", type=int, choices=(1, 2, 4), help="run only these")
+    parser.add_argument("--scenario", action="append", type=int, choices=(1, 2, 4, 5), help="run only these")
     parser.add_argument("--allow-missing-hop-receipt", action="store_true",
                         help="pass scenario 4 without A's receipt, for an image whose engine predates "
                              "the receipt crossing the mesh (#537)")
@@ -444,11 +470,12 @@ def main(argv: list[str] | None = None) -> int:
         device.wait_ready()
         print(f"{device.name}: {device.address}", file=sys.stderr)
 
-    wanted = args.scenario or [1, 2, 4]
+    wanted = args.scenario or [1, 2, 4, 5]
     for number, name, run in (
         (1, "1 store and forward", lambda: lab.store_and_forward(restart_sender=False)),
         (2, "2 sender restarts", lambda: lab.store_and_forward(restart_sender=True)),
         (4, "4 through the middle", lambda: lab.through_the_middle(args.allow_missing_hop_receipt)),
+        (5, "5 carried, sender off", lab.carried_for_a_sender_that_is_off),
     ):
         if number not in wanted:
             continue

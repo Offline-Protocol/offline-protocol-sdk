@@ -2583,6 +2583,32 @@ durable, kept in the same record as the control-freshness ratchet, and no key
 package clears it, including a replayed one that does not advertise support.
 Blocking and then unblocking the peer does not clear it either.
 
+**More reaches a peer across the mesh, and settles.** A session now forms
+between two devices that have never been in range when a third is between
+them: while a message waits for a peer no carrier reaches, the sender hands
+its key package to its neighbours, and the Welcome comes back the same way
+([mesh guide](mesh.md#starting-a-session-across-the-mesh)). A resend that no
+carrier takes, or that a carrier takes for a recipient it cannot reach, is now
+offered to the mesh as the first send was. And a direct message the mesh
+carried now settles with `message_delivered` when its recipient answers, where
+it used to stay in the outbox until `message_failed` seven days later. Check
+any UI that treated a long-unsettled message to a distant peer as lost. A
+device with `allowRelay` on now also carries these handshake frames, which it
+cannot read; turning it off declines them too.
+
+**A frame that can never decrypt is answered.** When a frame arrived over the
+internet relay and its sender advertises `ack_versions`, the recipient now
+answers a dead frame with an ACK whose `ack_status` is `undecryptable`, so the
+relay stops redelivering it. The sender never reports it delivered: it
+re-seals and resends once, then leaves the message to its retry ladder
+([message delivery](message-delivery.md#events)).
+
+**Frames the SDK sends on its own no longer push.** Engine-originated frames
+(data-sync offers, key packages, typing frames) carry `no_alert` for the relay
+to honour, so an offline peer is no longer woken with "new message" for them.
+User messages, connection requests and accepts, group chat messages and group
+invites still push.
+
 ---
 
 ## Appendix A: limits reference

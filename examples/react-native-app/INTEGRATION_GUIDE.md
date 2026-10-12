@@ -17,7 +17,7 @@ This guide walks you through integrating the Offline Protocol SDK into a new or 
 
 - React Native 0.70.0 or higher
 - Node.js 20 or higher
-- iOS 12.0+ or Android API 21+
+- iOS 13.0+ or Android API 24+
 - Physical devices for BLE and Wi-Fi Direct testing
 
 ## Installation
@@ -253,7 +253,7 @@ export function useOfflineProtocol(config: ProtocolConfig) {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to initialize');
     }
-  }, [config.appId, config.userId]);
+  }, [config.appId, config.profile]);
 
   const start = useCallback(async () => {
     if (!protocolRef.current) return;
@@ -391,7 +391,7 @@ const config: ProtocolConfig = {
     internet: { enabled: true },     // Enable Internet connectivity
   },
 
-  // DORS (Dynamic Offline Routing Strategy) configuration
+  // DORS (Dynamic Offline Relay Switch) configuration
   dors: {
     preferOnline: true,               // Prefer online routes when available
     switchHysteresis: 15,             // Minimum score delta before switching transports

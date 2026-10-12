@@ -7,8 +7,8 @@
 # bindings/python/docker with its own identity on its own volume. No HTTP
 # front: the scenarios use the local API through offline-protocol-verify.
 #
-# Peers are static (a and c dial b, c also dials a when the scenario puts it
-# on net-ab), so the topology is decided here and not by multicast DNS.
+# Peers are static (a and c dial b), so the topology is decided here and not
+# by multicast DNS. a and c never share a network, and never meet directly.
 #
 # run.py writes .env with one store key per device the first time; keep it,
 # or the devices come back with new addresses.
@@ -47,7 +47,7 @@ services:
     environment:
       <<: *environment
       OFFLINE_PROTOCOL_STORE_KEY: ${KEY_C:?run run.py once, or set KEY_C}
-      OP_PEERS: b:7878 a:7878
+      OP_PEERS: b:7878
     networks: [net-bc]
     volumes: [data-c:/var/lib/offline-protocol]
 

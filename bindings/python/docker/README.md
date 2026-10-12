@@ -12,6 +12,19 @@ export OFFLINE_PROTOCOL_STORE_KEY="$(openssl rand -hex 32)"   # once per host; k
 docker compose up -d
 ```
 
+Until a release ships the HTTP front, the image builds only from a wheel
+built from a checkout (below). To see the service work before deploying it,
+two demos run on one machine:
+[examples/offline-first](../../../examples/offline-first) (messages held for
+a device that is off, and carried through a third) and
+[examples/http-front](../../../examples/http-front) (two applications with
+no SDK calling each other over HTTP, each in its own container).
+
+This `compose.yml` uses host networking, which on Docker Desktop (macOS,
+Windows) is the namespace of Docker's Linux virtual machine, not the
+desktop's: the front is not on the Mac's loopback, and multicast DNS does
+not reach the Mac's LAN. Use the demos there; this file is for a Linux host.
+
 ## What a host's container manifest must grant
 
 Whatever runs the container (Compose, a fleet manager, a unit file), it owes
@@ -19,12 +32,36 @@ the service these, and the failure each one prevents:
 
 | Grant | Why |
 |---|---|
-| The host's network namespace | Multicast DNS (UDP 5353) does not leave a container bridge: on one, `--lan` finds only containers on the same bridge, never another host. It also puts the front on the host's loopback, where the host's applications reach it. Set `OP_LISTEN` to the host's LAN address (`192.168.1.10:7878`): on `0.0.0.0` the multicast DNS record names every interface the host has, and on a Docker host that includes `docker0`'s `172.17.0.1`, which every other Docker host holds as its own. A peer that dials that entry first reaches itself, refuses the stream, and backs off for up to ten minutes before it tries the record again. |
+| The host's network namespace | Multicast DNS (UDP 5353) does not leave a container bridge: on one, `--lan` finds only containers on the same bridge, never another host. It also puts the front on the host's loopback, where the host's applications reach it. Set `OP_LISTEN` to the host's LAN address (`192.168.1.10:7878`): on `0.0.0.0` the multicast DNS record names every interface the host has, and on a Docker host that includes `docker0`'s `172.17.0.1`, which every other Docker host holds as its own. A peer dials a record's entries in order and takes the first that connects, so one that lists `docker0` first reaches the dialling host itself every time: that side never connects, and the pair links only when the other side's dial lands. The address must be static: after a DHCP change the bind fails, the peer stream is the only transport the default configuration enables, so the service refuses to start and `restart: unless-stopped` restarts it in a loop. Reserve the address in DHCP. |
 | Inbound TCP 7878 | Other hosts open their peer streams here. Every host also dials, but a pair where neither accepts never connects. |
 | A persistent volume at `/var/lib/offline-protocol` | The identity and every queued message. Without it the device has a new address after every recreate, and its peers' sessions and queued messages go to an address nobody holds. |
 | `OFFLINE_PROTOCOL_STORE_KEY` from the host's secret store | Everything on the volume is sealed under it. A volume shared with another application is readable by it, so the key must not sit beside the data. Losing the key loses the identity. |
 | The system D-Bus socket, for Bluetooth LE | With `"ble_enabled": true` the service advertises to phones through BlueZ. It needs `/run/dbus/system_bus_socket` and a D-Bus policy that lets it register an advertisement and a GATT application; running as root inside the container is the simplest. Another process advertising on the same adapter may hold its only advertising slot: the service then logs the refusal and runs on its other transports. |
 | A clock | Freshness checks and request deadlines use it. A provider drops a request more than 60 s past its deadline, so a host whose clock runs ahead after an offline boot refuses valid requests. |
+
+## Who can reach this host
+
+The defaults admit any device, and the application behind the front
+decides who it serves:
+
+- The peer stream listens on every interface (`0.0.0.0:7878`) and the
+  baked configuration has `auto_key_exchange` on, so any device running this
+  SDK that reaches the port forms a session by itself. It can then call
+  every service registered with the front and answer discovery. An address
+  is a key the device generated: a consistent key, not a known device.
+- A provider that serves only some devices compares
+  `X-Offline-Protocol-Sender` with addresses it was given out of band. That
+  header is trustworthy only when nothing but the front can reach the
+  provider's callback: see [Who may call](../../../examples/http-front/README.md#who-may-call).
+- A `504 deadline_exceeded` does not mean the request did not run: the
+  request is not withdrawn, and a provider that receives it late still
+  serves it ([the HTTP front chapter](../../../docs/spec/http-front.md#the-requester)).
+
+An application in another container reaches the front by sharing the
+network namespace the front listens in: host networking with this
+`compose.yml`, or `network_mode: service:<the service container>` on a
+bridge network, as [the HTTP demo](../../../examples/http-front/README.md#how-an-application-container-reaches-the-front)
+does.
 
 ## Configuration
 
@@ -76,7 +113,10 @@ belong to the uid the container runs as (root, unless remapped) with mode
 
 The image installs the released package from PyPI. A Linux wheel built from
 a checkout, put in `wheels/`, is installed instead, even when PyPI has a
-release with the same version number:
+release with the same version number. On a host that is not Linux, build the
+wheel in a container as
+[the Python README](../README.md#a-linux-wheel-from-a-checkout-on-another-host)
+says; its last step copies it here. Then:
 
 ```bash
 cp bindings/python/dist/offline_protocol_sdk-*-manylinux_*.whl bindings/python/docker/wheels/
@@ -102,3 +142,7 @@ encrypted, in 35 ms. The address and the front's registrations survived a
 restart of the container. Host networking, the deployment this README
 recommends, has not been run between two hosts, and neither has Bluetooth
 LE from a container on hardware.
+
+On 2026-10-12 the image was built from this directory with a wheel made by
+the Python README's container recipe from `main` (d43f4aba), and the two
+demos above passed on it, each on one arm64 laptop.

@@ -27,7 +27,7 @@ A never-committing member's whole life, in one process:
 | Step | Who | What |
 |---|---|---|
 | 0.1-0.2 | leaf | each corrected default, restored, produces a key package the phone **refuses** |
-| 0.3 | leaf | a year-long lifetime is **accepted**, pinning a cap OpenMLS declares and never applies |
+| 0.3 | leaf | a year-long lifetime is **accepted** by OpenMLS alone and **refused** by the SDK's own cap, pinning that the cap is the SDK's |
 | 1-2 | leaf | derive an `off1` address, mint a key package with the corrections |
 | 3-4 | phone | parse it, validate it, re-derive the address from the key package it received |
 | 5 | phone | create the group, commit the Add, merge |
@@ -88,13 +88,16 @@ them individually says so on the first run.
 Step 0.3 pins the finding from both directions. The 28-day lifetime this harness
 uses stays, because RFC 9420 asks an application to define a maximum and it
 bounds how long an unused init key is usable, but it is **leaf-side policy, not
-an interop requirement**. If 0.3 ever starts failing, OpenMLS wired up its cap
-and that changed.
+an interop requirement**. If OpenMLS ever starts refusing it on its own, the
+library wired up its cap and that changed.
 
-It also says something about the phone rather than the leaf: because no cap is
-applied, the SDK admits a key package from any peer with an arbitrarily long
-lifetime, which RFC 9420 asks implementations to reject. That is a gap in
-`MlsManager::import_key_package`, recorded in ADR 0021 and not fixed from here.
+It also said something about the phone rather than the leaf: because OpenMLS
+applies no cap, the SDK used to admit a key package from any peer with an
+arbitrarily long lifetime, which RFC 9420 asks implementations to reject. The
+SDK now applies its own cap, `MAX_ACCEPTED_KEY_PACKAGE_LIFETIME` (90 days, in
+`offline-protocol-sealed`), in `MlsManager::verify_lifetime_bound`, and step 0.3
+models the phone with that cap: if the SDK ever accepts the year-long package
+again, the cap has been removed or widened.
 
 ## What this does not prove
 

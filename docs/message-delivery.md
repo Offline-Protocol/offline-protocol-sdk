@@ -130,6 +130,10 @@ When `internet_status_changed(true)` is called after a disconnection:
 
 Both flush methods cap at 20 messages per invocation to prevent blocking. If more messages are pending, the remainder stays in the retry queue and will be picked up on the next `process()` tick or the next flush.
 
+### Resends and the mesh
+
+Every resend (a retry-queue send, either flush, and so the ACK-timeout and parked-probe resends that run through them) asks the same question the first send does: a resend that no carrier takes, or that a carrier takes for a recipient it cannot reach, is also handed to mesh neighbors to carry. A resend over a link that still reaches the recipient is not, so an ordinary retransmission costs one copy. See [An online device in a mixed neighborhood](./mesh.md#an-online-device-in-a-mixed-neighborhood).
+
 ### Relay identity: the address declaration
 
 The relay authenticates a JWT and knows the connection by the **account name**

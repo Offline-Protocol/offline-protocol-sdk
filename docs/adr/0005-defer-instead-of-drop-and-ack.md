@@ -2,6 +2,7 @@
 
 **Status:** Accepted
 **Shipped in:** 0.20.1 (extended to every recoverable failure class)
+**See also:** the queue's time-to-live is now 24 hours (`DEFAULT_PENDING_TTL_MS`, #438), and since #543 a frame that can never decrypt is answered `undecryptable` when it arrived over the relay; see [Delivery and acknowledgements](../state-machines/delivery-and-acks.md).
 
 ## Context
 
