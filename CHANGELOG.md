@@ -95,8 +95,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   --http HOST:PORT` (with the new `http` extra) starts the front in the
   service's process, as a client of the local API; `offline-protocol-http-front`
   runs it apart. A request and its response travel as the content of an end
-  to end encrypted direct message, never on the service request path, whose
-  bodies are signed plaintext, and a front acts only on a message the engine
+  to end encrypted direct message, never on the service request path, which
+  still sends a body as signed plaintext to a provider it has no confirmed
+  session with, and a front acts only on a message the engine
   reports as encrypted, so the provider's callback is told the caller's
   MLS-authenticated address in `X-Offline-Protocol-Sender`. A device is named
   by its address, which is a DNS label as it stands, or by an operator alias,
@@ -116,7 +117,14 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   a `401`. A callback answer the requester would refuse, such as a status
   past 599, is `callback_failed` at once rather than a wait for the
   deadline. A provider runs
-  at most 32 callbacks at once. Run one front per service.
+  at most 32 callbacks at once. Run one front per service. The front does
+  not authorize: any device with a session can call every registered
+  service, and with `auto_key_exchange` any device running the SDK that
+  reaches the host forms one. The provider authorizes on
+  `X-Offline-Protocol-Sender`, which it can trust only when nothing but the
+  front reaches its callback, and a `504 deadline_exceeded` does not mean
+  the request did not run: it is not withdrawn, and a provider that receives
+  it within 60 s past its deadline still serves it.
   `docs/spec/http-front.md` is the contract;
   the threat model gains R23 (the front trusts every process that can reach
   it) and the Python bridge rules gain P13.
@@ -130,8 +138,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   a host's container manifest must grant (host networking for multicast DNS,
   inbound TCP 7878, a persistent volume, the store key from a secret store,
   and the system D-Bus socket for Bluetooth LE) and the failure each grant
-  prevents. `examples/http-front` has a provider with no SDK import and a
-  `curl` client, both able to send the front's token. Two containers from
+  prevents. `examples/http-front` has a provider with no SDK import (with
+  `--allow` for an allowlist of caller addresses), a client in Python's
+  standard library for a container with no `curl`, and a `curl` client.
+  Its `compose.yml` runs two boxes with the provider and the client each
+  sharing a box's network namespace, which is how an application container
+  reaches a front on the box's loopback, and its README says when the
+  sender header can be trusted. The Python README says how to build a
+  Linux wheel from a checkout in a container, which the image needs until
+  a release has the front. Two containers from
   the image, on one bridge network, found each other over multicast DNS with
   no peer list and served a request through the front, and the address and
   registrations survived a restart. Bluetooth LE from a container is
@@ -177,19 +192,22 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   three services from the container image on two bridge networks, so the
   middle one is the only way between the other two, and `run.py` runs the
   scenarios with `offline-protocol-verify` and prints a table: store and
-  forward, the sender killed and restarted while its message is queued, and
-  a message carried through the middle device. Its README is the runbook for
+  forward, the sender killed and restarted while its message is queued, a
+  message carried through the middle device to one the sender has never
+  met, and a message the middle device delivers while the sender is off.
+  Its README is the runbook for
   the legs that need hardware (the LAN between hosts, the carrier changing
   under a stream of messages, the relay, a gateway daemon, a phone), with a
-  record of what has been run: scenarios 1, 2 and 4 in containers on one
+  record of what has been run: scenarios 1, 2, 4 and 5 in containers on one
   machine, nothing on hardware yet. Scenario 4 fails unless the sender's
   receipt comes back across the hop. The image gains `OP_GATEWAY` (the
   gateway daemon, for a configuration with `reticulum_enabled`), two baked
   configurations beside the default (`config-ble.json`, `config-relay.json`),
   and the verifier, and its build fails when the installed package has none.
-  Found while running it: a message that a direct stream took and then lost
-  (a device that went away without closing the stream) is retried over
-  direct carriers only and never handed to the mesh (#541).
+  Found while running it, and fixed before release (#541, #540): a message
+  that a direct stream took and then lost (a device that went away without
+  closing the stream) was retried over direct carriers only and never
+  handed to the mesh.
 - **`message_decryption_failed` says how old the frame is.** Two new fields,
   `sealed_at_ms` (when the sender sealed the frame, sender clock, from the
   cleartext envelope) and `session_established_at_ms` (when this device's
