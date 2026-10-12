@@ -206,6 +206,17 @@ A `resp` whose `id` is not waiting, or that comes from a device other than
 the one asked, is dropped. A response that arrives after the deadline is
 dropped.
 
+**`deadline_exceeded` does not mean the request did not run.** The requester
+stops waiting; it does not withdraw the request. The message stays with the
+engine, which keeps retrying it like any other, and a provider that receives
+it no later than the clock slack past its deadline, by the provider's own
+clock, still calls the callback. Only the answer is lost. A requester that
+retries after a 504 can therefore cause the callback to run twice, and a
+callback that drives hardware or moves money can act after its caller was
+told the call timed out. A provider whose effect must not repeat should make
+it idempotent on a key the application chooses, sent in a carried `x-`
+header, since `X-Offline-Protocol-Request-Id` is fresh on every retry.
+
 A request to this device's own address is served locally, without a
 message, by the same steps the provider takes.
 
@@ -236,8 +247,24 @@ On a `message_received` stamped with the front's application id and with
    and a body over the limit is `response_too_large` (502).
 
 **The provider authorizes; the front does not.** Any device whose message
-the engine decrypts can call any registered service. A provider that serves
-only some devices reads `X-Offline-Protocol-Sender` and refuses the rest.
+the engine decrypts can call any registered service. With the engine's
+default `auto_key_exchange`, that is any device running this SDK that can
+reach this one: it forms a session by itself. An address is a key the
+device generated, so an authenticated sender is a consistent key, not a
+known device. A provider that serves only some devices reads
+`X-Offline-Protocol-Sender`, compares it with an allowlist of addresses it
+was given out of band, and refuses the rest.
+
+**`X-Offline-Protocol-Sender` is only as trustworthy as the route to the
+callback.** The front sets it from the MLS-authenticated sender and strips
+any copy a peer sent, so a request through the front cannot forge it. The
+callback, though, is an ordinary HTTP endpoint, and the header is not signed:
+any process that can reach the callback directly can send any value. A
+provider may trust the header only when nothing but the front can reach its
+callback, such as a callback bound to loopback in a network namespace it
+shares with the front alone. A callback on a network other programs share
+(a container bridge network, a host port) is not that, and its provider must
+not authorize on the header.
 
 ## The front's own endpoints
 
@@ -304,7 +331,7 @@ host's own router adds), and is recorded as
 | `bad_request` | 400 | requester | Headers or path over their limit, a header value that is not UTF-8, a path with a dot segment, or a timeout that is not a number |
 | `unknown_device` | 404 | requester | The label is neither an address nor an alias |
 | `body_too_large` | 413 | requester | The request body is over the limit |
-| `deadline_exceeded` | 504 | requester | No response before the deadline |
+| `deadline_exceeded` | 504 | requester | No response before the deadline. The request is not withdrawn and may still run (see the requester) |
 | `recipient_unreachable` | 502 | requester | The engine reported the device unreachable |
 | `send_failed` | 502 | requester | The engine gave up on the request message |
 | `not_connected` | 503 | either | The front has no connection to the local API, or is stopping |

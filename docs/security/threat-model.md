@@ -1022,7 +1022,23 @@ chooses which local URL remote devices reach.
 
 On the remote side, any device whose message this engine decrypts can call
 any registered service: MLS proves who sent a request, and nothing decides
-whether that sender may make it.
+whether that sender may make it. With `auto_key_exchange` on, which the
+service image's configuration sets, that is any device running this SDK
+that reaches the host. MLS proves a consistent key, not a known device: an
+address is a key its device generated.
+
+The sender a provider is told, `X-Offline-Protocol-Sender`, is an unsigned
+HTTP header on the callback request. The front strips any copy a peer sent
+and sets it from the MLS-authenticated sender, so it cannot be forged
+through the front, but any process that can reach the callback directly can
+send it with any value. In a container deployment a callback on a bridge
+network the provider shares with other containers is reachable by all of
+them.
+
+A request whose requester saw `deadline_exceeded` is not withdrawn. The
+engine keeps carrying the message, and the provider serves it if it arrives
+within the clock slack past its deadline, so a request reported as timed out
+can still act, and a retry after it can act twice.
 
 **What bounds it:** bodies never leave the host in the clear (invariant 1 of
 the chapter), the sender a provider is told is the MLS-authenticated one,
@@ -1042,7 +1058,12 @@ refused with `callback_failed` until it lets go.
 **What application teams must do:**
 run the front where only the operator's applications can reach it, with a
 token on any host where a browser runs, and
-authorize in the provider by reading `X-Offline-Protocol-Sender`. A host
+authorize in the provider by comparing `X-Offline-Protocol-Sender` with an
+allowlist of addresses obtained out of band. Bind the callback where only
+the front can reach it (loopback in a network namespace shared with the
+front alone), or do not authorize on the header. Make any callback with a
+side effect idempotent on a key the application chooses, since a 504 does
+not mean it did not run. A host
 that can identify the calling container should pass that identity to the
 front; until then, one front is one application to every rule.
 

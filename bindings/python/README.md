@@ -103,6 +103,44 @@ off one UDL, so they are never refreshed apart.
 
 **Prerequisites:** Rust toolchain, `uniffi-bindgen` (`cargo install uniffi --version 0.30.0 --features cli --locked`).
 
+### A Linux wheel from a checkout, on another host
+
+`bindings/python/scripts/build-wheel.sh` turns one built library into one
+platform wheel. To make a Linux wheel on a Mac, build the library in a Linux
+container from `git archive` output, never by mounting or copying the
+checkout itself (its `target/` alone fills the container VM). The archive
+holds committed files only, generated bindings included, and doubles as the
+throwaway tree the script wants: it rewrites the `pyproject.toml` version and
+the package's native library in place.
+
+Everything runs in the container, which has `readelf` and needs only
+Python's `venv`, `build` and `wheel` added:
+
+```bash
+src="$(mktemp -d)" && git archive HEAD | tar -x -C "$src"
+docker run --rm -v "$src":/src -w /src rust:1-bookworm sh -euc '
+    apt-get update -qq && apt-get install -y -qq python3-venv >/dev/null
+    cargo build --release --locked -p offline-protocol-uniffi
+    python3 -m venv /tmp/venv && . /tmp/venv/bin/activate
+    pip install -q build wheel
+    bash bindings/python/scripts/build-wheel.sh linux-aarch64 \
+        target/release/liboffline_protocol_uniffi.so 0.28.0'
+cp "$src"/bindings/python/dist/*.whl bindings/python/docker/wheels/
+```
+
+The container builds for its own architecture: `linux-aarch64` on Apple
+Silicon, and `linux-x86_64` under `docker run --platform linux/amd64`. The
+script reads the architecture from the library and refuses a mismatch, and
+reads the `manylinux` tag from the library: the wheel claims the glibc the
+library needs, which on Debian bookworm is 2.34, like the published wheels.
+The cargo build takes several minutes the first time; named volumes for
+`/usr/local/cargo/registry` and the target directory keep later builds
+incremental. The last line puts the wheel where the
+[container image](docker/README.md#building-from-a-checkout) installs it
+from. Run 2026-10-12 on an arm64 Mac: the wheel was
+`offline_protocol_sdk-0.28.0-py3-none-manylinux_2_34_aarch64.whl`, and the
+image built from it has the HTTP front and the verifier.
+
 ### Two hosts without a relay
 
 Set `wifi_direct_enabled=True` and `ProtocolManager` builds a
@@ -165,10 +203,14 @@ offline_protocol_sdk/
 ├── gateway_verdict_tracker.py, presence_watch_policy.py
 ├── services.py              # Service registry wrappers with the copy the engine lacks
 ├── dnssd_bridge.py          # Services on the LAN: publish own, import neighbours' (optional extra `lan`)
-├── ble_manager.py           # BLE transport (bleak library)
+├── ble_manager.py           # BLE transport, central role (bleak library)
+├── ble_peripheral.py        # BLE transport, peripheral role (bless library)
 ├── secure_storage.py        # MLS key storage (keyring library)
 ├── state_storage.py         # Restartable protocol state (application data)
-└── transport_manager.py     # Base transport abstraction
+├── transport_manager.py     # Base transport abstraction
+├── local_api/               # The local API server, `offline-protocol-service`
+├── http_front/              # The HTTP front (optional extra `http`), `offline-protocol-http-front`
+└── verify/                  # `offline-protocol-verify`: drives a running service
 ```
 
 ### Transport Managers
@@ -176,7 +218,7 @@ offline_protocol_sdk/
 | Transport | Library | Platforms | Notes |
 |-----------|---------|-----------|-------|
 | Internet/WebSocket | `websockets` | All | Primary transport for desktop |
-| BLE | `bleak` | All | Central (scanner) role only; peripheral/GATT server requires `bless` |
+| BLE | `bleak`, `bless` | Central: all. Peripheral: macOS, Linux | Central (scanner) role as `pm.ble` over `bleak`; peripheral (advertiser and GATT server) role as `pm.ble_peripheral` over `bless`, which is not installed on Windows. Both are built when `ble_enabled=True` |
 | Peer stream (the `wifi_direct` slot) | `asyncio` sockets; `zeroconf` for LAN discovery (optional extra `lan`) | All | `PeerStreamManager`: TCP streams to configured `host:port` peers or hosts found over DNS-SD, each proved by the identity-assertion preamble ([spec](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/spec/stream-framing.md)). Start it after `ProtocolManager.start()`; binds every interface unless `listen_host` narrows it |
 | Reticulum (a gateway daemon) | `asyncio` sockets | All | `GatewayManager` as `pm.gateway` when `reticulum_enabled=True`: the [gateway-daemon contract](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/docs/spec/gateway-contract.md) over TCP to a daemon on local IP (`configure(daemon_address="localhost:4242")`, then `await pm.gateway.start()` after `pm.start()`). Attaches with a signed address declaration, settles each send on the gateway's verdict, watches presence. What answers is a daemon built to the contract; this package ships the device half. Apps driving the slot themselves replace the callback via `protocol.set_reticulum_transport_callback(...)` |
 | Nostr | Built-in | All | Handled in Rust core (BIP-340 signing); `ProtocolManager` wires a stub callback when `nostr_enabled=True` — apps driving Nostr themselves replace it via `protocol.set_nostr_transport_callback(...)` |
