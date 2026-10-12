@@ -13,7 +13,16 @@ read on the device by
 | 1 | Store and forward: B off, A sends, B on | B receives it, and A gets `message_delivered` within 60 s of B coming back |
 | 2 | The sender restarts: B off, A sends, A killed (`SIGKILL`) and started, B on | the same, from the restarted A: the queue was on disk |
 | 3 | The carrier changes: the link A and B were using goes away | every message of a `ping` run is delivered, and `message_delivered.transport` names the new carrier (hardware only, below) |
-| 4 | Through the middle: A and C meet once, then only B hears both | C receives A's message at `hop_count` 1 within 30 s, B reports `message_relayed`, and A gets `message_delivered` back the same way |
+| 4 | Through the middle: A and C never meet, only B hears both | C receives A's message at `hop_count` 1 within 30 s, B reports `message_relayed`, and A gets `message_delivered` back the same way. On fresh identities the key exchange crosses B too |
+| 5 | Carried for a sender that is off: C off, A sends, B takes it, A off, C on | C receives it at `hop_count` 1 within 60 s of coming back, while A is still off, so B held it; once A is back, its retry and acknowledgement queues drain |
+
+The table `run.py` prints gives each scenario's wall-clock seconds from the
+moment the recipient came back (1, 2 and 5) or from the send (4): about half
+a second to a second in containers on one machine. The `latency_ms` a
+receipt carries is the engine's own time from the last transmission to the
+acknowledgement, tens of milliseconds there. Neither says what radios will
+do. A receipt over the LAN peer stream names `wifiDirect`, the transport slot
+the peer stream occupies.
 
 ## In containers, on one machine
 
@@ -28,17 +37,18 @@ them. Peers are static, so the topology is the file's and not multicast
 DNS's.
 
 ```bash
-python3 run.py            # builds the image, starts the devices, runs 1, 2 and 4
-python3 run.py --fresh    # new identities first
-python3 run.py --scenario 4
+python3 run.py            # builds the image, starts the devices, runs 1, 2, 4 and 5
+python3 run.py --fresh    # new identities first: in 4, A and C have never met
+python3 run.py --scenario 4 --scenario 5
 ```
 
 The image installs the package from PyPI unless a Linux wheel built from a
 checkout is in `bindings/python/docker/wheels/`, and its build fails when
 the installed package has no `offline-protocol-verify`, which is true of
-every release so far: until one ships, put a wheel there, or build the image
-another way and pass `--no-build` to use `offline-protocol-service:offline-first`
-as it is. `run.py` writes `.env` with one store key per device the first
+every release so far: until one ships, put a wheel there (built as
+[the Python README](../../bindings/python/README.md#a-linux-wheel-from-a-checkout-on-another-host)
+says), or build the image another way and pass `--no-build` to use
+`offline-protocol-service:offline-first` as it is. `run.py` writes `.env` with one store key per device the first
 time; keep it, or the devices come back with new addresses. It prints each
 scenario as it finishes and a table at the end, and exits non-zero if any
 failed.
@@ -51,23 +61,31 @@ offline-first-<device> offline-protocol-verify --socket /run/offline-protocol/ap
    A, `docker start` B, then `await <id> --until received` on B.
 2. The same with `docker kill --signal KILL` and `docker start` on A between
    the send and B's return.
-4. `docker network connect` C to net-ab and `pair` A and C; `docker stop` C,
-   disconnect it, `docker start` it; then `watch` on A and B, `send` from A
-   to C, and `await --until received` on C.
+4. `pair` B and C, and A and B; `state --peer <C>` on A, to report whether
+   A and C have met (`NoKeyPackage` when they never have); `watch` on A and
+   B; `send` from A to C, and `await --until received` on C. The session
+   between A and C, when there is none yet, forms through B while the
+   message waits.
+5. With A and C in session (one message through B forms it when they are
+   not), `docker stop` C, `send` from A to C, and poll `state` on B until
+   its `mesh_relay_stats.queued` counts one more; then `docker stop` A,
+   `docker start` C, and `await --until received` on C. Last, `docker start`
+   A and poll its `state` until `retry_queue_size` and `pending_ack_count`
+   are both 0.
 
-Two things in that order matter, and both are the engine's rules rather
-than the script's. A receipt that fires while no client is connected is not
-held, so the wait on the sender starts before the recipient can answer. And
-C is stopped before it leaves net-ab: taken off the network first, it would
-leave A a stream that looks open for about 30 s, and a message A sent down
-it would never be handed to B (see the known gaps).
+The order matters in one place, and it is the engine's rule rather than the
+script's: a receipt that fires while no client is connected is not held, so
+the wait on the sender starts before the recipient can answer. That is also
+why 5 checks A's queues rather than awaiting its receipt: A is off when C
+first acknowledges.
 
 ## On hardware
 
 `run.py --ssh a=user@host --ssh b=user@host --ssh c=user@host` runs the same
 checks over ssh against hosts that already run the service, and asks the
-operator to switch devices off and on, and to move a and c apart, at each
-step. Each host runs the [service image](../../bindings/python/docker) under
+operator to switch devices off and on at each step. For 4 and 5, a and c
+must never hear each other directly: each on its own segment that only b
+joins. Each host runs the [service image](../../bindings/python/docker) under
 host networking with `OP_LISTEN` set to its own LAN address, or the service
 directly. The verifier has to run where the service's socket is: for the
 image that is inside the container, so add `--remote-exec "docker exec
@@ -79,8 +97,8 @@ The legs that need real radios or more than one machine, and how to run
 each:
 
 - **LAN between hosts.** Two or three boxes on one segment, `OP_LAN=1` so
-  they find each other over DNS-SD. Scenarios 1, 2, 4 as above; for 4, put
-  C on a second segment that only B joins.
+  they find each other over DNS-SD. Scenarios 1, 2, 4 and 5 as above; for 4
+  and 5, put C on a second segment that only B joins.
 - **The carrier changes (3).** Two boxes with `OP_CONFIG=/etc/offline-protocol/config-ble.json`
   and the D-Bus grant, so both peer streams and Bluetooth LE are up. Start
   `offline-protocol-verify ping <B> --every 2 --count 60` on A, then pull
@@ -116,8 +134,8 @@ each:
 - **A message a direct link took and then lost crosses the mesh late**:
   a message sent down a stream to a device that went away without closing
   it is retried down that stream until keepalive ends it (about 30 s), and
-  only the next retry is handed to the neighbours. That is why scenario 4
-  stops C before taking it off the network A shares with it.
+  only the next retry is handed to the neighbours. No scenario here takes a
+  link away under a live stream; scenario 3 on hardware does.
 - **Every phone receives every notification on a Linux box.** A phone that
   writes the Bluetooth LE Hello (Android, and iOS from this release) is bound
   to its address on the box's peripheral however many centrals are connected.
@@ -125,10 +143,11 @@ each:
   phone receives every fragment, and the core drops what is not addressed to
   it. An app built on an older SDK writes no hello and is mapped to its user id
   only while it is the one central connected.
-- **An image built from 0.28.0 or earlier** never gets the receipt in
-  scenario 4: the engine drops an acknowledgement for a message whose only
-  route was the mesh (#537). Pass `--allow-missing-hop-receipt` to run the
-  rest of the scenario on such an image.
+- **An image built from 0.28.0 or earlier** fails scenarios 4 and 5: that
+  engine forms no session between devices that reach each other only
+  through a third, and drops an acknowledgement for a message whose only
+  route was the mesh (#537). `--allow-missing-hop-receipt` covers only the
+  second, for identities that already share a session.
 
 ## What has been run
 
@@ -136,6 +155,7 @@ each:
 |---|---|---|---|
 | 2026-10-08 | `run.py`, Docker 28.3 on one arm64 laptop, the image built from the 0.28.0 Linux wheel with this branch's Python sources, so an engine without #537 | 1, 2, 4 | pass, twice in a row (receipt latency 29 to 45 ms; 4 without A's receipt, which that engine never sends) |
 | 2026-10-08 | `run.py --fresh` then `run.py`, the same machine, the image with the native library built from `main` after #537 and this branch's Python sources | 1, 2, 4 | pass, twice in a row, A's receipt required in 4 and back at hop 1 (latency 33 to 36 ms in 1 and 2) |
+| 2026-10-12 | `run.py --fresh`, `run.py` twice, and `run.py --fresh --scenario 5`, Docker 28.3 on one arm64 laptop, the image built by its Dockerfile from a Linux wheel of `main` (d43f4aba) | 1, 2, 4, 5 | pass on every run. 4 on fresh identities: A and C had never met, C received at hop 1 and A's receipt came back at hop 1, 0.9 s from the send. 5: C received from B 0.4 s after coming back, with A off; A's queues drained once it was back. Receipt latency 26 to 33 ms in 1 and 2 |
 
 Nothing on this page has been run between separate hosts, over Bluetooth
 LE, over a relay, through a gateway daemon, or with a phone.
