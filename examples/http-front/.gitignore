@@ -1,0 +1,2 @@
+# The store keys docker compose reads: one per box, kept between runs.
+.env
