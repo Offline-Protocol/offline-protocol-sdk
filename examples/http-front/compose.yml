@@ -13,8 +13,9 @@
 # way the provider and the client do here. That also means every program
 # sharing that namespace can reach the front and the provider's callback.
 #
-# The image needs a package with the HTTP front, which no release has yet:
-# see bindings/python/docker/README.md, "Building from a checkout".
+# The image installs the released package from PyPI, which has the HTTP
+# front from 0.29.0. To run a checkout instead, see
+# bindings/python/docker/README.md, "Building from a checkout".
 services:
   box-a:
     build: ../../bindings/python/docker
