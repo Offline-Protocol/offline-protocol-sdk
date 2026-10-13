@@ -439,7 +439,7 @@ impl OfflineProtocol {
         // path.
         if self
             .mesh_relay
-            .absorb_settled_duplicate(&message.id.as_str())
+            .absorb_settled_duplicate(message, arrival_peer)
         {
             return;
         }

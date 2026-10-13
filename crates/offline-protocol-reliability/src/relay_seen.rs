@@ -21,7 +21,11 @@
 //! Capacity has to cover the whole *network's* traffic for as long as copies of
 //! a message can still be in flight, not just our own. Two windows matter: a
 //! flood's lifetime (bounded by hop limit times per-hop latency, so seconds),
-//! and the sender's early retransmissions (tens of seconds). The defaults cover
+//! and the sender's early retransmissions as forwarders pass them on (tens of
+//! seconds). The forwarder adjacent to the sender carries the sender's own
+//! re-send again, releasing and re-recording its entry, because the recipient
+//! re-acknowledges only a re-send that reaches it; every device after that
+//! still suppresses it. The defaults cover
 //! both with margin, and are chosen so that at the maximum rate a node will
 //! accept forwarding traffic, the cache still holds far more than
 //! [`DEFAULT_RELAY_SEEN_RETENTION_SECS`] of it — meaning entries expire by age
@@ -136,6 +140,12 @@ impl RelaySeenCache {
     /// frame reached a neighbor could be forwarded a second time — by every
     /// node — which is how a flood becomes a storm, so callers must be certain
     /// the frame travelled nowhere.
+    ///
+    /// One exception, and only at the point of acceptance: the mesh relay
+    /// governor forgets and immediately re-records an id when it accepts the
+    /// sender's own re-send of a frame it already carried. The entry is gone
+    /// for no observable moment, so no echo can slip through, and a re-send
+    /// the governor refuses never reaches this call.
     pub fn forget(&mut self, message_id: &str) {
         if self.entries.remove(message_id).is_some() {
             // Keep the insertion-order queue in lockstep with the map. Leaving
