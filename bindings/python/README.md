@@ -124,7 +124,7 @@ docker run --rm -v "$src":/src -w /src rust:1-bookworm sh -euc '
     python3 -m venv /tmp/venv && . /tmp/venv/bin/activate
     pip install -q build wheel
     bash bindings/python/scripts/build-wheel.sh linux-aarch64 \
-        target/release/liboffline_protocol_uniffi.so 0.28.0'
+        target/release/liboffline_protocol_uniffi.so 0.29.0'
 cp "$src"/bindings/python/dist/*.whl bindings/python/docker/wheels/
 ```
 

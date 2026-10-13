@@ -48,7 +48,7 @@ source](#build-python-desktop-bindings) instead. The import name is
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Offline-Protocol/offline-protocol-swift.git", from: "0.28.0")
+    .package(url: "https://github.com/Offline-Protocol/offline-protocol-swift.git", from: "0.29.0")
 ],
 targets: [
     .target(name: "YourApp", dependencies: [

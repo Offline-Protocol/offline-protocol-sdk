@@ -12,8 +12,9 @@ export OFFLINE_PROTOCOL_STORE_KEY="$(openssl rand -hex 32)"   # once per host; k
 docker compose up -d
 ```
 
-Until a release ships the HTTP front, the image builds only from a wheel
-built from a checkout (below). To see the service work before deploying it,
+The image installs the released package from PyPI, which has the HTTP
+front and the verifier from 0.29.0; a wheel built from a checkout replaces
+it (below). To see the service work before deploying it,
 two demos run on one machine:
 [examples/offline-first](../../../examples/offline-first) (messages held for
 a device that is off, and carried through a third) and
