@@ -277,7 +277,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   device between them until the window lapsed, with a retry entry and no
   pending acknowledgement. A copy that arrives over the link that proved its
   sender, with no hop spent, is now forwarded again, subject to the
-  neighbour's own rate; every other copy is still suppressed. Found on two
+  neighbour's own rate; every other copy is still suppressed, and a re-send
+  refused for rate or queue space leaves the id suppressed. The exception
+  reaches one hop: a second forwarder that already carried the frame still
+  suppresses the copy the first passes on. Found on two
   Raspberry Pis and a Mac: offline-first scenario 5 left the sender's queue
   undrained for over ten minutes, and now drains in seconds.
 - **A peer stream proved while its layer is still starting gets a session

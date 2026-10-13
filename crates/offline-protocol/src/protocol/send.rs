@@ -3791,11 +3791,13 @@ impl OfflineProtocol {
     /// the retry queue while a neighbor that could reach the recipient sat
     /// unused for the life of the outbox entry.
     ///
-    /// Re-offering on every resend is cheap for the reasons the park path
-    /// gives: a neighbor that took the frame refuses another copy of the id
-    /// for the whole `RelaySeenCache` retention window, the retry backoff
-    /// bounds how often we ask, and each offer spends the own-send tokens any
-    /// other frame of ours does. Excluding neighbors we already handed it to
+    /// Re-offering on every resend is bounded for the reasons the park path
+    /// gives: the retry backoff bounds how often we ask, each offer spends the
+    /// own-send tokens any other frame of ours does, and a neighbor that took
+    /// the frame carries our re-send again only within its per-neighbor
+    /// allowance for us (it has to: the recipient re-acknowledges only a
+    /// re-send that reaches it). Every device further on still suppresses the
+    /// id for the `RelaySeenCache` retention window. Excluding neighbors we already handed it to
     /// would be wrong, because a neighbor records an id only when it *accepts*
     /// the frame, and one that refused it (rate limit, full queue) is exactly
     /// the one a later offer should reach.
@@ -4690,11 +4692,13 @@ impl OfflineProtocol {
             // pending ACK (`settle_dm_without_pending_ack`). Without that arm this
             // offer would deliver messages the sender never learns about.
             //
-            // Re-offering on every park is cheap by construction: neighbors
-            // suppress a copy of an id they have already carried for the whole
-            // `RelaySeenCache` retention window, the escalation (15s → 600s)
-            // bounds how often we ask, and each offer spends the same own-send
-            // tokens as any other frame of ours.
+            // Re-offering on every park is bounded by construction: the
+            // escalation (15s → 600s) bounds how often we ask, each offer
+            // spends the same own-send tokens as any other frame of ours, a
+            // neighbor that already carried the id takes our re-send again
+            // only within its per-neighbor allowance for us, and every device
+            // further on suppresses the id for the whole `RelaySeenCache`
+            // retention window.
             handed_to_mesh = self.offer_to_mesh(&message);
             // Default: keep the documented perpetual timed probe (15s->600s cap
             // on every carrier). Opt-in (`edge_driven_unreachable_dm`): after a
