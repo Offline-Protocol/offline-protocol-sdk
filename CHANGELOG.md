@@ -11,6 +11,20 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+## [Unreleased]
+
+### Added
+
+- **The service image is published.** The release workflow builds
+  `bindings/python/docker` for linux/amd64 and linux/arm64 and pushes it to
+  `ghcr.io/offline-protocol/offline-protocol-service`, tagged `X.Y.Z`, and
+  `X.Y` and `latest` for a release without a prerelease suffix, with a
+  provenance attestation and an SBOM. It runs after the PyPI publish and
+  installs exactly that release's package: the Dockerfile's new
+  `SDK_VERSION` build argument pins `offline-protocol-sdk[lan,http]` to it
+  and fails the build on any other version. `service-image.yml` can also be
+  run by hand for a release already on PyPI, which is how 0.29.0 is published.
+
 ## [0.29.0] — 2026-10-13
 
 > **Service bodies are sealed end to end.** A service request or response

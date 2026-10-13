@@ -26,6 +26,36 @@ Windows) is the namespace of Docker's Linux virtual machine, not the
 desktop's: the front is not on the Mac's loopback, and multicast DNS does
 not reach the Mac's LAN. Use the demos there; this file is for a Linux host.
 
+## Published image
+
+Each release from 0.29.0 is also published, built from this directory, for
+linux/amd64 and linux/arm64:
+
+```bash
+docker pull ghcr.io/offline-protocol/offline-protocol-service:0.29.0
+```
+
+| Tag | What it names |
+|---|---|
+| `X.Y.Z`, such as `0.29.0` | That release |
+| `X.Y`, such as `0.29` | The newest release in that series |
+| `latest` | The newest release, never a prerelease |
+| `X.Y.Z-rc.N` | A prerelease, under that tag only |
+
+The image installs `offline-protocol-sdk[lan,http]` at exactly its tag's
+version from PyPI (the `SDK_VERSION` build argument), and its build fails if
+pip installs any other version. Pin `X.Y.Z` in a deployment, since `X.Y` and
+`latest` move with every release, and read
+[docs/UPGRADING.md](../../../docs/UPGRADING.md) before moving a host to a new
+one. Each image carries a provenance attestation and an SBOM; check the
+attestation with `gh attestation verify
+oci://ghcr.io/offline-protocol/offline-protocol-service:0.29.0 --repo
+Offline-Protocol/offline-protocol-sdk`.
+
+To run it with this directory's `compose.yml`, replace `build: .` with
+`image: ghcr.io/offline-protocol/offline-protocol-service:0.29.0`. The grants
+below apply to it unchanged.
+
 ## What a host's container manifest must grant
 
 Whatever runs the container (Compose, a fleet manager, a unit file), it owes
@@ -131,6 +161,10 @@ every release so far.
 
 The build context is this directory only. Never build from the repository
 root or mount the checkout: `target/` alone fills the build VM.
+
+`docker build --build-arg SDK_VERSION=0.29.0 bindings/python/docker` installs
+that release from PyPI and nothing else, as the published image does; it is
+refused while a wheel is in `wheels/`, which it would otherwise replace.
 
 ## What has been run
 
