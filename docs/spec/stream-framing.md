@@ -318,7 +318,9 @@ usable only while the layer is up. A platform may announce a stream before it
 reports the layer: every listener in this repository accepts before its
 manager reports the layer up, and the Python manager starts DNS-SD in between,
 about three seconds on a Raspberry Pi. The engine keeps such a link and, when
-the layer comes up, announces it to discovery a second time. The first
+the layer comes up, announces it to discovery a second time, so such a peer
+produces two `neighbor_discovered` events. A bridge must not collapse them:
+the second is the one that pushes the key package. The first
 announcement's discovery ran against a layer with no usable link, so its key
 package push failed, and a failed push is left for the next discovery to
 retry. Before the second announcement the layer coming up revealed the link
