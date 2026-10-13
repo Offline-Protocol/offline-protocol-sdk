@@ -269,6 +269,17 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A mesh forwarder carries the sender's own retransmission again.** A
+  device that had forwarded a frame ignored every later copy of its id for
+  ten minutes, the sender's own re-send included. A recipient whose
+  acknowledgement went nowhere (the sender was off when it answered) only
+  answers again when a re-send reaches it, so the sender retried into the
+  device between them until the window lapsed, with a retry entry and no
+  pending acknowledgement. A copy that arrives over the link that proved its
+  sender, with no hop spent, is now forwarded again, subject to the
+  neighbour's own rate; every other copy is still suppressed. Found on two
+  Raspberry Pis and a Mac: offline-first scenario 5 left the sender's queue
+  undrained for over ten minutes, and now drains in seconds.
 - **A frame that can never decrypt gets an answer, and is not redelivered
   forever.** A frame that failed with a spent ratchet generation or a dead
   epoch, or that the pending-decryption queue gave up on, was left

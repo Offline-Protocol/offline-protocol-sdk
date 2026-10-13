@@ -776,6 +776,19 @@ impl MeshRelayGovernor {
         let now = Instant::now();
         let message_id = message.id.as_str();
 
+        // The origin re-sending its own frame is a sender that heard no
+        // acknowledgement, not a copy echoing round the neighbourhood, and
+        // suppressing it for the retention window is the black hole the
+        // custody chapter forbids a custodian: the recipient never sees the
+        // re-send, so never re-acknowledges the copy it already holds, and the
+        // sender retries into this device until the window ends. Released
+        // here, it takes the full admission below (the neighbour's rate, the
+        // hop budget, the queue) and is recorded again, so it is paced by the
+        // origin's own retry ladder and by nothing it can raise.
+        if self.is_origin_resend(message, arrival_peer) {
+            self.seen.forget(&message_id);
+        }
+
         // Has this id been dealt with? Checked without recording, because a
         // frame that is about to be *refused* must not be remembered as
         // handled: another copy of it arriving over a healthy link a moment
@@ -1151,6 +1164,23 @@ impl MeshRelayGovernor {
         self.seen.observe(message_id);
     }
 
+    /// Whether `message` is its origin re-sending it: it arrived over the link
+    /// that proved its sender, before any device spent a hop on it, and no
+    /// copy of ours is still waiting to go out.
+    ///
+    /// A forwarder's copy always carries a spent hop, so an echo never
+    /// qualifies however it is routed. A neighbour that only claims to be the
+    /// origin gains one more forward of a frame it already holds, charged to
+    /// its own rate like any other arrival.
+    fn is_origin_resend(&self, message: &Message, arrival_peer: Option<&str>) -> bool {
+        arrival_peer == Some(message.sender.as_str())
+            && message.hop_count.value() == 0
+            && !self
+                .pending
+                .iter()
+                .any(|p| p.message.id.as_str() == message.id.as_str())
+    }
+
     /// Absorbs an arrival that is a copy of a frame already dealt with and
     /// needs no further decision, reporting whether it did.
     ///
@@ -1164,9 +1194,15 @@ impl MeshRelayGovernor {
     /// id, even though that is also a duplicate: the copy names a neighbor
     /// that now holds the frame, which narrows our pending forward, so it has
     /// to go through [`Self::admit`]. Those are rare, since the pending window
-    /// is one jitter delay wide.
-    pub fn absorb_settled_duplicate(&mut self, message_id: &str) -> bool {
-        if !self.seen.contains(message_id) {
+    /// is one jitter delay wide. Answers `false` for the origin re-sending its
+    /// own frame too, which [`Self::admit`] takes as a fresh forward.
+    pub fn absorb_settled_duplicate(
+        &mut self,
+        message: &Message,
+        arrival_peer: Option<&str>,
+    ) -> bool {
+        let message_id = message.id.as_str();
+        if !self.seen.contains(&message_id) || self.is_origin_resend(message, arrival_peer) {
             return false;
         }
         if self
@@ -1953,19 +1989,52 @@ mod tests {
         let msg = frame();
 
         assert!(
-            !gov.absorb_settled_duplicate(&msg.id.as_str()),
+            !gov.absorb_settled_duplicate(&msg, Some("b")),
             "an id never seen is not a duplicate"
         );
 
         gov.admit(&msg, Some("b"), 3);
         // While our copy is still pending, a copy narrows our forward, so the
         // cheap path must decline it and leave it to `admit`.
-        assert!(!gov.absorb_settled_duplicate(&msg.id.as_str()));
+        assert!(!gov.absorb_settled_duplicate(&msg, Some("b")));
 
         // Once it has gone out, further copies are settled duplicates.
         gov.take_due(Instant::now());
-        assert!(gov.absorb_settled_duplicate(&msg.id.as_str()));
+        assert!(gov.absorb_settled_duplicate(&msg, Some("b")));
         assert_eq!(gov.counters().duplicates_suppressed, 1);
+    }
+
+    /// The origin re-sending a frame this device already forwarded is a
+    /// sender that heard no acknowledgement. Its recipient has to see the
+    /// re-send to re-acknowledge the copy it holds, so neither intake may
+    /// suppress it: suppressed, the sender retried into this device for the
+    /// whole retention window (a Pi lab, 2026-10-13: the sender restarted
+    /// after the recipient's acknowledgement went nowhere, and its one retry
+    /// entry outlived the scenario by ten minutes). A copy from anyone else
+    /// is still an echo.
+    #[test]
+    fn the_origin_re_sending_a_forwarded_frame_is_forwarded_again() {
+        let mut gov = governor();
+        let msg = frame();
+        assert_eq!(gov.admit(&msg, Some("alice"), 3), RelayAdmission::Queued);
+        assert_eq!(gov.take_due(Instant::now()).len(), 1);
+
+        assert!(
+            gov.absorb_settled_duplicate(&msg, Some("carol")),
+            "an echo from another neighbour is absorbed"
+        );
+        assert!(
+            !gov.absorb_settled_duplicate(&msg, Some("alice")),
+            "the origin's re-send is not"
+        );
+        assert_eq!(gov.admit(&msg, Some("alice"), 3), RelayAdmission::Queued);
+        assert_eq!(gov.take_due(Instant::now()).len(), 1, "and goes out again");
+
+        // A forwarder's copy carries a spent hop, so it never qualifies, even
+        // from a link that claims the sender's name.
+        let mut echoed = msg.clone();
+        echoed.hop_count = echoed.hop_count.increment().unwrap();
+        assert!(gov.absorb_settled_duplicate(&echoed, Some("alice")));
     }
 
     #[test]
@@ -2737,12 +2806,13 @@ mod tests {
         let mut gov = governor();
         let msg = frame_with(3, MessagePriority::Medium);
 
-        // The ordinary path has handled this id: a copy would be refused.
+        // The ordinary path has handled this id: a copy would be refused (one
+        // from a neighbour; the origin's own re-send is forwarded again).
         assert_eq!(gov.admit(&msg, Some("alice"), 3), RelayAdmission::Queued);
         let (due, _) = gov.release_due(Instant::now());
         assert_eq!(due.len(), 1);
         assert_eq!(
-            gov.admit(&msg, Some("alice"), 3),
+            gov.admit(&msg, Some("carol"), 3),
             RelayAdmission::Rejected(RelayRejection::AlreadySeen)
         );
 
