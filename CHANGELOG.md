@@ -292,6 +292,14 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   the link to it was up and messages crossed it; the list now follows
   `neighbor_discovered` and `neighbor_lost`, the link's own up and down
   edges (#549).
+- **The demo app shows a group's name and every member.** The app kept
+  groups in screen memory only, and no event carries a group's name and full
+  member list: a group message carries neither, and an invited device hears
+  only the add that named it. So after a restart a group read as "Group"
+  with one member, and an invitee counted three members of a group of four,
+  while the SDK held the whole group. The app now reads the SDK's own record
+  (`meshListGroups` at start, `meshGetGroupInfo` for a group it has not read
+  yet and on every membership change), and names this device "You" in it.
 - **A mesh forwarder carries the sender's own retransmission again.** A
   device that had forwarded a frame ignored every later copy of its id for
   ten minutes, the sender's own re-send included. A recipient whose
