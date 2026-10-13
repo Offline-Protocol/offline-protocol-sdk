@@ -280,6 +280,17 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   neighbour's own rate; every other copy is still suppressed. Found on two
   Raspberry Pis and a Mac: offline-first scenario 5 left the sender's queue
   undrained for over ten minutes, and now drains in seconds.
+- **A peer stream proved while its layer is still starting gets a session
+  without waiting for traffic.** A host's listener accepts before the host
+  reports the peer-stream layer up (the Python manager starts DNS-SD in
+  between, about three seconds on a Raspberry Pi), so the first key package
+  push to a peer that connected in that window failed, and the layer coming
+  up revealed the link without the second discovery that retries it. Where
+  the other side's push was lost too, on a superseded stream, the pair formed
+  no session until an application sent something. The engine now announces
+  every link the layer reveals to discovery. First pairing between a Pi and a
+  Mac dropped from 14 to 17 seconds, and once past 90, to 1 to 6 seconds.
+
 - **A frame that can never decrypt gets an answer, and is not redelivered
   forever.** A frame that failed with a spent ratchet generation or a dead
   epoch, or that the pending-decryption queue gave up on, was left

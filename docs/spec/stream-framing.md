@@ -313,6 +313,19 @@ and a routed-mesh socket are the same thing to the engine, a stream to one
 peer whose identity the platform proved, and renaming the slot is a separate
 breaking change with an alias period.
 
+`wifi_direct_status_changed(is_connected)` reports the layer, and a link is
+usable only while the layer is up. A platform may announce a stream before it
+reports the layer: every listener in this repository accepts before its
+manager reports the layer up, and the Python manager starts DNS-SD in between,
+about three seconds on a Raspberry Pi. The engine keeps such a link and, when
+the layer comes up, announces it to discovery a second time. The first
+announcement's discovery ran against a layer with no usable link, so its key
+package push failed, and a failed push is left for the next discovery to
+retry. Before the second announcement the layer coming up revealed the link
+silently, and a pair whose other push was also lost (on a superseded stream)
+formed no session until an application sent something: a lab pairing waited
+past 90 seconds.
+
 Every stream carries the same replay exposure as the Bluetooth LE Identity
 characteristic, reachable from further away: anything that can open a stream
 to a receiver can present a copied preamble. The threat model records it as

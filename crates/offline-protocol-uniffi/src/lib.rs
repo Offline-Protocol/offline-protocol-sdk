@@ -4923,13 +4923,23 @@ impl OfflineProtocol {
         // The links visible before and after, read under the one lock that
         // flips the status. Leaving Available clears every link silently, so
         // `before` is also exactly the set this flip ends.
-        let (ended, after) = self
+        let (ended, revealed) = self
             .with_transport_fallible(CoreTransportType::WiFiDirect, |transport| {
                 let before = transport.connected_peers();
                 transport.on_status_changed(new_status);
-                (before, transport.connected_peers().len())
+                let revealed: Vec<_> = transport
+                    .connected_peers()
+                    .into_iter()
+                    .filter(|link| !before.iter().any(|b| b.peer_id == link.peer_id))
+                    .collect();
+                (before, revealed)
             })?
             .unwrap_or_default();
+        let after = if is_connected {
+            ended.len() + revealed.len()
+        } else {
+            0
+        };
 
         // The layer itself is not a switch: a platform manager brings it up
         // at start whether or not any peer is there, and announcing that as
@@ -4937,6 +4947,16 @@ impl OfflineProtocol {
         // carrying traffic while every send went over Bluetooth LE. Only the
         // links it hides or reveals move the edge.
         self.emit_wifi_direct_switch(ended.len(), after);
+
+        // A link revealed here was proved while the layer was down: a host's
+        // listener accepts before the host reports the layer. Its announcement
+        // ran discovery against a layer with no usable link, so the key
+        // package push failed, and a failed push is left for the next
+        // discovery to retry. This is that discovery; without it the reveal
+        // is silent and a quiet pair never pushes again.
+        for link in revealed {
+            self.notify_neighbor_reachable(&link.peer_id, "WiFiDirect", None)?;
+        }
 
         // Not every platform ends its streams before the layer: iOS flips it
         // on backgrounding and the OS kills the streams later, so a link this
@@ -10439,6 +10459,67 @@ mod tests {
         assert_eq!(
             switched, 1,
             "the layer coming up reveals both links at once"
+        );
+    }
+
+    /// A peer proved while the layer is still coming up gets our key package
+    /// once the layer is up. A host's listener accepts before the host
+    /// reports the layer (the Python manager starts DNS-SD in between, about
+    /// three seconds on a Pi), so the announcement's discovery pushes into a
+    /// layer with no usable link, the push fails, and nothing pushes again:
+    /// the failed push is not recorded as sent, on the understanding that a
+    /// later discovery will retry, and the layer coming up revealed the link
+    /// without one. A pair whose other push was lost too (a superseded
+    /// stream) then waited for an application message to start a session.
+    #[test]
+    fn test_wifi_direct_link_proved_while_down_gets_the_key_package_when_the_layer_comes_up() {
+        let engine = |profile: &str| {
+            let engine = OfflineProtocol::new(ProtocolConfig {
+                profile: profile.to_string(),
+                ..create_test_config()
+            })
+            .unwrap();
+            engine
+                .initialize_mls(
+                    Box::new(TestMlsStorageProvider::default()),
+                    Box::new(TestMlsStorageProvider::default()),
+                )
+                .unwrap();
+            engine.start().unwrap();
+            engine
+        };
+        let a = engine("early-a");
+        let b = engine("early-b");
+        let b_address = b.local_address().expect("address after init");
+
+        a.wifi_direct_peer_connected(b_address.clone()).unwrap();
+        assert!(
+            a.wifi_direct_get_next_message().is_none(),
+            "nothing can be queued on a layer that is down"
+        );
+
+        a.wifi_direct_status_changed(true).unwrap();
+        let outbound = a
+            .wifi_direct_get_next_message()
+            .expect("the key package goes out once the layer is up");
+        assert_eq!(outbound.recipient_id, b_address);
+
+        // The body is A's key package: B, which had nothing from A, has it.
+        let a_address = a.local_address().expect("address after init");
+        b.wifi_direct_status_changed(true).unwrap();
+        b.wifi_direct_peer_connected(a_address.clone()).unwrap();
+        assert!(matches!(
+            b.get_establishment_state(a_address.clone()).unwrap(),
+            EstablishmentState::NoKeyPackage
+        ));
+        b.wifi_direct_message_received(a_address.clone(), outbound.data)
+            .unwrap();
+        assert!(
+            !matches!(
+                b.get_establishment_state(a_address).unwrap(),
+                EstablishmentState::NoKeyPackage
+            ),
+            "B holds A's key package"
         );
     }
 
