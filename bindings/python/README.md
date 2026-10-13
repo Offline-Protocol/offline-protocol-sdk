@@ -32,6 +32,25 @@ is no wheel for Intel macOS, for musl Linux such as Alpine, or for an older
 glibc, and no source distribution, so on those hosts pip finds nothing to
 install: [build from source](#building-from-source) instead.
 
+A host that runs the service (a gateway, a site computer) also wants the two
+extras: `lan` finds the other hosts on the LAN over DNS-SD, and `http` adds
+the HTTP front for applications that do not use the SDK.
+
+```bash
+pip install 'offline-protocol-sdk[lan,http]'
+```
+
+Every install, with or without the extras, puts three commands on the path:
+
+| Command | What it does |
+|---------|--------------|
+| `offline-protocol-service` | Serves one engine to local applications over the [local API](#run-as-a-service-the-local-api); `--lan` needs the `lan` extra, `--http` the `http` extra |
+| `offline-protocol-http-front` | The HTTP front on its own, against a service already running (needs the `http` extra) |
+| `offline-protocol-verify` | Drives the local service and waits for the events that prove a message was held, carried and delivered (`state`, `send`, `await`, `pair`, `ping`, `watch`) |
+
+To run the service in a container instead, see
+[the image](https://github.com/Offline-Protocol/offline-protocol-sdk/tree/main/bindings/python/docker).
+
 ### 2. Use it
 
 ```python
