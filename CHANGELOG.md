@@ -13,9 +13,26 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ## [0.29.0] — 2026-10-13
 
+> **Service bodies are sealed end to end.** A service request or response
+> crosses the mesh inside the 1:1 MLS session once the recipient advertises
+> support and the session is confirmed, so the devices that carry it can no
+> longer read it (threat model R9). Rust code that names every field of the
+> two service events needs the new `encrypted` field or a `..`.
+>
+> **Two devices that have never met start a session through a third.** The
+> key package and the Welcome now cross the mesh like every other frame, so a
+> message to a peer only reachable through another device is delivered instead
+> of waiting out its lifetime.
+>
 > **Android and iOS meet on a shared Wi-Fi network.** The Android
 > peer-stream slot now finds iPhones and Python hosts on the Wi-Fi network
 > it is on, and they find it, with no Wi-Fi Direct group.
+>
+> **The service is usable without the SDK.** An application calls a service
+> on another device with a plain HTTP request through the HTTP front, a
+> container image runs the service, and `offline-protocol-verify` drives a
+> service and reports what it proved.
+>
 > [§27](docs/UPGRADING.md#27-behaviour-that-changes-without-a-compile-error-v0290)
 > lists what changes without a compile error.
 
