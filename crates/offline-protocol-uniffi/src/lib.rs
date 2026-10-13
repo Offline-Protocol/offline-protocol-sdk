@@ -4923,7 +4923,7 @@ impl OfflineProtocol {
         // The links visible before and after, read under the one lock that
         // flips the status. Leaving Available clears every link silently, so
         // `before` is also exactly the set this flip ends.
-        let (ended, revealed) = self
+        let (before, revealed) = self
             .with_transport_fallible(CoreTransportType::WiFiDirect, |transport| {
                 let before = transport.connected_peers();
                 transport.on_status_changed(new_status);
@@ -4936,7 +4936,7 @@ impl OfflineProtocol {
             })?
             .unwrap_or_default();
         let after = if is_connected {
-            ended.len() + revealed.len()
+            before.len() + revealed.len()
         } else {
             0
         };
@@ -4946,7 +4946,7 @@ impl OfflineProtocol {
         // "connected to a peer group" told every app Wi-Fi Direct was
         // carrying traffic while every send went over Bluetooth LE. Only the
         // links it hides or reveals move the edge.
-        self.emit_wifi_direct_switch(ended.len(), after);
+        self.emit_wifi_direct_switch(before.len(), after);
 
         // A link revealed here was proved while the layer was down: a host's
         // listener accepts before the host reports the layer. Its announcement
@@ -4963,7 +4963,7 @@ impl OfflineProtocol {
         // flip cleared is reported lost here, once. The stream's own late end
         // then finds no link and adds nothing (wifi_direct_peer_disconnected).
         if after == 0 {
-            for link in ended {
+            for link in before {
                 if self.peer_linked_elsewhere(&link.peer_id, CoreTransportType::WiFiDirect) {
                     continue;
                 }
