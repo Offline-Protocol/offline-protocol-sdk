@@ -1006,6 +1006,17 @@ internal class CentralGattClient(
         cancelHelloWatchdog(address, gatt)
         linkReady.remove(address)
 
+        // This handle is dead on every branch below: a redial opens a fresh
+        // one through connectGatt, and nothing holds this one once it is out
+        // of the registry. Close it so the stack frees its client slot. Left
+        // open, each dropped link leaks one of the stack's client slots (about
+        // 32 on most devices), and once they run out every new dial fails.
+        try {
+            gatt.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error closing gatt for $address on disconnect", e)
+        }
+
         // Don't remove from discovered list - keep trying to reconnect.
         // Only clear cached RSSI on Android's catch-all 0x85 GATT_ERROR —
         // see [GATT_GENERIC_ERROR] for why this status is special.
