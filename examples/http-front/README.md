@@ -28,9 +28,10 @@ docker compose run --rm client off1qy4g...        # box B's address from that li
 docker compose down             # add -v to forget both identities
 ```
 
-The image needs a package that has the HTTP front, and no release has one
-yet: build it as [the image's README](../../bindings/python/docker/README.md#building-from-a-checkout)
-says, or `--build` fails and says so.
+The image installs the released package, which has the HTTP front from
+0.29.0. To run this branch's code instead, build a wheel as
+[the image's README](../../bindings/python/docker/README.md#building-from-a-checkout)
+says; a package without the front makes `--build` fail and say so.
 
 ### How an application container reaches the front
 
