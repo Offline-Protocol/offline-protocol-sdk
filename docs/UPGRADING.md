@@ -1,7 +1,7 @@
 # Upgrading
 
 Everything an application team has to change to move off `v0.16.x` and onto the
-current `v0.28.x` line.
+current `v0.29.x` line.
 
 The breaking changes all landed in the **storage-split release**, `v0.17.0` —
 `initialize_mls` changes shape, three config updaters become fallible, and
@@ -51,12 +51,12 @@ and an exhaustive TypeScript `switch` over `SecurityWarningCode` needs a case
 for the new member. It also breaks one thing at run time: iOS's peer-stream
 slot moves from MultipeerConnectivity to Network framework, so an iPhone on
 `v0.28` does not see one on `v0.27` or earlier over that slot
-([§26](#26-behaviour-that-changes-without-a-compile-error-v0280)). The
-unreleased changes break one build, narrowly: Rust code that names every field
-of `Event::ServiceRequestReceived` or `Event::ServiceResponseReceived` needs
-the new `encrypted` field or a `..`. Android's peer-stream slot joins the Wi-Fi
-network it is on, and service bodies are sealed between peers on this release
-([§27](#27-behaviour-that-changes-without-a-compile-error-unreleased)).
+([§26](#26-behaviour-that-changes-without-a-compile-error-v0280)). `v0.29.0`
+breaks one build, narrowly: Rust code that names every field of
+`Event::ServiceRequestReceived` or `Event::ServiceResponseReceived` needs the
+new `encrypted` field or a `..`. Android's peer-stream slot joins the Wi-Fi
+network it is on, and service bodies are sealed between peers
+([§27](#27-behaviour-that-changes-without-a-compile-error-v0290)).
 
 Otherwise, where a later section documents an
 addition or a behaviour change, it is labelled inline with the release that
@@ -2505,7 +2505,7 @@ default. `ProtocolManager` already passes it; only code that builds an
 
 ---
 
-## 27. Behaviour that changes without a compile error *(unreleased)*
+## 27. Behaviour that changes without a compile error *(v0.29.0)*
 
 Everything compiles unchanged except one narrow case, the first paragraph
 under the service bodies below. Each paragraph says what to check.
