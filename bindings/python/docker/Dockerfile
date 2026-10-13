@@ -18,14 +18,34 @@ FROM python:3.12-slim
 # imports both extras' libraries, since the flag exists without them.
 # Never COPY the checkout itself: the build context is this directory only.
 ARG SDK_SPEC="offline-protocol-sdk[lan,http]"
+# SDK_VERSION installs exactly that release from PyPI (its Python spelling:
+# 0.30.0rc1, not 0.30.0-rc.1), and the build fails unless that is the version
+# installed. The published image passes the release's version, so it holds the
+# package PyPI has under that number and no later one. Empty, the default,
+# installs a wheel from wheels/ or else PyPI's newest release. Set together
+# with a wheel in wheels/ it is refused: PyPI's package would silently replace
+# the checkout's.
+ARG SDK_VERSION=""
 
 COPY wheels/ /wheels/
 RUN set -eu; \
+    spec="${SDK_SPEC}"; \
+    if [ -n "${SDK_VERSION}" ]; then \
+        if ls /wheels/*.whl >/dev/null 2>&1; then \
+            echo "SDK_VERSION installs a release from PyPI: empty wheels/, or leave SDK_VERSION unset to install the wheel" >&2; exit 1; \
+        fi; \
+        spec="${SDK_SPEC}==${SDK_VERSION}"; \
+    fi; \
     if ls /wheels/*.whl >/dev/null 2>&1; then \
         pip install --no-cache-dir --no-deps --no-index --find-links /wheels offline-protocol-sdk; \
     fi; \
-    pip install --no-cache-dir --find-links /wheels "${SDK_SPEC}"; \
+    pip install --no-cache-dir --find-links /wheels "${spec}"; \
     rm -rf /wheels; \
+    if [ -n "${SDK_VERSION}" ]; then \
+        installed="$(python -c 'from importlib.metadata import version; print(version("offline-protocol-sdk"))')"; \
+        [ "${installed}" = "${SDK_VERSION}" ] \
+            || { echo "SDK_VERSION is ${SDK_VERSION}, and pip installed ${installed}" >&2; exit 1; }; \
+    fi; \
     { offline-protocol-service --help | grep -q -- '--http ' && python -c 'import aiohttp, zeroconf'; } \
         || { echo "the installed offline-protocol-service has no HTTP front: put a wheel built from a checkout in wheels/" >&2; exit 1; }; \
     command -v offline-protocol-verify >/dev/null \
