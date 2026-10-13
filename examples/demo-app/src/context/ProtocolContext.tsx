@@ -910,30 +910,31 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     return () => clearInterval(interval);
   }, [isStarted]);
 
-  // ─── Stale neighbor cleanup ──────────────────────────────
+  // ─── Presence and typing expiry ──────────────────────────
 
   useEffect(() => {
     if (!isStarted) {return;}
 
     const interval = setInterval(() => {
       const now = Date.now();
-      setNeighbors(prev => {
-        let changed = false;
-        const next = new Map(prev);
-        for (const [peerId, neighbor] of next) {
-          if (now - neighbor.discoveredAt > NEARBY_THRESHOLD_MS * 2) {
-            next.delete(peerId);
-            changed = true;
-          }
-        }
-        return changed ? next : prev;
-      });
+      // Neighbours are not aged out here. `neighbor_discovered` and
+      // `neighbor_lost` are the link's up and down edges: the engine reports
+      // one loss per departure, including the radio going off, and nothing in
+      // between while the link holds. A clock here dropped a peer whose only
+      // link was the one it opened to us a minute earlier, so People showed
+      // nobody while messages crossed that link both ways.
 
+      // A contact is nearby while it is a neighbour. Otherwise "nearby" came
+      // from traffic or a presence report, and lapses with time.
       setContacts(prev => {
         let changed = false;
         const next = new Map(prev);
         for (const [peerId, contact] of next) {
-          if (contact.isNearby && now - contact.lastSeen > NEARBY_THRESHOLD_MS) {
+          if (
+            contact.isNearby &&
+            !neighborsRef.current.has(peerId) &&
+            now - contact.lastSeen > NEARBY_THRESHOLD_MS
+          ) {
             next.set(peerId, {...contact, isNearby: false});
             changed = true;
           }

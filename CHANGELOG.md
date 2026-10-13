@@ -269,6 +269,29 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **An Android dial that never connects is closed and redialed, and the
+  connection cap counts links rather than entries.** A dial that got no
+  callback held its address and its slot for the life of the process: the
+  scan answered every later advertisement with "already
+  connected/connecting", so the device never completed its own link to that
+  peer (#549). A dial that has not connected after 20 seconds is now closed,
+  and the scan dials the address again. Android also reports a client link
+  of ours to the GATT server as a central connecting, and the cap summed
+  both, so two dials filled a cap of four and the cap check then cancelled
+  the server-side half of the link one of them was waiting on. The cap now
+  counts each peer address once, the server-side report of our own dial is
+  neither refused nor counted, a peer connecting to us is turned away only
+  for completed links, and a dial to a peer already connected to our GATT
+  server is not refused by the cap.
+- **The demo app keeps its identity across restarts, and keeps a linked peer
+  in People.** The app minted a new `profile` on every launch, and the SDK
+  keeps the identity per profile, so a restart gave the device a new address
+  and every peer a new contact. The profile and the display name are now
+  kept in AsyncStorage, so only a reinstall mints a new identity. People also
+  dropped any peer whose last `neighbor_discovered` was a minute old, while
+  the link to it was up and messages crossed it; the list now follows
+  `neighbor_discovered` and `neighbor_lost`, the link's own up and down
+  edges (#549).
 - **A mesh forwarder carries the sender's own retransmission again.** A
   device that had forwarded a frame ignored every later copy of its id for
   ten minutes, the sender's own re-send included. A recipient whose

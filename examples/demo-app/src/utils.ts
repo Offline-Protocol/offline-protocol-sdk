@@ -1,20 +1,52 @@
 import {Platform, PermissionsAndroid, Alert, Linking, NativeModules} from 'react-native';
 import type {Permission} from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const {OfflineProtocolModule} = NativeModules;
 
 // ─── User ID & Name ──────────────────────────────────────────
 
-let cachedUserId: string | null = null;
+const PROFILE_KEY = 'offline-demo/profile';
+const USER_NAME_KEY = 'offline-demo/user-name';
 
-export function generateUserId(): string {
-  if (cachedUserId) {
-    return cachedUserId;
+/**
+ * The `profile` this install runs as, minted once and kept in AsyncStorage.
+ *
+ * The SDK keeps the identity key per profile, and the address derives from
+ * that key, so a profile minted on every launch gave the device a new address
+ * each time the process restarted: every peer saw a new contact, and a group
+ * invite sent to the old address went to a member nothing held. Only a
+ * reinstall (which clears AsyncStorage) mints a new one. A failed read is
+ * thrown rather than papered over with a fresh profile, for the same reason.
+ */
+export async function loadUserId(): Promise<string> {
+  const stored = await AsyncStorage.getItem(PROFILE_KEY);
+  if (stored) {
+    return stored;
   }
   const timestamp = Date.now().toString(36);
   const random = Math.random().toString(36).substring(2, 8);
-  cachedUserId = `user_${timestamp}_${random}`;
-  return cachedUserId;
+  const minted = `user_${timestamp}_${random}`;
+  await AsyncStorage.setItem(PROFILE_KEY, minted);
+  return minted;
+}
+
+/** The display name chosen on a previous launch, if any. */
+export async function loadUserName(): Promise<string | null> {
+  try {
+    return await AsyncStorage.getItem(USER_NAME_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/** Best effort: a name that is not kept costs a retype, not an identity. */
+export async function saveUserName(name: string): Promise<void> {
+  try {
+    await AsyncStorage.setItem(USER_NAME_KEY, name);
+  } catch (err) {
+    console.warn('[utils] could not save the display name:', err);
+  }
 }
 
 export function generateUserName(): string {
