@@ -284,7 +284,14 @@ class BleTransportFacade(
          *  Tiny relative to a message's lifetime (15 fragments ≈ 0.3s) and
          *  well under the reassembly TTL. */
         private const val INTER_FRAGMENT_PACING_MS = 20L
-        private const val CONNECTION_TIMEOUT_MS = 10000L
+        /** How long a dial may go without reaching STATE_CONNECTED before it
+         *  is closed and left to the scan to redial. A connect to a peer in
+         *  range completes in a few seconds; the stack's own direct-connect
+         *  timeout is about thirty, and it does not always report one: a dial
+         *  whose link was cancelled underneath it got no callback at all, kept
+         *  its registry entry, and the scan answered every later advertisement
+         *  with "already connected/connecting" for the rest of the process. */
+        private const val CONNECTION_TIMEOUT_MS = 20_000L
         private const val SCAN_WATCHDOG_INTERVAL_MS = 30000L // Match iOS timing
         private const val SCAN_WATCHDOG_HEARTBEAT_MS = 10000L
         /**
@@ -2215,8 +2222,8 @@ class BleTransportFacade(
                     }
                     
                     // Skip if we've hit connection cap
-                    if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
-                        break
+                    if (dialWouldExceedCap(address)) {
+                        continue
                     }
                     
                     // Skip if observation is too old
@@ -2504,7 +2511,7 @@ class BleTransportFacade(
         // Record the connection attempt for rate limiting
         recordConnectionAttempt(address, now)
 
-        if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
+        if (dialWouldExceedCap(address)) {
             if (logThrottler.shouldLog("mesh_conn_cap", intervalMs = 10000)) {
                 Log.d(TAG, "Reached max simultaneous connections, skipping $address")
             }
@@ -2811,7 +2818,7 @@ class BleTransportFacade(
                     return
                 }
 
-                if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
+                if (dialWouldExceedCap(device.address)) {
                     if (logThrottler.shouldLog("mesh_conn_cap", intervalMs = 10000)) {
                         Log.d(TAG, "Connection cap reached, not connecting to ${device.address}")
                     }
@@ -2849,6 +2856,7 @@ class BleTransportFacade(
                     return
                 }
                 connections.registerGatt(device.address, gatt)
+                armConnectWatchdog(device.address, gatt)
             }
             
             Log.i(TAG, "Connecting to device: ${device.address}")
@@ -2861,6 +2869,42 @@ class BleTransportFacade(
     }
 
     private fun currentConnectionCount(): Int = connections.connectionCount()
+
+    /**
+     * Whether dialing [address] would take a link past the cap. A peer already
+     * connected to our GATT server adds nothing: the dial rides the link that
+     * is already up, so the cap must not refuse it.
+     */
+    private fun dialWouldExceedCap(address: String): Boolean =
+        !connections.hasServerConnection(address) &&
+            currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE
+
+    /**
+     * Closes the dial [gatt] to [address] if it has not connected within
+     * [CONNECTION_TIMEOUT_MS], so the address is free for the scan to redial.
+     * Only that dial: a later one to the same address holds its own entry.
+     */
+    private fun armConnectWatchdog(address: String, gatt: BluetoothGatt) {
+        bleHandler.postDelayed({
+            if (shuttingDown) return@postDelayed
+            if (connections.getGatt(address) !== gatt || connections.isClientEstablished(address)) {
+                return@postDelayed
+            }
+            Log.w(TAG, "Connect to $address did not complete in ${CONNECTION_TIMEOUT_MS}ms; closing it")
+            emitDiagnostic("warning", "BLE connect timed out", mapOf(
+                "address" to address,
+                "timeoutMs" to CONNECTION_TIMEOUT_MS,
+            ))
+            try {
+                gatt.disconnect()
+                gatt.close()
+            } catch (e: Exception) {
+                Log.w(TAG, "Error closing timed-out gatt for $address", e)
+            }
+            connections.removeGatt(address)
+            connections.consumePendingRole(address)
+        }, CONNECTION_TIMEOUT_MS)
+    }
 
     /**
      * The subscribed peripheral-link address that maps to [deviceId] by identity,
@@ -4471,13 +4515,18 @@ class BleTransportFacade(
         if (decision.evictPeerId != null) {
             evictPeer(decision.evictPeerId, "inbound_swap")
         }
-        if (decision.intent == ConnectionIntent.REJECTED) {
+        // Android reports a client link of ours to the GATT server too, so a
+        // central at an address we dialed is our own link. Refusing it would
+        // cancel the connection the dial is waiting on.
+        val ownDial = connections.getGatt(device.address) != null
+        if (decision.intent == ConnectionIntent.REJECTED && !ownDial) {
             Log.w(TAG, "Rejecting inbound connection from ${device.address}: ${decision.reason}")
             peripheralGattServer?.cancelConnection(device)
             return
         }
-        // Check connection capacity
-        if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {
+        // Check connection capacity. Completed links only: a dial still in
+        // flight may never complete, and must not turn a peer away.
+        if (!ownDial && connections.establishedLinkCount() >= MAX_CONNECTIONS_PER_DEVICE) {
             Log.w(TAG, "Rejecting inbound connection from ${device.address}: connection cap reached")
             peripheralGattServer?.cancelConnection(device)
             return

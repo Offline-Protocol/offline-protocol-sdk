@@ -194,7 +194,27 @@ class MeshConnectionRegistry {
 
     fun serverConnectionCount(): Int = serverConnections.size
 
-    fun connectionCount(): Int = gattClients.size + serverConnections.size
+    /** True when the client link to [address] finished connecting. */
+    fun isClientEstablished(address: String): Boolean = establishedClients.contains(address)
+
+    /**
+     * Peer addresses holding a link in either direction or a dial still in
+     * flight, each counted once.
+     *
+     * Once, because Android reports a client link of ours to the GATT server
+     * as well: the dial to a peer arrives there as a central connecting. A
+     * sum of the two maps counted that one link twice, so two dials filled a
+     * cap of four, and the cap check then refused the server-side half of our
+     * own link, cancelling the connection the dial was waiting on.
+     */
+    fun connectionCount(): Int = (gattClients.keys + serverConnections).size
+
+    /**
+     * Peer addresses holding a completed link in either direction, each
+     * counted once. A dial still in flight does not count: it may never
+     * complete, and a peer connecting to us must not be refused for it.
+     */
+    fun establishedLinkCount(): Int = (establishedClients + serverConnections).size
 
     fun clear() {
         gattClients.clear()

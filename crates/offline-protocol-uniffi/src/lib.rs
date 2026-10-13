@@ -14087,7 +14087,7 @@ mod tests {
             )
             .expect("connectToDevice must consult the duplicate refusal");
         let cap = dial
-            .find("if (currentConnectionCount() >= MAX_CONNECTIONS_PER_DEVICE) {")
+            .find("if (dialWouldExceedCap(device.address)) {")
             .expect("connectToDevice must keep its connection cap");
         let connect = dial
             .find("device.connectGatt(")
@@ -14095,6 +14095,78 @@ mod tests {
         assert!(
             suppressed < cap && cap < connect,
             "a refused duplicate address must be skipped before the cap and the dial"
+        );
+    }
+
+    /// A dial that never connects must not hold its address and its slot for
+    /// the life of the process (issue #549). The scan answers an address with
+    /// a registered client by "already connected/connecting" and never
+    /// redials it, so a dial whose link was cancelled underneath it, and which
+    /// got no callback, wedged that peer and counted against the cap until the
+    /// app restarted. And Android reports our own dial to the GATT server as
+    /// a central connecting: refusing that report for the cap cancelled the
+    /// link the dial was waiting on.
+    ///
+    /// 1. `connectToDevice` arms the connect watchdog for every gatt it
+    ///    registers, and the watchdog closes only its own, unconnected dial.
+    /// 2. The inbound path neither rejects nor counts a central at an address
+    ///    we dialed, and counts completed links only against the cap.
+    #[test]
+    fn react_native_android_a_dial_that_never_connects_is_closed_and_redialed() {
+        let facade = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+        let section = |start: &str| -> String {
+            let from = facade
+                .find(start)
+                .unwrap_or_else(|| panic!("missing {start}"));
+            let rest = &facade[from + start.len()..];
+            rest[..rn_kotlin_body_end(rest)].to_string()
+        };
+
+        let dial = section("private fun connectToDevice(");
+        let register = dial
+            .find("connections.registerGatt(device.address, gatt)")
+            .expect("connectToDevice must register the dial");
+        let arm = dial
+            .find("armConnectWatchdog(device.address, gatt)")
+            .expect("connectToDevice must arm the connect watchdog for the dial it registers");
+        assert!(
+            register < arm,
+            "the watchdog is armed for the registered dial"
+        );
+
+        let watchdog = section("private fun armConnectWatchdog(");
+        assert!(
+            watchdog.contains("}, CONNECTION_TIMEOUT_MS)"),
+            "the watchdog must fire after CONNECTION_TIMEOUT_MS"
+        );
+        assert!(
+            watchdog.contains(
+                "if (connections.getGatt(address) !== gatt || \
+                 connections.isClientEstablished(address)) { return@postDelayed }"
+            ),
+            "the watchdog must leave a later dial and a completed link alone"
+        );
+        assert!(
+            watchdog.contains("connections.removeGatt(address)"),
+            "the watchdog must free the address for the scan to redial"
+        );
+
+        let inbound = section("private fun handleCentralConnectedOnBleThread(");
+        assert!(
+            inbound.contains("val ownDial = connections.getGatt(device.address) != null"),
+            "the inbound path must recognise the server-side report of our own dial"
+        );
+        assert!(
+            inbound.contains("if (decision.intent == ConnectionIntent.REJECTED && !ownDial) {"),
+            "the mesh decision must not cancel our own dial's link"
+        );
+        assert!(
+            inbound.contains(
+                "if (!ownDial && connections.establishedLinkCount() >= MAX_CONNECTIONS_PER_DEVICE) {"
+            ),
+            "the inbound cap must count completed links and skip our own dial"
         );
     }
 
