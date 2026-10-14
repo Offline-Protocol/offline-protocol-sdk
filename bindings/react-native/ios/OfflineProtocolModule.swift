@@ -4449,11 +4449,9 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
-    /// Byte-oriented variant of `signData` that accepts the input as a
-    /// base64 string and returns the signature as a base64 string, so the
-    /// legacy React Native bridge does not have to iterate an
-    /// `NSArray<NSNumber *>` of boxed bytes. Produces byte-identical
-    /// signatures to `signData` for the same input.
+    /// Byte-oriented variant of `signData`: the input crosses the bridge as
+    /// one base64 string and the signature comes back as one. The decoded
+    /// `Data` goes to `signDataBytes` (UDL `bytes`) without a `[UInt8]` copy.
     @objc func signDataBase64(_ dataBase64: String,
                               resolver: @escaping RCTPromiseResolveBlock,
                               rejecter: @escaping RCTPromiseRejectBlock) {
@@ -4461,14 +4459,13 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
             return
         }
-        guard let decoded = Data(base64Encoded: dataBase64) else {
+        guard let data = Data(base64Encoded: dataBase64) else {
             rejecter("ERROR_CRYPTO", "signDataBase64: invalid base64 input", nil)
             return
         }
         do {
-            let dataBytes = [UInt8](decoded)
-            let signature = try proto.signData(data: dataBytes)
-            resolver(Data(signature).base64EncodedString())
+            let signature = try proto.signDataBytes(data: data)
+            resolver(signature.base64EncodedString())
         } catch {
             rejecter("ERROR_CRYPTO", "Failed to sign data: \(error.localizedDescription)", error)
         }
@@ -4490,6 +4487,30 @@ class OfflineProtocolModule: RCTEventEmitter {
             let signatureBytes = signature.map { $0.uint8Value }
             let isValid = try proto.verifySignature(publicKey: publicKeyBytes, data: dataBytes, signature: signatureBytes)
             resolver(isValid)
+        } catch {
+            rejecter("ERROR_CRYPTO", "Failed to verify signature: \(error.localizedDescription)", error)
+        }
+    }
+
+    /// Byte-oriented variant of `verifySignature`, base64 across the bridge
+    /// for the same reason as `signDataBase64`.
+    @objc func verifySignatureBase64(_ publicKeyBase64: String,
+                                     data dataBase64: String,
+                                     signature signatureBase64: String,
+                                     resolver: @escaping RCTPromiseResolveBlock,
+                                     rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        guard let publicKey = Data(base64Encoded: publicKeyBase64),
+              let data = Data(base64Encoded: dataBase64),
+              let signature = Data(base64Encoded: signatureBase64) else {
+            rejecter("ERROR_CRYPTO", "verifySignatureBase64: invalid base64 input", nil)
+            return
+        }
+        do {
+            resolver(try proto.verifySignatureBytes(publicKey: publicKey, data: data, signature: signature))
         } catch {
             rejecter("ERROR_CRYPTO", "Failed to verify signature: \(error.localizedDescription)", error)
         }

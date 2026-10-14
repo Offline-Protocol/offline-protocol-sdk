@@ -1,23 +1,18 @@
 #!/usr/bin/env node
 /**
- * Behavioral tests for `signDataBytes` — the byte-oriented sibling of
- * `signData` that crosses the legacy React Native bridge as a base64
- * string instead of a boxed `number[]`.
+ * Behavioral tests for `signDataBytes` and `verifySignatureBytes`, the
+ * byte-oriented siblings of `signData` and `verifySignature` that cross the
+ * legacy React Native bridge as base64 strings instead of a boxed
+ * `number[]`.
  *
- * The motivation: on `n`-byte payloads, `signData(number[])` allocates
- * ~8n bytes of JS heap (each byte becomes an f64-backed Number) because
- * the legacy React Native bridge serializes `NSArray<NSNumber *>` /
- * `ReadableArray` element by element. For `n = 55 MB` (a representative
- * LoRA delta on gemma-270m) that is ~440 MB of JS heap, which exceeds
- * the Dalvik growth limit on mid-tier Android devices and OOMs before
- * the native call starts.
- *
- * `signDataBytes` base64-encodes once on the JS side and crosses the
- * bridge as a single string. Peak JS heap drops from ~8n bytes to
- * ~2.33n bytes. The native side decodes to a byte array (one
- * allocation) and signs through the exact same Rust / UniFFI path that
- * backs `signData`, so Ed25519 signatures are byte-identical for the
- * same input.
+ * The native halves hand the decoded buffer to the core's `bytes` entry
+ * points (`sign_data_bytes`, `verify_signature_bytes`), whose equality with
+ * the `sequence<u8>` originals is pinned in Rust. What only this harness can
+ * pin is the TypeScript codec: that it is standard base64, byte for byte,
+ * at every length and across its chunk boundary, and that it needs no
+ * `btoa` or `atob`, which React Native before 0.74 does not have. Both
+ * globals are deleted before the SDK loads, so a regression to them fails
+ * here rather than on a device.
  *
  * See README.md for why the package has no other JS test setup.
  */
@@ -80,6 +75,8 @@ let signDataCalls = 0;
 let signDataBase64Calls = 0;
 let lastSignDataArg = null;
 let lastSignDataBase64Arg = null;
+let lastVerifyArgs = null;
+let signatureOverride = null;
 
 const nativeModule = new Proxy(
   {},
@@ -99,8 +96,15 @@ const nativeModule = new Proxy(
           lastSignDataBase64Arg = args[0];
           const binary = Buffer.from(args[0], 'base64');
           const bytes = new Uint8Array(binary.buffer, binary.byteOffset, binary.byteLength);
+          if (signatureOverride !== null) return Promise.resolve(signatureOverride);
           const sig = fakeSignature(bytes);
           return Promise.resolve(Buffer.from(sig).toString('base64'));
+        }
+        if (method === 'verifySignatureBase64') {
+          lastVerifyArgs = args.slice(0, 3);
+          const [, data, signature] = args.slice(0, 3).map((b) => Buffer.from(b, 'base64'));
+          const expected = Buffer.from(fakeSignature(new Uint8Array(data)));
+          return Promise.resolve(expected.equals(signature));
         }
         return Promise.resolve();
       };
@@ -123,6 +127,11 @@ class StubNativeEventEmitter {
     return { remove: () => handlers.delete(handler) };
   }
 }
+
+// React Native before 0.74 (Hermes) and every JavaScriptCore build lack
+// these; Node has them, so without this the harness would hide a regression.
+delete globalThis.btoa;
+delete globalThis.atob;
 
 const realLoad = Module._load;
 Module._load = function loadWithReactNativeStub(request) {
@@ -183,10 +192,10 @@ test('byte-identity on a tiny payload', async () => {
   );
 });
 
-test('byte-identity on a payload that spans a chunk boundary (32 KB + overlap)', async () => {
+test('byte-identity on a payload that spans many encoder chunks', async () => {
   const sdk = newSdk();
-  // 100 KB spans past BASE64_CHUNK_SIZE (32,766 bytes) three times, so
-  // chunk joining is exercised and any boundary bug would surface.
+  // 100 KB is about 133,000 base64 characters, sixteen of the encoder's
+  // 8,192-character chunks, so chunk joining is exercised.
   const bytes = new Uint8Array(100_000);
   for (let i = 0; i < bytes.length; i++) bytes[i] = (i * 31 + 7) & 0xff;
 
@@ -235,6 +244,52 @@ test('signData still crosses the bridge as number[] (legacy path unchanged)', as
   assert.deepEqual(lastSignDataArg, [1, 2, 3]);
 });
 
+test('the encoder is standard padded base64 at every tail length and across chunks', async () => {
+  const sdk = newSdk();
+  // 6144 bytes is exactly one 8192-character chunk; the neighbours straddle it.
+  for (const length of [0, 1, 2, 3, 4, 5, 6, 7, 6143, 6144, 6145, 6146, 100_001]) {
+    const bytes = new Uint8Array(length);
+    for (let i = 0; i < length; i++) bytes[i] = (i * 151 + 13) & 0xff;
+    await sdk.signDataBytes(bytes);
+    assert.equal(
+      lastSignDataBase64Arg,
+      Buffer.from(bytes).toString('base64'),
+      `base64 of ${length} bytes must match Node's encoder`
+    );
+  }
+});
+
+test('every byte value survives the round trip', async () => {
+  const sdk = newSdk();
+  const bytes = Uint8Array.from({ length: 256 }, (_, i) => i);
+  await sdk.signDataBytes(bytes);
+  assert.deepEqual(Array.from(Buffer.from(lastSignDataBase64Arg, 'base64')), Array.from(bytes));
+});
+
+test('a malformed signature from the native side is an error, not a short array', async () => {
+  const sdk = newSdk();
+  signatureOverride = 'AAAA*AAA';
+  await assert.rejects(sdk.signDataBytes(new Uint8Array([1])), /invalid base64/);
+});
+
+test('verifySignatureBytes crosses the bridge as three base64 strings', async () => {
+  const sdk = newSdk();
+  const publicKey = Uint8Array.from({ length: 32 }, (_, i) => i);
+  const data = new Uint8Array([9, 8, 7, 6, 5]);
+  const signature = await sdk.signDataBytes(data);
+
+  assert.equal(await sdk.verifySignatureBytes(publicKey, data, signature), true);
+  assert.deepEqual(lastVerifyArgs, [
+    Buffer.from(publicKey).toString('base64'),
+    Buffer.from(data).toString('base64'),
+    Buffer.from(signature).toString('base64'),
+  ]);
+
+  const tampered = Uint8Array.from(signature);
+  tampered[0] ^= 1;
+  assert.equal(await sdk.verifySignatureBytes(publicKey, data, tampered), false);
+});
+
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
@@ -250,6 +305,8 @@ test('signData still crosses the bridge as number[] (legacy path unchanged)', as
       signDataBase64Calls = 0;
       lastSignDataArg = null;
       lastSignDataBase64Arg = null;
+      lastVerifyArgs = null;
+      signatureOverride = null;
       captureConsole();
       try {
         await fn();

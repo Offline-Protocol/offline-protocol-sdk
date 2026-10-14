@@ -1902,6 +1902,14 @@ interface OfflineProtocol {
     [Throws=ProtocolError]
     sequence<u8> sign_data(sequence<u8> data);
 
+    // sign_data over `bytes`. sequence<u8> generates List<UByte> on Kotlin,
+    // one boxed object per byte, and [UInt8] on Swift; a payload of tens of
+    // megabytes then exhausts the Android heap before anything is signed.
+    // `bytes` is ByteArray / Data with no per-element cost. Same key, same
+    // Ed25519 signature as sign_data for the same input.
+    [Throws=ProtocolError]
+    bytes sign_data_bytes(bytes data);
+
     // This identity's assertion over signed_data: the whole
     // publicKey(32) || signature(64) || signedData layout, built in the
     // core so no bridge assembles it. A Bluetooth LE peripheral serves it
@@ -1928,6 +1936,10 @@ interface OfflineProtocol {
     // Returns true if the signature is valid, false otherwise.
     [Throws=ProtocolError]
     boolean verify_signature(sequence<u8> public_key, sequence<u8> data, sequence<u8> signature);
+
+    // verify_signature over `bytes`, for the same reason as sign_data_bytes.
+    [Throws=ProtocolError]
+    boolean verify_signature_bytes(bytes public_key, bytes data, bytes signature);
 
     // Build an invite blob for this identity: an opaque base64url string.
     // Apps own the container; the recommended form is one parameter,

@@ -915,6 +915,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data() != 21607:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data_bytes() != 17945:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start() != 48145:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop() != 20607:
@@ -938,6 +940,8 @@ def _uniffi_check_api_checksums(lib):
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics() != 794:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature() != 30260:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes() != 1730:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() != 48560:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -2664,6 +2668,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data.ar
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data_bytes.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data_bytes.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_start.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2735,6 +2745,14 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signa
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature.restype = ctypes.c_int8
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature_bytes.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature_bytes.restype = ctypes.c_int8
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -3377,6 +3395,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data_bytes.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data_bytes.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start.restype = ctypes.c_uint16
@@ -3413,6 +3434,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message.restype = ctypes.c_uint16
@@ -10574,6 +10598,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def sign_data(self, data: typing.List[int]) -> typing.List[int]:
         raise NotImplementedError
+    def sign_data_bytes(self, data: bytes) -> bytes:
+        raise NotImplementedError
     def start(self, ) -> None:
         raise NotImplementedError
     def stop(self, ) -> None:
@@ -10597,6 +10623,8 @@ class OfflineProtocolProtocol(typing.Protocol):
     def update_transport_metrics(self, transport_type: TransportType,metrics: TransportMetrics) -> None:
         raise NotImplementedError
     def verify_signature(self, public_key: typing.List[int],data: typing.List[int],signature: typing.List[int]) -> bool:
+        raise NotImplementedError
+    def verify_signature_bytes(self, public_key: bytes,data: bytes,signature: bytes) -> bool:
         raise NotImplementedError
     def wifi_direct_get_next_message(self, ) -> typing.Optional[WifiDirectMessage]:
         raise NotImplementedError
@@ -13095,6 +13123,21 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def sign_data_bytes(self, data: bytes) -> bytes:
+        
+        _UniffiFfiConverterBytes.check_lower(data)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterBytes.lower(data),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterBytes.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data_bytes,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def start(self, ) -> None:
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -13269,6 +13312,27 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def verify_signature_bytes(self, public_key: bytes,data: bytes,signature: bytes) -> bool:
+        
+        _UniffiFfiConverterBytes.check_lower(public_key)
+        
+        _UniffiFfiConverterBytes.check_lower(data)
+        
+        _UniffiFfiConverterBytes.check_lower(signature)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterBytes.lower(public_key),
+            _UniffiFfiConverterBytes.lower(data),
+            _UniffiFfiConverterBytes.lower(signature),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterBoolean.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature_bytes,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)

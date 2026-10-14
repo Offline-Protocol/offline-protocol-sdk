@@ -229,48 +229,88 @@ interface NativeConfig {
   };
 }
 
-/**
- * Chunk size for the base64 encoder's intermediate "binary string" step.
- * 32 KB keeps per-chunk transient allocations small while amortising the
- * `btoa` call cost on large payloads. The encoder emits byte-identical
- * output for any `BASE64_CHUNK_SIZE` divisible by 3 (base64 operates on
- * 3-byte groups).
- */
-const BASE64_CHUNK_SIZE = 32_766;
+const BASE64_ALPHABET =
+  'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+const BASE64_PAD = 61; // '='
 
 /**
- * Encodes a byte array to a standard base64 string without materialising
- * one monolithic "binary" intermediate string. Used by {@link OfflineProtocol.signDataBytes}
- * to cross the legacy React Native bridge without the per-byte f64 boxing
- * that `number[]` triggers. See `js-ci-harness/sign-data-bytes.test.js` for
- * the byte-identity pin against `signData(Array.from(bytes))`.
+ * Characters per `String.fromCharCode.apply` call in {@link bytesToBase64}.
+ * Bounded because an engine caps the argument count of one call, and small
+ * enough that a payload of tens of megabytes never builds one large
+ * intermediate.
+ */
+const BASE64_CHUNK_CHARS = 8192;
+
+/**
+ * Standard, padded base64, written here rather than taken from `btoa`:
+ * `btoa` and `atob` are Hermes globals only from React Native 0.74, the
+ * package supports 0.70, and JavaScriptCore never has them. `btoa` would
+ * also need a "binary string" built one `String.fromCharCode` per byte.
  */
 function bytesToBase64(bytes: Uint8Array): string {
-  if (bytes.length === 0) return '';
-  const chunks: string[] = [];
-  for (let offset = 0; offset < bytes.length; offset += BASE64_CHUNK_SIZE) {
-    const end = Math.min(offset + BASE64_CHUNK_SIZE, bytes.length);
-    let binary = '';
-    for (let i = offset; i < end; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    chunks.push(btoa(binary));
+  const parts: string[] = [];
+  const codes = new Uint16Array(BASE64_CHUNK_CHARS);
+  let n = 0;
+  const flush = (): void => {
+    parts.push(
+      String.fromCharCode.apply(null, codes.subarray(0, n) as unknown as number[])
+    );
+    n = 0;
+  };
+  const full = bytes.length - (bytes.length % 3);
+  for (let i = 0; i < full; i += 3) {
+    const t = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
+    codes[n++] = BASE64_ALPHABET.charCodeAt(t >>> 18);
+    codes[n++] = BASE64_ALPHABET.charCodeAt((t >>> 12) & 63);
+    codes[n++] = BASE64_ALPHABET.charCodeAt((t >>> 6) & 63);
+    codes[n++] = BASE64_ALPHABET.charCodeAt(t & 63);
+    if (n === BASE64_CHUNK_CHARS) flush();
   }
-  return chunks.join('');
+  const rest = bytes.length - full;
+  if (rest > 0) {
+    const t = (bytes[full] << 16) | (rest === 2 ? bytes[full + 1] << 8 : 0);
+    codes[n++] = BASE64_ALPHABET.charCodeAt(t >>> 18);
+    codes[n++] = BASE64_ALPHABET.charCodeAt((t >>> 12) & 63);
+    codes[n++] = rest === 2 ? BASE64_ALPHABET.charCodeAt((t >>> 6) & 63) : BASE64_PAD;
+    codes[n++] = BASE64_PAD;
+  }
+  if (n > 0) flush();
+  return parts.join('');
 }
 
+const BASE64_DECODE = (() => {
+  const table = new Int8Array(128).fill(-1);
+  for (let i = 0; i < BASE64_ALPHABET.length; i++) {
+    table[BASE64_ALPHABET.charCodeAt(i)] = i;
+  }
+  return table;
+})();
+
 /**
- * Decodes a standard base64 string to a byte array. Signature outputs from
- * `signDataBase64` are 64 bytes (Ed25519), so this is only ever called with
- * tiny inputs on the signing path. The transient binary string is bounded
- * by the input length, which is sufficient for signature-shaped returns.
+ * Decodes the standard base64 the native modules return. Throws on any
+ * character outside the alphabet rather than decoding around it, so a
+ * malformed signature is an error and never a shorter byte array.
  */
 function base64ToBytes(b64: string): Uint8Array {
-  if (b64.length === 0) return new Uint8Array(0);
-  const binary = atob(b64);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    out[i] = binary.charCodeAt(i);
+  let end = b64.length;
+  while (end > 0 && b64.charCodeAt(end - 1) === BASE64_PAD) end--;
+  if (end % 4 === 1 || b64.length - end > 2) {
+    throw new Error('invalid base64 from the native module');
+  }
+  const out = new Uint8Array(Math.floor((end * 3) / 4));
+  let bits = 0;
+  let acc = 0;
+  let o = 0;
+  for (let i = 0; i < end; i++) {
+    const c = b64.charCodeAt(i);
+    const v = c < 128 ? BASE64_DECODE[c] : -1;
+    if (v < 0) throw new Error('invalid base64 from the native module');
+    acc = (acc << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out[o++] = (acc >>> bits) & 0xff;
+    }
   }
   return out;
 }
@@ -3056,32 +3096,24 @@ export class OfflineProtocol {
   }
 
   /**
-   * Byte-oriented variant of {@link signData} that avoids boxing every byte
-   * as a JavaScript `number` across the native bridge. On the legacy React
-   * Native bridge, passing `n` bytes as `number[]` allocates ~8n bytes of
-   * JS heap (each byte becomes an f64-backed `Number`). For a 55 MB payload
-   * that is ~440 MB of JS heap, which exceeds the Dalvik growth limit on
-   * mid-tier Android devices and OOMs before the native call even starts.
+   * Byte-oriented variant of {@link signData}. Signs the same bytes with the
+   * same key and returns the same signature, but never boxes a byte.
    *
-   * This method base64-encodes the bytes once on the JS side (chunked, so
-   * the intermediate binary string never exceeds `BASE64_CHUNK_SIZE`),
-   * crosses the bridge as a single `NSString` / Java `String`, and the
-   * native side decodes directly to a byte array. Peak JS heap on a 55 MB
-   * payload drops from ~440 MB to ~128 MB (input `Uint8Array` + output
-   * base64 string); the native side allocates one byte buffer, not an
-   * N-element boxed collection.
-   *
-   * Produces byte-identical signatures to {@link signData} for the same
-   * input bytes (Ed25519 is deterministic over its input).
+   * `signData` takes a `number[]`, which the legacy bridge carries as one
+   * boxed number per byte, and the native side then builds the
+   * `sequence<u8>` list the core takes, one object per byte again on
+   * Android. On a payload of tens of megabytes that exhausts the Android
+   * heap before anything is signed. This method crosses the bridge as one
+   * base64 string, and the native side hands the decoded buffer to the
+   * core's `bytes` entry point as is.
    *
    * @param data - The bytes to sign
-   * @returns The signature bytes (64 bytes for Ed25519)
+   * @returns The signature (64 bytes, Ed25519)
    * @throws Error if MLS is not initialized
    */
   async signDataBytes(data: Uint8Array): Promise<Uint8Array> {
-    const dataBase64 = bytesToBase64(data);
     const signatureBase64 = await OfflineProtocolNativeModule.signDataBase64(
-      dataBase64
+      bytesToBase64(data)
     );
     return base64ToBytes(signatureBase64);
   }
@@ -3105,6 +3137,29 @@ export class OfflineProtocol {
       publicKey,
       data,
       signature
+    );
+  }
+
+  /**
+   * Byte-oriented variant of {@link verifySignature}, for the same reason as
+   * {@link signDataBytes}: the three inputs cross the bridge as base64
+   * strings and reach the core without one boxed object per byte.
+   *
+   * @param publicKey - The signer's public key (32 bytes)
+   * @param data - The data that was signed
+   * @param signature - The signature to verify (64 bytes)
+   * @returns True if the signature is valid
+   * @throws Error if verification fails due to invalid input
+   */
+  async verifySignatureBytes(
+    publicKey: Uint8Array,
+    data: Uint8Array,
+    signature: Uint8Array
+  ): Promise<boolean> {
+    return await OfflineProtocolNativeModule.verifySignatureBase64(
+      bytesToBase64(publicKey),
+      bytesToBase64(data),
+      bytesToBase64(signature)
     );
   }
 

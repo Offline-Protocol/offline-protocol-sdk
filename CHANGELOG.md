@@ -15,6 +15,20 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Signing large payloads from React Native no longer boxes every byte.**
+  `signDataBytes(Uint8Array)` and `verifySignatureBytes` sit beside
+  `signData` and `verifySignature`, which are unchanged. They cross the bridge
+  as base64 strings, and the native modules hand the decoded buffer to new
+  `sign_data_bytes` and `verify_signature_bytes` entry points in the
+  interface definition, typed `bytes` rather than `sequence<u8>`. The old
+  path allocated one boxed number per byte in JavaScript and one boxed
+  `UByte` per byte, twice, on the Android heap, which exhausts that heap on
+  a payload of tens of megabytes before anything is signed. Signatures are
+  identical for the same input. The base64 codec is the SDK's own, since
+  `btoa` and `atob` are missing from Hermes before React Native 0.74 and from
+  JavaScriptCore. On the local API the two are platform operations: the wire
+  already carries base64, and a signing twin there would reach the shared key
+  past the `sign_data` deny group.
 - **The service image is published.** The release workflow builds
   `bindings/python/docker` for linux/amd64 and linux/arm64 and pushes it to
   `ghcr.io/offline-protocol/offline-protocol-service`, tagged `X.Y.Z`, and

@@ -288,6 +288,11 @@ PLATFORM: frozenset[str] = frozenset(
         "erase_custody",
         # takes a callback interface
         "run_storage_conformance",
+        # byte twins of sign_data / verify_signature for the mobile bridges.
+        # The wire already carries base64, and exposing the signing twin
+        # would reach the shared key past the `sign_data` deny group.
+        "sign_data_bytes",
+        "verify_signature_bytes",
     }
 )
 

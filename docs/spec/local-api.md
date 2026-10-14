@@ -547,6 +547,7 @@ this chapter asserts it.
 | `data.wipe_all` | Erases every client's documents and the identity's key documents at once. That is the operator's logout, taken at the server, never one application's call |
 | `erase_custody` | Drops every frame this device holds for its neighbours, whichever client's traffic brought them, and resets the counters. The operator's erase, like `data.wipe_all`, never one application's call |
 | `run_storage_conformance` | Takes a callback interface; a storage backend is verified by the host that supplies it |
+| `sign_data_bytes`, `verify_signature_bytes` | The `bytes` twins of `sign_data` and `verify_signature`, which exist so a mobile bridge can hand a large payload to the core without one boxed object per byte. The wire already carries base64, and a signing twin on the wire would reach the shared identity key past the `sign_data` deny group |
 
 ## Event catalogue
 

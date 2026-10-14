@@ -1597,6 +1597,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func signData(data: [UInt8]) throws  -> [UInt8]
     
+    func signDataBytes(data: Data) throws  -> Data
+    
     func start() throws 
     
     func stop() throws 
@@ -1620,6 +1622,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     func updateTransportMetrics(transportType: TransportType, metrics: TransportMetrics) throws 
     
     func verifySignature(publicKey: [UInt8], data: [UInt8], signature: [UInt8]) throws  -> Bool
+    
+    func verifySignatureBytes(publicKey: Data, data: Data, signature: Data) throws  -> Bool
     
     func wifiDirectGetNextMessage()  -> WifiDirectMessage?
     
@@ -3077,6 +3081,15 @@ open func signData(data: [UInt8])throws  -> [UInt8]  {
 })
 }
     
+open func signDataBytes(data: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data_bytes(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(data),$0
+    )
+})
+}
+    
 open func start()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_start(
             self.uniffiCloneHandle(),$0
@@ -3171,6 +3184,17 @@ open func verifySignature(publicKey: [UInt8], data: [UInt8], signature: [UInt8])
         FfiConverterSequenceUInt8.lower(publicKey),
         FfiConverterSequenceUInt8.lower(data),
         FfiConverterSequenceUInt8.lower(signature),$0
+    )
+})
+}
+    
+open func verifySignatureBytes(publicKey: Data, data: Data, signature: Data)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature_bytes(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(publicKey),
+        FfiConverterData.lower(data),
+        FfiConverterData.lower(signature),$0
     )
 })
 }
@@ -10451,6 +10475,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data() != 3647) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data_bytes() != 45196) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start() != 10699) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -10485,6 +10512,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature() != 13732) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes() != 56211) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() != 1936) {

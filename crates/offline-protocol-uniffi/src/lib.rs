@@ -7127,6 +7127,14 @@ impl OfflineProtocol {
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
     }
 
+    /// [`Self::sign_data`] over UDL `bytes`, which the bindings carry as
+    /// `ByteArray` / `Data` rather than one boxed element per byte. The
+    /// `sequence<u8>` form allocates an object per byte on Kotlin, which a
+    /// payload of tens of megabytes turns into an Android heap exhaustion.
+    pub fn sign_data_bytes(&self, data: Vec<u8>) -> Result<Vec<u8>, ProtocolError> {
+        self.sign_data(data)
+    }
+
     /// This identity's assertion over `signed_data`: the whole
     /// `public_key(32) ‖ signature(64) ‖ signed_data` layout, built in the
     /// core so that no bridge assembles it and every peripheral on every
@@ -7267,6 +7275,17 @@ impl OfflineProtocol {
     ) -> Result<bool, ProtocolError> {
         CoreMlsManager::verify_signature(&public_key, &data, &signature)
             .map_err(|e| ProtocolError::MlsError(e.to_string()))
+    }
+
+    /// [`Self::verify_signature`] over UDL `bytes`, which the bindings carry
+    /// as `ByteArray` / `Data` rather than one boxed element per byte.
+    pub fn verify_signature_bytes(
+        &self,
+        public_key: Vec<u8>,
+        data: Vec<u8>,
+        signature: Vec<u8>,
+    ) -> Result<bool, ProtocolError> {
+        self.verify_signature(public_key, data, signature)
     }
 
     // ========================================================================
@@ -9957,6 +9976,53 @@ mod tests {
              no delivery ACK); got outbound recipients: {:?}",
             outbound_recipients
         );
+    }
+
+    /// The `bytes` siblings are the same operation as the `sequence<u8>`
+    /// originals: the React Native bridges route a large payload through
+    /// `sign_data_bytes`, and a peer verifying with either form must accept
+    /// what either form signed.
+    #[test]
+    fn test_sign_data_bytes_matches_sign_data() {
+        let device = OfflineProtocol::new(create_test_config()).unwrap();
+        assert!(
+            matches!(
+                device.sign_data_bytes(b"x".to_vec()),
+                Err(ProtocolError::MlsNotInitialized)
+            ),
+            "no identity before initialize_mls, so nothing to sign with"
+        );
+        device
+            .initialize_mls(
+                Box::new(TestMlsStorageProvider::default()),
+                Box::new(TestMlsStorageProvider::default()),
+            )
+            .unwrap();
+        let public_key = device.get_identity_public_key().unwrap();
+
+        for data in [Vec::new(), b"a LoRA delta".to_vec()] {
+            let via_bytes = device.sign_data_bytes(data.clone()).unwrap();
+            assert_eq!(via_bytes, device.sign_data(data.clone()).unwrap());
+            assert_eq!(via_bytes.len(), 64);
+            assert!(device
+                .verify_signature_bytes(public_key.clone(), data.clone(), via_bytes.clone())
+                .unwrap());
+
+            let mut tampered = via_bytes;
+            tampered[0] ^= 0x01;
+            assert!(!device
+                .verify_signature_bytes(public_key.clone(), data.clone(), tampered.clone())
+                .unwrap_or(false));
+            assert_eq!(
+                device
+                    .verify_signature_bytes(public_key.clone(), data.clone(), tampered.clone())
+                    .is_ok(),
+                device
+                    .verify_signature(public_key.clone(), data, tampered)
+                    .is_ok(),
+                "both forms must answer a bad signature the same way"
+            );
+        }
     }
 
     /// The assertion a device builds is the assertion the namespace verifier

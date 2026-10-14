@@ -792,5 +792,11 @@ RCT_EXTERN_METHOD(verifySignature:(NSArray *)publicKey
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(verifySignatureBase64:(NSString *)publicKeyBase64
+                  data:(NSString *)dataBase64
+                  signature:(NSString *)signatureBase64
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 @end
 
