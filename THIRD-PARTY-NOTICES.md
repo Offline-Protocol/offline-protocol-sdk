@@ -25,10 +25,10 @@ upstream source on each crate's page) — the exact versions are listed below.
 
 | License | Crates |
 |---------|--------|
-| MIT License | 269 |
+| MIT License | 270 |
 | Mozilla Public License 2.0 | 12 |
 | GNU Affero General Public License v3.0 only | 11 |
-| Apache License 2.0 | 11 |
+| Apache License 2.0 | 10 |
 | BSD 3-Clause "New" or "Revised" License | 6 |
 | ISC License | 3 |
 | Boost Software License 1.0 | 1 |
@@ -520,7 +520,6 @@ Used by:
 - [libcrux-secrets 0.0.5](https://github.com/cryspen/libcrux)
 - [libcrux-sha3 0.0.8](https://github.com/cryspen/libcrux)
 - [libcrux-traits 0.0.6](https://github.com/cryspen/libcrux)
-- [ryu 1.0.20](https://github.com/dtolnay/ryu)
 
 ```
 Apache License
@@ -5170,7 +5169,7 @@ Used by:
 - [serde_bytes 0.11.19](https://github.com/serde-rs/bytes)
 - [serde_core 1.0.229](https://github.com/serde-rs/serde)
 - [serde_derive 1.0.229](https://github.com/serde-rs/serde)
-- [serde_json 1.0.145](https://github.com/serde-rs/json)
+- [serde_json 1.0.151](https://github.com/serde-rs/json)
 - [syn 1.0.109](https://github.com/dtolnay/syn)
 - [syn 2.0.108](https://github.com/dtolnay/syn)
 - [syn 3.0.3](https://github.com/dtolnay/syn)
@@ -5182,6 +5181,7 @@ Used by:
 - [utf8-zero 0.8.1](https://github.com/algesten/utf8-zero)
 - [wasi 0.11.1+wasi-snapshot-preview1](https://github.com/bytecodealliance/wasi)
 - [wit-bindgen 0.46.0](https://github.com/bytecodealliance/wit-bindgen)
+- [zmij 1.0.23](https://github.com/dtolnay/zmij)
 
 ```
 Permission is hereby granted, free of charge, to any
