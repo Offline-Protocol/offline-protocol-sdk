@@ -44,8 +44,8 @@ python3 run.py --scenario 4 --scenario 5
 
 The image installs the package from PyPI unless a Linux wheel built from a
 checkout is in `bindings/python/docker/wheels/`, and its build fails when
-the installed package has no `offline-protocol-verify`, which is true of
-every release so far: until one ships, put a wheel there (built as
+the installed package has no `offline-protocol-verify`, which 0.29.0 is the
+first release to ship. To run a checkout, put its wheel there (built as
 [the Python README](../../bindings/python/README.md#a-linux-wheel-from-a-checkout-on-another-host)
 says), or build the image another way and pass `--no-build` to use
 `offline-protocol-service:offline-first` as it is. `run.py` writes `.env` with one store key per device the first

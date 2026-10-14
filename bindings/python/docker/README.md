@@ -12,8 +12,9 @@ export OFFLINE_PROTOCOL_STORE_KEY="$(openssl rand -hex 32)"   # once per host; k
 docker compose up -d
 ```
 
-Until a release ships the HTTP front, the image builds only from a wheel
-built from a checkout (below). To see the service work before deploying it,
+The image installs the released package from PyPI, which has the HTTP
+front and the verifier from 0.29.0; a wheel built from a checkout replaces
+it (below). To see the service work before deploying it,
 two demos run on one machine:
 [examples/offline-first](../../../examples/offline-first) (messages held for
 a device that is off, and carried through a third) and
@@ -24,6 +25,39 @@ This `compose.yml` uses host networking, which on Docker Desktop (macOS,
 Windows) is the namespace of Docker's Linux virtual machine, not the
 desktop's: the front is not on the Mac's loopback, and multicast DNS does
 not reach the Mac's LAN. Use the demos there; this file is for a Linux host.
+
+## Published image
+
+Each release from 0.29.0 is also published, built from this directory, for
+linux/amd64 and linux/arm64:
+
+```bash
+docker pull ghcr.io/offline-protocol/offline-protocol-service:0.29.0
+```
+
+| Tag | What it names |
+|---|---|
+| `X.Y.Z`, such as `0.29.0` | That release |
+| `X.Y`, such as `0.29` | The newest release in that series |
+| `latest` | The newest release, never a prerelease |
+| `X.Y.Z-rc.N` | A prerelease, under that tag only |
+
+The image installs `offline-protocol-sdk[lan,http]` at exactly its tag's
+version from PyPI (the `SDK_VERSION` build argument), and its build fails if
+pip installs any other version. `X.Y` and `latest` move with every release;
+`X.Y.Z` is never pushed twice by the release workflow, but a registry tag
+can be moved, and a digest cannot. So pin the digest in a deployment, which
+`docker buildx imagetools inspect
+ghcr.io/offline-protocol/offline-protocol-service:0.29.0` prints:
+`image: ghcr.io/offline-protocol/offline-protocol-service@sha256:<digest>`.
+Read [docs/UPGRADING.md](../../../docs/UPGRADING.md) before moving a host to
+a new one. Each image carries a provenance attestation and an SBOM; check the
+attestation with `gh attestation verify
+oci://ghcr.io/offline-protocol/offline-protocol-service:0.29.0 --repo
+Offline-Protocol/offline-protocol-sdk`.
+
+To run it with this directory's `compose.yml`, replace `build: .` with
+`image:` and that reference. The grants below apply to it unchanged.
 
 ## What a host's container manifest must grant
 
@@ -126,10 +160,14 @@ docker build bindings/python/docker
 Wheels for several architectures may sit there together; pip takes the one
 that matches the image. The build fails if the installed service has no HTTP
 front or the package has no `offline-protocol-verify`, which is the case for
-every release so far.
+every release before 0.29.0.
 
 The build context is this directory only. Never build from the repository
 root or mount the checkout: `target/` alone fills the build VM.
+
+`docker build --build-arg SDK_VERSION=0.29.0 bindings/python/docker` installs
+that release from PyPI and nothing else, as the published image does; it is
+refused while a wheel is in `wheels/`, which it would otherwise replace.
 
 ## What has been run
 
