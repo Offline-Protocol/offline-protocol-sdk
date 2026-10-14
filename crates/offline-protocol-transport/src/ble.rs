@@ -140,7 +140,14 @@ pub struct BleTransport {
     /// Pending serialized fragments waiting to be delivered
     #[allow(clippy::type_complexity)]
     pending_fragments: Arc<Mutex<VecDeque<(String, Vec<u8>)>>>,
-    /// Transport metrics
+    /// Transport metrics.
+    ///
+    /// BLE never writes its own `success_count` / `failure_count`: it has no
+    /// send confirmation loop, so the transport manager fills delivery
+    /// evidence from the engine's acknowledgements instead. Counting a
+    /// receive-side reassembly drop here, with no success ever recorded to
+    /// balance it, reported a permanent 0% delivery ratio after one lost
+    /// fragment and drove DORS into its emergency switch (#557).
     metrics: Arc<Mutex<TransportMetrics>>,
     /// Platform-specific handle (opaque pointer)
     platform_handle: Arc<Mutex<Option<usize>>>,
@@ -401,30 +408,6 @@ impl BleTransport {
         metrics.congestion = ((metrics.queue_depth as f32) / heuristic_capacity).clamp(0.0, 1.0);
     }
 
-    /// Records a successful send for metrics tracking.
-    pub fn record_send_success(&self) {
-        let mut metrics = self.metrics.lock_or_recover();
-        metrics.success_count = metrics.success_count.saturating_add(1);
-        let total = metrics.success_count + metrics.failure_count;
-        if total > 0 {
-            let ratio = metrics.success_count as f32 / total as f32;
-            metrics.delivery_ratio = Some(ratio);
-            metrics.drop_rate = Some((1.0 - ratio).clamp(0.0, 1.0));
-        }
-    }
-
-    /// Records a failed send for metrics tracking.
-    pub fn record_send_failure(&self) {
-        let mut metrics = self.metrics.lock_or_recover();
-        metrics.failure_count = metrics.failure_count.saturating_add(1);
-        let total = metrics.success_count + metrics.failure_count;
-        if total > 0 {
-            let drop_ratio = metrics.failure_count as f32 / total as f32;
-            metrics.drop_rate = Some(drop_ratio.clamp(0.0, 1.0));
-            metrics.delivery_ratio = Some((1.0 - drop_ratio).clamp(0.0, 1.0));
-        }
-    }
-
     fn record_latency(&self, latency_ms: u128) {
         let value = latency_ms.min(u128::from(u32::MAX)) as u32;
         let mut metrics = self.metrics.lock_or_recover();
@@ -456,8 +439,8 @@ impl BleTransport {
         }
 
         for message_id in expired {
+            // Not a send outcome: see the `metrics` field (#557).
             buffers.remove(&message_id);
-            self.record_send_failure();
             tracing::debug!(
                 message_id = %message_id,
                 "Dropped expired BLE fragment assembly"
@@ -704,7 +687,6 @@ impl BleTransport {
 
         let mut completed_payload: Option<Vec<u8>> = None;
         let mut assembly_started_at: Option<SystemTime> = None;
-        let mut evicted = false;
         // Collected outside the lock to avoid holding fragment_buffers while
         // invoking the callback (which may acquire shared_state).
         let mut eviction_info: Option<FragmentEvictionInfo> = None;
@@ -747,7 +729,6 @@ impl BleTransport {
                     });
 
                     buffers.remove(&evict_id);
-                    evicted = true;
                 }
             }
 
@@ -845,10 +826,6 @@ impl BleTransport {
             if let Some(cb) = cb {
                 cb(info);
             }
-        }
-
-        if evicted {
-            self.record_send_failure();
         }
 
         if let Some(payload) = completed_payload {
@@ -2152,17 +2129,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ble_record_send_success_failure() {
-        let transport = BleTransport::new("test-device");
-        transport.record_send_success();
-        transport.record_send_success();
-        transport.record_send_failure();
-        let metrics = transport.metrics();
-        assert_eq!(metrics.success_count, 2);
-        assert_eq!(metrics.failure_count, 1);
-    }
-
-    #[test]
     fn test_ble_peer_discovery() {
         let transport = BleTransport::new("test-device");
         transport.on_peer_discovered(peer_device("peer-1"));
@@ -2732,5 +2698,63 @@ mod tests {
             *fired.lock().unwrap(),
             "eviction callback should have fired"
         );
+    }
+
+    /// A capacity eviction drops an inbound partial message. That is not an
+    /// outcome of any send of ours, so it must leave the delivery counters
+    /// untouched; recording it as a send failure, with no success ever
+    /// recorded, pinned BLE's delivery ratio at zero (#557).
+    #[test]
+    fn a_capacity_eviction_is_not_a_send_failure() {
+        let transport = BleTransport::new("test-device");
+        for i in 0..BLE_MAX_FRAGMENT_ASSEMBLIES {
+            let msg_id = format!("msg-{i}");
+            let frag = encode_fragment(msg_id.as_bytes(), 0, 4, b"payload-data").unwrap();
+            assert!(transport.process_fragment(&frag).unwrap().is_none());
+        }
+        let trigger_frag = encode_fragment(b"new-msg", 0, 4, b"payload-data").unwrap();
+        assert!(transport.process_fragment(&trigger_frag).unwrap().is_none());
+        assert_eq!(
+            transport.fragment_buffers.lock_or_recover().len(),
+            BLE_MAX_FRAGMENT_ASSEMBLIES,
+            "one assembly must have been evicted to admit the new one"
+        );
+
+        let metrics = transport.metrics();
+        assert_eq!(metrics.sample_count(), 0);
+        assert_eq!(metrics.delivery_ratio, None);
+        assert_eq!(metrics.drop_rate, None);
+    }
+
+    /// The idle-timeout path drops an inbound partial message too, and is
+    /// equally not a send outcome (#557).
+    #[test]
+    fn an_idle_expired_assembly_is_not_a_send_failure() {
+        let transport = BleTransport::new("test-device");
+        let stale = SystemTime::now() - StdDuration::from_secs(BLE_FRAGMENT_TIMEOUT_SECS + 1);
+        transport.fragment_buffers.lock_or_recover().insert(
+            "stale-msg".to_string(),
+            FragmentAssembly {
+                total_fragments: 4,
+                fragments: HashMap::from([(0, b"payload-data".to_vec())]),
+                started_at: stale,
+                last_seen: stale,
+                buffered_bytes: 12,
+            },
+        );
+
+        // Any received fragment runs the idle cleanup first.
+        let frag = encode_fragment(b"fresh-msg", 0, 4, b"payload-data").unwrap();
+        assert!(transport.process_fragment(&frag).unwrap().is_none());
+
+        let buffers = transport.fragment_buffers.lock_or_recover();
+        assert!(!buffers.contains_key("stale-msg"), "stale assembly expired");
+        assert!(buffers.contains_key("fresh-msg"));
+        drop(buffers);
+
+        let metrics = transport.metrics();
+        assert_eq!(metrics.sample_count(), 0);
+        assert_eq!(metrics.delivery_ratio, None);
+        assert_eq!(metrics.drop_rate, None);
     }
 }
