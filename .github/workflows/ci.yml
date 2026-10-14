@@ -724,7 +724,7 @@ jobs:
       # trusted publishing, which needs the npm >= 11.5.1 that Node 24 bundles.
       # Keeping the two in lockstep is the whole point of this job, so this
       # version tracks that one rather than being chosen independently.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: "24"
           cache: "npm"
@@ -878,7 +878,7 @@ jobs:
       # through the symlink farm ios/BRIDGE_MAINTENANCE.md describes. The file
       # list is a glob, not the enumerated list above, so a new source is
       # covered without being registered here.
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version: "24"
           cache: "npm"
