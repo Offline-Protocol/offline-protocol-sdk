@@ -4508,11 +4508,13 @@ impl OfflineProtocol {
         None
     }
 
-    /// BLE: Return fragment (marks last fragment as sent)
-    pub fn ble_return_fragment(&self) {
-        // This is a no-op for backwards compatibility
-        // Fragment sending confirmation is handled by the transport layer
-    }
+    /// BLE: Return fragment. A no-op kept for binary compatibility.
+    ///
+    /// BLE has no send confirmation loop: nothing reports a write's outcome,
+    /// and the transport records none. Its delivery evidence is the engine's
+    /// acknowledgements, which the transport manager merges into BLE's
+    /// metrics (#557).
+    pub fn ble_return_fragment(&self) {}
 
     /// BLE: Get peer count
     pub fn ble_get_peer_count(&self) -> u32 {

@@ -27,6 +27,28 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   is how 0.29.0 is published. It never pushes `X.Y.Z` a second time unless
   told to, for an image that failed its checks.
 
+### Fixed
+
+- **One lost inbound Bluetooth fragment no longer marks BLE as a failing
+  link.** When a partial message idled out of the reassembly cache or was
+  evicted at capacity, the BLE transport counted it as a failed send, and
+  nothing ever counted a successful one, so BLE's delivery ratio read 0% for
+  the life of the process. The transport manager then ignored the engine's
+  own acknowledgements for BLE, because it only used them for a transport
+  reporting no counts of its own, and DORS took the low-success-rate
+  emergency switch within a few sends, bypassing hysteresis and cooldown
+  where Wi-Fi Direct was available. `get_transport_metrics` reported the same
+  0% to the application. A reassembly drop is no longer a delivery sample,
+  and BLE and Wi-Fi Direct always take their delivery ratio from
+  acknowledgements; Internet, Reticulum and Nostr keep the counts their
+  confirmation loops report (#557).
+
+### Removed
+
+- **`BleTransport::record_send_success` and `record_send_failure`.** They had
+  no caller outside their own test, and the failure half was the cause of the
+  fix above. BLE has no send confirmation loop to feed them (#557).
+
 ## [0.29.0] — 2026-10-13
 
 > **Service bodies are sealed end to end.** A service request or response
