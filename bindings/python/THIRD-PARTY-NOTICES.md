@@ -2133,7 +2133,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [bech32 0.11.1](https://github.com/rust-bitcoin/rust-bech32)
+- [bech32 0.12.0](https://github.com/rust-bitcoin/rust-bech32)
 
 ```
 Copyright (c) 2017 Clark Moody
