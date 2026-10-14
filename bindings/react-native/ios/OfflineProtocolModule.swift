@@ -4448,6 +4448,31 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejecter("ERROR_CRYPTO", "Failed to sign data: \(error.localizedDescription)", error)
         }
     }
+
+    /// Byte-oriented variant of `signData` that accepts the input as a
+    /// base64 string and returns the signature as a base64 string, so the
+    /// legacy React Native bridge does not have to iterate an
+    /// `NSArray<NSNumber *>` of boxed bytes. Produces byte-identical
+    /// signatures to `signData` for the same input.
+    @objc func signDataBase64(_ dataBase64: NSString,
+                              resolver: @escaping RCTPromiseResolveBlock,
+                              rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
+            return
+        }
+        guard let decoded = Data(base64Encoded: dataBase64 as String) else {
+            rejecter("ERROR_CRYPTO", "signDataBase64: invalid base64 input", nil)
+            return
+        }
+        do {
+            let dataBytes = [UInt8](decoded)
+            let signature = try proto.signData(data: dataBytes)
+            resolver(Data(signature).base64EncodedString())
+        } catch {
+            rejecter("ERROR_CRYPTO", "Failed to sign data: \(error.localizedDescription)", error)
+        }
+    }
     
     /// Verify a signature against a public key
     @objc func verifySignature(_ publicKey: [NSNumber],

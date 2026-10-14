@@ -4192,6 +4192,32 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     /**
+     * Byte-oriented variant of `signData` that accepts the input as a
+     * base64 string and returns the signature as a base64 string, so the
+     * legacy React Native bridge does not have to iterate a ReadableArray
+     * of boxed bytes. Produces byte-identical signatures to `signData` for
+     * the same input.
+     */
+    @ReactMethod
+    fun signDataBase64(dataBase64: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val decoded = try {
+                android.util.Base64.decode(dataBase64, android.util.Base64.DEFAULT)
+            } catch (e: IllegalArgumentException) {
+                promise.reject("ERROR_CRYPTO", "signDataBase64: invalid base64 input", e)
+                return
+            }
+            val dataBytes = decoded.map { it.toUByte() }
+            val signature = proto.signData(dataBytes)
+            val signatureBytes = ByteArray(signature.size) { signature[it].toByte() }
+            promise.resolve(android.util.Base64.encodeToString(signatureBytes, android.util.Base64.NO_WRAP))
+        } catch (e: Exception) {
+            promise.reject("ERROR_CRYPTO", "Failed to sign data: ${e.message}", e)
+        }
+    }
+
+    /**
      * Verify a signature against a public key
      */
     @ReactMethod

@@ -229,6 +229,52 @@ interface NativeConfig {
   };
 }
 
+/**
+ * Chunk size for the base64 encoder's intermediate "binary string" step.
+ * 32 KB keeps per-chunk transient allocations small while amortising the
+ * `btoa` call cost on large payloads. The encoder emits byte-identical
+ * output for any `BASE64_CHUNK_SIZE` divisible by 3 (base64 operates on
+ * 3-byte groups).
+ */
+const BASE64_CHUNK_SIZE = 32_766;
+
+/**
+ * Encodes a byte array to a standard base64 string without materialising
+ * one monolithic "binary" intermediate string. Used by {@link OfflineProtocol.signDataBytes}
+ * to cross the legacy React Native bridge without the per-byte f64 boxing
+ * that `number[]` triggers. See `js-ci-harness/sign-data-bytes.test.js` for
+ * the byte-identity pin against `signData(Array.from(bytes))`.
+ */
+function bytesToBase64(bytes: Uint8Array): string {
+  if (bytes.length === 0) return '';
+  const chunks: string[] = [];
+  for (let offset = 0; offset < bytes.length; offset += BASE64_CHUNK_SIZE) {
+    const end = Math.min(offset + BASE64_CHUNK_SIZE, bytes.length);
+    let binary = '';
+    for (let i = offset; i < end; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    chunks.push(btoa(binary));
+  }
+  return chunks.join('');
+}
+
+/**
+ * Decodes a standard base64 string to a byte array. Signature outputs from
+ * `signDataBase64` are 64 bytes (Ed25519), so this is only ever called with
+ * tiny inputs on the signing path. The transient binary string is bounded
+ * by the input length, which is sufficient for signature-shaped returns.
+ */
+function base64ToBytes(b64: string): Uint8Array {
+  if (b64.length === 0) return new Uint8Array(0);
+  const binary = atob(b64);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
+}
+
 function sanitize<T extends object>(value: T | undefined | null): T | undefined {
   if (!value) {
     return undefined;
@@ -3007,6 +3053,37 @@ export class OfflineProtocol {
    */
   async signData(data: number[]): Promise<number[]> {
     return await OfflineProtocolNativeModule.signData(data);
+  }
+
+  /**
+   * Byte-oriented variant of {@link signData} that avoids boxing every byte
+   * as a JavaScript `number` across the native bridge. On the legacy React
+   * Native bridge, passing `n` bytes as `number[]` allocates ~8n bytes of
+   * JS heap (each byte becomes an f64-backed `Number`). For a 55 MB payload
+   * that is ~440 MB of JS heap, which exceeds the Dalvik growth limit on
+   * mid-tier Android devices and OOMs before the native call even starts.
+   *
+   * This method base64-encodes the bytes once on the JS side (chunked, so
+   * the intermediate binary string never exceeds `BASE64_CHUNK_SIZE`),
+   * crosses the bridge as a single `NSString` / Java `String`, and the
+   * native side decodes directly to a byte array. Peak JS heap on a 55 MB
+   * payload drops from ~440 MB to ~128 MB (input `Uint8Array` + output
+   * base64 string); the native side allocates one byte buffer, not an
+   * N-element boxed collection.
+   *
+   * Produces byte-identical signatures to {@link signData} for the same
+   * input bytes (Ed25519 is deterministic over its input).
+   *
+   * @param data - The bytes to sign
+   * @returns The signature bytes (64 bytes for Ed25519)
+   * @throws Error if MLS is not initialized
+   */
+  async signDataBytes(data: Uint8Array): Promise<Uint8Array> {
+    const dataBase64 = bytesToBase64(data);
+    const signatureBase64 = await OfflineProtocolNativeModule.signDataBase64(
+      dataBase64
+    );
+    return base64ToBytes(signatureBase64);
   }
 
   /**
