@@ -446,14 +446,37 @@ as one bundle through the Central Portal Publisher API
 (`scripts/maven-central-upload.sh`, `https://central.sonatype.com/api/v1/publisher`).
 The OSSRH endpoints are not used anywhere.
 
-Switching it on takes an organization owner, once, in this order:
+Switching it on takes an organization owner, once. Decide the tier first,
+before the DNS record or the key. From 2026-10-01 Sonatype requires Maven
+Central Publisher Pro for an artifact of "commercial nature", one that
+"supports the adoption, integration, or operation of your organization's
+commercial product or service", whatever its publishing volume, and it names
+service-dependent SDKs among its examples. The license does not settle it:
+Sonatype says no single signal, license included, decides the question, and
+this library's POM itself points at a commercial license. There is nothing to
+set in the Portal account either way. The choice is one of two requests:
+
+- **Publisher Pro**: through Sonatype's
+  [Maven Central Pro contact page](https://www.sonatype.com/products/maven-central-pro/contact).
+  No price is published.
+- **Excluded as community**: mail central-support@sonatype.com asking that
+  `com.offlineprotocol` be excluded from commercial classification, naming the
+  organization, the group id, why it is not part of a commercial
+  go-to-market effort, and which of the organization's artifacts remain
+  commercial.
+
+The rules are on Sonatype's
+[publishing limits page](https://central.sonatype.org/publish/maven-central-publishing-limits/).
+Then, in this order:
 
 1. **The account and the namespace.** Sign in at
    <https://central.sonatype.com> with an account the company controls (not a
    personal one: it owns the namespace). Under Namespaces, add
    `com.offlineprotocol`. The Portal shows a verification key: add it as a DNS
    TXT record on `offlineprotocol.com` and press Verify. Keep the record until
-   the namespace shows as verified.
+   the namespace shows as verified. Then open Publishing, Usage Center: it is
+   where Sonatype states the monthly file, size and release limits, and a
+   release (the AAR alone is about 21 MiB) counts against all three.
 2. **A Portal user token.** Under the account menu, View Account, Generate User
    Token. It is a name and a secret, shown once. They are
    `MAVEN_CENTRAL_USERNAME` and `MAVEN_CENTRAL_PASSWORD` below; the account's
@@ -488,6 +511,7 @@ Switching it on takes an organization owner, once, in this order:
    gh secret set MAVEN_CENTRAL_USERNAME -R Offline-Protocol/offline-protocol-sdk
    gh secret set MAVEN_CENTRAL_PASSWORD -R Offline-Protocol/offline-protocol-sdk
    gh secret set MAVEN_SIGNING_KEY -R Offline-Protocol/offline-protocol-sdk < release-signing-key.asc
+   # Only for a key with a passphrase:
    gh secret set MAVEN_SIGNING_KEY_PASSWORD -R Offline-Protocol/offline-protocol-sdk
    ```
 
@@ -499,10 +523,14 @@ Switching it on takes an organization owner, once, in this order:
    ```
 
 6. **A rehearsal before the next tag.** Run Release & Publish from `main` with
-   `dry_run` checked. The Publish to Maven Central job uploads the library as a
-   deployment Central validates and then drops, so a wrong token, an
-   unverified namespace or a key the keyservers do not have fails there, with
-   the Portal's reason in the log, and nothing is released.
+   `dry_run` checked and the version box empty. The Publish to Maven Central
+   job uploads the library as a deployment Central validates and then drops,
+   so a wrong token, an unverified namespace or a key the keyservers do not
+   have fails there, with the Portal's reason in the log, and nothing is
+   released. The form calls the version required, but left empty it becomes
+   `0.0.0-dev`, which never collides with a release. Never name a version
+   that is already on Central: the Portal refuses the duplicate and the
+   rehearsal fails for that reason alone.
 
 The first release tag after that publishes to Maven Central, permanently. The
 library a release built while the channel was off is kept for a day (the
