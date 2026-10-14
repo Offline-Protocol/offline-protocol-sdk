@@ -145,6 +145,11 @@ RCT_EXTERN_METHOD(cancelFileTransfer:(NSString *)fileId
 RCT_EXTERN_METHOD(receiveMessage:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(replayEvents:(nonnull NSNumber *)fromSeq
+                  toSeq:(nonnull NSNumber *)toSeq
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(pause:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 

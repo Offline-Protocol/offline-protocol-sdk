@@ -50,6 +50,8 @@ final class InboundEventBuffer {
         "message_received",
         "file_received",
         "message_decryption_failed",
+        "message_delivered",
+        "message_failed",
     ]
 
     /// Most events held; the oldest is dropped past it.

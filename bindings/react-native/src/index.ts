@@ -71,6 +71,9 @@ import {
   ONE_SHOT_EVENT_TYPES,
   BUFFERED_INBOUND_EVENT_TYPES,
   MAX_PENDING_INBOUND_EVENTS,
+  NATIVE_EVENT_REPLAY_CAPACITY,
+  NATIVE_EVENT_REPLAY_TIMEOUT_MS,
+  MAX_DEFERRED_NATIVE_EVENTS,
 } from './constants';
 
 export * from './types';
@@ -506,9 +509,20 @@ export class OfflineProtocol {
   private eventSubscription: EmitterSubscription | null = null;
   /**
    * The `seq` of the last event the native module handed over, or null before
-   * the first. See {@link checkEventSequence}.
+   * the first. See {@link admitNativeEvent}.
    */
   private lastEventSeq: number | null = null;
+  /**
+   * A paused dispatch waiting on `replayEvents`, or null. See
+   * {@link admitNativeEvent}.
+   */
+  private eventReplay: {
+    ranges: Array<[number, number]>;
+    outstanding: number;
+    recovered: Map<number, string>;
+    deferred: Array<{ seq: number; eventJson: string }>;
+    timer: ReturnType<typeof setTimeout>;
+  } | null = null;
   private eventListeners: Map<EventType | "all", Set<EventListener>> =
     new Map();
   /**
@@ -961,46 +975,208 @@ export class OfflineProtocol {
   private setupEventSubscription(): void {
     this.eventSubscription = this.eventEmitter.addListener(
       "OfflineProtocol_Event",
-      (data: { eventJson: string; seq?: number }) => {
-        this.checkEventSequence(data.seq);
-        try {
-          const event = JSON.parse(data.eventJson) as ProtocolEvent;
-          this.emitEvent(event);
-        } catch (error) {
-          console.error("Failed to parse event JSON:", error);
-        }
-      }
+      (data: { eventJson: string; seq?: number }) => { this.admitNativeEvent(data.eventJson, data.seq); }
     );
   }
 
+  /** Parses one event the native module handed over and dispatches it. */
+  private dispatchEventJson(eventJson: string): void {
+    try {
+      const event = JSON.parse(eventJson) as ProtocolEvent;
+      this.emitEvent(event);
+    } catch (error) {
+      console.error("Failed to parse event JSON:", error);
+    }
+  }
+
   /**
-   * Reports events the native module handed over that never arrived here.
+   * Admits one event from the native module, in the order the module numbered
+   * them, fetching back any it handed over that never arrived (#514).
    *
    * Both native modules number every event they hand to JavaScript, under one
-   * lock, in the order they hand them over. A bridgeless emit that fails
-   * inside React Native returns normally, so the native side cannot see the
-   * loss; this is the one place that can (#514). A gap is surfaced as a
-   * `diagnostic` event at level `warning`, message `native_event_gap`, with
-   * the missing range, so a log of every event shows where one went missing.
-   * It is detection, not recovery: nothing is refetched.
+   * lock, and keep the last {@link NATIVE_EVENT_REPLAY_CAPACITY} of them. A
+   * bridgeless emit that fails inside React Native returns normally, so the
+   * native side cannot see the loss; this is the one place that can. Several
+   * of the events that can go missing settle a message for good
+   * (`message_received`, `message_delivered`) and nothing restates them, so a
+   * gap is not only reported: dispatch pauses, the missing numbers are asked
+   * for with `replayEvents`, and the recovered events are dispatched in their
+   * place before anything that arrived after them. Recovery is reported as a
+   * `diagnostic` at level `info` with message `native_event_replayed`. A
+   * number the module no longer holds is reported as before, a `diagnostic`
+   * at level `warning` with message `native_event_gap` and the missing range.
    *
    * A native module older than this one sends no `seq`, and the first event
    * after a JavaScript reload starts a fresh count against a module that kept
-   * counting, so neither is reported. A number lower than expected is a
-   * native module that was recreated under this instance and counts from
-   * zero again; the count restarts from it rather than reporting a negative
-   * gap.
+   * counting, so neither is a gap. A number lower than expected is a native
+   * module that was recreated under this instance and counts from zero again:
+   * any recovery in flight is finished with what it has, and the count
+   * restarts from that number. A module without `replayEvents` gets the old
+   * behaviour, a reported gap and no pause.
    */
-  private checkEventSequence(seq: number | undefined): void {
+  private admitNativeEvent(eventJson: string, seq: number | undefined): void {
     if (typeof seq !== "number") {
+      this.dispatchEventJson(eventJson);
       return;
     }
     const expected = this.lastEventSeq === null ? seq : this.lastEventSeq + 1;
-    this.lastEventSeq = seq;
-    if (seq <= expected) {
+    if (seq < expected) {
+      // The module was recreated and counts from zero again.
+      this.finishEventReplay();
+      this.lastEventSeq = seq;
+      this.dispatchEventJson(eventJson);
       return;
     }
-    const context = { expected, received: seq, missing: seq - expected };
+    this.lastEventSeq = seq;
+
+    const replay = this.eventReplay;
+    if (seq > expected) {
+      if (!this.requestEventReplay(expected, seq - 1)) {
+        // Nothing to ask: report the gap where it is, as before.
+        if (replay) {
+          replay.deferred.push({ seq, eventJson });
+        } else {
+          this.reportEventGap(expected, seq);
+          this.dispatchEventJson(eventJson);
+        }
+        return;
+      }
+    }
+    const current = this.eventReplay;
+    if (!current) {
+      this.dispatchEventJson(eventJson);
+      return;
+    }
+    current.deferred.push({ seq, eventJson });
+    if (current.deferred.length > MAX_DEFERRED_NATIVE_EVENTS) {
+      // Holding more would turn a slow answer into a stalled app; what the
+      // ring has not served by now is reported as lost.
+      this.finishEventReplay();
+    }
+  }
+
+  /**
+   * Asks the native module for events [fromSeq, toSeq], pausing dispatch
+   * until it answers. Returns false when the module cannot be asked, in which
+   * case nothing is paused for this range.
+   */
+  private requestEventReplay(fromSeq: number, toSeq: number): boolean {
+    const replayEvents = (OfflineProtocolNativeModule as { replayEvents?: unknown })
+      .replayEvents;
+    if (typeof replayEvents !== "function") {
+      return false;
+    }
+    let replay = this.eventReplay;
+    if (!replay) {
+      replay = {
+        ranges: [],
+        outstanding: 0,
+        recovered: new Map(),
+        deferred: [],
+        timer: setTimeout(() => {
+          if (this.eventReplay === replay) {
+            this.finishEventReplay();
+          }
+        }, NATIVE_EVENT_REPLAY_TIMEOUT_MS),
+      };
+      this.eventReplay = replay;
+    }
+    const state = replay;
+    state.ranges.push([fromSeq, toSeq]);
+    state.outstanding += 1;
+    const settle = (served: unknown) => {
+      if (this.eventReplay !== state) {
+        return;
+      }
+      if (Array.isArray(served)) {
+        for (const entry of served as Array<{ seq?: unknown; eventJson?: unknown }>) {
+          if (
+            entry &&
+            typeof entry.seq === "number" &&
+            typeof entry.eventJson === "string" &&
+            entry.seq >= fromSeq &&
+            entry.seq <= toSeq
+          ) {
+            state.recovered.set(entry.seq, entry.eventJson);
+          }
+        }
+      }
+      state.outstanding -= 1;
+      if (state.outstanding === 0) {
+        this.finishEventReplay();
+      }
+    };
+    try {
+      Promise.resolve(replayEvents.call(OfflineProtocolNativeModule, fromSeq, toSeq)).then(
+        settle,
+        (error: unknown) => {
+          console.warn("[OfflineProtocol] native event replay failed:", error);
+          settle(undefined);
+        }
+      );
+    } catch (error) {
+      console.warn("[OfflineProtocol] native event replay failed:", error);
+      Promise.resolve().then(() => settle(undefined));
+    }
+    return true;
+  }
+
+  /**
+   * Ends a paused dispatch: every recovered and deferred event goes out in
+   * number order, each still-missing run is reported where it falls, and
+   * each requested range that recovered something is reported once.
+   */
+  private finishEventReplay(): void {
+    const replay = this.eventReplay;
+    if (!replay) {
+      return;
+    }
+    this.eventReplay = null;
+    clearTimeout(replay.timer);
+
+    const present = new Map<number, string>(replay.recovered);
+    for (const { seq, eventJson } of replay.deferred) {
+      present.set(seq, eventJson);
+    }
+    const first = Math.min(...replay.ranges.map(([from]) => from));
+    const last = Math.max(...present.keys(), ...replay.ranges.map(([, to]) => to));
+
+    for (const [from, to] of replay.ranges) {
+      let recovered = 0;
+      for (let seq = from; seq <= to; seq++) {
+        if (replay.recovered.has(seq)) recovered++;
+      }
+      if (recovered > 0) {
+        this.emitEvent({
+          type: "diagnostic",
+          level: "info",
+          message: "native_event_replayed",
+          context: { from, to, recovered, missing: to - from + 1 - recovered },
+        } as ProtocolEvent);
+      }
+    }
+
+    let missingFrom: number | null = null;
+    for (let seq = first; seq <= last; seq++) {
+      const eventJson = present.get(seq);
+      if (eventJson === undefined) {
+        if (missingFrom === null) missingFrom = seq;
+        continue;
+      }
+      if (missingFrom !== null) {
+        this.reportEventGap(missingFrom, seq);
+        missingFrom = null;
+      }
+      this.dispatchEventJson(eventJson);
+    }
+    if (missingFrom !== null) {
+      this.reportEventGap(missingFrom, last + 1);
+    }
+  }
+
+  /** Reports events [expected, received) as lost before JavaScript. */
+  private reportEventGap(expected: number, received: number): void {
+    const context = { expected, received, missing: received - expected };
     console.warn("[OfflineProtocol] native events lost before JavaScript:", context);
     this.emitEvent({
       type: "diagnostic",
@@ -3860,6 +4036,12 @@ export class OfflineProtocol {
     if (this.eventSubscription) {
       this.eventSubscription.remove();
       this.eventSubscription = null;
+    }
+    // A paused dispatch belongs to the account being torn down, whose held
+    // messages are discarded below; it must not surface into the next one.
+    if (this.eventReplay) {
+      clearTimeout(this.eventReplay.timer);
+      this.eventReplay = null;
     }
 
     // Destroy native protocol instance
