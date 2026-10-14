@@ -116,6 +116,16 @@ const ESCALATION_TRIGGER_DEDUPE_SECS: u64 = 30;
 /// capability from the next key package (one JSON send in the meantime).
 const MAX_PEER_BINARY_WIRE_ENTRIES: usize = 4096;
 
+/// Whether the platform reports each send's outcome back to this transport,
+/// so its own `success_count` / `failure_count` are real delivery evidence.
+/// Exhaustive on purpose: a new transport must decide which side it is on.
+fn has_send_confirmation_loop(transport_type: TransportType) -> bool {
+    match transport_type {
+        TransportType::Internet | TransportType::Reticulum | TransportType::Nostr => true,
+        TransportType::BLE | TransportType::WiFiDirect => false,
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 struct ObservedStats {
     success_count: u32,
@@ -169,19 +179,21 @@ impl ObservedStats {
             .map(|ratio| (1.0 - ratio).clamp(0.0, 1.0))
     }
 
-    fn apply_to_metrics(&self, metrics: &mut TransportMetrics) {
+    /// Merges the engine's delivery observations into `metrics`.
+    ///
+    /// A transport with a send confirmation loop (Internet, Reticulum,
+    /// Nostr: the platform reports each send's outcome back) owns its
+    /// success and failure counts, and they are kept when it has any. Every
+    /// other transport has no outcome of its own to report, so the engine's
+    /// acknowledgements are its delivery evidence and always win. The
+    /// previous rule was value-based ("keep the transport's counts when they
+    /// are non-zero"), so one stray count from BLE's reassembly path silently
+    /// discarded every later acknowledgement for that transport (#557).
+    fn apply_to_metrics(&self, transport_type: TransportType, metrics: &mut TransportMetrics) {
         if self.success_count + self.failure_count > 0 {
-            // Only override delivery counts when the transport itself has not
-            // reported any.  Internet transport tracks wire-level outcomes via
-            // the confirmation loop; overwriting those would discard real data.
-            //
-            // NOTE: This check is value-based, not transport-type-based.  If
-            // BLE or WiFi Direct ever start reporting their own success/failure
-            // counts from the native layer (the way Internet does via the
-            // confirmation loop), the condition below will silently skip the
-            // local observations for those transports too.  At that point,
-            // consider switching to an explicit per-transport-type check.
-            if metrics.success_count + metrics.failure_count == 0 {
+            let transport_owns_counts = has_send_confirmation_loop(transport_type)
+                && metrics.success_count + metrics.failure_count > 0;
+            if !transport_owns_counts {
                 metrics.success_count = self.success_count;
                 metrics.failure_count = self.failure_count;
                 metrics.delivery_ratio = self.delivery_ratio();
@@ -1353,7 +1365,7 @@ impl TransportManager {
 
             if let Some(mut metrics) = maybe_metrics {
                 if let Some(stats) = self.observations.get(transport_type) {
-                    stats.apply_to_metrics(&mut metrics);
+                    stats.apply_to_metrics(*transport_type, &mut metrics);
                 }
                 self.apply_device_battery(&mut metrics);
                 available.insert(*transport_type, metrics);
@@ -1408,7 +1420,7 @@ impl TransportManager {
             statuses.insert(*transport_type, status);
             if let Some(mut metrics) = metrics {
                 if let Some(stats) = self.observations.get(transport_type) {
-                    stats.apply_to_metrics(&mut metrics);
+                    stats.apply_to_metrics(*transport_type, &mut metrics);
                 }
                 self.apply_device_battery(&mut metrics);
                 available.insert(*transport_type, metrics);
@@ -1745,6 +1757,125 @@ mod tests {
         assert_eq!(ble_metrics.success_count, 0);
         assert_eq!(ble_metrics.failure_count, 1);
         assert!(ble_metrics.drop_rate.expect("drop ratio") > 0.99);
+    }
+
+    /// A mesh transport with no send confirmation loop takes the engine's
+    /// delivery evidence even when it carries a stray count of its own: the
+    /// value-based rule discarded every acknowledgement after one (#557).
+    #[test]
+    fn engine_observations_win_over_a_mesh_transports_own_counts() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+
+        let transport = MockTransport::new(TransportType::BLE);
+        transport.start().unwrap();
+        transport.set_metrics(TransportMetrics {
+            failure_count: 1,
+            delivery_ratio: Some(0.0),
+            drop_rate: Some(1.0),
+            ..Default::default()
+        });
+        manager.add_transport(TransportType::BLE, Box::new(transport));
+
+        manager.record_delivery_success(TransportType::BLE, 150, 1);
+
+        let metrics = manager.get_available_transports();
+        let ble = metrics.get(&TransportType::BLE).expect("metrics");
+        assert_eq!((ble.success_count, ble.failure_count), (1, 0));
+        assert_eq!(ble.delivery_ratio, Some(1.0));
+        assert_eq!(ble.drop_rate, Some(0.0));
+    }
+
+    /// A transport with a confirmation loop owns its counts: the platform's
+    /// per-send outcomes are better evidence than the engine's
+    /// acknowledgements and must not be overwritten.
+    #[test]
+    fn a_confirmation_loop_transport_keeps_its_own_counts() {
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+
+        let transport = MockTransport::new(TransportType::Internet);
+        transport.start().unwrap();
+        transport.set_metrics(TransportMetrics {
+            success_count: 5,
+            failure_count: 1,
+            delivery_ratio: Some(5.0 / 6.0),
+            drop_rate: Some(1.0 / 6.0),
+            ..Default::default()
+        });
+        manager.add_transport(TransportType::Internet, Box::new(transport));
+
+        manager.record_delivery_failure(TransportType::Internet);
+
+        let metrics = manager.get_available_transports();
+        let internet = metrics.get(&TransportType::Internet).expect("metrics");
+        assert_eq!((internet.success_count, internet.failure_count), (5, 1));
+        assert_eq!(internet.delivery_ratio, Some(5.0 / 6.0));
+    }
+
+    /// End to end over a real BLE transport: an inbound partial message
+    /// evicted at capacity must not read as a 0% delivery ratio, so a
+    /// handful of sends afterwards neither trips the low-success-rate
+    /// escalation nor hides the engine's acknowledgements (#557).
+    #[test]
+    fn a_dropped_inbound_fragment_does_not_escalate_ble() {
+        use offline_protocol_transport::constants::BLE_MAX_FRAGMENT_ASSEMBLIES;
+        use offline_protocol_transport::{BleTransport, PeerDevice};
+
+        let selector = TransportSelector::with_config(DorsConfig::default());
+        let mut manager = TransportManager::new(selector);
+
+        let ble = BleTransport::new("alice-device");
+        ble.start().unwrap();
+        ble.on_peer_discovered(PeerDevice {
+            device_id: "bob".to_string(),
+            address: "AA:BB:CC:DD:EE:FF".to_string(),
+            rssi: -60,
+            last_seen: std::time::SystemTime::now(),
+            connected: true,
+        });
+        manager.add_transport(TransportType::BLE, Box::new(ble));
+        let wifi = MockTransport::new(TransportType::WiFiDirect);
+        wifi.start().unwrap();
+        manager.add_transport(TransportType::WiFiDirect, Box::new(wifi));
+
+        // Fill the reassembly cache with first fragments of multi-fragment
+        // messages, then one more: the cache evicts a partial assembly.
+        let ble = manager.get_transport(TransportType::BLE).expect("ble");
+        let ble_ref = ble.as_any().downcast_ref::<BleTransport>().expect("ble");
+        for _ in 0..=BLE_MAX_FRAGMENT_ASSEMBLIES {
+            let large = Message::new(
+                UserId::new("bob").unwrap(),
+                UserId::new("alice").unwrap(),
+                AppId::new("test").unwrap(),
+                "x".repeat(2_000),
+            );
+            let fragments = ble_ref.fragment_message(&large).expect("fragments");
+            assert!(fragments.len() > 1, "the message must span fragments");
+            ble.on_fragment_received_from(fragments[0].clone(), "bob".to_string())
+                .expect("fragment accepted");
+        }
+        drop(ble);
+
+        // More sends than the low-success-rate sample floor.
+        for _ in 0..8 {
+            manager.send(&create_test_message()).expect("send");
+        }
+
+        assert!(
+            !manager.should_escalate_to_wifi(),
+            "a receive-side reassembly drop must not read as a failing BLE link"
+        );
+        let metrics = manager.get_available_transports();
+        assert_ne!(
+            metrics[&TransportType::BLE].delivery_ratio,
+            Some(0.0),
+            "BLE must not report a 0% delivery ratio with no failed delivery"
+        );
+
+        manager.record_delivery_success(TransportType::BLE, 120, 1);
+        let metrics = manager.get_available_transports();
+        assert_eq!(metrics[&TransportType::BLE].delivery_ratio, Some(1.0));
     }
 
     /// A carrier that refuses the recipient with nothing left to fall back to
