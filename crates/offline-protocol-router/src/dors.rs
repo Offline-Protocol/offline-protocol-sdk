@@ -27,6 +27,8 @@ pub struct DorsConfig {
 
     /// Minimum BLE success-ratio samples (observation volume) before evaluating low-success-rate
     /// escalation. Prevents a single early failure from triggering escalation on sparse data.
+    /// A sample is taken when the transport's delivery counts change, not on every selection,
+    /// so selecting again over the same counts never advances it.
     pub min_ble_samples_before_success_rate_escalation: usize,
 
     /// RSSI threshold for switching from BLE to Wi-Fi Direct (dBm).
@@ -312,6 +314,13 @@ struct TransportHistory {
     rssi_samples: VecDeque<i16>,
     success_ratios: VecDeque<f32>,
     latency_samples: VecDeque<u32>,
+    /// The `(success_count, failure_count)` the last success-ratio sample was
+    /// taken from. A sample is taken only when these move, so the window
+    /// counts delivery observations, not selections: re-reading unchanged
+    /// counts on every send turned one early failure into a full window of
+    /// identical 0.0 samples and met the escalation floor with no new
+    /// evidence (#559).
+    last_outcome_counts: Option<(u32, u32)>,
 }
 
 impl TransportHistory {
@@ -333,6 +342,19 @@ impl TransportHistory {
     fn push_success_ratio(&mut self, ratio: f32, limit: usize) {
         self.success_ratios.push_back(ratio.clamp(0.0, 1.0));
         truncate_deque(&mut self.success_ratios, limit);
+    }
+
+    /// Takes a success-ratio sample from cumulative outcome counts, once per
+    /// change in them. Counts that move in either direction (a source halving
+    /// its counts to stay bounded) are a change; counts read again unchanged
+    /// are not.
+    fn observe_outcome_counts(&mut self, success: u32, failure: u32, limit: usize) {
+        let total = success.saturating_add(failure);
+        if total == 0 || self.last_outcome_counts == Some((success, failure)) {
+            return;
+        }
+        self.last_outcome_counts = Some((success, failure));
+        self.push_success_ratio(success as f32 / total as f32, limit);
     }
 
     fn push_latency(&mut self, latency: u32, limit: usize) {
@@ -1256,11 +1278,7 @@ impl TransportSelector {
             history.push_latency(latency, window);
         }
 
-        let total = metrics.success_count + metrics.failure_count;
-        if total > 0 {
-            let success_ratio = metrics.success_count as f32 / total as f32;
-            history.push_success_ratio(success_ratio, window);
-        }
+        history.observe_outcome_counts(metrics.success_count, metrics.failure_count, window);
     }
 
     /// Updates BLE-specific escalation signals.
@@ -2226,7 +2244,8 @@ mod tests {
     }
 
     /// Sparse data must not trigger low-success-rate escalation: single sample below threshold
-    /// is gated by min_ble_samples_before_success_rate_escalation (default 5).
+    /// is gated by min_ble_samples_before_success_rate_escalation (default 5), and the floor
+    /// counts changes in the delivery counts, not calls to select_transport.
     #[test]
     fn test_low_success_rate_escalation_gated_by_sample_floor() {
         let config = DorsConfig {
@@ -2255,18 +2274,48 @@ mod tests {
             Some(EscalationTriggerReason::LowSuccessRate)
         );
 
-        // After 5 select_transport calls we have 5 samples; then low rate should trigger
+        // Selecting again over the same counts is not a new observation: five
+        // sends on one stale failure must not meet the floor (#559).
         for _ in 0..4 {
             selector.select_transport(&message, &transports);
         }
         assert!(
+            !selector.should_escalate_to_wifi(),
+            "re-reading unchanged counts must not advance the sample floor"
+        );
+
+        // Four further outcomes, each moving the counts, bring the window to
+        // five observations; the rate is still below threshold, so it triggers.
+        for _ in 0..4 {
+            let metrics = transports.get_mut(&TransportType::BLE).unwrap();
+            metrics.failure_count += 1;
+            selector.select_transport(&message, &transports);
+        }
+        assert!(
             selector.should_escalate_to_wifi(),
-            "after 5 samples, low success rate should trigger escalation"
+            "after 5 observations, low success rate should trigger escalation"
         );
         assert_eq!(
             selector.escalation_trigger_reason(),
             Some(EscalationTriggerReason::LowSuccessRate)
         );
+    }
+
+    /// A source that halves its counts to stay bounded (the engine's observed
+    /// stats do) has moved them: that is a sample. Reading the halved counts
+    /// again is not.
+    #[test]
+    fn test_success_ratio_sample_taken_once_per_count_change() {
+        let mut history = TransportHistory::default();
+        history.observe_outcome_counts(0, 0, 10);
+        assert_eq!(history.success_ratio_sample_count(), 0);
+        history.observe_outcome_counts(0, 1, 10);
+        history.observe_outcome_counts(0, 1, 10);
+        assert_eq!(history.success_ratio_sample_count(), 1);
+        history.observe_outcome_counts(150, 52, 10);
+        history.observe_outcome_counts(75, 26, 10);
+        history.observe_outcome_counts(75, 26, 10);
+        assert_eq!(history.success_ratio_sample_count(), 3);
     }
 
     #[test]
