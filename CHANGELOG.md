@@ -23,7 +23,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   installs exactly that release's package: the Dockerfile's new
   `SDK_VERSION` build argument pins `offline-protocol-sdk[lan,http]` to it
   and fails the build on any other version. `service-image.yml` can also be
-  run by hand for a release already on PyPI, which is how 0.29.0 is published.
+  run by hand, from the default branch, for a release already on PyPI, which
+  is how 0.29.0 is published. It never pushes `X.Y.Z` a second time unless
+  told to, for an image that failed its checks.
 
 ## [0.29.0] — 2026-10-13
 

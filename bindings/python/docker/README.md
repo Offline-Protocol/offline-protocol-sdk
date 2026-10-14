@@ -44,17 +44,20 @@ docker pull ghcr.io/offline-protocol/offline-protocol-service:0.29.0
 
 The image installs `offline-protocol-sdk[lan,http]` at exactly its tag's
 version from PyPI (the `SDK_VERSION` build argument), and its build fails if
-pip installs any other version. Pin `X.Y.Z` in a deployment, since `X.Y` and
-`latest` move with every release, and read
-[docs/UPGRADING.md](../../../docs/UPGRADING.md) before moving a host to a new
-one. Each image carries a provenance attestation and an SBOM; check the
+pip installs any other version. `X.Y` and `latest` move with every release;
+`X.Y.Z` is never pushed twice by the release workflow, but a registry tag
+can be moved, and a digest cannot. So pin the digest in a deployment, which
+`docker buildx imagetools inspect
+ghcr.io/offline-protocol/offline-protocol-service:0.29.0` prints:
+`image: ghcr.io/offline-protocol/offline-protocol-service@sha256:<digest>`.
+Read [docs/UPGRADING.md](../../../docs/UPGRADING.md) before moving a host to
+a new one. Each image carries a provenance attestation and an SBOM; check the
 attestation with `gh attestation verify
 oci://ghcr.io/offline-protocol/offline-protocol-service:0.29.0 --repo
 Offline-Protocol/offline-protocol-sdk`.
 
 To run it with this directory's `compose.yml`, replace `build: .` with
-`image: ghcr.io/offline-protocol/offline-protocol-service:0.29.0`. The grants
-below apply to it unchanged.
+`image:` and that reference. The grants below apply to it unchanged.
 
 ## What a host's container manifest must grant
 
