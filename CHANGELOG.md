@@ -42,6 +42,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   and BLE and Wi-Fi Direct always take their delivery ratio from
   acknowledgements; Internet, Reticulum and Nostr keep the counts their
   confirmation loops report (#557).
+- **DORS needs five delivery observations, not five sends, before the
+  low-success-rate rule applies.** The selector took a success-ratio sample
+  from the transport's cumulative counts on every selection, so one early
+  failure became five identical 0.0 samples after five sends and met
+  `min_ble_samples_before_success_rate_escalation` with no new evidence. It
+  now samples only when the delivery counts change (#559).
 
 ### Removed
 

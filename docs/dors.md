@@ -195,7 +195,7 @@ This ensures messages still get delivered even when normal conditions aren't met
 | `switchCooldownSecs` | 20 | Wait time after switching before another switch |
 | `bleToWifiRetryThreshold` | 2 | BLE failures before suggesting Wi-Fi Direct |
 | `minSuccessRateBeforeEscalation` | 0.30 | Success rate below which BLE escalation and emergency switching fire |
-| `minBleSamplesBeforeSuccessRateEscalation` | 5 | Delivery samples required before the success-rate rule applies |
+| `minBleSamplesBeforeSuccessRateEscalation` | 5 | Delivery samples required before the success-rate rule applies. A sample is taken when the delivery counts change, not on every send |
 | `rssiSwitchThreshold` | -85 dBm | RSSI threshold for poor signal detection |
 | `congestionQueueThreshold` | 50 | Queue depth indicating high congestion |
 | `stabilityWindowSecs` | 8 | Duration to verify transport stability |
