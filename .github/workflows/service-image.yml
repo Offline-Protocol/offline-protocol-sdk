@@ -1,0 +1,272 @@
+name: Service Image
+
+# The container image of bindings/python/docker, published to the GitHub
+# Container Registry as ghcr.io/offline-protocol/offline-protocol-service for
+# linux/amd64 and linux/arm64: one service per gateway or site computer.
+#
+# The image is the PyPI package of the same release and nothing newer. It is
+# built with SDK_VERSION set to the release's Python version, which pins
+# `offline-protocol-sdk[lan,http]==X.Y.Z` and fails the build if pip installs
+# anything else. So this runs only once PyPI serves that version: release.yml
+# calls it after `publish-pypi`, and the first step below waits for both Linux
+# wheels to be downloadable before building.
+#
+# Two ways in:
+#   - release.yml's `publish-image` job, on a real release tag with PyPI
+#     publishing on.
+#   - By hand (Actions > Service Image > Run workflow, `tag` = v0.29.0) for a
+#     release that is already on PyPI, such as one cut before this workflow
+#     existed. The Dockerfile then comes from the branch the run is started
+#     on, not from the tag: an older tag's Dockerfile has no SDK_VERSION, and
+#     would install PyPI's newest release under the older number. So a run
+#     by hand is refused from any branch but the default one.
+#
+# A version tag, once pushed, is not replaced. PyPI, crates.io and npm refuse
+# a second upload of a version, and a deployment that pinned X.Y.Z expects the
+# same: GHCR would accept the push, so the run refuses before building when
+# X.Y.Z already exists. `overwrite` lifts that, for an image that never passed
+# its checks (the last step failed after the push). A re-run of release.yml
+# whose `publish-image` already went green is refused here too, which is the
+# point: it would rebuild the release with whatever PyPI's dependencies are
+# by then.
+#
+# Tags: X.Y.Z always; X.Y and latest only for a release with no prerelease
+# suffix, and only while it is the newest such release in its X.Y series (for
+# X.Y) or overall (for latest), so publishing an older release by hand never
+# moves either back. A prerelease gets its own version tag (0.30.0-rc.1) only.
+#
+# Every action is pinned to a commit SHA with its version in the trailing
+# comment, for the reason at the top of release.yml: this job holds
+# `packages: write` and mints attestations.
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Release tag, e.g. v0.29.0'
+        type: string
+        required: true
+      overwrite:
+        description: 'Replace an X.Y.Z image that is already pushed'
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag already on PyPI, e.g. v0.29.0'
+        type: string
+        required: true
+      overwrite:
+        description: 'Replace an X.Y.Z image that is already pushed (only one that failed its checks)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: service-image-${{ inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/offline-protocol/offline-protocol-service
+
+jobs:
+  publish:
+    name: Build and push the service image
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+      # The GitHub attestation for the pushed image, as the release job mints
+      # for the release assets.
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve the version and the image tags
+        id: version
+        env:
+          TAG: ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          # Under workflow_call this is the caller's event (a tag push from
+          # release.yml), never workflow_dispatch.
+          EVENT: ${{ github.event_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # The Dockerfile comes from the ref the run started on, so a run by
+          # hand from a feature branch would publish that branch's image under
+          # a release's number.
+          if [ "$EVENT" = workflow_dispatch ] && [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "::error title=Not the default branch::Run this from $DEFAULT_BRANCH, not $GITHUB_REF: the image is built from that ref's Dockerfile."
+            exit 1
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error title=Not a release tag::'$TAG' is not vX.Y.Z or vX.Y.Z-suffix."
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          # The wheel's number: v0.30.0-rc.1 is 0.30.0rc1 on PyPI.
+          PY_VERSION="$(bash scripts/pep440-version.sh "$VERSION")"
+
+          tags="$(gh api --paginate "repos/$REPO/git/matching-refs/tags/v" --jq '.[].ref | ltrimstr("refs/tags/")')"
+          if ! grep -qxF "$TAG" <<<"$tags"; then
+            echo "::error title=No such tag::$REPO has no tag $TAG."
+            exit 1
+          fi
+
+          IMAGE_TAGS="$IMAGE:$VERSION"
+          if [[ "$VERSION" != *-* ]]; then
+            stable="$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' <<<"$tags" | sed 's/^v//' | sort -V)"
+            MINOR="${VERSION%.*}"
+            newest_in_minor="$(grep -E "^${MINOR//./\\.}\.[0-9]+$" <<<"$stable" | tail -n 1)"
+            if [ "$newest_in_minor" = "$VERSION" ]; then
+              IMAGE_TAGS="$IMAGE_TAGS,$IMAGE:$MINOR"
+            else
+              echo "::notice::$IMAGE:$MINOR stays on $newest_in_minor."
+            fi
+            if [ "$(tail -n 1 <<<"$stable")" = "$VERSION" ]; then
+              IMAGE_TAGS="$IMAGE_TAGS,$IMAGE:latest"
+            else
+              echo "::notice::$IMAGE:latest stays on $(tail -n 1 <<<"$stable")."
+            fi
+          fi
+
+          {
+            echo "VERSION=$VERSION"
+            echo "PY_VERSION=$PY_VERSION"
+            echo "IMAGE_TAGS=$IMAGE_TAGS"
+          } >> "$GITHUB_OUTPUT"
+          echo "Publishing offline-protocol-sdk $PY_VERSION as $IMAGE_TAGS"
+
+      # The build installs from PyPI, and a release run reaches here minutes
+      # after the upload: wait until pip itself can fetch both Linux wheels,
+      # the way the build will.
+      - name: Wait for the version on PyPI
+        env:
+          PY_VERSION: ${{ steps.version.outputs.PY_VERSION }}
+        run: |
+          set -euo pipefail
+          dir="$(mktemp -d)"
+          for attempt in $(seq 1 40); do
+            found=true
+            for platform in manylinux_2_34_x86_64 manylinux_2_34_aarch64; do
+              # Each failure's output is kept, so the last one says why: a
+              # slow index, a changed platform tag, or no network.
+              python3 -m pip download --quiet --no-cache-dir --no-deps \
+                --only-binary=:all: --platform "$platform" --python-version 3.12 \
+                --dest "$dir" "offline-protocol-sdk==$PY_VERSION" \
+                >"$dir/last-$platform.log" 2>&1 || found=false
+            done
+            if [ "$found" = true ]; then
+              rm -rf "$dir"
+              echo "offline-protocol-sdk $PY_VERSION is on PyPI for both architectures."
+              exit 0
+            fi
+            echo "Attempt $attempt: offline-protocol-sdk $PY_VERSION not downloadable yet."
+            sleep 30
+          done
+          for log in "$dir"/last-*.log; do
+            [ -s "$log" ] || continue
+            echo "--- pip's last output for $(basename "$log" .log | sed 's/^last-//'):"
+            tail -n 20 "$log"
+          done
+          echo "::error title=Not on PyPI::offline-protocol-sdk $PY_VERSION has no downloadable manylinux_2_34 x86_64 and aarch64 wheels after 20 minutes. pip's last output for each platform is above."
+          exit 1
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # After the login, since the package may be private. Only "not found"
+      # counts as absent: any other failure (a refused token, a registry
+      # outage) stops the run rather than pushing over a version that may
+      # exist.
+      - name: Refuse to replace a published version
+        if: ${{ !inputs.overwrite }}
+        env:
+          VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          set -euo pipefail
+          if out="$(docker buildx imagetools inspect "$IMAGE:$VERSION" 2>&1)"; then
+            echo "::error title=Already published::$IMAGE:$VERSION exists, and a deployment that pinned it would change under it. Run with overwrite only for an image that failed its checks after the push."
+            exit 1
+          fi
+          if ! grep -q ': not found' <<<"$out"; then
+            echo "$out"
+            echo "::error title=Registry check failed::Could not tell whether $IMAGE:$VERSION exists (output above), so nothing is pushed. Run with overwrite only once you know it does not, or that it failed its checks."
+            exit 1
+          fi
+          echo "$IMAGE:$VERSION is not published yet."
+
+      # Labels on each platform's image, and the same as annotations on the
+      # index, which is what the registry's package page reads for a
+      # multi-platform image.
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: bindings/python/docker
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            SDK_VERSION=${{ steps.version.outputs.PY_VERSION }}
+          tags: ${{ steps.version.outputs.IMAGE_TAGS }}
+          labels: |
+            org.opencontainers.image.title=offline-protocol-service
+            org.opencontainers.image.description=The Offline Protocol mesh SDK service for a gateway or site computer: one engine with its local API and HTTP front
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}/tree/main/bindings/python/docker
+            org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=AGPL-3.0-only
+          annotations: |
+            index:org.opencontainers.image.description=The Offline Protocol mesh SDK service for a gateway or site computer: one engine with its local API and HTTP front
+            index:org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            index:org.opencontainers.image.version=${{ steps.version.outputs.VERSION }}
+            index:org.opencontainers.image.revision=${{ github.sha }}
+            index:org.opencontainers.image.licenses=AGPL-3.0-only
+          provenance: mode=max
+          sbom: true
+          push: true
+
+      - name: Attest the image
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # What was pushed: pull it by digest on this runner's architecture and
+      # check the package version and the three commands.
+      - name: Check the pushed image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PY_VERSION: ${{ steps.version.outputs.PY_VERSION }}
+        run: |
+          set -euo pipefail
+          ref="$IMAGE@$DIGEST"
+          docker buildx imagetools inspect "$ref"
+          installed="$(docker run --rm --entrypoint python "$ref" -c \
+            'from importlib.metadata import version; print(version("offline-protocol-sdk"))')"
+          [ "$installed" = "$PY_VERSION" ] || {
+            echo "::error title=Wrong package in the image::$ref holds offline-protocol-sdk $installed, not $PY_VERSION."
+            exit 1
+          }
+          for cmd in offline-protocol-service offline-protocol-http-front offline-protocol-verify; do
+            docker run --rm --entrypoint "$cmd" "$ref" --help >/dev/null
+          done
+          echo "$ref holds offline-protocol-sdk $installed." >> "$GITHUB_STEP_SUMMARY"

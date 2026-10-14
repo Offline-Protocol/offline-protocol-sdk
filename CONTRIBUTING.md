@@ -251,11 +251,13 @@ One number identifies a release across every channel: the `vX.Y.Z` git tag, the
 `@offline-protocol/mesh-sdk` npm package, the `offline-protocol*` crates on
 crates.io, the GitHub release assets (the Python wheels among them), the Swift
 package's `X.Y.Z` tag in `Offline-Protocol/offline-protocol-swift`,
-`com.offlineprotocol:offline-protocol-sdk` on Maven Central, and
-`offline-protocol-sdk` on PyPI. Pushing the tag is what publishes, so
-everything below happens on a `chore/release-X.Y.Z` branch that merges first.
-The last three are switched on one by one, and the Swift package is pulled
-rather than pushed; see
+`com.offlineprotocol:offline-protocol-sdk` on Maven Central,
+`offline-protocol-sdk` on PyPI, and the service image
+`ghcr.io/offline-protocol/offline-protocol-service`, which installs that PyPI
+release. Pushing the tag is what publishes, so everything below happens on a
+`chore/release-X.Y.Z` branch that merges first. Maven Central and PyPI are
+switched on one by one, the image follows PyPI's switch, and the Swift package
+is pulled rather than pushed; see
 [the native packages and PyPI](#the-native-packages-and-pypi).
 
 Version files to bump together:
@@ -360,12 +362,19 @@ Maven Central and PyPI then publish after the `release` job, only from a
 `v*` tag that is not a dry run, and only when the channel's repository
 variable is `true`. A channel switched on with its secret missing fails the
 run rather than skipping, because a skipped channel is a release that looks
-shipped.
+shipped. The service image publishes after PyPI, under the same switch,
+because it installs the wheels PyPI just served: `service-image.yml` waits
+until pip can download both Linux wheels of the release, builds
+`bindings/python/docker` for amd64 and arm64 with `SDK_VERSION` set to that
+number, and pushes it. A prerelease is pushed under its own tag
+(`0.30.0-rc.1`) only; `X.Y` and `latest` move only to the newest final
+release.
 
 | Channel | Switch (variable) | Credentials (secrets) | A dry run with it on |
 | --- | --- | --- | --- |
 | Maven Central | `MAVEN_CENTRAL_PUBLISH` | `MAVEN_CENTRAL_USERNAME` and `MAVEN_CENTRAL_PASSWORD` (a Central Portal user token), `MAVEN_SIGNING_KEY` (armored private key) and `MAVEN_SIGNING_KEY_PASSWORD` | uploads a deployment Central validates, then drops it |
 | PyPI | `PYPI_PUBLISH` | none: trusted publishing from `release.yml` in the `pypi` environment | checks the wheels' metadata only: PyPI has no rehearsal |
+| Service image (ghcr.io) | `PYPI_PUBLISH`, since it installs what PyPI published | none: the workflow's own `GITHUB_TOKEN` with `packages: write` | not built: it needs the release on PyPI |
 
 **The Swift package is pulled, not pushed.** Nothing in this repository can
 write to `Offline-Protocol/offline-protocol-swift`, and no credential for it
@@ -399,8 +408,13 @@ One-time setup, outside this repository (none for the Swift package):
 - **PyPI**: a trusted publisher for `offline-protocol-sdk` naming this
   repository, the workflow `release.yml` and the environment `pypi`. As with
   npm, renaming the file revokes it.
+- **The service image**: nothing before the first run. A package a workflow
+  creates in the organization can start out private, so after the first
+  push an organization admin opens the `offline-protocol-service` package's
+  settings, makes it public, and checks it is linked to this repository
+  (the image's `org.opencontainers.image.source` label links it).
 
-Three things here cannot be undone, and each script refuses rather than
+Four things here cannot be undone, and each script refuses rather than
 guesses:
 
 - **A Swift package tag never moves.** Swift Package Manager records the
@@ -418,6 +432,19 @@ guesses:
   serves it, which is minutes after the Portal publishes; a re-run inside
   that window uploads a duplicate the Portal refuses, which turns the job
   red and changes nothing.
+- **An image version is not replaced, though the registry would allow it.**
+  GHCR accepts a second push of `X.Y.Z`, and a deployment that pinned it
+  would then run something else under the same number. So
+  `service-image.yml` refuses before building when `X.Y.Z` exists, refuses
+  a run by hand from any branch but the default one (the image is built
+  from that ref's Dockerfile), and treats any registry answer but "not
+  found" as a reason to stop. Its `overwrite` input lifts the first check,
+  and is for one case only: an image whose checks failed after the push.
+  That is also the recovery when `publish-image` fails in a release: run
+  Actions > Service Image from `main` with the release tag, and
+  `overwrite` only if the push itself happened. A re-run of the whole
+  release after `publish-image` went green turns that job red, and changes
+  nothing.
 - **The wheels' platform tags are read from the libraries.** A Linux wheel is
   tagged `manylinux_2_N` for the newest glibc its library needs, which is the
   glibc of the image that built it. That counts the `GLIBC_ABI_*` markers as

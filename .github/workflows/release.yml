@@ -1793,3 +1793,21 @@ jobs:
         with:
           packages-dir: dist/
           skip-existing: true
+
+  # ghcr.io/offline-protocol/offline-protocol-service, built from
+  # bindings/python/docker. The image installs the wheels `publish-pypi` just
+  # uploaded, pinned to this release's version, so it runs after that job and
+  # only when that job really published. The steps are in service-image.yml,
+  # which can also be run by hand for a release already on PyPI.
+  publish-image:
+    name: Publish the service image
+    needs: [version-gate, publish-pypi]
+    if: needs.version-gate.outputs.REAL_RELEASE == 'true' && vars.PYPI_PUBLISH == 'true'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/service-image.yml
+    with:
+      tag: ${{ github.ref_name }}
