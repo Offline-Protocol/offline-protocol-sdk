@@ -576,6 +576,22 @@ server's; they never change an event and they never reach the mesh.
    client and not its neighbours, and a `message_delivered` for a message the
    relay re-sent after a restart reaches everyone.
 
+   An identifier stays live until the event that settles it:
+   `message_delivered` or `message_failed` for a message id (a connection
+   request's included), `media_sent` or `media_send_failed` for a file id,
+   and `service_response_received` for a request id.
+   `message_undeliverable` and `connection_request_undeliverable` settle
+   nothing on a relay verdict: the engine keeps the message or the request,
+   may repeat the event on every reachability probe, and later delivers it
+   or gives up. A message a client sent to a recipient that is away
+   therefore reports `message_undeliverable` to that client, as often as
+   the engine says so, and its `message_delivered` reaches that client too.
+   A settled identifier still routes to its client for the next 1024
+   settlements, because the engine emits some events after the one that
+   settles an id: a connection request it gives up on reports
+   `message_failed` and then `connection_request_undeliverable`, and the
+   second names the recipient.
+
    The engine emits synchronously, on the thread that is inside its call, so
    some events fire before the call that caused them has returned:
    `message_sent` is emitted inside the send when a transport takes the
@@ -608,7 +624,7 @@ and is the one a client is written against.
 | `message_received` | `message_id`, `sender`, `recipient`, `content`, `hop_count #`, `transport`, `timestamp #`, `lamport_clock #`, `reply_to_msg?`, `reply_context {ReplyContext}?`, `content_type`, `media_metadata {MediaMetadata}?`, `forward_info {ForwardInfo}?`, `encrypted !`, `app_id` | `app_id` |
 | `message_delivered` | `message_id`, `latency_ms #`, `hop_count #`, `transport` | `message_id` |
 | `message_failed` | `message_id`, `reason`, `retry_count #` | `message_id` |
-| `message_decryption_failed` | `message_id`, `sender`, `code <DecryptionFailureCode>`, `reason` | `all` |
+| `message_decryption_failed` | `message_id`, `sender`, `code <DecryptionFailureCode>`, `reason`, `sealed_at_ms #?`, `session_established_at_ms #?` | `all` |
 | `transport_switched` | `from?`, `to`, `reason` | `all` |
 | `relay_promoted` | `connection_count #`, `battery_level #?` | `all` |
 | `relay_demoted` | `reason` | `all` |
@@ -659,8 +675,8 @@ and is the one a client is written against.
 | `group_role_changed` | `group_id`, `user_id`, `new_role`, `changed_by` | `all` |
 | `group_renamed` | `group_id`, `new_name`, `old_name?`, `renamed_by` | `all` |
 | `service_discovered` | `query_id`, `service_id`, `version`, `provider_peer_id`, `capabilities` (object), `hop_count #` | `query_id` |
-| `service_request_received` | `request_id`, `service_id`, `method`, `body`, `sender` | `service_id` |
-| `service_response_received` | `request_id`, `service_id`, `status`, `body`, `provider_peer_id` | `request_id` |
+| `service_request_received` | `request_id`, `service_id`, `method`, `body`, `sender`, `encrypted !` | `service_id` |
+| `service_response_received` | `request_id`, `service_id`, `status`, `body`, `provider_peer_id`, `encrypted !` | `request_id` |
 | `presence_updated` | `peer_id`, `status <PresenceStatus>`, `timestamp #`, `last_seen_ms #?`, `source <PresenceSource>` | `all` |
 | `typing_indicator_received` | `sender`, `conversation_id`, `is_typing !`, `timestamp #` | `all` |
 | `read_receipt_received` | `sender`, `message_ids []`, `timestamp #` | `all` |

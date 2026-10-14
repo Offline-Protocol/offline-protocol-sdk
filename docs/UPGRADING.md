@@ -1,7 +1,7 @@
 # Upgrading
 
 Everything an application team has to change to move off `v0.16.x` and onto the
-current `v0.28.x` line.
+current `v0.29.x` line.
 
 The breaking changes all landed in the **storage-split release**, `v0.17.0` —
 `initialize_mls` changes shape, three config updaters become fallible, and
@@ -51,7 +51,12 @@ and an exhaustive TypeScript `switch` over `SecurityWarningCode` needs a case
 for the new member. It also breaks one thing at run time: iOS's peer-stream
 slot moves from MultipeerConnectivity to Network framework, so an iPhone on
 `v0.28` does not see one on `v0.27` or earlier over that slot
-([§26](#26-behaviour-that-changes-without-a-compile-error-v0280)).
+([§26](#26-behaviour-that-changes-without-a-compile-error-v0280)). `v0.29.0`
+breaks one build, narrowly: Rust code that names every field of
+`Event::ServiceRequestReceived` or `Event::ServiceResponseReceived` needs the
+new `encrypted` field or a `..`. Android's peer-stream slot joins the Wi-Fi
+network it is on, and service bodies are sealed between peers
+([§27](#27-behaviour-that-changes-without-a-compile-error-v0290)).
 
 Otherwise, where a later section documents an
 addition or a behaviour change, it is labelled inline with the release that
@@ -2497,6 +2502,112 @@ short throttle while the user edits, and once more when editing stops.
 **Python: `InternetManager` requires `app_id`.** It is keyword-only with no
 default. `ProtocolManager` already passes it; only code that builds an
 `InternetManager` directly needs `app_id=`.
+
+---
+
+## 27. Behaviour that changes without a compile error *(v0.29.0)*
+
+Everything compiles unchanged except one narrow case, the first paragraph
+under the service bodies below. Each paragraph says what to check.
+
+**Android: the peer-stream slot joins the Wi-Fi network.** With
+`wifiDirect: { enabled: true }`, an Android phone now advertises its address
+on the Wi-Fi network it is on and opens streams to iPhones, Python hosts and
+other Android phones it finds there, as an iPhone already did. Every device on
+that network can see the address, the same exposure as a Bluetooth LE
+advertisement. There is no switch for the LAN alone: turn `wifiDirect` off if
+you do not want either. The module adds `ACCESS_NETWORK_STATE` and
+`CHANGE_WIFI_MULTICAST_STATE`, install-time permissions with no prompt; the
+second lets Android 12 and lower hold the multicast lock mDNS needs there.
+When you move your app to target Android 17 (API 37), it must declare `ACCESS_LOCAL_NETWORK` and request it before `start()`, or the LAN carrier stays off with a warning diagnostic. The SDK does not declare it, because a declaration revokes the grant apps targeting 36 and lower hold by default.
+
+**Android: the transport starts without the Wi-Fi Direct grant.** Without
+`NEARBY_WIFI_DEVICES` (or fine location on 12 and lower), `start()` used to
+leave the slot off. It now runs on the Wi-Fi network only, and Wi-Fi Direct
+stays off until `enableTransport('wifiDirect')` after the grant.
+
+**Android: of two streams for one address, the lower-opened one is kept.**
+Inside a Wi-Fi Direct group this changes one thing: a client whose address is
+higher than its group owner's reconnects past a half-open stream after
+keepalive ends it, about thirty seconds on Android 10 and later (up to two
+hours on 7 to 9, which keep the OS defaults), instead of at once. Bluetooth LE
+and the relays carry traffic meanwhile.
+
+**Android peers on an older release** neither advertise nor browse on the
+LAN, so they meet a phone on this release only inside a Wi-Fi Direct group,
+as before.
+
+**Service bodies are sealed between peers on this release.** A request or
+response to a peer that also runs this release, once your session with it is
+confirmed, now crosses the mesh as an ordinary `__MLS_ENC__` message instead
+of signed plaintext. Nothing changes toward an older peer, and the first
+request to a provider you have never met still leaves as signed plaintext.
+Turn it off with `encryption.encryptServiceMessages: false`
+(`encrypt_service_messages` in Rust and Python), which stops your device from
+advertising, recording and sealing; a peer's sealed frame is still routed to
+your service handlers.
+
+**A sealed service body is about a third larger on the wire.** With the
+compact envelope, which every release that seals service bodies advertises
+unless it is switched off, the frame is about 1.34 times the plaintext one: a
+64 KiB body, the service layer's limit, becomes a frame of about 86 KiB.
+Bodies above about 52 KB no longer cross Bluetooth LE at the 185-byte MTU
+floor, where every body under the limit did, and bodies above about 47 KiB no
+longer fit a Nostr relay's 64 KiB event limit. If a provider answers with
+large bodies over those carriers, keep bodies under those sizes or switch the
+sealing off. Toward a peer with the compact envelope switched off the frame is
+about 3.6 times the plaintext one.
+
+**`service_request_received.sender` is proven a second way.** For a sealed
+request it is the sender MLS authenticated, rather than the sender a control
+signature proved. The field and its value are unchanged.
+
+**The two service events carry `encrypted`.** `service_request_received` and
+`service_response_received` say whether the frame arrived sealed. Check it
+if a body must never have crossed the mesh readable. This is the one build
+break in this release: Rust code that destructures
+`Event::ServiceRequestReceived` or `Event::ServiceResponseReceived` naming
+every field, or builds one, needs `encrypted` or a `..`, and a TypeScript
+object literal typed as either event needs `encrypted`. Code that reads the
+events compiles unchanged, and the JSON only gains a field.
+
+**A service send can now fail where it used to succeed.** When sealing fails
+on a session that is already confirmed (an MLS or storage fault),
+`send_service_request` and `respond_to_service_request` return the error, as
+`send_message` does. The body used to leave as signed plaintext instead. A
+failure while the session is still being set up keeps the old behaviour: the
+body leaves signed, because that is the documented first-contact window.
+
+**A peer that has sent you a sealed service frame stays sealed.** The proof is
+durable, kept in the same record as the control-freshness ratchet, and no key
+package clears it, including a replayed one that does not advertise support.
+Blocking and then unblocking the peer does not clear it either.
+
+**More reaches a peer across the mesh, and settles.** A session now forms
+between two devices that have never been in range when a third is between
+them: while a message waits for a peer no carrier reaches, the sender hands
+its key package to its neighbours, and the Welcome comes back the same way
+([mesh guide](mesh.md#starting-a-session-across-the-mesh)). A resend that no
+carrier takes, or that a carrier takes for a recipient it cannot reach, is now
+offered to the mesh as the first send was. And a direct message the mesh
+carried now settles with `message_delivered` when its recipient answers, where
+it used to stay in the outbox until `message_failed` seven days later. Check
+any UI that treated a long-unsettled message to a distant peer as lost. A
+device with `allowRelay` on now also carries these handshake frames, which it
+cannot read; turning it off declines them too.
+
+**A frame that can never decrypt is answered.** When a frame arrived over the
+internet relay and its sender advertises `ack_versions`, the recipient now
+answers a dead frame with an ACK whose `ack_status` is `undecryptable`, so the
+relay stops redelivering it. The sender never reports it delivered: it
+re-seals and resends once, then leaves the message to its retry ladder
+([message delivery](message-delivery.md#events)).
+
+**Frames the SDK sends on its own no longer push.** Engine-originated frames
+(data-sync offers, key packages, typing frames) carry `no_alert` for the relay
+to honour, so an offline peer is no longer woken with "new message" for them.
+User messages, connection requests and accepts, group chat messages and group
+invites still push.
 
 ---
 

@@ -1,5 +1,9 @@
 package com.offlineprotocol
 
+import android.os.Build
+import android.os.ParcelFileDescriptor
+import android.system.Os
+import android.system.OsConstants
 import java.io.BufferedInputStream
 import java.io.DataInputStream
 import java.io.EOFException
@@ -11,7 +15,6 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -33,8 +36,9 @@ import java.util.concurrent.atomic.AtomicLong
  *   [Host.peerConnected] once per address, each body attributed to it, and
  *   [Host.peerDisconnected] once, if and only if the stream still held the
  *   address when it ended.
- * - One announced stream per address, newer superseding older, through
- *   [PeerStreamLinks]. A superseded stream is closed and reports nothing.
+ * - One announced stream per address, the one the lower address opened
+ *   kept, through [PeerStreamLinks]. A superseded or refused stream is
+ *   closed and reports nothing.
  * - A stream's announcement, deliveries and loss report run under that
  *   stream's lock, so no body reaches the host after its loss report. The
  *   core re-adds a neighbour on any inbound body, so a delivery that raced
@@ -85,8 +89,27 @@ internal class PeerStreamSockets(
         val writeChunkBytes: Int = 64 * 1024,
         /** A writer blocked on one piece this long is stalled on the peer. */
         val writeStallMs: Long = 2_000L,
-        /** Open sockets, proved or not. A group is a handful of devices. */
+        /** Open sockets, proved or not. */
         val maxStreams: Int = 16,
+        /**
+         * The inbound share of [maxStreams]. The rest is left to dials, so a
+         * listener full of strangers' sockets never stops this device
+         * reaching the peers it finds. iOS's `maxInbound`.
+         */
+        val maxInbound: Int = 12,
+        /**
+         * Inbound sockets one remote address may hold, proved or not. A peer
+         * needs one, two while it reconnects past its own stale stream.
+         * iOS's `maxInboundPerHost`, Python's `MAX_STREAMS_PER_HOST` scaled
+         * to this budget.
+         */
+        val maxInboundPerHost: Int = 4,
+        /**
+         * How long an announced stream must hold its address to count as
+         * having carried its peer with no body: the keepalive window. A
+         * refused stream ends within moments of its proof.
+         */
+        val carriedAfterMs: Long = 30_000L,
         /**
          * Queued bytes toward one peer beyond which a body is dropped (the
          * core retries it), and only while that peer's writer is stalled. The
@@ -98,12 +121,33 @@ internal class PeerStreamSockets(
 
     enum class SendResult { QUEUED, NO_STREAM, OUT_OF_BOUNDS, QUEUE_FULL }
 
+    /**
+     * What [run] saw. [proved] is the address the preamble proved, also when
+     * the stream then lost to the one already held; [heard] is whether the
+     * peer sent anything at all, which tells a liar from a silent socket;
+     * [carried] is whether the stream carried the peer: a body reached the
+     * host after the preamble, or the stream held its address for
+     * [Limits.carriedAfterMs].
+     *
+     * Only [carried] starts a redial ladder over. A stream refused here
+     * because another holds the address, or closed by a peer whose stale
+     * stream wins there, proves the peer and carries nothing, and a ladder
+     * that reset on proof alone redialed it every second. A body alone was
+     * too narrow: two peers with a session may reconnect and send nothing,
+     * and every ordinary drop of such a stream climbed the ladder for good.
+     */
+    data class Ran(val proved: String?, val heard: Boolean, val carried: Boolean = false)
+
+    /** The link a stream rides, so one going down ends only its own streams. */
+    enum class Carrier { P2P, LAN }
+
     private val openStreams: MutableSet<Stream> = ConcurrentHashMap.newKeySet()
-    // Slots taken against [Limits.maxStreams]. Reserved by an increment that
-    // decides, not by reading the set's size and adding afterwards: two
-    // sockets accepted at once both read a size under the limit, and both
-    // got in.
-    private val reserved = AtomicInteger(0)
+    // Slots taken against [Limits], decided and taken under one lock, not by
+    // reading the set's size and adding afterwards: two sockets accepted at
+    // once both read a size under the limit, and both got in.
+    private val admission = Any()
+    private var reserved = 0
+    private val inboundHosts = ArrayList<String?>()
     private val links = PeerStreamLinks<Stream>()
 
     // Daemon, like the stream threads, so an instance dropped without
@@ -118,24 +162,52 @@ internal class PeerStreamSockets(
     /** Whether any stream has proved a peer: nothing is sendable otherwise. */
     fun isEmpty(): Boolean = links.isEmpty()
 
+    /**
+     * Told each address whose announced stream ended, after the core was.
+     * The LAN carrier dials back a peer it still sees advertised.
+     */
+    @Volatile var onLost: ((String) -> Unit)? = null
+
+    /** Whether a stream holds [address] now. */
+    fun holds(address: String): Boolean = links.handleFor(address) != null
+
+    /** Whether an outbound socket would find a free slot now. */
+    fun hasRoom(): Boolean = synchronized(admission) { reserved < limits.maxStreams }
+
     /** Open sockets, proved or not. */
     val openCount: Int get() = openStreams.size
 
     /**
-     * Runs [socket] to its end on the calling thread, and returns the address
-     * it proved, or null if it proved none.
+     * Runs [socket] to its end on the calling thread, and returns what it saw.
      *
-     * [accepting] is the owner's "still running": a socket that arrives while
-     * it is false, or past [Limits.maxStreams], is closed unread.
+     * [expected] is the address a dial was made toward, from a discovery
+     * record: a preamble proving any other is refused (the chapter's step
+     * four). [accepting] is the owner's "still running": a socket that
+     * arrives while it is false, or past [Limits], is closed unread.
      */
-    fun run(socket: Socket, outbound: Boolean, accepting: () -> Boolean): String? {
+    fun run(
+        socket: Socket,
+        outbound: Boolean,
+        carrier: Carrier = Carrier.P2P,
+        expected: String? = null,
+        accepting: () -> Boolean,
+    ): Ran {
         val endpoint = socket.remoteSocketAddress?.toString() ?: "unknown"
+        var proved: String? = null
+        var heard = false
+        var delivered = false
+        var announcedAtNs = 0L
+        fun ran() = Ran(
+            proved, heard,
+            carried = delivered || (
+                announcedAtNs != 0L &&
+                    (System.nanoTime() - announcedAtNs) / 1_000_000 >= limits.carriedAfterMs
+                ),
+        )
+        val remoteHost = if (outbound) null else socket.inetAddress?.hostAddress
         val refusal = when {
             !accepting() -> "not running"
-            reserved.incrementAndGet() > limits.maxStreams -> {
-                reserved.decrementAndGet()
-                "at stream limit"
-            }
+            !reserve(outbound, remoteHost) -> "at stream limit"
             else -> null
         }
         if (refusal != null) {
@@ -145,24 +217,24 @@ internal class PeerStreamSockets(
                 "reason" to refusal,
             ))
             closeQuietly(socket)
-            return null
+            return ran()
         }
         // The slot is released by endStream, which runs once per stream.
-        val stream = Stream(socket)
+        val stream = Stream(socket, outbound, remoteHost, carrier)
         openStreams.add(stream)
         // Re-checked after the add: a closeAll() that snapshotted the set just
         // before it cannot miss this stream, because the owner stops
         // accepting before it closes everything.
         if (!accepting()) {
             endStream(stream)
-            return null
+            return ran()
         }
 
-        var proved: String? = null
         var why = "ended"
         try {
             try { socket.tcpNoDelay = true } catch (_: Exception) {}
             try { socket.keepAlive = true } catch (_: Exception) {}
+            tuneKeepalive(socket)
 
             // Ours goes first and without waiting for theirs, so neither side
             // can hold the other half-open by staying silent.
@@ -170,12 +242,13 @@ internal class PeerStreamSockets(
                 host.identityAssertion()
             } catch (e: Exception) {
                 why = "no identity to present: ${e.message ?: "unknown"}"
-                return null
+                return ran()
             }
             stream.enqueue(PeerStreamFraming.frame(assertion))
 
             val preamble = PeerStreamPreamble(
                 verify = host::verify,
+                expected = expected,
                 localAddress = try { host.localAddress() } catch (_: Exception) { null },
             )
             val input = DataInputStream(BufferedInputStream(socket.getInputStream()))
@@ -185,25 +258,29 @@ internal class PeerStreamSockets(
             )
             val address = try {
                 val body = PeerStreamFraming.readBody(input, preamble = true)
+                heard = true
                 when (val outcome = preamble.accept(body)) {
                     is PeerStreamPreamble.Outcome.Announce -> outcome.address
                     is PeerStreamPreamble.Outcome.Refuse -> {
                         why = "preamble refused: ${outcome.reason}"
-                        return null
+                        return ran()
                     }
                     is PeerStreamPreamble.Outcome.Deliver -> {
                         why = "preamble state out of order"
-                        return null
+                        return ran()
                     }
                 }
             } finally {
                 deadline.cancel(false)
             }
-            if (!announce(stream, address)) {
-                why = "ended before the announcement"
-                return null
-            }
+            // Proved even if the held stream wins below: the peer is who it
+            // said, and the dial that found it needs no ladder.
             proved = address
+            if (!announce(stream, address, outbound)) {
+                why = "ended or refused before the announcement"
+                return ran()
+            }
+            announcedAtNs = System.nanoTime()
             host.diagnostic("info", "Peer stream proved", mapOf(
                 "address" to address,
                 "outbound" to outbound,
@@ -213,8 +290,9 @@ internal class PeerStreamSockets(
                 val body = PeerStreamFraming.readBody(input, preamble = false)
                 if (!deliver(stream, address, body)) {
                     why = "superseded or ended"
-                    return proved
+                    return ran()
                 }
+                delivered = true
             }
         } catch (e: PeerStreamFraming.Refused) {
             why = "frame refused: ${e.reason}"
@@ -229,7 +307,7 @@ internal class PeerStreamSockets(
                 "reason" to why,
             ))
         }
-        return proved
+        return ran()
     }
 
     /**
@@ -258,15 +336,31 @@ internal class PeerStreamSockets(
         }
     }
 
+    /** Ends every stream on [carrier], reporting each announced one lost. */
+    fun closeCarrier(carrier: Carrier) {
+        for (stream in openStreams.toList()) {
+            if (stream.carrier == carrier) endStream(stream)
+        }
+    }
+
     /**
      * Enters [stream] as the one announced stream for [address], and tells
      * the host if no stream held it. False when the stream was ended first,
      * in which case nothing was announced.
      */
-    private fun announce(stream: Stream, address: String): Boolean {
+    private fun announce(stream: Stream, address: String, outbound: Boolean): Boolean {
+        val local = try { host.localAddress() } catch (_: Exception) { null }
         synchronized(stream.lock) {
             if (stream.closed) return false
-            val announcement = links.announce(stream, address)
+            val announcement = links.announce(stream, address, outbound, local)
+            if (announcement.refused) {
+                // The held stream wins: this one closes without a report,
+                // and the peer, computing the same rule, keeps the other too.
+                host.diagnostic("info", "Peer stream refused: the held one wins", mapOf(
+                    "address" to address,
+                ))
+                return false
+            }
             announcement.superseded?.let { older ->
                 // Closed without a loss report: `links` already moved the
                 // address here, so the older stream's end finds nothing.
@@ -313,11 +407,30 @@ internal class PeerStreamSockets(
      * or [closeAll]. Reports the loss if the stream still held its address,
      * under the lock the deliveries take.
      */
+    private fun reserve(outbound: Boolean, host: String?): Boolean = synchronized(admission) {
+        val admitted = if (outbound) {
+            reserved < limits.maxStreams
+        } else {
+            PeerStreamDialPolicy.admitsInbound(host, inboundHosts, reserved, limits)
+        }
+        if (admitted) {
+            reserved++
+            if (!outbound) inboundHosts.add(host)
+        }
+        admitted
+    }
+
+    private fun release(stream: Stream) = synchronized(admission) {
+        reserved--
+        if (!stream.outbound) inboundHosts.remove(stream.remoteHost)
+    }
+
     private fun endStream(stream: Stream) {
+        var lost: String? = null
         synchronized(stream.lock) {
             if (stream.closed) return
             stream.closed = true
-            reserved.decrementAndGet()
+            release(stream)
             links.remove(stream)?.let { address ->
                 try {
                     host.peerDisconnected(address)
@@ -326,11 +439,42 @@ internal class PeerStreamSockets(
                         "error" to (e.message ?: "unknown"),
                     ))
                 }
+                lost = address
             }
         }
+        lost?.let { address -> onLost?.invoke(address) }
         openStreams.remove(stream)
         stream.abort()
         stream.shutdownWriter()
+    }
+
+    /**
+     * Keepalive at 15 s idle, 5 s between probes, 3 probes, and a 30 s bound
+     * on unacknowledged data, the iOS and Python timers. The higher address's
+     * reconnect past a half-open stream is refused until the held one ends.
+     * With the OS defaults an idle dead stream holds the address for two
+     * hours, and keepalive sends no probe while data waits unacknowledged,
+     * so one with a write outstanding holds it until retransmission gives up
+     * (about fifteen minutes); `TCP_USER_TIMEOUT` bounds that case.
+     *
+     * Android 10 and later only. Before API 29 `fromSocket` takes the
+     * socket's own descriptor instead of a duplicate, so closing it closed
+     * the socket under every stream. Those versions keep the OS defaults.
+     * Best effort: a socket that refuses the options keeps the defaults.
+     */
+    private fun tuneKeepalive(socket: Socket) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        try {
+            // A duplicate of the socket's descriptor from API 29: options set
+            // on it apply to the socket, and closing it leaves the socket open.
+            ParcelFileDescriptor.fromSocket(socket).use { pfd ->
+                val fd = pfd.fileDescriptor
+                Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, TCP_KEEPIDLE, 15)
+                Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, TCP_KEEPINTVL, 5)
+                Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, TCP_KEEPCNT, 3)
+                Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, TCP_USER_TIMEOUT, 30_000)
+            }
+        } catch (_: Throwable) {}
     }
 
     private fun closeQuietly(socket: Socket) {
@@ -345,7 +489,13 @@ internal class PeerStreamSockets(
      * and splice a prefix into another frame's body) and a peer that stops
      * reading blocks only its own queue.
      */
-    private inner class Stream(val socket: Socket) {
+    private inner class Stream(
+        val socket: Socket,
+        val outbound: Boolean,
+        /** The remote host an inbound socket came from, for [Limits.maxInboundPerHost]. */
+        val remoteHost: String?,
+        val carrier: Carrier,
+    ) {
         /** Guards [closed] and the stream's calls into the host. */
         val lock = Any()
         var closed = false
@@ -417,3 +567,9 @@ internal class PeerStreamSockets(
         }
     }
 }
+
+// Linux <netinet/tcp.h>; `OsConstants` does not publish them.
+private const val TCP_KEEPIDLE = 4
+private const val TCP_KEEPINTVL = 5
+private const val TCP_KEEPCNT = 6
+private const val TCP_USER_TIMEOUT = 18

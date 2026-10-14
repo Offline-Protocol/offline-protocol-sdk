@@ -127,6 +127,34 @@ class StaleAddressDisconnectTest {
     }
 
     @Test
+    fun `a dropped link's gatt is closed before the redial`() {
+        // The redial opens a fresh handle, so an unclosed one leaks a client
+        // slot per drop until the stack refuses every new connection.
+        val dropped = gatt(old)
+        host.connections.registerGatt(old, dropped)
+        host.connections.markClientEstablished(old)
+        host.connections.setDeviceIdentifier(old, "peerF")
+
+        disconnect(dropped)
+
+        assertTrue("the dead handle is closed", shadowOf(dropped).isClosed)
+        assertEquals("the redial still happens", listOf(old), host.dialed)
+    }
+
+    @Test
+    fun `a stale address's gatt is closed even though it is not redialled`() {
+        val oldGatt = gatt(old)
+        host.connections.registerGatt(old, oldGatt)
+        host.connections.setDeviceIdentifier(old, "peerG")
+        host.connections.registerGatt(new, gatt(new))
+        host.connections.setDeviceIdentifier(new, "peerG")
+
+        disconnect(oldGatt)
+
+        assertTrue("the dead handle is closed", shadowOf(oldGatt).isClosed)
+    }
+
+    @Test
     fun `a dial still in flight is not a link`() {
         // A dial to a phone whose Bluetooth is off lasts as long as the
         // stack's connect timeout; counting it would defer the loss that long.

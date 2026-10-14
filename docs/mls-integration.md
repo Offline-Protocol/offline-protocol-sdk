@@ -116,6 +116,7 @@ const protocol = new OfflineProtocol({
 | `compactEnvelopeEnabled` | `true` | Emit the compact MLS envelope to recipients that advertise `env_versions` |
 | `richPayloadEnabled` | `true` | Seal rich extras inside the MLS ciphertext for recipients that advertise `rich_versions` |
 | `cryptoRecoveryEnabled` | `true` | Recover an undecryptable 1:1 message instead of dropping it and ACKing anyway ([below](#crypto-failure-recovery)) |
+| `encryptServiceMessages` | `true` | Seal service request and response bodies toward peers that advertise `svc_versions`, once the session is confirmed; signed plaintext otherwise ([service discovery](service-discovery.md#encryption-interaction)) |
 
 The `pendingTtlMs` default is 24 hours (it was 2 minutes, then 30 minutes, in
 earlier releases): under the deferred-ACK model a message held here is not
@@ -148,6 +149,7 @@ Queued encrypted messages received before session readiness use bounded storage 
 When auto-encryption is enabled:
 
 1. **On peer discovery**: Key packages are automatically exchanged via BLE/WiFi Direct
+   (a peer no carrier reaches directly, such as one two hops away that is never discovered, is sent this device's key package through mesh neighbors while a message waits for it, and its Welcome comes back the same way; see [Starting a session across the mesh](mesh.md#starting-a-session-across-the-mesh))
 2. **On first message**: If no session exists but we have the recipient's key package, a session is created and a Welcome message is sent automatically
 3. **On send**: Messages are encrypted before transmission
 4. **On receive**: 
@@ -1257,6 +1259,7 @@ to configure:
 | `wire_versions` | Compact binary mesh framing (hop-local; in-memory, re-exchanged on connect) | `binaryWireEnabled` |
 | `env_versions` | Compact MLS envelope (base64 binary instead of JSON, ~2.7× smaller) | `encryption.compactEnvelopeEnabled` |
 | `rich_versions` | Sealed rich payload (`__RICH_V1__` body inside the MLS plaintext) | `encryption.richPayloadEnabled` |
+| `svc_versions` | Sealed service request and response bodies (`__SVC_REQ__` / `__SVC_RESP__` inside the 1:1 MLS plaintext) | `encryption.encryptServiceMessages` |
 
 **Sealed rich payload**: quoted-reply context, rich media metadata (including
 cloud-media `encryption_key`/`iv` secrets), and forward attribution are wrapped
@@ -1312,10 +1315,12 @@ for dedup and ACK correlation. Tier 1 makes the failure honest; Tier 2 is what
 makes the message actually arrive.
 
 What is deliberately **excluded from the re-key**: failures that are *not* an
-epoch mismatch — an AEAD/authentication failure, a discarded past ratchet
-generation, a malformed frame — withhold the ACK exactly like an epoch mismatch
-(Tier 1 and Tier 2 both apply, so the sender's re-sealed resend still recovers
-the message), but they never trigger a re-key. Widening the *re-key* trigger to
+epoch mismatch (an AEAD/authentication failure, a discarded past ratchet
+generation, a malformed frame). They are answered exactly like an epoch
+mismatch: never a delivery ACK, and an `undecryptable` ACK when the frame came
+over the relay, so the sender re-seals the message once and the relay drops the
+dead frame. Tier 2 still applies to every retry. But they never trigger a
+re-key. Widening the *re-key* trigger to
 cover them would turn every malformed frame into a session teardown, which is an
 unbounded churn vector; withholding an ACK carries no such cost, because the
 recovery it enables is the sender's own retry.

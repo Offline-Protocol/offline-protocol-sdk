@@ -1,0 +1,2 @@
+# The per-device store keys run.py writes: secret, and per checkout.
+.env

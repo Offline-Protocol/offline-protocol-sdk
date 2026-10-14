@@ -30,6 +30,16 @@ class MeshConnectionRegistry {
     // still in flight, and a dial to a peer whose Bluetooth is off lasts as
     // long as the stack's connect timeout, so it cannot count as a link.
     private val establishedClients = Collections.newSetFromMap(ConcurrentHashMap<String, Boolean>())
+    /**
+     * Addresses refused as a second client link to a peer we already hold a
+     * client link to, with that peer and the elapsed-realtime moment the
+     * refusal lapses.
+     * A peripheral that rotates its address (macOS does, on its own clock)
+     * advertises under both for a while, and without this the scanner would
+     * redial the second address on every advertisement, verify it, and be
+     * refused again, each round holding a connection slot.
+     */
+    private val duplicateUntil = ConcurrentHashMap<String, Pair<String, Long>>()
 
     fun registerGatt(address: String, gatt: BluetoothGatt) {
         gattClients[address] = gatt
@@ -108,6 +118,39 @@ class MeshConnectionRegistry {
             id == deviceId && (establishedClients.contains(address) || serverConnections.contains(address))
         }
 
+    /**
+     * True when we hold a client link to [deviceId] at an address other than
+     * [excluding]. Server links do not count: a peer may hold one link per
+     * direction, and only a second link in the SAME direction is a duplicate.
+     */
+    fun hasOtherClientLink(deviceId: String, excluding: String): Boolean =
+        addressToDevice.any { (address, id) ->
+            id == deviceId && address != excluding && gattClients.containsKey(address)
+        }
+
+    /**
+     * Refuse client links to [address], a duplicate of [deviceId], until
+     * [untilMs] (elapsed realtime).
+     */
+    fun suppressDuplicate(address: String, deviceId: String, untilMs: Long) {
+        duplicateUntil[address] = deviceId to untilMs
+    }
+
+    /**
+     * Whether a dial to [address] is still inside a duplicate refusal.
+     *
+     * Lapses early once the client link it duplicated is gone: otherwise a
+     * peer whose kept link died just after the refusal stayed undialed at the
+     * address it still advertises for the rest of the window.
+     */
+    fun isSuppressedDuplicate(address: String, nowMs: Long): Boolean {
+        val entry = duplicateUntil[address] ?: return false
+        val (deviceId, until) = entry
+        if (nowMs < until && hasOtherClientLink(deviceId, address)) return true
+        duplicateUntil.remove(address, entry)
+        return false
+    }
+
     /** Every address currently mapped to [deviceId]. */
     fun addressesForDevice(deviceId: String): List<String> =
         addressToDevice.filterValues { it == deviceId }.keys.toList()
@@ -151,7 +194,27 @@ class MeshConnectionRegistry {
 
     fun serverConnectionCount(): Int = serverConnections.size
 
-    fun connectionCount(): Int = gattClients.size + serverConnections.size
+    /** True when the client link to [address] finished connecting. */
+    fun isClientEstablished(address: String): Boolean = establishedClients.contains(address)
+
+    /**
+     * Peer addresses holding a link in either direction or a dial still in
+     * flight, each counted once.
+     *
+     * Once, because Android reports a client link of ours to the GATT server
+     * as well: the dial to a peer arrives there as a central connecting. A
+     * sum of the two maps counted that one link twice, so two dials filled a
+     * cap of four, and the cap check then refused the server-side half of our
+     * own link, cancelling the connection the dial was waiting on.
+     */
+    fun connectionCount(): Int = (gattClients.keys + serverConnections).size
+
+    /**
+     * Peer addresses holding a completed link in either direction, each
+     * counted once. A dial still in flight does not count: it may never
+     * complete, and a peer connecting to us must not be refused for it.
+     */
+    fun establishedLinkCount(): Int = (establishedClients + serverConnections).size
 
     fun clear() {
         gattClients.clear()
@@ -161,5 +224,6 @@ class MeshConnectionRegistry {
         connectionRoles.clear()
         serverConnections.clear()
         establishedClients.clear()
+        duplicateUntil.clear()
     }
 }

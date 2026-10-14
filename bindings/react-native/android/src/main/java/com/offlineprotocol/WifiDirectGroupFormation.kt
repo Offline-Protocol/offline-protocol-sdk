@@ -265,9 +265,9 @@ internal object WifiDirectGroupFormation {
     fun isValidNetworkName(name: String): Boolean =
         name.length <= 32 && Regex("^DIRECT-[a-zA-Z0-9]{2}.*").matches(name)
 
-    private fun sha256(text: String): ByteArray =
+    internal fun sha256(text: String): ByteArray =
         MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
 
-    private fun hex(bytes: ByteArray, count: Int): String =
+    internal fun hex(bytes: ByteArray, count: Int): String =
         bytes.take(count).joinToString("") { "%02x".format(it.toInt() and 0xff) }
 }

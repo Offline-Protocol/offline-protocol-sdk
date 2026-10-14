@@ -144,8 +144,12 @@ impl OfflineProtocol {
         // would make "block, then unblock" a way to walk a peer's own
         // protection back, requestable by anyone who can get a user to do it.
         self.peer_ctrl_freshness.remove(user_id);
+        self.peer_undecryptable_ack.remove(user_id);
         self.peer_rich_payload.remove(user_id);
         self.peer_rich_attested.remove(user_id);
+        // Advertised half only, as above: `svc_sealed_proved_peers` is a
+        // ratchet, and "block, then unblock" must not walk it back.
+        self.peer_svc_sealed.remove(user_id);
         self.forget_data_sync_peer(user_id);
         // The Nostr sealing key lives in the transport, not in one of the sets
         // above, so it needs its own clear — the durable record is deleted by
@@ -1441,6 +1445,8 @@ mod tests {
             rich_versions: Vec::new(),
             data_versions: Vec::new(),
             ctrl_versions: Vec::new(),
+            svc_versions: Vec::new(),
+            ack_versions: Vec::new(),
             nostr_pubkey: None,
         };
         let content = serde_json::to_string(&reset_payload).unwrap();

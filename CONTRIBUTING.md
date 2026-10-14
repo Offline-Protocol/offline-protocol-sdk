@@ -125,10 +125,11 @@ offline-protocol-sdk/
 │   ├── offline-protocol-mls/
 │   ├── offline-protocol-services/
 │   ├── offline-protocol-data/
+│   ├── offline-protocol-telemetry-wire/
 │   ├── offline-protocol/
 │   ├── offline-protocol-uniffi/
 │   └── offline-protocol-bench/
-├── bindings/        # Platform bindings (React Native)
+├── bindings/        # Platform bindings (React Native, Python, Swift, Kotlin)
 ├── docs/            # Documentation
 └── examples/        # Example applications
 ```
@@ -250,11 +251,13 @@ One number identifies a release across every channel: the `vX.Y.Z` git tag, the
 `@offline-protocol/mesh-sdk` npm package, the `offline-protocol*` crates on
 crates.io, the GitHub release assets (the Python wheels among them), the Swift
 package's `X.Y.Z` tag in `Offline-Protocol/offline-protocol-swift`,
-`com.offlineprotocol:offline-protocol-sdk` on Maven Central, and
-`offline-protocol-sdk` on PyPI. Pushing the tag is what publishes, so
-everything below happens on a `chore/release-X.Y.Z` branch that merges first.
-The last three are switched on one by one, and the Swift package is pulled
-rather than pushed; see
+`com.offlineprotocol:offline-protocol-sdk` on Maven Central,
+`offline-protocol-sdk` on PyPI, and the service image
+`ghcr.io/offline-protocol/offline-protocol-service`, which installs that PyPI
+release. Pushing the tag is what publishes, so everything below happens on a
+`chore/release-X.Y.Z` branch that merges first. Maven Central and PyPI are
+switched on one by one, the image follows PyPI's switch, and the Swift package
+is pulled rather than pushed; see
 [the native packages and PyPI](#the-native-packages-and-pypi).
 
 Version files to bump together:
@@ -359,12 +362,19 @@ Maven Central and PyPI then publish after the `release` job, only from a
 `v*` tag that is not a dry run, and only when the channel's repository
 variable is `true`. A channel switched on with its secret missing fails the
 run rather than skipping, because a skipped channel is a release that looks
-shipped.
+shipped. The service image publishes after PyPI, under the same switch,
+because it installs the wheels PyPI just served: `service-image.yml` waits
+until pip can download both Linux wheels of the release, builds
+`bindings/python/docker` for amd64 and arm64 with `SDK_VERSION` set to that
+number, and pushes it. A prerelease is pushed under its own tag
+(`0.30.0-rc.1`) only; `X.Y` and `latest` move only to the newest final
+release.
 
 | Channel | Switch (variable) | Credentials (secrets) | A dry run with it on |
 | --- | --- | --- | --- |
 | Maven Central | `MAVEN_CENTRAL_PUBLISH` | `MAVEN_CENTRAL_USERNAME` and `MAVEN_CENTRAL_PASSWORD` (a Central Portal user token), `MAVEN_SIGNING_KEY` (armored private key) and `MAVEN_SIGNING_KEY_PASSWORD` | uploads a deployment Central validates, then drops it |
 | PyPI | `PYPI_PUBLISH` | none: trusted publishing from `release.yml` in the `pypi` environment | checks the wheels' metadata only: PyPI has no rehearsal |
+| Service image (ghcr.io) | `PYPI_PUBLISH`, since it installs what PyPI published | none: the workflow's own `GITHUB_TOKEN` with `packages: write` | not built: it needs the release on PyPI |
 
 **The Swift package is pulled, not pushed.** Nothing in this repository can
 write to `Offline-Protocol/offline-protocol-swift`, and no credential for it
@@ -392,14 +402,20 @@ One-time setup, outside this repository (none for the Swift package):
 
 - **Maven Central**: a Central Portal account, the `com.offlineprotocol`
   namespace verified (a DNS TXT record on `offlineprotocol.com`), a user token,
-  and the signing key's public half on `keys.openpgp.org`. Central checks every
+  and the signing key's public half on the keyservers. Central checks every
   signature against the keyservers, so a key that is not there fails the
-  rehearsal, which is where it should fail.
+  rehearsal, which is where it should fail. The steps are in
+  [Maven Central, once](#maven-central-once).
 - **PyPI**: a trusted publisher for `offline-protocol-sdk` naming this
   repository, the workflow `release.yml` and the environment `pypi`. As with
   npm, renaming the file revokes it.
+- **The service image**: nothing before the first run. A package a workflow
+  creates in the organization can start out private, so after the first
+  push an organization admin opens the `offline-protocol-service` package's
+  settings, makes it public, and checks it is linked to this repository
+  (the image's `org.opencontainers.image.source` label links it).
 
-Three things here cannot be undone, and each script refuses rather than
+Four things here cannot be undone, and each script refuses rather than
 guesses:
 
 - **A Swift package tag never moves.** Swift Package Manager records the
@@ -417,6 +433,19 @@ guesses:
   serves it, which is minutes after the Portal publishes; a re-run inside
   that window uploads a duplicate the Portal refuses, which turns the job
   red and changes nothing.
+- **An image version is not replaced, though the registry would allow it.**
+  GHCR accepts a second push of `X.Y.Z`, and a deployment that pinned it
+  would then run something else under the same number. So
+  `service-image.yml` refuses before building when `X.Y.Z` exists, refuses
+  a run by hand from any branch but the default one (the image is built
+  from that ref's Dockerfile), and treats any registry answer but "not
+  found" as a reason to stop. Its `overwrite` input lifts the first check,
+  and is for one case only: an image whose checks failed after the push.
+  That is also the recovery when `publish-image` fails in a release: run
+  Actions > Service Image from `main` with the release tag, and
+  `overwrite` only if the push itself happened. A re-run of the whole
+  release after `publish-image` went green turns that job red, and changes
+  nothing.
 - **The wheels' platform tags are read from the libraries.** A Linux wheel is
   tagged `manylinux_2_N` for the newest glibc its library needs, which is the
   glibc of the image that built it. That counts the `GLIBC_ABI_*` markers as
@@ -430,6 +459,110 @@ guesses:
   not exceed it. Every wheel's architecture is read from its library's
   header, so a library from the wrong build is refused rather than wheeled
   under a correct name.
+
+#### Maven Central, once
+
+The `publish-maven` job in `release.yml` is complete and switched off: every
+release builds, tests and writes out the library, and stops there while
+`MAVEN_CENTRAL_PUBLISH` is not `true`. What it uploads is the AAR (classes,
+the UniFFI bindings, `jni/<abi>/libuniffi_offline_protocol.so` for
+arm64-v8a, armeabi-v7a, x86 and x86_64, and the license files), its POM,
+the Gradle module file, the sources jar and a javadoc jar, each signed with
+gpg and given MD5 and SHA-1 checksums by `scripts/maven-central-bundle.sh`,
+as one bundle through the Central Portal Publisher API
+(`scripts/maven-central-upload.sh`, `https://central.sonatype.com/api/v1/publisher`).
+The OSSRH endpoints are not used anywhere.
+
+Switching it on takes an organization owner, once. Decide the tier first,
+before the DNS record or the key. From 2026-10-01 Sonatype requires Maven
+Central Publisher Pro for an artifact of "commercial nature", one that
+"supports the adoption, integration, or operation of your organization's
+commercial product or service", whatever its publishing volume, and it names
+service-dependent SDKs among its examples. The license does not settle it:
+Sonatype says no single signal, license included, decides the question, and
+this library's POM itself points at a commercial license. There is nothing to
+set in the Portal account either way. The choice is one of two requests:
+
+- **Publisher Pro**: through Sonatype's
+  [Maven Central Pro contact page](https://www.sonatype.com/products/maven-central-pro/contact).
+  No price is published.
+- **Excluded as community**: mail central-support@sonatype.com asking that
+  `com.offlineprotocol` be excluded from commercial classification, naming the
+  organization, the group id, why it is not part of a commercial
+  go-to-market effort, and which of the organization's artifacts remain
+  commercial.
+
+The rules are on Sonatype's
+[publishing limits page](https://central.sonatype.org/publish/maven-central-publishing-limits/).
+Then, in this order:
+
+1. **The account and the namespace.** Sign in at
+   <https://central.sonatype.com> with an account the company controls (not a
+   personal one: it owns the namespace). Under Namespaces, add
+   `com.offlineprotocol`. The Portal shows a verification key: add it as a DNS
+   TXT record on `offlineprotocol.com` and press Verify. Keep the record until
+   the namespace shows as verified. Then open Publishing, Usage Center: it is
+   where Sonatype states the monthly file, size and release limits, and a
+   release (the AAR alone is about 21 MiB) counts against all three.
+2. **A Portal user token.** Under the account menu, View Account, Generate User
+   Token. It is a name and a secret, shown once. They are
+   `MAVEN_CENTRAL_USERNAME` and `MAVEN_CENTRAL_PASSWORD` below; the account's
+   own login password is never used.
+3. **A release signing key**, used for nothing else, on a trusted machine:
+
+   ```bash
+   gpg --quick-gen-key "Offline Protocol releases <ADDRESS@offlineprotocol.com>" rsa4096 sign 2y
+   FPR=<the fingerprint gpg printed>
+   gpg --keyserver hkps://keyserver.ubuntu.com --send-keys "$FPR"
+   gpg --keyserver hkps://keys.openpgp.org --send-keys "$FPR"
+   gpg --armor --export-secret-keys "$FPR" > release-signing-key.asc
+   ```
+
+   Use an address the team reads. keys.openpgp.org publishes the key without
+   its user id until that address confirms the mail it sends; Central needs
+   only the key, and keyserver.ubuntu.com keeps the user id either way. Keep
+   the revocation certificate gpg wrote under `openpgp-revocs.d` and a copy of
+   the private key offline, and extend the expiry (then send the key again)
+   before it lapses: an expired key fails the rehearsal.
+4. **The secrets**, as repository secrets on this repository (Settings,
+   Secrets and variables, Actions). These are the names `release.yml` reads:
+
+   | Secret | Value |
+   | --- | --- |
+   | `MAVEN_CENTRAL_USERNAME` | The user token's name, from step 2 |
+   | `MAVEN_CENTRAL_PASSWORD` | The user token's secret, from step 2 |
+   | `MAVEN_SIGNING_KEY` | The whole of `release-signing-key.asc`, armored, exactly one secret key |
+   | `MAVEN_SIGNING_KEY_PASSWORD` | The key's passphrase; leave it unset for a key without one |
+
+   ```bash
+   gh secret set MAVEN_CENTRAL_USERNAME -R Offline-Protocol/offline-protocol-sdk
+   gh secret set MAVEN_CENTRAL_PASSWORD -R Offline-Protocol/offline-protocol-sdk
+   gh secret set MAVEN_SIGNING_KEY -R Offline-Protocol/offline-protocol-sdk < release-signing-key.asc
+   # Only for a key with a passphrase:
+   gh secret set MAVEN_SIGNING_KEY_PASSWORD -R Offline-Protocol/offline-protocol-sdk
+   ```
+
+   Then delete `release-signing-key.asc` from the machine.
+5. **The switch**, as a repository variable:
+
+   ```bash
+   gh variable set MAVEN_CENTRAL_PUBLISH --body true -R Offline-Protocol/offline-protocol-sdk
+   ```
+
+6. **A rehearsal before the next tag.** Run Release & Publish from `main` with
+   `dry_run` checked and the version box empty. The Publish to Maven Central
+   job uploads the library as a deployment Central validates and then drops,
+   so a wrong token, an unverified namespace or a key the keyservers do not
+   have fails there, with the Portal's reason in the log, and nothing is
+   released. The form calls the version required, but left empty it becomes
+   `0.0.0-dev`, which never collides with a release. Never name a version
+   that is already on Central: the Portal refuses the duplicate and the
+   rehearsal fails for that reason alone.
+
+The first release tag after that publishes to Maven Central, permanently. The
+library a release built while the channel was off is kept for a day (the
+run's `android-library-maven` artifact); within that day, re-running only that
+run's Publish to Maven Central job, once the switch is on, publishes it.
 
 ## Architecture Decisions
 

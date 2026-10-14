@@ -139,8 +139,13 @@ Python host all speak plain TCP, which the
 part of the trust argument. A device on the path is A1 for those frames. It
 reads what an envelope leaves in clear, such as the application id
 ([R17](#r17-the-application-id-on-every-frame-is-cleartext-and-unsigned)),
-and never a payload. The iOS manager's hop was encrypted while it used
-MultipeerConnectivity
+and never a payload. On a shared Wi-Fi network the path is every device on
+it, for Android since it joined the LAN
+([ADR 0028](../adr/0028-android-peer-streams-join-the-lan.md)) as for iOS and
+hosts before; a listener open to that network takes at most twelve inbound
+streams of its sixteen, and four from one remote address, so strangers'
+sockets cannot stop it dialing. The iOS manager's hop was encrypted while it
+used MultipeerConnectivity
 ([ADR 0027](../adr/0027-ios-peer-streams-ride-network-framework.md)).
 
 ### Boundary 5: end to end
@@ -197,7 +202,14 @@ The rule the protocol settled on:
   resolves as a policy refusal is never acknowledged, because the arrival path
   withheld the acknowledgement already.
 - A frame that failed for a **recoverable** reason gets no acknowledgement, so
-  the sender's resend is the recovery path.
+  the sender's resend is the recovery path. One exception: a frame that can
+  never decrypt (a dead epoch, a spent ratchet generation, or one the
+  pending-decryption queue gave up on) is answered `ack_status:
+  "undecryptable"` when it arrived over the **internet relay** and its sender
+  advertised that it reads the status. These failures happen before anything
+  is authenticated, so the answer is withheld on every other carrier, where an
+  injector in radio range would read it. See
+  [R25](#r25-the-relay-learns-which-of-its-frames-a-device-could-not-decrypt).
 
 Both refusals are permanent, so what separates them is neither authentication
 nor recoverability: a **policy** refusal is a statement about a *frame*, while a
@@ -365,7 +377,9 @@ of closing them is paid on every peer forever; the harm is a stale restatement
 inside a bounded window.
 
 **What stands in front of it:** the receive deduplicator refuses an exact repeat
-for an hour, so a replay must wait out that window to land at all.
+for the redelivery window (seven days by default, while the id is among the
+5000 most recent it tracks), so a replay must wait out that window to land at
+all.
 
 **Two exposures that are not in the window at all.** A peer that has never
 presented a freshness-bound signature is where it always was, since holding it
@@ -412,24 +426,73 @@ timeout and frames are retransmitted before they were ever written. Duplicates
 are absorbed by deduplication, so this is wasted work rather than loss, but it
 is a real scaling cliff.
 
-### R9. Service discovery and service bodies are signed, not encrypted
+### R9. Service bodies are sealed only toward capable peers; discovery is signed, not encrypted
 
 The service prefix family (`__SVC_DISC_Q__`, `__SVC_DISC_R__`, `__SVC_REQ__`,
-`__SVC_RESP__`, and the generic service message) is control-plane: every frame
-is signature-gated, so its sender is proven, and every frame is **exempt from
-the encryption requirement**. Discovery gossip and the application-supplied
-request and response bodies therefore travel in cleartext.
+`__SVC_RESP__`, and the generic service message) is control-plane: every
+plaintext frame is signature-gated, so its sender is proven, and the family is
+**exempt from the encryption requirement**.
 
-**Impact:** A1 and A3 read service bodies and the full discovery pattern. This
-is the one application-supplied payload that boundary 5 does **not** cover, so
-"MLS protects application content" does not hold here.
+**Discovery** gossip always travels in cleartext. It is a broadcast to peers
+with whom no session necessarily exists, and every hop must read `service_id`
+to match and forward it, so there is no group to encrypt it to.
 
-**Why it stands:** discovery is a broadcast to peers with whom no session
-necessarily exists, so there is no established group to encrypt to; encrypting
-request and response bodies is not implemented.
+**Request and response bodies** are sealed inside the recipient's 1:1 MLS
+session when all of these hold: the sender's `encrypt_service_messages` is on
+(the default), the recipient advertised `svc_versions` entry 1 in a signed key
+package or proved it by sending a sealed service frame, and the session with
+the recipient is confirmed. The provider then sees the MLS-authenticated
+requester. A body still travels as signed plaintext:
 
-**What application teams must do today:** treat a service body as public, and
-encrypt anything sensitive above the SDK before handing it over.
+- toward a peer on a release from before this capability, or with the switch
+  off,
+- toward a capable peer before the session confirms, which includes **the
+  first request to a provider this device has never met**: the attempt to
+  seal it is what starts the session, and the request goes out signed rather
+  than being held or dropped,
+- toward a peer that has **never sent us a sealed service frame**, after an
+  attacker strips `svc_versions` from its key package in transit or replays
+  an older signed package from before it upgraded, until a genuine package or
+  a sealed frame from that peer arrives. No freshness window bounds the
+  replay: a key package signed under `offline-ctrl-v1` is admitted at any age
+  (the key-package escape in the control-frame gate).
+
+A peer that has sent us a sealed service frame is past the first and the
+third. The frame proves it routes the sealed form, which no replay can fake,
+and the receiver records that in a durable ratchet beside the control-freshness
+one, which no key package can clear. From then on its bodies are sealed
+whatever its key packages say, except while the session is not confirmed: a
+request sent while a desync re-key rebuilds the session takes the second
+fallback, toward a proved peer too.
+
+The advertised capability cannot be flushed by a flood either. The set that
+holds it is a subset of the capped encryption-capable set and refuses new
+peers at the cap rather than evicting old ones, so a stream of fresh
+identities costs only the later identities the capability.
+
+A failure to seal on a **confirmed** session (an MLS or storage fault) is
+returned to the caller as an error, never sent in plaintext instead. The
+fallback covers a peer this device cannot seal to yet, not a fault on one it
+can.
+
+The plaintext fallback is a stated exception to the capability rule that a
+downgrade loses the feature rather than the confidentiality
+([capability negotiation](../spec/capability-negotiation.md#the-exception-svc_versions)):
+the signed plaintext form is the floor every older peer depends on.
+
+**Impact:** A1 and A3 read the full discovery pattern, and any service body that
+took the fallback. Between two peers running this release with a confirmed
+session, they read neither body. The receiving application can tell which form
+arrived: `service_request_received` and `service_response_received` carry
+`encrypted`.
+
+**What application teams must do today:** treat the first request to a provider
+as readable by the hops that carry it, or make sure a session exists first (any
+exchanged direct message does it). A body that must never travel in plaintext
+goes in an ordinary direct message instead, as the HTTP front does.
+
+**Follow-up:** a strict mode under `require_encryption` that refuses the
+fallback toward a peer that advertised or proved the sealed form.
 
 ### R10. Gateways are unauthenticated for delivery, and see who is in the zone
 
@@ -722,13 +785,12 @@ the stream chapter's one-stream-per-address rule it gains one more thing: its
 close is reported as the peer's loss, which evicts the real peer's link until
 it reconnects. That is why the rule is normative rather than policy. Which
 stream the rule keeps is policy, and each choice leaves the replayer something.
-The Android manager keeps the newer stream, so a replayer chooses when a real
-stream ends: its copy supersedes the real one, the real peer reconnects past
-it, and each round costs both sides a signature check, while the core sees no
-loss because the address never stopped being held. The Python and iOS
-managers keep the stream opened by the lower address, and the newer of two
-such, so the same replay works only against a receiver whose address is
-higher than the peer it copies; a lower receiver refuses the copy. The price
+Every manager keeps the stream opened by the lower address, and the newer of
+two such. Against a receiver whose address is higher than the peer it copies,
+a replayer chooses when a real stream ends: its copy supersedes the real one,
+the real peer reconnects past it, and each round costs both sides a signature
+check, while the core sees no loss because the address never stopped being
+held. A lower receiver refuses the copy. The price
 is that a stale stream can block the higher address's reconnect until
 keepalive notices. A receiver MUST NOT read a verified
 assertion as evidence that the peer is live, recent, or the only holder of the
@@ -945,6 +1007,127 @@ changes its address captures the device again, a few minutes per change,
 and a squatter whose signal is stronger than the honest owner's keeps
 winning the join until the takeover. The same rule covers an owner whose
 application died, since the group can outlive the process. Formation is opt-in and Android-only.
+
+### R23. The HTTP front trusts every process that can reach it
+
+The [HTTP front](../spec/http-front.md) lets any process that can open its
+port register a service, unregister one, or send a request as this device.
+Bound to loopback, that is every process on the host; bound elsewhere, every
+process that holds the launch token. It cannot tell one local application
+from another, so the local API's per-application rules (space scoping,
+method denials, service ownership) separate the front, as one application,
+from the others, and do nothing between the applications behind it. A
+registered callback is called as given, so a process that can register
+chooses which local URL remote devices reach.
+
+On the remote side, any device whose message this engine decrypts can call
+any registered service: MLS proves who sent a request, and nothing decides
+whether that sender may make it. With `auto_key_exchange` on, which the
+service image's configuration sets, that is any device running this SDK
+that reaches the host. MLS proves a consistent key, not a known device: an
+address is a key its device generated.
+
+The sender a provider is told, `X-Offline-Protocol-Sender`, is an unsigned
+HTTP header on the callback request. The front strips any copy a peer sent
+and sets it from the MLS-authenticated sender, so it cannot be forged
+through the front, but any process that can reach the callback directly can
+send it with any value. In a container deployment a callback on a bridge
+network the provider shares with other containers is reachable by all of
+them.
+
+A request whose requester saw `deadline_exceeded` is not withdrawn. The
+engine keeps carrying the message, and the provider serves it if it arrives
+within the clock slack past its deadline, so a request reported as timed out
+can still act, and a retry after it can act twice.
+
+**What bounds it:** bodies never leave the host in the clear (invariant 1 of
+the chapter), the sender a provider is told is the MLS-authenticated one,
+off loopback the token is required, and a request from a browser page
+(one carrying `Origin`, or reaching a tokenless front under a name other
+than loopback or the domain) is refused. That does not cover a `GET` a page
+makes by loading a resource, which carries no `Origin`: with a wildcard
+route to the domain on a host where a browser runs, any page can make a
+blind `GET` to a service as this device. A token closes it, since such a
+load cannot set a header. A peer cannot steer a callback outside the path
+its provider registered (dot segments are refused), cannot choose the source
+address a proxy in front of the callback reports (the forwarding headers are
+dropped), and cannot hold more than 32 callback connections at once.
+That limit bounds the callback's load, not fairness: one peer with a
+session can hold all 32 for the maximum deadline, and every other peer is
+refused with `callback_failed` until it lets go.
+**What application teams must do:**
+run the front where only the operator's applications can reach it, with a
+token on any host where a browser runs, and
+authorize in the provider by comparing `X-Offline-Protocol-Sender` with an
+allowlist of addresses obtained out of band. Bind the callback where only
+the front can reach it (loopback in a network namespace shared with the
+front alone), or do not authorize on the header. Make any callback with a
+side effect idempotent on a key the application chooses, since a 504 does
+not mean it did not run. A host
+that can identify the calling container should pass that identity to the
+front; until then, one front is one application to every rule.
+
+### R24. A session can be started from anywhere the mesh reaches
+
+A key package that arrives across the mesh is admitted, and answered with a
+session and a Welcome that the receiving device hands to its neighbours to
+carry back, followed by the fresh key package every new session sends for
+group invites. So anyone a mesh path connects to this device can make it build
+an MLS group, store a key package, and put two frames on its links, by signing
+a key package under an address of their own. Addresses cost nothing to mint,
+so an A2 adversary several hops away can do it once per address. Until the
+handshake crossed the mesh, the answer had no route back unless the sender was
+a neighbour or reached by the relay, so a distant sender cost the device the
+group and the stored package but nothing on the air.
+
+**Why it stands:** a device two hops away is indistinguishable from an
+adversary two hops away until the handshake completes, and the handshake is
+what the mesh exists to carry for a pair that has never met. Refusing a
+package from a sender this device cannot see would refuse exactly that pair.
+
+**What bounds it:** the package's signature must verify against the key its
+claimed address derives from, so it cannot be made on another device's
+behalf, and the session it opens is with the attacker's own address only.
+Every device in between applies its per-neighbour forwarding allowance to the
+attacker's link before the package goes further, and its per-second budget
+after, so the rate at which packages reach this device is the forwarding
+rate, not the attacker's. The receiving device sends its two frames from the
+share of its own budget that its own traffic uses, so a flood delays this
+device's own frames rather than putting more on the air than the budget
+allows. Stored packages are capped at 1000, evicting the soonest to expire,
+the push pool stops minting at 64 and shares a package past that, and a
+Welcome's lifecycle expires after 300 seconds of retries. A device does not
+answer a package from a sender only the mesh reaches with one of its own
+first, so a package buys one Welcome, not a second group. A later package from
+the same mesh-only address re-arms that Welcome only while it has stalled or
+expired, so a replayed package buys at most one more Welcome per stall, from
+the same budget share; the receive deduplicator absorbs a replay of the same
+frame for the redelivery window (seven days by default, while the id is among
+the 5000 most recent it tracks). A device that declines to carry
+(`allowRelay` off) carries none of this for others. The
+same flood from a direct neighbour or over the relay was possible before and
+is unchanged.
+
+### R25. The relay learns which of its frames a device could not decrypt
+
+A frame that can never decrypt is answered with an `undecryptable` ACK when it
+arrived over the internet relay, so the relay drops its mailbox copy instead
+of redelivering it on every connect. Every such failure happens before
+authentication, so anyone able to inject on the relay ingest path, under a
+claimed sender that advertised the status, gets an answer for a garbage frame
+in that sender's derivable session slot.
+
+**Why it stands:** silence left a relay redelivering dead ciphertext forever,
+and each redelivery failed again on the recipient. The relay is the only
+carrier with a mailbox that does that.
+
+**What bounds it:** the answer is addressed to the claimed sender and routed
+by the relay, which already knows the device is connected (A3), so it adds the
+fact that one named frame was processed and failed, not liveness. It is never
+sent on a mesh or peer-stream link, where an A1 or A2 neighbour would read it.
+It goes only to a sender whose key package advertised `ack_versions` entry 1,
+and the sender reacts with one resend of a message it already holds, never a
+delivery.
 
 ## Network egress
 

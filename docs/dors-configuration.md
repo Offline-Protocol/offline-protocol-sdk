@@ -216,9 +216,8 @@ protocol.on('transport_switched', (event) => {
 | Reason | Meaning | Action |
 |--------|---------|--------|
 | "DORS selected better transport" | Normal switching based on scoring | No action needed |
-| "DORS suggests escalating to WiFi Direct due to BLE failures" | Escalation triggered | Consider enabling WiFi Direct if not already active |
-| "BLE transport became available" | BLE initialized | Normal startup |
-| "Internet connection established" | Server connected | Normal in hybrid mode |
+
+That is the only `reason` the core writes on `transport_switched`. For a stable, machine-readable cause, listen for `dors_transport_switched`, whose `reason_code` is one of `INITIAL_SELECTION`, `PRIMARY_SELECTED`, `PRIMARY_SUCCESS`, `FALLBACK_SUCCESS`, `ESCALATION_APPLIED` or `CURRENT_UNAVAILABLE`, and for `dors_escalation_triggered` when DORS recommends or applies a BLE to Wi-Fi Direct escalation.
 
 ## Advanced Tuning
 

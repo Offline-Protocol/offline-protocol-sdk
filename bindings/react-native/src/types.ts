@@ -410,7 +410,11 @@ export interface InternetTransportConfig {
  * WiFi Direct transport configuration
  */
 export interface WifiDirectTransportConfig {
-  /** Enable WiFi Direct transport */
+  /**
+   * Enable the peer-stream slot. Android: Wi-Fi Direct, and DNS-SD on the
+   * Wi-Fi network it is on, which finds iPhones and Python hosts there. iOS:
+   * Network framework streams on the LAN and over AWDL.
+   */
   enabled: boolean;
   /** Device name to advertise */
   deviceName?: string;
@@ -627,7 +631,7 @@ export interface TransportsConfig {
   ble?: BleTransportConfig;
   /** Internet transport configuration */
   internet?: InternetTransportConfig;
-  /** WiFi Direct transport configuration (Android only) */
+  /** Peer-stream slot configuration (Wi-Fi Direct and LAN on Android, LAN and AWDL on iOS) */
   wifiDirect?: WifiDirectTransportConfig;
   /** Reticulum mesh transport configuration (requires external Reticulum daemon) */
   reticulum?: ReticulumTransportConfig;
@@ -710,6 +714,20 @@ export interface EncryptionConfig {
    * rather than a real fork) is visible to your app.
    */
   cryptoRecoveryEnabled?: boolean;
+  /**
+   * Seal service request and response bodies inside the recipient's 1:1 MLS
+   * session instead of sending them as signed plaintext that every hop can
+   * read. Default: `true`.
+   *
+   * Takes effect only toward a peer that advertised support (an SDK release
+   * with this switch on) and only once the session with that peer is
+   * confirmed. Toward everyone else, and before the session confirms, the body
+   * still leaves as signed plaintext: the first request to a provider this
+   * device has never met is readable by the devices that carry it. Discovery is
+   * never sealed. If a body must never travel in plaintext, send it as an
+   * ordinary message instead of through the service API.
+   */
+  encryptServiceMessages?: boolean;
   /**
    * Bounds and policy for encrypted messages received before session readiness.
    */
@@ -1325,6 +1343,19 @@ export interface MessageDecryptionFailedEvent extends BaseEvent {
   sender: string;
   code: DecryptionFailureCode;
   reason: string;
+  /**
+   * When the sender sealed the frame (sender clock, ms), from the cleartext
+   * envelope. Unauthenticated: a hint, never a security input. `null` unless
+   * this was a 1:1 decrypt attempt.
+   */
+  sealed_at_ms: number | null;
+  /**
+   * When this device's current session with `sender` was created or adopted
+   * (local clock, ms); `null` when unknown. A frame sealed before it cannot
+   * have been sealed under this session, so its failure says nothing about
+   * whether the two sides hold the same session now.
+   */
+  session_established_at_ms: number | null;
 }
 
 /**
@@ -2237,6 +2268,12 @@ export interface ServiceRequestReceivedEvent extends BaseEvent {
   method: string;
   body: string;
   sender: string;
+  /**
+   * Whether the request arrived sealed inside the 1:1 MLS session with
+   * `sender`. `false` means it arrived as signed plaintext that every device
+   * carrying it could read (an older peer, or no confirmed session yet).
+   */
+  encrypted: boolean;
 }
 
 /**
@@ -2249,6 +2286,11 @@ export interface ServiceResponseReceivedEvent extends BaseEvent {
   status: string;
   body: string;
   provider_peer_id: string;
+  /**
+   * Whether the response arrived sealed inside the 1:1 MLS session with the
+   * provider. `false` means it arrived as signed plaintext.
+   */
+  encrypted: boolean;
 }
 
 // ============================================================================

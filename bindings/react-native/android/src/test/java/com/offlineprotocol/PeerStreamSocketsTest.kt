@@ -83,14 +83,18 @@ class PeerStreamSocketsTest {
     )
 
     /** A listener whose accepted sockets [sockets] runs, as the group owner's does. */
-    private fun listen(sockets: PeerStreamSockets, running: () -> Boolean = { true }): Int {
+    private fun listen(
+        sockets: PeerStreamSockets,
+        carrier: PeerStreamSockets.Carrier = PeerStreamSockets.Carrier.P2P,
+        running: () -> Boolean = { true },
+    ): Int {
         val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
         cleanup.add(server)
         thread(isDaemon = true) {
             while (!server.isClosed) {
                 val s = try { server.accept() } catch (_: IOException) { return@thread }
                 cleanup.add(s)
-                thread(isDaemon = true) { sockets.run(s, outbound = false, accepting = running) }
+                thread(isDaemon = true) { sockets.run(s, outbound = false, carrier, accepting = running) }
             }
         }
         return server.localPort
@@ -321,6 +325,23 @@ class PeerStreamSocketsTest {
     }
 
     @Test
+    fun `one remote host holds at most its inbound share`() {
+        // Every test socket comes from loopback, one host.
+        val host = Host("peer-a")
+        val a = PeerStreamSockets(host, fast.copy(maxInboundPerHost = 2, preambleTimeoutMs = 5_000))
+        val port = listen(a)
+        val first = raw(port).also { it.readBody() }
+        raw(port).readBody()
+        assertTrue(raw(port).closedByPeer())
+
+        // Ending one frees its share, once the listener side has seen it end.
+        first.close()
+        val until = System.currentTimeMillis() + 5_000
+        while (a.openCount > 1 && System.currentTimeMillis() < until) Thread.sleep(10)
+        assertArrayEquals(assertion("peer-a"), raw(port).readBody())
+    }
+
+    @Test
     fun `a socket that arrives while stopped is closed unread`() {
         val host = Host("peer-a")
         val port = listen(PeerStreamSockets(host, fast)) { false }
@@ -331,8 +352,9 @@ class PeerStreamSocketsTest {
     // --- one announced stream per address ---------------------------------------------
 
     @Test
-    fun `a newer stream supersedes the older with one announcement and one loss`() {
-        val host = Host("peer-a")
+    fun `a newer stream the lower address opened supersedes the older with one announcement and one loss`() {
+        // peer-b is lower than us, so its inbound streams are the winning kind.
+        val host = Host("peer-c")
         val port = listen(PeerStreamSockets(host, fast))
         val older = raw(port)
         older.readBody()
@@ -353,6 +375,117 @@ class PeerStreamSocketsTest {
         newer.close()
         assertEquals("lost:peer-b", host.next())
         assertNull(host.quiet())
+    }
+
+    @Test
+    fun `a second stream the higher address opened is refused and the held one stays`() {
+        // peer-b is higher than us: we keep its first stream until it ends.
+        val host = Host("peer-a")
+        val port = listen(PeerStreamSockets(host, fast))
+        val held = raw(port)
+        held.readBody()
+        held.send(assertion("peer-b"))
+        assertEquals("connected:peer-b", host.next())
+
+        val second = raw(port)
+        second.readBody()
+        second.send(assertion("peer-b"))
+        assertTrue(second.closedByPeer())
+        assertNull(host.quiet())
+
+        held.send("still here".toByteArray())
+        assertEquals("message:peer-b:10", host.next())
+        held.close()
+        assertEquals("lost:peer-b", host.next())
+        assertNull(host.quiet())
+    }
+
+    @Test
+    fun `closing one carrier ends only its streams`() {
+        val host = Host("peer-a")
+        val a = PeerStreamSockets(host, fast)
+        val group = raw(listen(a, PeerStreamSockets.Carrier.P2P)).also { it.readBody() }
+        group.send(assertion("peer-b"))
+        assertEquals("connected:peer-b", host.next())
+        val lan = raw(listen(a, PeerStreamSockets.Carrier.LAN)).also { it.readBody() }
+        lan.send(assertion("peer-c"))
+        assertEquals("connected:peer-c", host.next())
+
+        a.closeCarrier(PeerStreamSockets.Carrier.P2P)
+        assertEquals("lost:peer-b", host.next())
+        assertTrue(group.closedByPeer())
+        assertNull(host.quiet())
+
+        lan.send("still here".toByteArray())
+        assertEquals("message:peer-c:10", host.next())
+    }
+
+    @Test
+    fun `run reports a proof, and carried only once a body arrives`() {
+        val host = Host("peer-a")
+        val a = PeerStreamSockets(host, fast)
+        val results = LinkedBlockingQueue<PeerStreamSockets.Ran>()
+        val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
+        cleanup.add(server)
+        thread(isDaemon = true) {
+            while (!server.isClosed) {
+                val s = try { server.accept() } catch (_: IOException) { return@thread }
+                cleanup.add(s)
+                thread(isDaemon = true) { results.add(a.run(s, outbound = false) { true }) }
+            }
+        }
+
+        // Held by peer-b's first stream, which is higher than us: refused here.
+        val held = raw(server.localPort).also { it.readBody() }
+        held.send(assertion("peer-b"))
+        assertEquals("connected:peer-b", host.next())
+        val refused = raw(server.localPort).also { it.readBody() }
+        refused.send(assertion("peer-b"))
+        assertEquals(
+            PeerStreamSockets.Ran(proved = "peer-b", heard = true, carried = false),
+            results.poll(5, TimeUnit.SECONDS),
+        )
+
+        held.send("body".toByteArray())
+        assertEquals("message:peer-b:4", host.next())
+        held.close()
+        assertEquals(
+            PeerStreamSockets.Ran(proved = "peer-b", heard = true, carried = true),
+            results.poll(5, TimeUnit.SECONDS),
+        )
+
+        // A preamble that does not verify: heard, proved nothing.
+        val liar = raw(server.localPort).also { it.readBody() }
+        liar.send(assertion("bad-x"))
+        assertEquals(
+            PeerStreamSockets.Ran(proved = null, heard = true, carried = false),
+            results.poll(5, TimeUnit.SECONDS),
+        )
+    }
+
+    @Test
+    fun `an idle stream that held its address through the window carried its peer`() {
+        // Two peers with a session may reconnect and send nothing: a stream
+        // that held its address that long was no refusal.
+        val host = Host("peer-a")
+        val a = PeerStreamSockets(host, fast.copy(carriedAfterMs = 200))
+        val results = LinkedBlockingQueue<PeerStreamSockets.Ran>()
+        val server = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
+        cleanup.add(server)
+        thread(isDaemon = true) {
+            val s = try { server.accept() } catch (_: IOException) { return@thread }
+            cleanup.add(s)
+            results.add(a.run(s, outbound = false) { true })
+        }
+        val idle = raw(server.localPort).also { it.readBody() }
+        idle.send(assertion("peer-b"))
+        assertEquals("connected:peer-b", host.next())
+        Thread.sleep(400)
+        idle.close()
+        assertEquals(
+            PeerStreamSockets.Ran(proved = "peer-b", heard = true, carried = true),
+            results.poll(5, TimeUnit.SECONDS),
+        )
     }
 
     @Test

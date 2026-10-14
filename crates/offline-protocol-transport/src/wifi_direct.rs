@@ -371,10 +371,9 @@ impl Transport for WifiDirectTransport {
 
     /// Queues `message` for a specific connected peer.
     ///
-    /// Unlike [`Transport::send`], which accepts any recipient and lets the
-    /// platform discover it cannot be reached, this refuses a peer with no
-    /// live link — a forwarding caller needs the failure synchronously so it
-    /// can pick another neighbor instead.
+    /// Refuses a peer with no live link, as [`Transport::send`] does: a
+    /// forwarding caller needs the failure synchronously so it can pick
+    /// another neighbor instead.
     fn send_to_peer(&self, peer_id: &str, message: &Message) -> Result<()> {
         if self.layer_status() != TransportStatus::Available {
             return Err(crate::Error::TransportNotAvailable(

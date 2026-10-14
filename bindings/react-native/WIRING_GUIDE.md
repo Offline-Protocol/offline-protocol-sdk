@@ -109,7 +109,9 @@ RCT_EXTERN_METHOD(doSomething:(NSString *)param
 | Swift Type | Obj-C Bridge Type |
 |------------|-------------------|
 | `String` | `NSString *` |
-| `Int` / `NSNumber` | `nonnull NSNumber *` |
+| `Int` | `NSInteger` |
+| `Double` | `double` |
+| `NSNumber` | `nonnull NSNumber *` |
 | `Bool` | `BOOL` |
 | `[Any]` / `NSArray` | `NSArray *` |
 | `[String: Any]` / `NSDictionary` | `NSDictionary *` |
@@ -188,18 +190,18 @@ Use this checklist every time you add or modify a bridged method:
 ```swift
 // Swift: first param has no external label (uses _), second uses "status:"
 @objc func sendPresenceUpdate(_ recipient: String,
-                              status: NSNumber, ...)
+                              status: Int, ...)
 ```
 ```objc
 // .m file: first param name matches, second uses the external label
 RCT_EXTERN_METHOD(sendPresenceUpdate:(NSString *)recipient
-                  status:(nonnull NSNumber *)status ...)
+                  status:(NSInteger)status ...)
 ```
 
 ### 3. Wrong Number Type (iOS)
 
-**Symptom:** `nil` value received for numeric parameters.
-**Cause:** Objective-C bridge requires `nonnull NSNumber *` for numbers, not primitive `int`. Use `BOOL` for booleans.
+**Symptom:** a garbage number (the pointer bits of an `NSNumber`) received for a numeric parameter, with nothing logged.
+**Cause:** the `.m` type does not match the Swift parameter: a Swift `Int` needs `NSInteger`, a `Double` needs `double`, and only a Swift `NSNumber` takes `nonnull NSNumber *`. Use `BOOL` for booleans. See [BRIDGE_MAINTENANCE.md](ios/BRIDGE_MAINTENANCE.md#step-3-type-mapping).
 
 ### 4. Forgetting to Update One Platform
 

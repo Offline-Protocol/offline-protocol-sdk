@@ -157,6 +157,88 @@ async def test_the_python_example_runs_from_the_shell(harness):
         await receiver.close()
 
 
+@pytest.mark.parametrize("language", ["python", "node"])
+async def test_the_examples_wait_past_undeliverable_for_the_delivery(harness, language):
+    """A recipient that is away makes the engine report the message
+    undeliverable, keep it, and deliver it later. Both examples print each
+    report and keep waiting, and the server keeps routing the message's
+    events to the sender alone, so the later delivery reaches them."""
+    node = shutil.which("node")
+    if language == "node" and node is None:
+        pytest.skip("node is not on the path")
+    example = load_example()
+    away = await harness.server(config=make_config(profile="away", wifi_direct_enabled=True, internet_enabled=False))
+    config = make_config(profile="alice", wifi_direct_enabled=True, internet_enabled=False, data_enabled=True)
+    server = await harness.server(config=config, tcp=language == "node")
+    recipient = away.manager.local_address
+    observer, observer_token = await example.open_client(
+        str(server.socket_path) if server.socket_path else None,
+        server.port,
+        str(server.token_path) if server.token_path else None,
+    )
+    stranger, stranger_token = await example.open_client(
+        str(server.socket_path) if server.socket_path else None,
+        server.port,
+        str(server.token_path) if server.token_path else None,
+    )
+    try:
+        # Another client of the same application sees the send's own events,
+        # which is how this test learns the id the example was handed.
+        await example.hello(observer, "notes", observer_token)
+        await example.hello(stranger, "other", stranger_token)
+        if language == "python":
+            command = [sys.executable, str(PYTHON_EXAMPLE), "--socket", str(server.socket_path)]
+        else:
+            command = [node, str(NODE_EXAMPLE), "--port", str(server.port), "--token-file", str(server.token_path)]
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            "--app-id",
+            "notes",
+            "--to",
+            recipient,
+            "--content",
+            "to someone away",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        named = await observer.next_event(
+            ("message_sent", "message_deferred", "message_retrying"), timeout=15.0, recipient=recipient
+        )
+        message_id = named["message_id"]
+        undeliverable = {
+            "type": "message_undeliverable",
+            "message_id": message_id,
+            "recipient": recipient,
+            "reason": "recipient_unreachable",
+        }
+        server._route(undeliverable)
+        server._route(dict(undeliverable))
+        server._route(
+            {"type": "message_delivered", "message_id": message_id, "latency_ms": 7, "hop_count": 0, "transport": "ble"}
+        )
+        stdout, stderr = await finish(process)
+        assert process.returncode == 0, stderr.decode()
+        lines = output_lines(stdout)
+        assert [next(iter(line)) for line in lines] == [
+            "hello",
+            "undeliverable",
+            "undeliverable",
+            "delivered",
+            "document",
+            "one_shot",
+        ]
+        assert lines[3]["delivered"]["message_id"] == message_id
+        # The other application heard none of it.
+        with pytest.raises((TimeoutError, asyncio.TimeoutError)):
+            await stranger.next_event(
+                ("message_undeliverable", "message_delivered"), timeout=0.5, message_id=message_id
+            )
+    finally:
+        await observer.close()
+        await stranger.close()
+
+
 def test_the_node_example_parses():
     node = shutil.which("node")
     if node is None:

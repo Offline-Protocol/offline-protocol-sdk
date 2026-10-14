@@ -8,13 +8,13 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 2. **Write Once**: Core logic shared across all platforms
 3. **Zero-Copy**: Minimize allocations and copying
 4. **Modular**: Each crate has a single responsibility
-5. **Testable**: ~1,700 tests covering all critical paths
+5. **Testable**: ~3,300 tests covering all critical paths
 
 ## Crate Organization
 
 ### 1. offline-protocol-core
 
-**Purpose**: Fundamental types with zero dependencies.
+**Purpose**: Fundamental types, depending on no other SDK crate.
 
 **Key Types**:
 - `Message`, `MessageId`, `MessagePriority`
@@ -29,7 +29,7 @@ This document provides a deep dive into the Offline Protocol SDK architecture.
 
 **Safety**: `#![deny(unsafe_code)]` - 100% safe Rust
 
-**Dependencies**: `serde`, `uuid`, `chrono`
+**Dependencies**: `serde`, `serde_json`, `uuid`, `bech32`, `postcard`, `thiserror`, all declared without `std` (see [ADR 0020](adr/0020-core-compiles-without-std.md))
 
 ### 2. offline-protocol-sealed
 
@@ -63,7 +63,7 @@ implementations and are not allowed to disagree about anything outside them.
 
 **Safety**: `#![deny(unsafe_code)]` - 100% safe Rust
 
-**Dependencies**: `offline-protocol-core`
+**Dependencies**: `offline-protocol-core`, `offline-protocol-sealed`
 
 ### 4. offline-protocol-router
 
@@ -93,7 +93,7 @@ implementations and are not allowed to disagree about anything outside them.
 **Key Components**:
 - `AckManager` - Timeout tracking (default 10s)
 - `RetryQueue` - Exponential backoff (1s → 2s → 4s …, capped at 5 min; 10 retries)
-- `Deduplicator` - Message ID tracking (1,000 IDs, 1-hour retention)
+- `Deduplicator` - Message ID tracking (5,000 IDs, 7-day retention)
 
 **Data Structures**:
 - `BinaryHeap` for priority queue (retry queue)
@@ -238,6 +238,14 @@ AEAD key held in secure storage before they reach the state provider. See
 
 **Dependencies**: `offline-protocol`
 
+### 12. offline-protocol-telemetry-wire
+
+**Purpose**: The batch envelope and typed event payloads the [telemetry pipe](telemetry.md) uploads, shared with the ingest that receives them. `batch.rs` and `event.rs` are copies of the ingest's own wire crate, so a non-additive edit belongs there first.
+
+**Safety**: `#![deny(unsafe_code)]` - 100% safe Rust
+
+**Dependencies**: `serde`, `serde_json`, `uuid`
+
 ## DORS Algorithm
 
 See [DORS Deep Dive](dors.md) for the full scoring system and [DORS Configuration Guide](dors-configuration.md) for tuning parameters.
@@ -248,15 +256,11 @@ See [DORS Deep Dive](dors.md) for the full scoring system and [DORS Configuratio
 
 ### Promotion Logic
 
-A device is promoted to relay when it has sufficient connections, battery, and relay priority — and only if its configuration allows relaying at all (`allowRelay` must be true and the relay priority must not be `never`; a device whose config forbids relaying is also demoted if it somehow holds the role). Relay scoring considers connection count, battery level, charging state, link quality, congestion, and queue depth.
+The relay standing reports observed behaviour, not capability: `relay_promoted` fires because this device has actually been carrying frames for other devices, and `relay_demoted` when it stops. Whether it may carry anything at all is the relay policy (`allowRelay` must be true, the relay priority must not be `never`, and the battery floors apply); within that policy, battery level and charging state scale its forwarding effort rather than switching it on or off.
 
 ### Load Balancing
 
-Distributes messages across top K relays (default 3):
-1. Filter out overloaded relays (congestion above the configured `maxCongestionLevel`, default 0.7)
-2. Score all remaining relays
-3. Select top K by score
-4. Forward to all selected relays
+A forwarded frame goes to a bounded number of neighbors chosen by signal strength and capacity, never back to the device it came from, within per-neighbor and per-second budgets. See [Mesh Networking](mesh.md#what-a-device-does-with-a-frame-for-someone-else) for the full sequence. The top-K relay selection and its `maxCongestionLevel` filter were removed with the `path` config section in v0.23.0.
 
 ## Reliability Layer
 
@@ -290,10 +294,10 @@ clamping semantics and how to tune the ladder.
 
 ### Deduplication
 
-**Method**: Hash-based tracking
-**Capacity**: 1,000 message IDs
-**Retention**: 1 hour
-**Eviction**: FIFO when at capacity
+**Method**: Exact-match ID tracking (a rotating Bloom-filter mode is opt-in)
+**Capacity**: 5,000 message IDs
+**Retention**: 7 days (the redelivery window), persisted across restarts
+**Eviction**: Oldest first when at capacity, this device's own marks before ids it received
 
 **Check**:
 ```
@@ -364,7 +368,7 @@ The SDK uses [UniFFI](https://mozilla.github.io/uniffi-rs/) to generate type-saf
 
 ## Testing Strategy
 
-### Test Coverage (~1,700 tests)
+### Test Coverage (~3,300 tests)
 
 Tests are distributed across all crates and cover:
 - Core types and message construction

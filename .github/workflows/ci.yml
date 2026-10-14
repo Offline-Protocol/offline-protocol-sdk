@@ -459,6 +459,17 @@ jobs:
             scripts/tests/test-generate-bindings.sh
           bash scripts/tests/test-generate-bindings.sh
 
+      # The container image's entrypoint and the demo client: nothing else
+      # runs them, and the entrypoint's flag order is a contract (an explicit
+      # flag must win over its variable).
+      - name: Guard the container entrypoint and the demo client
+        run: |
+          shellcheck --severity=warning \
+            bindings/python/docker/entrypoint.sh \
+            examples/http-front/client.sh \
+            scripts/tests/test-docker-entrypoint.sh
+          bash scripts/tests/test-docker-entrypoint.sh
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
@@ -844,7 +855,7 @@ jobs:
             PeerStreamSession.swift ReticulumManager.swift mesh/Mesh.swift ble/MeshConnectionRegistry.swift \
             ble/BleDiscoveryBootstrapPolicy.swift \
             PeripheralRestorationAgeOutPolicy.swift \
-            BleMessageNotificationPolicy.swift \
+            BleHelloPolicy.swift BleMessageNotificationPolicy.swift \
             BleAppTag.swift BleDensityPolicy.swift BleServiceInstanceSelection.swift \
             Generated/offline_protocol.swift ForcedPresenceCheckQueue.swift \
             AddressDeclarationPolicy.swift \

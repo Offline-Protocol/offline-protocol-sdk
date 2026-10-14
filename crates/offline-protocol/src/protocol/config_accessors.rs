@@ -409,10 +409,10 @@ impl OfflineProtocol {
     /// Broadcasts a service discovery query to all known peers.
     /// Returns a query_id. Responses arrive asynchronously as `ServiceDiscovered` events.
     ///
-    /// **Note:** Discovery responses currently travel only one hop back (to the
-    /// immediate sender of the query). Multi-hop response relay is not yet
-    /// implemented, so services more than one hop away will generate responses
-    /// that reach intermediate forwarders but not the original querier.
+    /// A provider more than one hop away answers toward the query's
+    /// originator, and each device in between forwards the response on to it
+    /// (`offline_protocol_services`), so discovery reaches as far as the query
+    /// was gossiped.
     pub fn discover_services(&mut self, service_id: Option<&str>) -> Result<String> {
         // Service discovery messages are internal control messages (not user
         // content), so they are exempt from require_encryption.
@@ -451,7 +451,9 @@ impl OfflineProtocol {
         body: &str,
     ) -> Result<String> {
         // Service requests are internal control messages (not user content),
-        // so they are exempt from require_encryption.
+        // so they are exempt from require_encryption: sealed toward a peer
+        // that routes the sealed form, signed plaintext otherwise (see
+        // `send_service_frame`).
         Self::validate_outbound_recipient(provider)?;
 
         let result = self
@@ -459,7 +461,7 @@ impl OfflineProtocol {
             .send_service_request(provider, service_id, method, body)
             .map_err(Error::Service)?;
         let msg = result.message;
-        self.send_internal_message(&msg.recipient, msg.content, msg.priority)?;
+        self.send_service_frame(&msg.recipient, msg.content, msg.priority)?;
         Ok(result.request_id)
     }
 
@@ -473,7 +475,9 @@ impl OfflineProtocol {
         body: &str,
     ) -> Result<MessageId> {
         // Service responses are internal control messages (not user content),
-        // so they are exempt from require_encryption.
+        // so they are exempt from require_encryption: sealed toward a peer
+        // that routes the sealed form, signed plaintext otherwise (see
+        // `send_service_frame`).
         Self::validate_outbound_recipient(requester)?;
 
         let result = self
@@ -481,7 +485,7 @@ impl OfflineProtocol {
             .respond_to_service_request(request_id, requester, service_id, status, body)
             .map_err(Error::Service)?;
         let msg = result.message;
-        let message_id = self.send_internal_message(&msg.recipient, msg.content, msg.priority)?;
+        let message_id = self.send_service_frame(&msg.recipient, msg.content, msg.priority)?;
         Ok(message_id)
     }
 }

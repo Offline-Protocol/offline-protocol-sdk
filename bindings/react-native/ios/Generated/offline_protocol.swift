@@ -5551,10 +5551,11 @@ public struct ProtocolConfig: Equatable, Hashable {
     public var custody: CustodyConfig?
     public var dataEnabled: Bool
     public var controlFreshnessEnforced: Bool
+    public var encryptServiceMessages: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, edgeDrivenUnreachableDm: Bool = false, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true, meshRelay: MeshRelayConfig? = nil, custody: CustodyConfig? = nil, dataEnabled: Bool = true, controlFreshnessEnforced: Bool = true) {
+    public init(appId: String, profile: String, bleEnabled: Bool, wifiDirectEnabled: Bool, internetEnabled: Bool, reticulumEnabled: Bool, nostrEnabled: Bool, preferOnline: Bool, initialTtl: UInt8, encryptionEnabled: Bool, autoKeyExchange: Bool, storePending: Bool, requireEncryption: Bool = true, maxPendingPerPeer: UInt64, maxPendingGlobal: UInt64, pendingTtlMs: UInt64, overflowPolicy: OverflowPolicy, edgeDrivenUnreachableDm: Bool = false, maxGroupMembers: UInt32 = UInt32(256), groupRelayEnabled: Bool = true, groupRelayBroadcastEnabled: Bool = true, groupEnforceAdminCommits: Bool = false, requireTransportIdentity: Bool = false, binaryWireEnabled: Bool = true, nostrSealingEnabled: Bool = true, nostrColdContactEnabled: Bool = true, nostrUsernameDiscoveryEnabled: Bool = false, compactEnvelopeEnabled: Bool = true, richPayloadEnabled: Bool = true, cryptoRecoveryEnabled: Bool = true, meshRelay: MeshRelayConfig? = nil, custody: CustodyConfig? = nil, dataEnabled: Bool = true, controlFreshnessEnforced: Bool = true, encryptServiceMessages: Bool = true) {
         self.appId = appId
         self.profile = profile
         self.bleEnabled = bleEnabled
@@ -5589,6 +5590,7 @@ public struct ProtocolConfig: Equatable, Hashable {
         self.custody = custody
         self.dataEnabled = dataEnabled
         self.controlFreshnessEnforced = controlFreshnessEnforced
+        self.encryptServiceMessages = encryptServiceMessages
     }
 
     
@@ -5638,7 +5640,8 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
                 meshRelay: FfiConverterOptionTypeMeshRelayConfig.read(from: &buf), 
                 custody: FfiConverterOptionTypeCustodyConfig.read(from: &buf), 
                 dataEnabled: FfiConverterBool.read(from: &buf), 
-                controlFreshnessEnforced: FfiConverterBool.read(from: &buf)
+                controlFreshnessEnforced: FfiConverterBool.read(from: &buf), 
+                encryptServiceMessages: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -5677,6 +5680,7 @@ public struct FfiConverterTypeProtocolConfig: FfiConverterRustBuffer {
         FfiConverterOptionTypeCustodyConfig.write(value.custody, into: &buf)
         FfiConverterBool.write(value.dataEnabled, into: &buf)
         FfiConverterBool.write(value.controlFreshnessEnforced, into: &buf)
+        FfiConverterBool.write(value.encryptServiceMessages, into: &buf)
     }
 }
 

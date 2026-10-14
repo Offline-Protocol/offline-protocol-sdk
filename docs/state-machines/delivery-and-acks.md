@@ -28,7 +28,7 @@ restarts its own time-to-live.
 frame that this device is live and processing. Refusals on security grounds
 therefore stay silent.
 
-## The four outcomes
+## The five outcomes
 
 Every inbound frame resolves to exactly one:
 
@@ -36,6 +36,7 @@ Every inbound frame resolves to exactly one:
 |---------|-----------|--------------|------------------------|--------|
 | **Consumed** | yes, **or permanently refused** | yes | yes | no |
 | **Deferred** | not yet | **no** | **no** | sometimes, see below |
+| **Undecryptable** | not yet | **no**, an `undecryptable` answer over the relay only, see below | **no** | no |
 | **SecurityRejected** | no | **no** | **no** | no |
 | **Duplicate** | no | usually, see below | yes | no |
 
@@ -53,16 +54,17 @@ stateDiagram-v2
     Gate --> Decrypt: gate passed
     Decrypt --> Consumed: plaintext recovered
     Decrypt --> Deferred: session not ready
-    Decrypt --> Deferred: recoverable crypto failure
+    Decrypt --> Undecryptable: recoverable crypto failure or epoch desync
     Decrypt --> Deferred: envelope parse failure
     Decrypt --> Consumed: terminal post-decrypt failure
     Decrypt --> Consumed: commit refused by enforcement
 
     Deferred --> [*]: unmark, NO ack, sender retains custody
+    Undecryptable --> [*]: unmark, undecryptable answer<br/>over the relay only, sender retains custody
     Consumed --> [*]: ack
 ```
 
-**A refused commit is not a fifth outcome.** A commit refused by membership
+**A refused commit is not a sixth outcome.** A commit refused by membership
 enforcement resolves to `Consumed`, which is what the "or permanently refused"
 column entry means: no delivery, but an acknowledgement and a mark that stays.
 That is deliberate, and it is the half of the refusal rule that is easy to lose.
@@ -91,7 +93,8 @@ deduplicator keeps identifiers for 7 days by default, persisted across
 restarts: the sender's redelivery window (`REDELIVERY_WINDOW_MS`), the longest a
 sender re-sends one identifier. With a shorter window a late re-send is not a
 duplicate. It reaches the ratchet, fails to decrypt because that generation is
-spent, and is never acknowledged, so the sender re-sends it on every reconnect.
+spent, and is answered `undecryptable` when it came over the relay: the
+sender resends it once, re-sealed when it still holds the plaintext.
 
 **An acknowledgement nothing can carry is held, not dropped.** It is owed from
 the moment the frame is accepted, and the usual reason no route takes it is a
@@ -103,9 +106,9 @@ re-sending to this device. At most 500 are held, oldest dropped first, each for
 at most 10 minutes. Losing one is recoverable: the sender re-sends, and the
 duplicate is re-acknowledged. The hold is in memory only.
 
-These four are the observable dispositions, not a mirror of any one type. The
-implementation's decrypt-result type also has four cases, but they are not the
-same four: it splits a delivered message out as its own case and does not model
+These five are the observable dispositions, not a mirror of any one type. The
+implementation's decrypt-result type also has five cases, but they are not the
+same five: it splits a delivered message out as its own case and does not model
 duplicates at all, because the duplicate check runs before it.
 
 ## The deferred-acknowledgement atom
@@ -148,7 +151,10 @@ loop unmarked it. Once the message is genuinely delivered, the deduplicator must
 know, or a later resend delivers it twice.
 
 **5. A time-to-live long enough to be useful.** 2 minutes is too short for
-session establishment across a mesh. 30 minutes is the value this protocol uses.
+session establishment across a mesh. 24 hours is the value this protocol uses
+(`DEFAULT_PENDING_TTL_MS`): with a relay that pushes ciphertext without keeping
+a copy, a frame has to outlive the handshake of a phone opened once a day. The
+queue is persisted, and the persisted copy is bounded separately at 7 days.
 
 **6. Acknowledge on drain, on the transport the frame arrived on.**
 
@@ -193,9 +199,9 @@ flowchart TD
     P -->|envelope unparseable| D1[Deferred: no ack, no enqueue]
     P -->|no| E{Epoch disagreement?<br/>WrongEpoch / NoPastEpochData}
     E -->|yes| SD[SessionDesync]
-    SD --> D2[Deferred: no ack, no enqueue,<br/>+ schedule re-key]
+    SD --> D2[Undecryptable: undecryptable ack,<br/>no enqueue, + schedule re-key]
     E -->|no| C{Session established<br/>but decrypt failed?}
-    C -->|AEAD / corrupt / ratchet| D3[Deferred: no ack, no enqueue,<br/>NO re-key]
+    C -->|AEAD / corrupt / ratchet| D3[Undecryptable: undecryptable ack,<br/>no enqueue, NO re-key]
     C -->|session not ready| D4[Deferred: no ack, ENQUEUE]
     C -->|policy refusal that can never<br/>become decryptable| K[Consumed: ack, drop]
 ```
@@ -205,13 +211,35 @@ flowchart TD
 | Class | Acknowledged | Enqueued | Re-key | Why |
 |-------|--------------|----------|--------|-----|
 | Session not ready | no | **yes** | no | It will become decryptable when the session arrives |
-| Session desync (epoch fork) | no | no | **yes** | Ciphertext is sealed to a dead epoch and can never drain |
-| Crypto failure (AEAD, corrupt, ratchet generation) | no | no | **no** | The attempt spent the generation; a queued copy could never drain |
-| Transport failure | no | no | no | Recoverable by resend |
+| Session desync (epoch fork) | `undecryptable` | no | **yes** | Ciphertext is sealed to a dead epoch and can never drain |
+| Crypto failure (AEAD, corrupt, ratchet generation) | `undecryptable` | no | **no** | The attempt spent the generation; a queued copy could never drain |
+| Transport failure | `undecryptable` | no | no | Classified with crypto failures: the attempt may have spent the generation, so recovery is the sender's re-sealed resend |
 | Envelope parse failure | no | no | no | Unparseable now is unparseable forever; the resend is the fix |
 | Policy refusal (commit not authorized) | **yes** | no | no | Can never become decryptable, so retries are pure waste |
 | Security refusal (identity mismatch, foreign session slot) | **no**, identifier unmarked | no | no | An acknowledgement confirms to an injector that the target is live |
 | Post-decrypt failure (empty, non-UTF-8, malformed plaintext) | **yes** | no | no | The generation is spent and a re-seal would produce the same malformed plaintext |
+
+An `undecryptable` answer is a delivery ACK in shape (`ack_for`, empty content,
+`requires_ack: false`) with `ack_status: "undecryptable"`, so a relay holding the
+frame drops it instead of redelivering the same dead ciphertext on every
+connect. It goes only to a frame that arrived over the internet relay, and
+only to a sender that advertised `ack_versions` entry 1. It is sent on the
+relay alone, never through the acknowledgement route ladder, and is dropped
+rather than held when the relay is down: the mailbox redelivers the frame on
+the next connect, and the live path answers it then. Every failure in these
+rows happens before anything is authenticated, so on a mesh or peer-stream
+link the answer would confirm liveness to an injector in range (the
+security-refusal row's leak); the relay already knows the device is connected
+([R25](../security/threat-model.md#r25-the-relay-learns-which-of-its-frames-a-device-could-not-decrypt)).
+Any other frame or sender is answered with nothing, the identifier unmarked, as before the
+status existed, because it would read the answer as a delivery. The sender never reports it delivered: it re-seals an encrypted DM
+under its current session and resends it once with the same identifier, and
+ignores a second answer for the same identifier, leaving the entry to its retry
+ladder. When the plaintext is gone (an entry restored after a restart) the one
+resend is verbatim rather than a failure: a frame the pending-decryption queue
+dropped was never attempted, so the same ciphertext still decrypts, and failing
+it would let anyone who can fill that queue (a parked frame's sender is
+unauthenticated) turn a delay into a lost message.
 
 The policy-refusal and security-refusal rows are the two halves of "can never
 become decryptable", and they are deliberately opposite. Both refusals are
@@ -229,7 +257,8 @@ disposition, which is the bug the interception exists to prevent. See
 ### Why the desync split gates the re-key, not the acknowledgement
 
 **The classification split exists to gate the re-key. Both classes withhold the
-acknowledgement.**
+delivery acknowledgement**, and both get the same `undecryptable` answer over
+the relay.
 
 Drawing the no-acknowledgement boundary at desync alone was the original bug.
 Sender-side re-sealing means every resend is re-sealed against the peer's
@@ -268,9 +297,10 @@ acknowledgement there would burn the sender's whole retry budget to no purpose.
 
 ## The drain has its own rules
 
-A queued frame that hard-fails when the drain retries it is `Deferred`: no
-acknowledgement, no re-mark, and **the queued copy is dropped rather than
-re-enqueued**.
+A queued frame that hard-fails when the drain retries it is `Undecryptable`:
+an `undecryptable` answer, no re-mark, and **the queued copy is dropped rather
+than re-enqueued**. A frame the queue evicts (overflow or time-to-live) is
+answered `undecryptable` too, when it arrived over the relay.
 
 That last part is not an optimization. The drain **removes** the entry before
 processing it, so a re-enqueue misses the idempotency check and re-stamps the

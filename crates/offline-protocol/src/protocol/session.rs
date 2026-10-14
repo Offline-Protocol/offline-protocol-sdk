@@ -1113,10 +1113,14 @@ impl OfflineProtocol {
     // WELCOME LIFECYCLE
     // ========================================================================
 
+    /// `user_send` is true when a user's own send created the session: their
+    /// message waits on this Welcome, so its first send must alert (see
+    /// [`Self::try_send_welcome`]).
     pub(super) fn send_welcome_message(
         &mut self,
         recipient: &str,
         welcome: &WelcomeMessage,
+        user_send: bool,
     ) -> Result<bool> {
         let serialized =
             serde_json::to_string(welcome).map_err(|e| Error::Serialization(e.to_string()))?;
@@ -1127,7 +1131,7 @@ impl OfflineProtocol {
         let group_id = welcome.group_id.as_str().to_string();
 
         self.upsert_welcome_lifecycle(recipient, &group_id, message, "welcome_created")?;
-        self.try_send_welcome(recipient, "welcome_initial_send")
+        self.try_send_welcome(recipient, "welcome_initial_send", user_send)
     }
 
     /// Parks a Welcome that currently has no transport carrier: refresh the
@@ -1184,7 +1188,19 @@ impl OfflineProtocol {
         Ok(false)
     }
 
-    pub(super) fn try_send_welcome(&mut self, peer_id: &str, source_event: &str) -> Result<bool> {
+    /// The Welcome is the frame that wakes an offline peer for a first
+    /// message queued behind it, so the relay push is decided per send rather
+    /// than baked into the stored frame: it alerts when `user_send` (the
+    /// message is being queued right now) or when user content is already
+    /// waiting for the peer, and is otherwise
+    /// [`crate::constants::NO_ALERT_KEY`]-marked. Metadata is outside the
+    /// control signature, so changing it here leaves the frame verifiable.
+    pub(super) fn try_send_welcome(
+        &mut self,
+        peer_id: &str,
+        source_event: &str,
+        user_send: bool,
+    ) -> Result<bool> {
         let now = Utc::now();
         let mut record = self
             .welcome_lifecycles
@@ -1251,9 +1267,34 @@ impl OfflineProtocol {
             ));
         }
 
-        match self.transport_manager.send(&record.welcome_message) {
-            Ok(()) => {
-                let transport_used = self.transport_manager.current_transport();
+        // A Welcome for a peer no carrier is known to reach is handed to
+        // neighbours to carry, as the key package that produced it was: a
+        // session between two devices that only reach each other through a
+        // third is built from exactly these two frames crossing it. Carried
+        // or sent, it is equally unproved, so it takes the same in-flight
+        // path below and the peer's probe or decrypt is still what settles
+        // it. A carried one waits the mesh confirmation timeout, since a
+        // neighbour is a mesh link whatever the selector last picked.
+        let mut welcome = record.welcome_message.clone();
+        if user_send || self.has_user_content_waiting_for(peer_id) {
+            welcome.metadata.remove(crate::constants::NO_ALERT_KEY);
+        } else {
+            welcome
+                .metadata
+                .insert(crate::constants::NO_ALERT_KEY.to_string(), "1".to_string());
+        }
+        let sent = self
+            .send_or_carry_handshake(&welcome)
+            .map(|handed_to_mesh| {
+                if handed_to_mesh > 0 {
+                    None
+                } else {
+                    self.transport_manager.current_transport()
+                }
+            });
+
+        match sent {
+            Ok(transport_used) => {
                 let mut updated =
                     self.welcome_lifecycles
                         .get(peer_id)
@@ -1363,7 +1404,7 @@ impl OfflineProtocol {
                     entry.expires_at =
                         Utc::now() + ChronoDuration::seconds(WELCOME_LIFECYCLE_TTL_SECS);
                 }
-                if let Err(err) = self.try_send_welcome(peer_id, source_event) {
+                if let Err(err) = self.try_send_welcome(peer_id, source_event, false) {
                     warn!(
                         peer_id = %peer_id,
                         error = %err,
@@ -1387,7 +1428,7 @@ impl OfflineProtocol {
                     );
                     return;
                 }
-                if let Err(err) = self.try_send_welcome(peer_id, source_event) {
+                if let Err(err) = self.try_send_welcome(peer_id, source_event, false) {
                     warn!(
                         peer_id = %peer_id,
                         error = %err,
@@ -1415,7 +1456,8 @@ impl OfflineProtocol {
     /// lifecycle and the confirmation probes, which own that half.
     ///
     /// Only a peer already pushed to qualifies; the first push belongs to
-    /// discovery. The stamp is taken before the send, so a send that fails
+    /// discovery, except for a peer only the mesh reaches, which discovery
+    /// never names (see [`Self::push_key_package_across_mesh`]). The stamp is taken before the send, so a send that fails
     /// still waits out the interval instead of being retried on every tick.
     /// A send that fails does not count as a repeat, though: the backoff is
     /// for a peer that was asked and did not answer, and a peer whose frame
@@ -1436,6 +1478,7 @@ impl OfflineProtocol {
             return;
         }
         let Some((sent_at, repeats)) = self.key_package_sent_to.get_mut(peer_id) else {
+            self.push_key_package_across_mesh(peer_id);
             return;
         };
         if sent_at.elapsed() < StdDuration::from_secs(key_package_resend_wait_secs(*repeats)) {
@@ -1465,6 +1508,43 @@ impl OfflineProtocol {
             if let Some((_, repeats)) = self.key_package_sent_to.get_mut(peer_id) {
                 *repeats = repeats.saturating_add(1);
             }
+        }
+    }
+
+    /// Makes the first key-package push to a peer that only the mesh can
+    /// reach, for whom a message is waiting.
+    ///
+    /// Invariant: a message queued for a session is enough to start that
+    /// session over any path that can carry a frame to the peer. The first
+    /// push is otherwise discovery's, and discovery names only the device a
+    /// frame arrived from: on a peer two hops away every frame arrives
+    /// attributed to the device in the middle, so the pair is never
+    /// discovered and, before this, never started a session. A message to a
+    /// device the sender had never been next to waited out its seven days.
+    ///
+    /// Three things keep it narrow:
+    ///
+    /// - **Only with a message waiting.** The caller is the reconciliation
+    ///   tick, for peers holding a queued message, so the package goes to
+    ///   addresses the application asked to reach, never to whoever is heard.
+    /// - **Only when nothing else reaches the peer.** A direct link means
+    ///   discovery has already pushed, and an infrastructure carrier has its
+    ///   own exchange; both are left alone.
+    /// - **Only once by this route.** A push that a neighbour took is recorded
+    ///   like any other, so every repeat after it is the re-push ladder's, on
+    ///   its doubling wait. A push nobody took is tried again on the next
+    ///   tick, and costs nothing new: the pool hands the peer the same
+    ///   package until a Welcome consumes it (ADR 0012).
+    fn push_key_package_across_mesh(&mut self, peer_id: &str) {
+        if self.can_reach_recipient(peer_id) || self.transport_manager.mesh_neighbors().is_empty() {
+            return;
+        }
+        if !matches!(self.has_mls_session(peer_id), Ok(false)) {
+            return;
+        }
+        debug!(peer_id = %peer_id, "Message waiting for a peer only the mesh reaches, pushing our key package");
+        if let Err(e) = self.send_key_package_to(peer_id, false) {
+            debug!(peer_id = %peer_id, error = %e, "Key package push across the mesh deferred");
         }
     }
 
@@ -1630,7 +1710,7 @@ impl OfflineProtocol {
             );
             return;
         }
-        if let Err(err) = self.try_send_welcome(peer_id, source_event) {
+        if let Err(err) = self.try_send_welcome(peer_id, source_event, false) {
             warn!(
                 peer_id = %peer_id,
                 error = %err,
@@ -2356,7 +2436,7 @@ impl OfflineProtocol {
             .collect();
 
         for peer_id in due_peers {
-            if let Err(err) = self.try_send_welcome(&peer_id, "welcome_retry") {
+            if let Err(err) = self.try_send_welcome(&peer_id, "welcome_retry", false) {
                 warn!(
                     peer_id = %peer_id,
                     error = %err,
@@ -2372,5 +2452,21 @@ impl OfflineProtocol {
         self.welcome_lifecycles
             .get(peer_id)
             .is_some_and(|record| matches!(record.state, WelcomeDeliveryState::Expired))
+    }
+
+    /// Whether a message the user sent is waiting for `peer_id`: queued
+    /// behind session establishment, or on the outbox unmarked (an entry
+    /// restored from before the marker existed counts, the safe direction).
+    fn has_user_content_waiting_for(&self, peer_id: &str) -> bool {
+        self.pending_encrypted_messages
+            .get(peer_id)
+            .is_some_and(|queued| !queued.is_empty())
+            || self.outbox.values().any(|entry| {
+                entry.message.recipient.as_str() == peer_id
+                    && !entry
+                        .message
+                        .metadata
+                        .contains_key(crate::constants::NO_ALERT_KEY)
+            })
     }
 }

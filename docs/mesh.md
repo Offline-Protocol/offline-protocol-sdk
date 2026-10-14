@@ -238,7 +238,7 @@ When an ACK is received, the sender:
 Failed messages are queued for retry with exponential backoff:
 - **Initial Delay**: 1 second
 - **Backoff Factor**: 2x each retry (1s → 2s → 4s → 8s...)
-- **Maximum Delay**: 30 seconds
+- **Maximum Delay**: 5 minutes
 - **No attempt limit**: The retry queue is a pure scheduling mechanism. Only ACK timeouts (not transport failures) count toward the retry limit (default: 10).
 
 When a transport becomes available (peer discovered, internet reconnects), pending messages are flushed immediately — bypassing backoff timers.
@@ -248,8 +248,8 @@ For the full delivery lifecycle including client-side persistence patterns, see 
 ### Priority Ordering
 The retry queue processes messages by priority:
 1. **Critical**: Processed first, bypasses some safeguards
-2. **High**: Processed before normal messages
-3. **Normal**: Standard processing
+2. **High**: Processed before medium-priority messages
+3. **Medium**: Standard processing (the default)
 4. **Low**: Processed last, may be delayed under load
 
 Within the same priority, older messages go first.
@@ -267,8 +267,8 @@ Without deduplication, the same message could be processed multiple times. The d
 
 ### HashMap Mode (Default)
 Exact tracking with no false positives:
-- **Capacity**: 1,000 message IDs (configurable)
-- **Retention**: 1 hour (configurable)
+- **Capacity**: 5,000 message IDs (configurable)
+- **Retention**: 7 days, the outbox redelivery window (configurable)
 - **Eviction**: LRU when capacity is reached
 
 ### Bloom Filter Mode
@@ -517,7 +517,7 @@ A message addressed to a device that is out of range is carried by the devices i
 
 Every frame passing through runs the same sequence before it goes anywhere, and each step covers something the others cannot:
 
-1. **Handled once** — an id a device has already dealt with is ignored. Without this, copies circulate until their hop budget runs out and every device repeats every copy.
+1. **Handled once** — an id a device has already dealt with is ignored. Without this, copies circulate until their hop budget runs out and every device repeats every copy. The one exception is the sender itself re-sending its own frame: it arrives over the link that proved the sender, with no hop spent, and it is taken on again (see below).
 2. **Accepted from this neighbor?** — each link has its own allowance, so one noisy or hostile neighbor cannot consume the device's whole capacity for carrying traffic.
 3. **Hop budget** — the remaining budget a frame claims is cut down to what local policy would have issued, then spent. Nothing authenticates that claim, so it is never taken at face value. In a dense neighborhood the ceiling is lower: with more devices in range, a message covers the same ground in fewer hops.
 4. **Held briefly, and narrowed by every copy** — a frame waits a short randomized moment before going out, and each copy that arrives while it waits takes the neighbor that sent it off this device's fan-out, because that neighbor holds the frame. A forward is dropped only when every neighbor it could go to has handed it a copy. In a crowded room each copy removes one link from a waiting device's fan-out, so the devices that transmit later send to fewer neighbors, never to more. The cost is at most one fan-out per device, which the per-second budgets in step 6 bound, and it adapts as a room fills without any threshold to tune. A copy never cancels a forward outright: carriers hand a frame to a few chosen neighbors rather than broadcasting it, so a copy proves only that its sender holds the frame. Cancelling on one used to stand down the only device beside the way out of a dense cluster, and the frame died there with its id suppressed on every member, out of reach of the sender's retries.
@@ -532,7 +532,7 @@ Whether an app is told this device "is a relay" (`isRelay`, `relay_promoted`, `r
 
 #### What "handled once" costs
 
-Step 1 is what keeps a message from multiplying, and it has a price worth knowing. Once a device takes a frame on, it ignores that id for the next ten minutes — including the sender's own retransmissions of it. So if the device that accepted a frame then fails to pass it on (it walks out of range, its battery drops below the floor, its queue is full of newer traffic), that particular route is closed for the rest of the window, and the message has to arrive some other way: through a device that never accepted it, or over the internet relay once one of the two comes back online.
+Step 1 is what keeps a message from multiplying, and it has a price worth knowing. Once a device takes a frame on, it ignores every further copy of that id for the next ten minutes. The sender's own retransmission is not a copy in that sense, and is carried again. A sender retransmits because it heard no acknowledgement, and the recipient re-acknowledges a message it already holds only when the re-send reaches it. Ignoring the re-send meant that a recipient whose first acknowledgement went nowhere (the sender was off when it answered) never answered again, and the sender retried into the device between them for the whole ten minutes. A forwarder's copy always carries a spent hop, so no echo qualifies, and a re-send still takes the neighbor's own allowance in step 2. A re-send the device refuses (rate, hop budget, queue) leaves the id suppressed exactly as before. The exception reaches one hop: the device adjacent to the sender carries the re-send again, but the copy it passes on has a spent hop, so a second forwarder that already carried the frame suppresses it. A recipient two or more forwarders away is re-reached only through devices that never accepted the frame. So if the device that accepted a frame then fails to pass it on (it walks out of range, its battery drops below the floor, its queue is full of newer traffic), that particular route is closed for the rest of the window, and the message has to arrive some other way: through a device that never accepted it, or over the internet relay once one of the two comes back online.
 
 This is the trade every controlled flood makes — the alternative is a device re-forwarding the same message each time a copy reaches it, which is exactly the storm the step exists to prevent. Three things keep the cost bounded in practice: a frame is handed to several neighbors at once, so a single carrier walking away rarely closes every route; a device only records an id once it has genuinely *accepted* the frame, so one turned away for rate, hop budget or queue space leaves the way open for the next copy; and a frame that was accepted but then dropped **without ever being transmitted** — displaced by more urgent traffic, abandoned after waiting too long, or refused room on its way back to the queue — releases its id again, because nothing went on the air that a later copy could duplicate.
 
@@ -570,9 +570,21 @@ The catch is that the question being asked there is mostly about this device's o
   A verdict is also **remembered**, not just acted on. It is recorded as a fact about that recipient on that carrier, so the *next* send does not have to repeat the failure to learn the same thing: a carrier that has said it cannot reach someone stops counting as a way to reach them until the fact ages out (ten minutes) or a presence answer supersedes it. Facts decay on purpose. A remembered "unreachable" that never expired would keep a path shut long after the recipient came back, and since nothing is ever settled by a claim, the worst a stale one can cost is latency.
 - **How the message arrived.** An acknowledgement for a message that reached this device across the mesh goes back the way it came, whatever this device's own carriers say. Otherwise an online recipient answers over the relay, where an offline sender cannot see it — and that sender retransmits a message that was delivered and read, eventually reporting it failed. When this device is also online, the answer goes both ways; the duplicate costs one frame.
 
-Because parking removes the pending acknowledgement, a parked message that is then delivered across the mesh is settled from the acknowledgement alone. Apps see the ordinary `message_delivered` event.
+The question is asked again on every **resend**, not only on the first send: a retry or an outbox flush that no carrier takes, or that a carrier takes for a recipient it cannot reach, is handed to the neighbors too. That is what recovers a message whose first attempt went into a direct link that had already died (a half-open stream reports success until its keepalive notices): by the time the acknowledgement times out the link is gone and every resend is refused, and a neighbor may be the only way left. A resend over a link that still reaches the recipient is not offered, so an ordinary retransmission puts one copy on the air, not two.
+
+Because parking removes the pending acknowledgement, a parked message that is then delivered across the mesh is settled from the acknowledgement alone. So is a message no carrier took directly, which was handed to the neighbors at once and never had a pending acknowledgement. Apps see the ordinary `message_delivered` event either way.
 
 What is still not covered: a device whose only infrastructure is **Nostr** never receives an unreachable verdict at all (a broadcast relay reports no per-recipient delivery), so nothing contradicts the initial "reachable" answer and no mesh fallback fires for it. That gap is permanent for Nostr rather than unfinished: there is no verdict to be had. Reticulum is no longer in that position. Its managers speak [the gateway contract](spec/gateway-contract.md), so a gateway's `recipient_unreachable` verdict reaches the same parking machinery the relay's does (it was always keyed to the verdict rather than to the relay), and a device attached to a gateway gets mesh fallback for a recipient that gateway cannot reach. What remains carrier-specific is only that a zone with no gateway has no verdicts to receive, which is the same as having no infrastructure at all. Note also that carrier status is reported by the platform bridge and means "this carrier is up", not "the relay connection is authenticated"; a bridge that reports a connection it never authenticates produces no verdicts either, and its messages settle by acknowledgement timeout as they always did.
+
+#### Starting a session across the mesh
+
+With encryption required, nothing but the session handshake can leave a device for a peer it holds no session with: the message waits in the pending queue. Two devices that have never been in range of each other, with a third between them, therefore need the handshake itself to cross the third, and it does.
+
+- **The sender's key package.** While a message waits for a peer that no carrier reaches directly and no infrastructure carrier claims, the reconciliation tick (every two seconds while anything waits) hands this device's key package to its neighbors to carry. Discovery cannot do it: a peer two hops away is never discovered, since every frame from it arrives attributed to the device in between. The push is made only for an address the application asked to reach, and once a neighbor takes it, every repeat is the ordinary re-push ladder's (30 seconds, doubling to 10 minutes).
+- **The recipient's Welcome.** A key package that arrives across the mesh is admitted like any other: its signature is checked against the key the claimed address derives from, so nothing about the device that carried it matters. The recipient builds the session and its Welcome, and a Welcome for a peer no carrier is known to reach is handed to the neighbors, the same as a message. "Known to reach" is not the same as "accepted": the internet carrier accepts a frame for a peer the relay has already said is not on it, so both handshake frames are offered to the mesh whenever the direct send fails or no carrier is known to reach the peer. A Welcome that stalled or expired while the path was down is sent again when the next key package from that peer arrives, since a peer two hops away is never rediscovered. It does not send its own key package back first, so one group is built rather than two for the tiebreak to settle.
+- **The rest.** Confirmation probes, their acknowledgements and the message itself already crossed the mesh. The sender joins on the Welcome, flushes the waiting message sealed, and the recipient's acknowledgement settles it.
+
+The device in the middle carries sealed or signed frames it cannot read or alter, and declining to carry (`allowRelay` off) declines these too. What the handshake costs a recipient is in [R24](security/threat-model.md#r24-a-session-can-be-started-from-anywhere-the-mesh-reaches).
 
 ### Holding a frame for hours: custody
 
@@ -711,7 +723,7 @@ replaced it: forwarding needs no help from the app.
 - `MessageSent`: Message queued for delivery
 - `MessageReceived`: Message received from peer
 - `MessageDelivered`: ACK received, delivery confirmed
-- `MessageFailed`: Max retries exceeded
+- `MessageFailed`: Max ACK retries exceeded, or the outbox lifetime or capacity was exceeded
 
 ### Connection Events (Native Layer)
 The native `MeshController` emits connection-related events that can be observed for debugging.
@@ -724,7 +736,9 @@ The native `MeshController` emits connection-related events that can be observed
 const config = {
   appId: 'my-app',
   profile: userId,
-  initialTtl: 8,  // Default message TTL
+  network: {
+    initialTtl: 8,  // Default message TTL
+  },
   
   reliability: {
     ack: {
@@ -734,7 +748,7 @@ const config = {
       maxRetries: 10,            // Max ACK retry attempts
       initialDelayMs: 1000,      // First retry after 1s
       maxDelayMs: 300000,        // Cap delay at 5 min (default)
-      backoffFactor: 2.0,        // Double delay each retry
+      backoffMultiplier: 2.0,    // Double delay each retry
     },
     dedup: {
       useBloomFilter: false,     // HashMap mode (default); set true for bloom filter
@@ -761,7 +775,7 @@ The native `MeshController` has additional settings:
 
 ### Message Priority
 - Use **Critical** sparingly (bypasses some safeguards)
-- **Normal** priority is appropriate for most messages
+- **Medium** priority (the default) is appropriate for most messages
 - **Low** priority for non-urgent background sync
 
 ### Network Monitoring

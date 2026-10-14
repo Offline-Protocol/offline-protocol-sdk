@@ -54,7 +54,7 @@ vector.
 
 ### Prefixes that never appear on the wire
 
-Two prefixes are reserved but travel only **inside** an encrypted envelope. They
+Three prefixes are reserved but travel only **inside** an encrypted envelope. They
 are listed in the registry so application content can never impersonate them.
 
 | Prefix | Where it lives | Purpose |
@@ -115,11 +115,11 @@ two mandatory properties, and both are load-bearing:
    did nothing wrong.
 2. They MUST be pinned to the internet transport rather than routed by the
    transport selector. The selector demotes the internet transport by design,
-   and some mesh transports swallow a self-addressed frame: Wi-Fi Direct and
-   Reticulum enqueue it unconditionally and report success. Bluetooth LE fails
-   closed, because self is never a connected peer, but that only helps on a
-   BLE-only device: a synchronous refusal is a fallback trigger, so the frame
-   reaches one of the others anyway. The caller then believes the broadcast
+   and some mesh transports swallow a self-addressed frame: Reticulum enqueues
+   it unconditionally and reports success. Bluetooth LE and Wi-Fi Direct (the
+   peer stream) fail closed, because self is never a connected or proved
+   peer, but a synchronous refusal is a fallback trigger, so the frame
+   reaches another carrier anyway. The caller then believes the broadcast
    succeeded and skips its per-member fallback, delivering to nobody. One such
    transport is enough to lose the frame, which is why the rule is a pin rather
    than a preference.
@@ -149,10 +149,24 @@ treats the registry as a set of mutually non-prefixing frame tags fails on this
 entry alone; the correct reading is that `__SVC_` bounds a namespace and the
 four spellings above name the frames currently in it.
 
-They are signature-gated like any control frame, but they are **exempt from the
-encryption requirement**, so discovery gossip and the application-supplied
-request and response bodies are sent in cleartext. See
-[residual risk R9](../security/threat-model.md#r9-service-discovery-and-service-bodies-are-signed-not-encrypted).
+They are signature-gated like any control frame, and they are **exempt from the
+encryption requirement**. Discovery gossip is always sent in cleartext.
+
+`__SVC_REQ__` and `__SVC_RESP__` MAY instead travel inside `__MLS_ENC__`
+toward a peer that advertised `svc_versions` entry 1
+([capability negotiation](capability-negotiation.md)), once the 1:1 session
+with that peer is confirmed. The sealed form is unsigned, as every 1:1
+envelope is: MLS authenticates its sender. A receiver that decrypts a plaintext
+beginning `__SVC_REQ__` or `__SVC_RESP__` from a 1:1 session slot MUST hand
+it to its service layer with the MLS-authenticated sender. It MUST NOT surface
+any decrypted `__SVC_` plaintext as a message, and it drops any other service
+frame found there: discovery is never sealed, and a receiver that routed a
+sealed query would forward it onward as plaintext gossip. It
+routes the frame whatever its own configuration says, because parsing is never
+gated. The signed plaintext form remains the floor. Neither form changes the
+exemption classes in this chapter, since the sealed form is `__MLS_ENC__`. See
+[residual risk R9](../security/threat-model.md#r9-service-bodies-are-sealed-only-toward-capable-peers-discovery-is-signed-not-encrypted) for what the
+fallback leaves exposed.
 
 ### Custody
 
@@ -160,10 +174,10 @@ request and response bodies are sent in cleartext. See
 |--------|-----------|------|
 | `__CUSTODY_RECEIPT__` | custodian to depositor | JSON `{"v":1,"id":<held frame id>,"hold_ms":<u64>}`. Signature-gated like every control frame; introduces no signing domain of its own |
 
-The receipt is the one frame [Custody](custody.md) adds. It is reserved
-ahead of the implementation on the same terms `__DATA_V1__` was: the name is
-registered before any frame uses it, so no application message sent in the
-meantime can occupy it. A receipt settles nothing and is never routed as an
+The receipt is the one frame [Custody](custody.md) adds. It was reserved
+ahead of the implementation on the same terms `__DATA_V1__` was: the name was
+registered before any frame used it, so no application message sent in the
+meantime could occupy it. A receipt settles nothing and is never routed as an
 acknowledgement; a receiver that reserves the prefix but does not implement
 custody MUST NOT advertise `data_versions` entry 7, and then never receives
 one.

@@ -61,7 +61,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // ProtocolConfig has 16 required fields (+ 8 with defaults). See
+        // ProtocolConfig has 16 required fields (+ 19 with defaults). See
         // docs/configuration.md for what each one controls.
         val config = ProtocolConfig(
             appId = "my-android-app",
@@ -80,7 +80,7 @@ class MainActivity : AppCompatActivity() {
             maxPendingGlobal = 1_000.toULong(),
             pendingTtlMs = 86_400_000.toULong(),  // 24 h (the SDK default)
             overflowPolicy = OverflowPolicy.DROP_OLDEST,
-            // These 9 use their defaults: requireEncryption (true),
+            // Among those left at their defaults: requireEncryption (true),
             // maxGroupMembers (256u), groupRelayEnabled (true),
             // groupRelayBroadcastEnabled (true — capability-gated, and it
             // falls back to per-member fan-out against any relay that did not
@@ -88,7 +88,7 @@ class MainActivity : AppCompatActivity() {
             // docs/configuration.md#group-configuration),
             // requireTransportIdentity (false), binaryWireEnabled (true),
             // compactEnvelopeEnabled (true), richPayloadEnabled (true),
-            // cryptoRecoveryEnabled (true).
+            // cryptoRecoveryEnabled (true), encryptServiceMessages (true).
         )
 
         protocol = OfflineProtocol(config)
@@ -216,6 +216,7 @@ Add to `AndroidManifest.xml`:
 <uses-permission android:name="android.permission.BLUETOOTH" />
 <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
 <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+<uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
 <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
 <!-- Location (required for BLE scanning on Android) -->
@@ -225,6 +226,9 @@ Add to `AndroidManifest.xml`:
 <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
 <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+<!-- The same slot on the Wi-Fi network (LAN peers) -->
+<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+<uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
 <!-- Internet -->
 <uses-permission android:name="android.permission.INTERNET" />

@@ -1,0 +1,19 @@
+{
+  "app_id": "offline-protocol-service",
+  "profile": "device",
+  "ble_enabled": false,
+  "wifi_direct_enabled": true,
+  "internet_enabled": true,
+  "reticulum_enabled": false,
+  "nostr_enabled": false,
+  "prefer_online": false,
+  "initial_ttl": 5,
+  "encryption_enabled": true,
+  "require_encryption": true,
+  "auto_key_exchange": true,
+  "store_pending": true,
+  "max_pending_per_peer": 100,
+  "max_pending_global": 1000,
+  "pending_ttl_ms": 604800000,
+  "overflow_policy": "DropOldest"
+}

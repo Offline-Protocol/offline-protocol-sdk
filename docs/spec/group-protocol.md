@@ -27,11 +27,17 @@ Beyond the MLS Welcome itself, the invite carries:
 - **`member_rich`**: a capability map for the existing roster, so a joiner can
   seal rich payloads to members it has never exchanged key packages with.
   Bounded to the joined MLS roster.
+- **`member_data`**: the `data_versions` sibling of `member_rich`, carrying
+  the group-relevant replication entries the inviter knows for each existing
+  member ([Capability negotiation](capability-negotiation.md#persistence)).
+  Same bounds.
 
 ### Commit metadata
 
 - **`affected_member_rich`**: the added member's capability, delivered to
   existing members. Admin-gated on the commit, like the role field.
+- **`affected_member_data`**: the `data_versions` sibling of
+  `affected_member_rich`, with the same gate.
 
 ## Leaf identity binding
 

@@ -97,6 +97,12 @@ internal object ProtocolConfigParser {
             "cryptoRecoveryEnabled",
             "crypto_recovery_enabled"
         ) ?: json.optBooleanCompat("cryptoRecoveryEnabled", "crypto_recovery_enabled") ?: true
+        // Sealed service bodies (default on). Same nested-then-flat shape;
+        // mirrors EncryptionConfigReader.swift, keep in sync.
+        val encryptServiceMessages = encryptionJson?.optBooleanCompat(
+            "encryptServiceMessages",
+            "encrypt_service_messages"
+        ) ?: json.optBooleanCompat("encryptServiceMessages", "encrypt_service_messages") ?: true
         val pendingQueueJson = encryptionJson?.optJSONObject("pendingQueue")
             ?: encryptionJson?.optJSONObject("pending_queue")
         val maxPendingPerPeer = pendingQueueJson?.optLongCompat(
@@ -277,6 +283,7 @@ internal object ProtocolConfigParser {
             compactEnvelopeEnabled = compactEnvelopeEnabled,
             richPayloadEnabled = richPayloadEnabled,
             cryptoRecoveryEnabled = cryptoRecoveryEnabled,
+            encryptServiceMessages = encryptServiceMessages,
             meshRelay = meshRelay,
             custody = custody
         )

@@ -20,6 +20,7 @@ pub(crate) mod reachability;
 mod receive;
 mod security;
 mod send;
+mod service_seal;
 mod session;
 pub(crate) mod state_crypto;
 mod storage;
@@ -181,6 +182,12 @@ pub struct OfflineProtocol {
     /// retry machinery, from the already-sealed `Message`). Once consumed it
     /// lives on the `OutboxEntry` itself. See [`OutboxReseal`].
     pending_reseal: HashMap<MessageId, OutboxReseal>,
+
+    /// Outbox ids already re-sealed and resent once in answer to an
+    /// `undecryptable` ACK. A second such answer leaves the entry to its retry
+    /// ladder, so two devices cannot trade undecryptable ACKs and resends at
+    /// network speed. Cleared with the outbox entry.
+    undecryptable_resent: HashSet<MessageId>,
 
     /// Dedicated outbox for file chunk messages, separate from the main outbox
     /// to prevent large file transfers from evicting regular messages.
@@ -375,6 +382,14 @@ pub struct OfflineProtocol {
     /// [`CTRL_SIGN_V2`]: offline_protocol_sealed::CTRL_SIGN_V2
     peer_ctrl_freshness: std::collections::HashSet<String>,
 
+    /// Peers that read an `undecryptable` ACK as "not delivered"
+    /// ([`ACK_UNDECRYPTABLE_V1`] in `ack_versions`). Only these are answered
+    /// when a frame of theirs can never decrypt: an older SDK reads any ACK as
+    /// a delivery. Same lifecycle as `peer_ctrl_freshness` above.
+    ///
+    /// [`ACK_UNDECRYPTABLE_V1`]: offline_protocol_sealed::ACK_UNDECRYPTABLE_V1
+    pub(crate) peer_undecryptable_ack: std::collections::HashSet<String>,
+
     /// Peers that have presented a control-frame signature over the
     /// freshness-bound payload, so their frames under the older one are
     /// refused.
@@ -417,6 +432,39 @@ pub struct OfflineProtocol {
     /// `key_package_sent_to`. Forgetting a peer only costs silently dropped
     /// rich extras — never a cleartext fallback.
     peer_rich_payload: std::collections::HashSet<String>,
+
+    /// Peers that route a sealed service frame ([`SVC_SEALED_V1`] in
+    /// `svc_versions`), so a service request or response addressed to them
+    /// may travel inside `__MLS_ENC__` rather than as signed plaintext.
+    ///
+    /// The **advertised** half: learned only from a **signed** key package,
+    /// like the sets above (persisted as [`PeerCapabilities`], restored on
+    /// `initialize_mls`), and rewritten by every key package, so a fresh one
+    /// that stops advertising removes the peer. A strict subset of
+    /// [`Self::encryption_capable_peers`], refused at its cap rather than
+    /// cleared when full: clearing would send every established peer's
+    /// service bodies in plaintext on a flood. The proved half is
+    /// [`Self::svc_sealed_proved_peers`], and either one is enough to seal.
+    ///
+    /// [`SVC_SEALED_V1`]: offline_protocol_sealed::SVC_SEALED_V1
+    pub(crate) peer_svc_sealed: std::collections::HashSet<String>,
+
+    /// Peers that have sent us a service frame sealed inside the 1:1 session,
+    /// which proves they route the sealed form.
+    ///
+    /// A **ratchet**, unlike [`Self::peer_svc_sealed`]: no key package can
+    /// remove a peer from it. The failure it prevents is a replayed key
+    /// package from before the peer upgraded, which would otherwise drop the
+    /// peer from the advertised set and send its service bodies in signed
+    /// plaintext again. A key package signed under `offline-ctrl-v1` is
+    /// admitted at any age, so nothing else bounds that replay. Durable in
+    /// the peer's [`EncryptionCapableEntry`] beside `ctrl_freshness_proved`,
+    /// and a strict subset of [`Self::encryption_capable_peers`] by
+    /// construction, so `MAX_ENCRYPTION_CAPABLE_PEERS` bounds it too.
+    ///
+    /// Knowledge, not policy: recorded whatever our own switch says, and the
+    /// switch gates only whether we seal.
+    pub(crate) svc_sealed_proved_peers: std::collections::HashSet<String>,
 
     /// Peers whose key package advertised replicated-document sync
     /// ([`DATA_SYNC_V1`] in `data_versions`), so the send path may push
@@ -1142,6 +1190,7 @@ impl OfflineProtocol {
             shared_state: Arc::new(Mutex::new(SharedState::new())),
             outbox: HashMap::new(),
             pending_reseal: HashMap::new(),
+            undecryptable_resent: HashSet::new(),
             media_outbox: HashMap::new(),
             dm_unreachable_parks: HashMap::new(),
             unrouted_acks: VecDeque::new(),
@@ -1159,9 +1208,12 @@ impl OfflineProtocol {
             encryption_capable_peers: std::collections::HashSet::new(),
             peer_compact_envelope: std::collections::HashSet::new(),
             peer_ctrl_freshness: std::collections::HashSet::new(),
+            peer_undecryptable_ack: std::collections::HashSet::new(),
             control_freshness_peers: std::collections::HashSet::new(),
             control_reset_watermark: std::collections::HashMap::new(),
             peer_rich_payload: std::collections::HashSet::new(),
+            peer_svc_sealed: std::collections::HashSet::new(),
+            svc_sealed_proved_peers: std::collections::HashSet::new(),
             peer_data_sync: std::collections::HashSet::new(),
             peer_data_group: std::collections::HashSet::new(),
             peer_data_group_attested: std::collections::HashSet::new(),
@@ -1365,6 +1417,7 @@ impl OfflineProtocol {
         let previous_outbox = self.outbox.clone();
         let previous_peer_compact_envelope = self.peer_compact_envelope.clone();
         let previous_peer_ctrl_freshness = self.peer_ctrl_freshness.clone();
+        let previous_peer_undecryptable_ack = self.peer_undecryptable_ack.clone();
         // Snapshotted with its siblings so a failed re-initialize restores it
         // too. It is a ratchet, so the direction that matters is that a
         // rollback must not *lose* it: a peer we hold to the newer payload has
@@ -1372,6 +1425,8 @@ impl OfflineProtocol {
         let previous_control_freshness_peers = self.control_freshness_peers.clone();
         let previous_control_reset_watermark = self.control_reset_watermark.clone();
         let previous_peer_rich_payload = self.peer_rich_payload.clone();
+        let previous_peer_svc_sealed = self.peer_svc_sealed.clone();
+        let previous_svc_sealed_proved_peers = self.svc_sealed_proved_peers.clone();
         let previous_peer_data_sync = self.peer_data_sync.clone();
         let previous_peer_rich_attested = self.peer_rich_attested.clone();
         let previous_peer_data_group = self.peer_data_group.clone();
@@ -1534,9 +1589,12 @@ impl OfflineProtocol {
             self.outbox = previous_outbox;
             self.peer_compact_envelope = previous_peer_compact_envelope;
             self.peer_ctrl_freshness = previous_peer_ctrl_freshness;
+            self.peer_undecryptable_ack = previous_peer_undecryptable_ack;
             self.control_freshness_peers = previous_control_freshness_peers;
             self.control_reset_watermark = previous_control_reset_watermark;
             self.peer_rich_payload = previous_peer_rich_payload;
+            self.peer_svc_sealed = previous_peer_svc_sealed;
+            self.svc_sealed_proved_peers = previous_svc_sealed_proved_peers;
             self.peer_data_sync = previous_peer_data_sync;
             self.peer_rich_attested = previous_peer_rich_attested;
             self.peer_data_group = previous_peer_data_group;
@@ -2805,10 +2863,12 @@ impl OfflineProtocol {
                     current_transport,
                     Some(attempt_count.saturating_add(1)),
                 );
+                self.offer_resend_to_mesh(&message, true);
                 debug!(message_id = %message.id, "Flush send succeeded");
                 current_transport
             }
             Err(e) => {
+                self.offer_resend_to_mesh(&message, false);
                 let _ = self.retry_queue.enqueue(message.clone(), attempt_count);
                 debug!(message_id = %message.id, error = %e, "Flush send failed, re-enqueued");
                 None
@@ -3015,7 +3075,7 @@ impl OfflineProtocol {
                 self.mark_encryption_capable(peer_id);
 
                 // Send welcome message to peer
-                let welcome_sent = self.send_welcome_message(peer_id, &welcome)?;
+                let welcome_sent = self.send_welcome_message(peer_id, &welcome, false)?;
 
                 // All operations succeeded, now safe to remove the key package
                 self.pending_key_packages.remove(peer_id);
@@ -3518,7 +3578,7 @@ impl OfflineProtocol {
 
         // --- Service discovery & request/response ---
         if content.starts_with(offline_protocol_services::SVC_MESSAGE_PREFIX) {
-            self.handle_service_message(sender, content, message);
+            self.handle_service_message(sender, content, message, false);
             return Some(InternalMessageResult::Consumed);
         }
 
@@ -3885,6 +3945,7 @@ impl OfflineProtocol {
                     if let Some(transport) = current_transport {
                         self.transport_manager.reset_retry_count(transport);
                     }
+                    self.offer_resend_to_mesh(&entry.message, true);
 
                     debug!(
                         message_id = %entry.message.id,
@@ -3894,6 +3955,7 @@ impl OfflineProtocol {
                     );
                 }
                 Err(e) => {
+                    self.offer_resend_to_mesh(&entry.message, false);
                     // Re-enqueue with incremented retry count for backoff
                     let next_retry_at = self
                         .retry_queue

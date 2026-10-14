@@ -294,6 +294,8 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             message_id: _,
             code: _,
             reason: _,
+            sealed_at_ms: _,
+            session_established_at_ms: _,
         } => {
             hash_string(sender, scrubber);
         }
@@ -719,6 +721,7 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             service_id: _,
             method: _,
             body: _,
+            encrypted: _,
         } => {
             hash_string(sender, scrubber);
         }
@@ -728,6 +731,7 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             service_id: _,
             status: _,
             body: _,
+            encrypted: _,
         } => {
             hash_string(provider_peer_id, scrubber);
         }
@@ -1384,6 +1388,8 @@ mod tests {
             sender: "alice".into(),
             code: DecryptionFailureCode::InvalidCiphertext,
             reason: "bad mac".into(),
+            sealed_at_ms: None,
+            session_established_at_ms: None,
         };
         let scrubbed = scrub_event(&event, &scrubber_enabled()).into_owned();
         match scrubbed {

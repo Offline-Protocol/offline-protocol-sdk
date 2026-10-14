@@ -275,7 +275,7 @@ to apply, so a long list is a liability rather than a safety net.
 
 ## In a group
 
-The frames and the ladder are identical. Three rules are not:
+The frames and the ladder are identical. Four rules are not:
 
 - **Offers and answers are addressed to one member**, because anti-entropy
   between two members is a conversation between two devices. Only a local

@@ -204,6 +204,8 @@ async def test_issued_identifiers_are_bounded_oldest_first(router):
 
 
 async def test_a_terminal_event_forgets_its_identifier_after_routing_it(router):
+    from offline_protocol_sdk.local_api.mux import SETTLED_CAPACITY
+
     notes = attached(router, "notes")
     other = attached(router, "other")
     router.note_ids("notes", ["m1", "f1"])
@@ -214,9 +216,81 @@ async def test_a_terminal_event_forgets_its_identifier_after_routing_it(router):
     assert [e["type"] for e in drain(notes)] == ["file_progress", "message_delivered", "media_sent"]
     assert drain(other) == []
     assert not router.knows("m1") and not router.knows("f1")
-    # Anything later naming the id is broadcast.
+    # An event trailing the settling one still reaches the owner; once the
+    # settled table has moved on, the id is unknown and its events broadcast.
+    router.route({"type": "message_failed", "message_id": "m1", "reason": "x", "retry_count": 1})
+    assert [e["type"] for e in drain(notes)] == ["message_failed"]
+    assert drain(other) == []
+    router.note_ids("notes", [f"s{i}" for i in range(SETTLED_CAPACITY)])
+    for i in range(SETTLED_CAPACITY):
+        router.route({"type": "message_delivered", "message_id": f"s{i}"})
+    drain(notes)
     router.route({"type": "message_failed", "message_id": "m1", "reason": "x", "retry_count": 1})
     assert [e["type"] for e in drain(other)] == ["message_failed"]
+
+
+async def test_a_connection_request_given_up_on_reports_both_events_to_its_sender(router):
+    # On a request it gives up on (retry budget, outbox lifetime or capacity)
+    # the engine emits `message_failed` and then, for the same id,
+    # `connection_request_undeliverable`. The second names the recipient, so
+    # it reaches the client that sent the request and no other.
+    notes = attached(router, "notes")
+    other = attached(router, "other")
+    router.note_ids("notes", ["c1"])
+    router.route({"type": "message_failed", "message_id": "c1", "reason": "Max retries exceeded", "retry_count": 5})
+    router.route(
+        {
+            "type": "connection_request_undeliverable",
+            "recipient": "r",
+            "message_id": "c1",
+            "reason": "max_retries_exceeded",
+        }
+    )
+    assert [e["type"] for e in drain(notes)] == ["message_failed", "connection_request_undeliverable"]
+    assert drain(other) == []
+
+
+async def test_an_unreachable_connection_request_stays_correlated_until_it_settles(router):
+    # On a relay verdict the engine reports the request undeliverable and
+    # keeps retrying it; it may still be delivered when the peer is back.
+    notes = attached(router, "notes")
+    other = attached(router, "other")
+    router.note_ids("notes", ["c1"])
+    router.route(
+        {
+            "type": "connection_request_undeliverable",
+            "recipient": "r",
+            "message_id": "c1",
+            "reason": "recipient_unreachable",
+        }
+    )
+    assert router.knows("c1")
+    router.route({"type": "message_delivered", "message_id": "c1", "latency_ms": 5, "hop_count": 0, "transport": "ble"})
+    assert [e["type"] for e in drain(notes)] == ["connection_request_undeliverable", "message_delivered"]
+    assert drain(other) == []
+    assert not router.knows("c1")
+
+
+async def test_an_undeliverable_message_stays_correlated_until_it_settles(router):
+    # The engine parks a message the relay could not deliver and keeps it:
+    # `message_undeliverable` repeats on each reachability probe and
+    # `message_delivered` settles it. Every one of them is the sender's alone.
+    notes = attached(router, "notes")
+    other = attached(router, "other")
+    router.note_ids("notes", ["m1"])
+    undeliverable = {
+        "type": "message_undeliverable",
+        "message_id": "m1",
+        "recipient": "r",
+        "reason": "recipient_unreachable",
+    }
+    router.route(undeliverable)
+    router.route(dict(undeliverable))
+    assert router.knows("m1")
+    router.route({"type": "message_delivered", "message_id": "m1", "latency_ms": 5, "hop_count": 0, "transport": "ble"})
+    assert [e["type"] for e in drain(notes)] == ["message_undeliverable", "message_undeliverable", "message_delivered"]
+    assert drain(other) == []
+    assert not router.knows("m1")
 
 
 async def test_a_loop_event_naming_the_calls_own_id_waits_for_the_id_and_reaches_only_the_caller(router):

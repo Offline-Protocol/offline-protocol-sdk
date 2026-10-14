@@ -217,6 +217,32 @@ pub struct EncryptionConfig {
     /// is bounded re-key churn on a single pair: delivery delayed, never lost.
     /// `OfflineProtocol::schedule_session_rekey` carries the full analysis.
     pub crypto_recovery_enabled: bool,
+
+    /// Whether service request and response bodies (`__SVC_REQ__`,
+    /// `__SVC_RESP__`) are sealed inside the recipient's 1:1 MLS session
+    /// instead of crossing every hop as signed plaintext.
+    ///
+    /// Defaults to `true`. It takes effect only toward a peer that advertised
+    /// `svc_versions` entry 1 in a signed key package (or proved it by sending
+    /// a sealed service frame) and only once the session with that peer is
+    /// confirmed. Toward everyone else, and before the session confirms, the
+    /// body still leaves as signed plaintext, because that form is the floor
+    /// every older peer depends on: the first request to a provider this
+    /// device has never met is readable by the hops that carry it. Discovery
+    /// (`__SVC_DISC_Q__` / `__SVC_DISC_R__`) is never sealed, since every hop
+    /// must read it to match and forward.
+    ///
+    /// Gates advertising, recording and emitting. Routing an inbound sealed
+    /// service frame is unconditional, so switching this off never makes a
+    /// peer's sealed request surface as chat text.
+    #[serde(default = "default_encrypt_service_messages")]
+    pub encrypt_service_messages: bool,
+}
+
+/// The default for [`EncryptionConfig::encrypt_service_messages`], by name so
+/// a config serialized before the field existed still parses, and parses on.
+fn default_encrypt_service_messages() -> bool {
+    true
 }
 
 impl Default for EncryptionConfig {
@@ -232,6 +258,7 @@ impl Default for EncryptionConfig {
             compact_envelope_enabled: true,
             rich_payload_enabled: true,
             crypto_recovery_enabled: true,
+            encrypt_service_messages: true,
         }
     }
 }
@@ -248,6 +275,7 @@ impl EncryptionConfig {
             compact_envelope_enabled: false,
             rich_payload_enabled: false,
             crypto_recovery_enabled: false,
+            encrypt_service_messages: false,
         }
     }
 }
@@ -1737,6 +1765,7 @@ mod tests {
         // SEC-M3: encryption is required by default; plaintext is an
         // explicit opt-out, never a silent fallback.
         assert!(encryption.require_encryption);
+        assert!(encryption.encrypt_service_messages);
         assert_eq!(encryption.pending_queue.max_pending_per_peer, 64);
         assert_eq!(encryption.pending_queue.max_pending_global, 4096);
         assert_eq!(
@@ -1756,6 +1785,24 @@ mod tests {
         assert!(!encryption.auto_key_exchange);
         assert!(!encryption.store_pending);
         assert!(!encryption.require_encryption);
+        assert!(!encryption.encrypt_service_messages);
+    }
+
+    /// A config serialized before `encrypt_service_messages` existed still
+    /// parses, and parses with the switch on: without the named default a
+    /// stored config would fail to load the release that added the field.
+    #[test]
+    fn an_encryption_config_without_the_service_switch_parses_with_it_on() {
+        let mut value =
+            serde_json::to_value(EncryptionConfig::default()).expect("the config serializes");
+        value
+            .as_object_mut()
+            .expect("an object")
+            .remove("encrypt_service_messages")
+            .expect("the field was serialized");
+        let parsed: EncryptionConfig =
+            serde_json::from_value(value).expect("an older config still parses");
+        assert!(parsed.encrypt_service_messages);
     }
 
     #[test]

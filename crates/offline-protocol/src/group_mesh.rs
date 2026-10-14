@@ -3431,7 +3431,13 @@ impl OfflineProtocol {
             serde_json::to_string(&welcome_payload)
                 .map_err(|e| Error::Serialization(format!("Serialize welcome: {}", e)))?
         );
-        self.send_internal_message(invitee_user_id, welcome_content, MessagePriority::High)?;
+        // Alerting: being added to a group is something the invitee hears about.
+        self.send_internal_message_alerting(
+            invitee_user_id,
+            welcome_content,
+            MessagePriority::High,
+            true,
+        )?;
 
         // Send Commit to all existing members (excluding self and invitee)
         // so they can process it and advance their MLS epoch
@@ -4185,6 +4191,7 @@ impl OfflineProtocol {
                 reply_to_msg,
                 payload_forward_info,
                 priority,
+                true,
             )?;
 
         let member_count = succeeded_members.len() as u32;
@@ -4858,7 +4865,7 @@ impl OfflineProtocol {
         // retry policy for registration is the `relay_register_pending`
         // tracker armed just below, not the message ACK ladder — which could
         // never settle this frame and would re-send it ~10 times.
-        match self.send_relay_hint_message(content, MessagePriority::Medium) {
+        match self.send_relay_hint_message(content, MessagePriority::Medium, false) {
             Ok(_) => {
                 // Arm the ack correlation: only a `__GROUP_CREATED__` that
                 // answers an outstanding registration may set `relay_synced`.
@@ -5030,7 +5037,7 @@ impl OfflineProtocol {
             serde_json::to_string(payload)
                 .map_err(|e| Error::Serialization(format!("Serialize relay broadcast: {}", e)))?
         );
-        self.send_relay_hint_message(content, MessagePriority::Medium)?;
+        self.send_relay_hint_message(content, MessagePriority::Medium, true)?;
         Ok(())
     }
 
@@ -5040,6 +5047,10 @@ impl OfflineProtocol {
     /// ladder. `logical_id` is `Some` when the copies re-issue a relay
     /// broadcast — receivers then dedup/emit under that id (see
     /// [`GroupMlsMessagePayload::message_id`]).
+    ///
+    /// `alert` is true for a chat message and false for a replication frame
+    /// (see [`Self::send_internal_message_alerting`]): both are
+    /// `__GRP_MLS_MSG__` ciphertext, so the caller is the only one who knows.
     ///
     /// Returns `(frame ids, succeeded members, failed members)`; errors only
     /// on payload serialization.
@@ -5054,6 +5065,7 @@ impl OfflineProtocol {
         reply_to: Option<&str>,
         forward_info: Option<ForwardInfo>,
         priority: MessagePriority,
+        alert: bool,
     ) -> Result<(Vec<MessageId>, Vec<String>, Vec<String>)> {
         let msg_payload = GroupMlsMessagePayload {
             group_id: group_id.to_string(),
@@ -5078,7 +5090,8 @@ impl OfflineProtocol {
             if member == &self_id {
                 continue;
             }
-            match self.send_internal_message(member, base_content.clone(), priority) {
+            match self.send_internal_message_alerting(member, base_content.clone(), priority, alert)
+            {
                 Ok(mid) => {
                     message_ids.push(mid);
                     succeeded_members.push(member.clone());
@@ -5243,6 +5256,7 @@ impl OfflineProtocol {
             None,
             None,
             MessagePriority::Low,
+            false,
         )?;
         if !failed.is_empty() {
             // Not an error: a member that could not be reached now has the
@@ -5518,6 +5532,7 @@ impl OfflineProtocol {
                 entry.reply_to.as_deref(),
                 entry.forward_info.clone(),
                 entry.priority,
+                true,
             ) {
                 Ok((_ids, succeeded, _failed)) => reissued = succeeded,
                 Err(e) => {
@@ -6112,6 +6127,7 @@ impl OfflineProtocol {
             entry.reply_to.as_deref(),
             entry.forward_info.clone(),
             entry.priority,
+            true,
         ) {
             error!(
                 group_id = %entry.group_id,

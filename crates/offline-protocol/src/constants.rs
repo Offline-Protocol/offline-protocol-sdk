@@ -17,6 +17,28 @@ pub const ACK_HOP_COUNT_KEY: &str = "ack_hop_count";
 /// Metadata key for ACK messages indicating the transport used.
 pub const ACK_TRANSPORT_KEY: &str = "ack_transport";
 
+/// Metadata key on an ACK that answers a frame without delivering it. Absent
+/// on an ordinary delivery ACK.
+pub const ACK_STATUS_KEY: &str = "ack_status";
+
+/// [`ACK_STATUS_KEY`] value: the recipient can never decrypt the frame it
+/// names (a spent ratchet generation, a dead epoch, or the pending-decryption
+/// queue gave up on it). The sender resends the message once; it is
+/// never `message_delivered`. Still a delivery ACK in shape, so a relay holding
+/// the frame drops it.
+pub const ACK_STATUS_UNDECRYPTABLE: &str = "undecryptable";
+
+/// Metadata key marking a frame the SDK sent on its own: control traffic,
+/// key packages, data-sync frames, receipts, typing, presence, and a 1:1
+/// Welcome no user message is waiting on.
+///
+/// Set to `"1"` in the cleartext envelope so the relay can tell these from
+/// the user's own messages (both are opaque `__MLS_ENC__` ciphertext to it)
+/// and skip the "new message" push for an offline recipient. Frames built
+/// for the application's user-content sends never carry it. Unsigned like
+/// all metadata; receivers ignore it.
+pub const NO_ALERT_KEY: &str = "no_alert";
+
 /// Maximum number of entries in the outbox before evicting oldest entries.
 /// This prevents unbounded memory growth when messages cannot be delivered.
 pub const MAX_OUTBOX_ENTRIES: usize = 500;

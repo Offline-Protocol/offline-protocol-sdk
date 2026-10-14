@@ -46,7 +46,7 @@ can dial.
    address opened, and the newer of two such.** This is the Python manager's
    rule. Addresses compare by their UTF-8 bytes. A Rust guard pins the Swift
    and Python copies together
-   (`ios_and_python_peer_streams_keep_the_same_stream`).
+   (`every_peer_stream_manager_keeps_the_same_stream`).
 3. **Both ends dial, the higher address after five seconds.** The lower
    address's stream is the one that will be kept, so it goes first, and the
    common case opens one stream per pair. The higher address still dials,
@@ -93,7 +93,9 @@ seconds idle, 5 between probes, 3 probes.
 - An iPhone and a Python host on one LAN find each other and keep one
   stream. Android does not change: its Wi-Fi Direct group has one dialer and
   keeps "newer supersedes", which the chapter allows as local policy. iOS and
-  Android still do not talk directly.
+  Android still do not talk directly. (Since
+  [ADR 0028](0028-android-peer-streams-join-the-lan.md), Android joins the
+  LAN and keeps the lower-opened stream too.)
 - The stream budget is 16 open streams, as on Android, instead of seven.
   Unlike a Wi-Fi Direct group, the listener is open to the whole LAN, so at
   most 12 are inbound, leaving 4 for dials whatever the listener holds, and

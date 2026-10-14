@@ -10,7 +10,7 @@ This is the crate to depend on if you are consuming the SDK from Rust — it re-
 - **Mesh networking**: peer discovery, cluster formation, and bounded multi-hop message relay
 - **End-to-end encryption**: automatic MLS (RFC 9420) for direct messages and groups, fail-closed by default
 - **Reliability**: delivery ACKs, retries with exponential backoff, and deduplication built in
-- **Event-driven**: the engine surfaces `MessageReceived`, `PeerDiscovered`, `TransportChanged`, and the rest of its lifecycle through an event callback
+- **Event-driven**: the engine surfaces `MessageReceived`, `NeighborDiscovered`, `TransportSwitched`, and the rest of its lifecycle through an event callback
 
 ## What you must implement
 

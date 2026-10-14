@@ -1,0 +1,67 @@
+# Three devices on one machine, for the offline-first scenarios in README.md.
+#
+#   a ---- net-ab ---- b ---- net-bc ---- c
+#
+# a and c share no network, so b is the only way between them; Docker keeps
+# separate bridge networks apart. Each device is the service image from
+# bindings/python/docker with its own identity on its own volume. No HTTP
+# front: the scenarios use the local API through offline-protocol-verify.
+#
+# Peers are static (a and c dial b), so the topology is decided here and not
+# by multicast DNS. a and c never share a network, and never meet directly.
+#
+# run.py writes .env with one store key per device the first time; keep it,
+# or the devices come back with new addresses.
+#
+# The image is built once, by b; a and c run the same tag and wait for it.
+# With build: on all three, Compose builds the one tag three times at once,
+# and Docker 29 fails the second and third with "image already exists".
+x-device: &device
+  image: offline-protocol-service:offline-first
+  environment: &environment
+    OP_LAN: "0"
+    OP_HTTP: ""
+    OP_LISTEN: 0.0.0.0:7878
+
+services:
+  a:
+    <<: *device
+    container_name: offline-first-a
+    hostname: a
+    depends_on: [b]   # built once, by b
+    environment:
+      <<: *environment
+      OFFLINE_PROTOCOL_STORE_KEY: ${KEY_A:?run run.py once, or set KEY_A}
+      OP_PEERS: b:7878
+    networks: [net-ab]
+    volumes: [data-a:/var/lib/offline-protocol]
+  b:
+    <<: *device
+    build: ../../bindings/python/docker
+    container_name: offline-first-b
+    hostname: b
+    environment:
+      <<: *environment
+      OFFLINE_PROTOCOL_STORE_KEY: ${KEY_B:?run run.py once, or set KEY_B}
+    networks: [net-ab, net-bc]
+    volumes: [data-b:/var/lib/offline-protocol]
+  c:
+    <<: *device
+    container_name: offline-first-c
+    hostname: c
+    depends_on: [b]   # built once, by b
+    environment:
+      <<: *environment
+      OFFLINE_PROTOCOL_STORE_KEY: ${KEY_C:?run run.py once, or set KEY_C}
+      OP_PEERS: b:7878
+    networks: [net-bc]
+    volumes: [data-c:/var/lib/offline-protocol]
+
+networks:
+  net-ab:
+  net-bc:
+
+volumes:
+  data-a:
+  data-b:
+  data-c:

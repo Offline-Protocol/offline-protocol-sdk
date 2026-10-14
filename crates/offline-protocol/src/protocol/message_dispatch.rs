@@ -16,7 +16,8 @@ use crate::SessionStateError;
 use chrono::Utc;
 use offline_protocol_core::{Message, MessagePriority};
 use offline_protocol_mls::{EncryptedMessage, WelcomeMessage};
-use offline_protocol_services::ServiceAction;
+use offline_protocol_sealed::SVC_SEALED_V1;
+use offline_protocol_services::{ServiceAction, SVC_MESSAGE_PREFIX, SVC_REQUEST, SVC_RESPONSE};
 use offline_protocol_transport::TransportType;
 use tracing::{debug, error, info, warn};
 
@@ -46,10 +47,11 @@ impl OfflineProtocol {
     /// Handles an incoming MLS key package message.
     ///
     /// `signed` is the security gate's verdict on this specific frame (see
-    /// [`ControlGateOutcome::Proceed`]). It gates **only** `nostr_pubkey`,
-    /// which is consumed as a destination key rather than as a feature hint —
-    /// see the comment at that use for why the distinction earns a separate
-    /// trust level from the capability lists around it.
+    /// [`ControlGateOutcome::Proceed`]). It gates **only** `nostr_pubkey` and
+    /// `svc_versions`: the first is consumed as a destination key rather than
+    /// as a feature hint, and the second decides whether a service body is
+    /// readable by every hop. See the comments at those uses for why each
+    /// earns a separate trust level from the capability lists around them.
     ///
     /// `freshness` gates **only** `session_reset`, which is the one field here
     /// that destroys state: `Some(stamp)` when the frame's signature covers
@@ -151,6 +153,46 @@ impl OfflineProtocol {
                 self.peer_ctrl_freshness.insert(sender.to_string());
             } else {
                 self.peer_ctrl_freshness.remove(sender);
+            }
+
+            // Record whether this peer routes a sealed service frame, so a
+            // request or response addressed to them may travel inside
+            // `__MLS_ENC__`. Same shape as the lists above, with one
+            // difference: honoured only from a signed key package, like
+            // `nostr_pubkey` below, because this list sits beside a
+            // confidentiality decision rather than a rendering one. The gate
+            // refuses unsigned key packages today, so the check costs a branch
+            // and keeps the posture from depending on that staying true.
+            //
+            // This is the advertised half only, and the removal below is
+            // what a replayed older key package can reach. A peer that has
+            // sent us a sealed service frame stays in
+            // `svc_sealed_proved_peers`, which nothing here touches, and the
+            // send path seals on either set.
+            let advertises_svc_sealed = signed && payload.svc_versions.contains(&SVC_SEALED_V1);
+            if self.config.encryption.encrypt_service_messages && advertises_svc_sealed {
+                self.record_svc_sealed_peer(sender);
+            } else {
+                self.peer_svc_sealed.remove(sender);
+            }
+
+            // Record whether this peer reads an `undecryptable` ACK as "not
+            // delivered", so a frame of theirs that can never decrypt may be
+            // answered with one. Same shape as the capabilities above; not
+            // gated on our config, since what it gates is our reply to them.
+            // Forgetting a peer costs the old behaviour: no answer at all.
+            if payload
+                .ack_versions
+                .contains(&offline_protocol_sealed::ACK_UNDECRYPTABLE_V1)
+            {
+                if !self.peer_undecryptable_ack.contains(sender)
+                    && self.peer_undecryptable_ack.len() >= MAX_KEY_PACKAGE_SENT_TO
+                {
+                    self.peer_undecryptable_ack.clear();
+                }
+                self.peer_undecryptable_ack.insert(sender.to_string());
+            } else {
+                self.peer_undecryptable_ack.remove(sender);
             }
 
             // Record whether this peer replicates documents, so the data
@@ -345,6 +387,8 @@ impl OfflineProtocol {
                 &payload.rich_versions,
                 &payload.data_versions,
                 &payload.ctrl_versions,
+                if signed { &payload.svc_versions } else { &[] },
+                &payload.ack_versions,
                 advertised_nostr_pubkey.as_deref(),
             );
             if caps.is_any() {
@@ -536,10 +580,18 @@ impl OfflineProtocol {
                 .insert(sender.to_string(), pkg.clone());
             self.persist_peer_key_package(sender, &pkg);
 
-            // Send our key package back if auto_key_exchange is enabled
+            // Send our key package back if auto_key_exchange is enabled.
+            //
+            // Not yet to a sender only the mesh reaches. The Welcome built
+            // below is all that sender needs to join, and a package sent back
+            // first would make each side build a group of its own for the
+            // tiebreak to discard, every frame of both crossing each device in
+            // between. The fresh package a new session sends for group invites
+            // still goes, after the Welcome.
             if self.config.encryption.auto_key_exchange
                 && self.config.encryption.enabled
                 && !self.key_package_sent_to.contains_key(sender)
+                && self.can_reach_recipient(sender)
             {
                 let _ = self.send_key_package_to(sender, false);
             }
@@ -552,7 +604,20 @@ impl OfflineProtocol {
                         info!(sender = %sender, "Auto-established secure session after key package exchange");
                     }
                     Ok(None) => {
-                        // Session already exists — nothing to do.
+                        // A session already exists. If it is unconfirmed and
+                        // its sender is a peer only the mesh reaches, the
+                        // package is the peer saying it holds no session, so
+                        // our Welcome never arrived: re-arm it. A neighbour
+                        // gets this from rediscovery and a relay peer from
+                        // presence, but a peer two hops away produces
+                        // neither, so without it a Welcome that expired while
+                        // the path was down (300 s) was never sent again, the
+                        // peer's re-pushes were all answered with nothing,
+                        // and its waiting message sat out its seven days.
+                        // No-op unless the Welcome has stalled or expired.
+                        if !self.can_reach_recipient(sender) {
+                            self.rearm_welcome_for_peer(sender, "key_package_received");
+                        }
                     }
                     Err(e) => {
                         debug!(sender = %sender, error = %e, "Auto-establish deferred (session not ready yet)");
@@ -1228,9 +1293,10 @@ impl OfflineProtocol {
                                 // the *message* is not lost — Tier 2 re-seals
                                 // every resend against the peer's current
                                 // session, so the sender's next attempt carries
-                                // a fresh generation that can decrypt. Withhold
-                                // the ACK (the receive loop's `Deferred` arm) so
-                                // the sender keeps that lever, exactly like the
+                                // a fresh generation that can decrypt. Answer
+                                // `undecryptable` rather than "delivered" (the
+                                // receive loop's `Undecryptable` arm) so the
+                                // sender pulls that lever, exactly like the
                                 // desync path above.
                                 //
                                 // What this must NOT do is re-key. Desync stays
@@ -1247,7 +1313,7 @@ impl OfflineProtocol {
                                         sender = %sender,
                                         error = %e,
                                         error_code = session_state_error.code(),
-                                        "Failed to decrypt message; withholding ACK so the sender can resend"
+                                        "Failed to decrypt message; withholding the delivery ACK so the sender can re-seal"
                                     );
                                     DecryptResult::Failed {
                                         sender: sender.to_string(),
@@ -1317,7 +1383,36 @@ impl OfflineProtocol {
                         sender_owned.clone(),
                         format!("is_confirm={}", is_session_confirm),
                     ));
-                    let surfaced = if is_session_confirm {
+                    // A service request or response sealed in this 1:1
+                    // session. Handled only after the confirm below, so a reply
+                    // the service layer sends from inside the handler (the
+                    // automatic `not_found`) finds the session confirmed and is
+                    // sealed too; handled before it, the owner's first decrypt
+                    // from this peer would answer in plaintext.
+                    let mut text = text;
+                    //
+                    // Request and response only, the two frames a sender
+                    // seals. Discovery is never sealed: routing a sealed query
+                    // would have us forward it onward as plaintext gossip, so
+                    // any other service frame found here is dropped, and like
+                    // every service frame it never surfaces as a message.
+                    let in_session = group_id.starts_with("session:");
+                    let sealed_service_frame = (in_session
+                        && (text.starts_with(SVC_REQUEST) || text.starts_with(SVC_RESPONSE)))
+                    .then(|| std::mem::take(&mut text));
+                    let unroutable_service_frame = sealed_service_frame.is_none()
+                        && in_session
+                        && text.starts_with(SVC_MESSAGE_PREFIX);
+                    if unroutable_service_frame {
+                        debug!(
+                            sender = %sender_owned,
+                            "Dropping a sealed service frame that is not a request or response"
+                        );
+                    }
+                    let surfaced = if is_session_confirm
+                        || sealed_service_frame.is_some()
+                        || unroutable_service_frame
+                    {
                         Some(InternalMessageResult::Consumed)
                     } else if let Some(body) = text.strip_prefix(internal_prefixes::DATA_V1) {
                         // A document sync frame. Consumed either way, and
@@ -1344,6 +1439,9 @@ impl OfflineProtocol {
                         Some(InternalMessageResult::Decrypted(text))
                     };
                     self.confirm_session_from_successful_decrypt(&sender_owned, &group_id);
+                    if let Some(frame) = sealed_service_frame {
+                        self.handle_sealed_service_frame(&sender_owned, &frame, message);
+                    }
                     surfaced
                 }
                 DecryptResult::Empty => {
@@ -1392,9 +1490,10 @@ impl OfflineProtocol {
                 } => {
                     // The session exists but is out of epoch sync (the two sides
                     // diverged). Trigger a rate-limited re-key to heal the channel
-                    // for future traffic, and return Deferred so the receive loop
-                    // withholds the ACK and unmarks the id — the sender's ACK was
-                    // a lie before (message dropped, sender told "delivered").
+                    // for future traffic, and return Undecryptable so the receive
+                    // loop unmarks the id and answers `undecryptable` instead of
+                    // "delivered": the sender's ACK was a lie before (message
+                    // dropped, sender told "delivered").
                     //
                     // We deliberately do NOT enqueue: unlike the not-yet-ready
                     // case, this ciphertext is sealed to the now-dead epoch and
@@ -1405,7 +1504,7 @@ impl OfflineProtocol {
                     // retries surface an honest undeliverable instead of silent
                     // loss, which is strictly better than the lying ACK.
                     self.schedule_session_rekey(&sender_owned);
-                    Some(InternalMessageResult::Deferred)
+                    Some(InternalMessageResult::Undecryptable)
                 }
                 DecryptResult::Failed {
                     sender: sender_owned,
@@ -1419,36 +1518,52 @@ impl OfflineProtocol {
                         kind,
                         MlsOperationContext::Receive,
                     );
+                    // The app's split-brain heuristics need to tell a stale
+                    // frame (sealed before this session existed) from a live
+                    // one; only a 1:1 session has a single establishment time.
+                    let session_established_at_ms = if group_id.starts_with("session:") {
+                        self.mls_manager
+                            .as_ref()
+                            .and_then(|mls| mls.read().ok())
+                            .and_then(|manager| {
+                                manager
+                                    .session_established_at_ms(&sender_owned)
+                                    .ok()
+                                    .flatten()
+                            })
+                    } else {
+                        None
+                    };
                     if let Ok(state) = lock_shared_state(&self.shared_state) {
                         // On the retriable path this event is **advisory, not
-                        // terminal**, and fires once per failed attempt rather
-                        // than once per message: the frame was not ACKed, so the
-                        // sender resends and each resend that still fails
-                        // reports again. It is bounded by the sender's ACK retry
-                        // budget, after which the sender settles the message as
-                        // an honest `MessageFailed`.
+                        // terminal**: the frame is never delivery-ACKed (and is
+                        // answered `undecryptable` when it came over the relay),
+                        // so the sender re-seals the message under its current
+                        // session, and a resend that still fails reports again. The sender's retry ladder settles it
+                        // as an honest `MessageFailed` if it never decrypts.
                         let reason = if retriable {
                             format!(
-                                "Failed to decrypt MLS message ({kind:?}); not acknowledged, so the sender's resend can still deliver it"
+                                "Failed to decrypt MLS message ({kind:?}); not delivery-ACKed, so the sender can re-seal it"
                             )
                         } else {
                             format!("Failed to decrypt MLS message ({kind:?})")
                         };
-                        state.emit_event(Event::message_decryption_failed(
+                        state.emit_event(Event::message_decryption_failed_for_frame(
                             message.id.clone(),
                             sender_owned.clone(),
                             Self::decryption_failure_code_from_kind(kind),
                             reason,
+                            encrypted.timestamp_ms,
+                            session_established_at_ms,
                         ));
                     }
                     if retriable {
-                        // Reuses the Deferred atom (skip ACK + `unmark_seen`)
-                        // without enqueueing: like a desync, this ciphertext is
-                        // dead — OpenMLS consumed the ratchet generation on the
+                        // Not enqueued: like a desync, this ciphertext is dead.
+                        // OpenMLS consumed the ratchet generation on the
                         // failed attempt, so a queued copy could never drain.
                         // Recovery is the sender's re-sealed resend, not this
                         // frame.
-                        Some(InternalMessageResult::Deferred)
+                        Some(InternalMessageResult::Undecryptable)
                     } else {
                         Some(InternalMessageResult::Consumed)
                     }
@@ -2174,12 +2289,53 @@ impl OfflineProtocol {
         }
     }
 
+    /// Routes a service frame that arrived sealed in the 1:1 session with
+    /// `sender` into the service layer.
+    ///
+    /// `sender` is the MLS-authenticated one: the decrypt checked the
+    /// credential that produced the ciphertext against the wire sender, so the
+    /// provider's `service_request_received.sender` is proven by the session
+    /// rather than by a signature. The frame is never re-fed through
+    /// `process_internal_message_via`, whose gate would refuse an unsigned
+    /// `__SVC_` frame. Routing is unconditional (parsing is never gated by a
+    /// kill switch), so a peer's sealed request does not surface as chat text
+    /// here when our switch is off. A group-sealed service frame is not routed
+    /// here: the service protocol has no group form.
+    ///
+    /// A peer that sealed a service frame has proved it routes them, and no
+    /// replay of an older key package can fake that, so the sender is
+    /// recorded in the durable ratchet `svc_sealed_proved_peers`, which no key
+    /// package can clear. That closes two windows: a provider answering a
+    /// sealed request in plaintext because the requester's fresh key package
+    /// has not landed yet, and a replayed older key package removing the peer
+    /// from the advertised set. Recorded whatever our switch says (knowledge,
+    /// not policy); the switch gates only whether we seal.
+    ///
+    /// One case still answers in plaintext: a both-create owner whose decrypt
+    /// `can_confirm_from_source` refused to confirm on holds an unconfirmed
+    /// session, so a reply sent from inside the handler (the automatic
+    /// `not_found`) takes the documented "before the session confirms"
+    /// fallback even though the proof was just recorded.
+    fn handle_sealed_service_frame(&mut self, sender: &str, content: &str, message: &Message) {
+        // The frame decrypted in a 1:1 session with `sender`, which is the
+        // encryption-capability fact itself. Recorded first because the
+        // ratchet below is a subset of that set and refuses anyone outside it.
+        self.record_encryption_capable(sender);
+        self.record_svc_sealed_proved(sender);
+        self.handle_service_message(sender, content, message, true);
+    }
+
     /// Handles service discovery and request/response messages.
+    ///
+    /// `sealed` says whether the frame arrived inside the 1:1 MLS session
+    /// with `sender`, and is reported to the application as the `encrypted`
+    /// field of the request and response events.
     pub(crate) fn handle_service_message(
         &mut self,
         sender: &str,
         content: &str,
         message: &Message,
+        sealed: bool,
     ) {
         let peers: Vec<String> = self
             .known_peers
@@ -2201,12 +2357,21 @@ impl OfflineProtocol {
                 messages_to_send,
                 events_to_emit,
             } => {
+                // Through the chooser, so the automatic `not_found` answer to a
+                // sealed request is sealed too. Discovery forwards pass
+                // through it unchanged: it seals requests and responses only.
                 for msg in messages_to_send {
-                    let _ = self.send_internal_message(&msg.recipient, msg.content, msg.priority);
+                    let _ = self.send_service_frame(&msg.recipient, msg.content, msg.priority);
                 }
                 if let Ok(state) = lock_shared_state(&self.shared_state) {
                     for svc_event in events_to_emit {
-                        state.emit_event(Event::from(svc_event));
+                        let mut event = Event::from(svc_event);
+                        if let Event::ServiceRequestReceived { encrypted, .. }
+                        | Event::ServiceResponseReceived { encrypted, .. } = &mut event
+                        {
+                            *encrypted = sealed;
+                        }
+                        state.emit_event(event);
                     }
                 }
             }

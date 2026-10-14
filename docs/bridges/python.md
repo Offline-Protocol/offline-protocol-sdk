@@ -181,11 +181,12 @@ kept (two hosts that each list the other open toward each other at once, and
 without a shared rule each would keep what the other discards, forever), and
 between two of the winning kind the newer supersedes the older (the lower
 address reconnecting must not be blocked by its own half-open stream). Either
-way the core sees one announcement and one loss per address. The iOS manager
-keeps the same stream by the same rule, because an iPhone and a host on one
-LAN both dial; `ios_and_python_peer_streams_keep_the_same_stream` pins the
-two copies together
-([ADR 0027](../adr/0027-ios-peer-streams-ride-network-framework.md)).
+way the core sees one announcement and one loss per address. The iOS and
+Android managers keep the same stream by the same rule, because a phone and
+a host on one LAN both dial; `every_peer_stream_manager_keeps_the_same_stream`
+pins the three copies together
+([ADR 0027](../adr/0027-ios-peer-streams-ride-network-framework.md),
+[ADR 0028](../adr/0028-android-peer-streams-join-the-lan.md)).
 
 The tie-break gives the higher address no such way past a stale stream: its
 reconnect is the losing kind for as long as the lower side holds a stream it
@@ -363,6 +364,144 @@ four hand-mirrored copies under [C5](README.md#c5-hand-mirrored-constants-must-b
 and `test_relay_answer_prefixes.py` pins it as literals. Before #368 there was
 no Python copy, and the injection had drifted to `__GRP_*` names the registry
 never held.
+
+## P13. The HTTP front carries bodies only in sealed messages, and its literals are pinned
+
+`offline_protocol_sdk.http_front` is a client of the local API like any
+other, so every rule of [the local API bridge](local-api.md) holds for it
+unchanged: it declares one application id, its sends are stamped with it,
+and the server holds its inbound messages while it is away. It sends every
+request and response as a direct message, never on the service request path,
+which falls back to signed plaintext whenever it cannot seal, and it acts only on a `message_received` the
+engine reports as `encrypted`. Discovery is the one thing it takes from the
+service path. It runs one per service, since every client under one
+application id receives each request. Everything a handler can wait on
+(an answer, a browse stream, a callback) is ended before the HTTP server's
+cleanup, which otherwise waits two minutes for a running handler and
+outlives a supervisor's stop grace period. The envelope limits, the carried-header list, the application
+id and the error tokens of [the chapter](../spec/http-front.md) are module
+literals, and its tests pin them as literals (C5). `aiohttp` is imported only
+when the front starts, behind the `http` extra, so the base install's
+dependency set is unchanged.
+
+## P14. On BlueZ the peripheral learns its centrals from the bus, and one drain feeds both roles
+
+bless tracks the centrals of its server only in its CoreBluetooth backend. Its
+BlueZ characteristic drops the options BlueZ passes to `ReadValue` and
+`WriteValue`, which name the calling device, and `StartNotify` names none. So
+on Linux the peripheral adds a dbus_next message handler to bless's own bus
+that reads `options["device"]` from each read or write of its application's
+characteristics before bless dispatches the call, and never answers one. A
+device is a central once it has called into the application, and stops being
+one when BlueZ reports its `Device1.Connected` false or the object gone. That
+is what tells a central apart from a peripheral the central role connected
+to: both are connected `Device1` objects, and only a central reads our
+identity. It is announced to the core only while the Message characteristic
+has a subscriber, because BlueZ reports subscriptions per characteristic and
+not per device, and only while one of its centrals is still connected: bless
+forgets a subscription only on `StopNotify`, which BlueZ sends when an
+unpaired central disconnects but not a bonded one. The caller the hook reads
+is the caller of the call bless dispatches next only because bless's
+`ReadValue` and `WriteValue` are plain methods, which dbus_next runs inline;
+a coroutine method would be scheduled after the next call's hook, so a test
+reads the method dbus_next dispatches and refuses a coroutine. Each inbound write is attributed to its own caller, so two
+centrals no longer collapse into `ble-peer`. Notifications go to every
+subscribed central on BlueZ, which offers no per-central notification; on
+macOS see P15.
+
+The core's outbound fragment queue is shared by the two roles and offers no
+peek and no requeue (`ble_return_fragment` is a no-op), so a fragment one
+role pops is gone. Two drains running at once split a message's fragments
+across two links. With both roles present, `ProtocolManager` runs one drain
+that pops each fragment once and writes it on the central's link to its
+recipient, else notifies it when the peripheral has a subscriber, else drops
+and counts it; the core's retry of the message re-sends it. A write or notify
+that fails is reported and the drain goes on, so one failure never strands the
+fragments behind it. The peripheral on
+its own takes nothing while nobody is subscribed. `test_ble_peripheral.py`
+pins both with a fake bus. Nothing here has run on a board.
+
+## P15. A peripheral link carries the address its hello proved, or it cannot start a session
+
+**Invariant:** a fragment the peripheral hands to the core carries, as its
+transport identity, the address the writing central proved with its hello,
+and nothing else proves it. The core refuses a hop-0 control frame whose
+sender is not the link's identity (`TRANSPORT_IDENTITY_MISMATCH`), and a key
+package is such a frame. A link known by a central UUID, or by the
+`ble-peer` placeholder, can carry ciphertext for a session that already
+exists but can never start one. That is how an Android phone and a Mac found
+each other, verified each other, and never formed a session: the Mac rotates
+its address, the phone held a link to each address, so the Mac's peripheral
+saw two centrals, attributed every write to `ble-peer`, and the core refused
+the phone's key package.
+
+The pieces, each of which the failure needs only one of to come back:
+
+- **The writer of each write is named.** bless hands a CoreBluetooth write to
+  its callback without its `CBCentral`. The peripheral builds bless's server
+  with a subclass of its delegate (swapped into bless's module for that one
+  construction, under a lock) that passes each request's central, offset and
+  value through, and answers with the ATT code the peripheral returns. On
+  BlueZ the bus hook of P14 names the writer.
+- **The peripheral serves Hello** ([the chapter](../spec/ble-framing.md),
+  writable with response) and runs the chapter's order: refuse an offset write
+  (`0x07`) or a value outside 96 to 512 bytes (`0x0D`) before verifying;
+  verify with the core's one verifier; bind the central to the derived address;
+  never rebind; announce the peer only when no other link has, which includes
+  the central role's client link (`ProtocolManager` hands the peripheral
+  `BleManager.holds_peer`). A message's `sender` field never replaces a hello
+  binding: it proves nothing. A central that says hello and never subscribes
+  is not a central the monitor tracks, so its binding is dropped, and its peer
+  reported lost unless another link reaches it, once it has gone 5 seconds
+  without a subscription. Kept, it left a route to the address it proved for
+  the life of the process.
+- **The central writes its hello** after its Message subscription and before
+  its first write, when the peer serves Hello and the assertion fits one write.
+  So do the Android and iOS centrals, which is what lets a phone start a
+  session with this peripheral at all. "Fits one write" means one ATT packet:
+  iOS bounds it by `maximumWriteValueLength(for: .withoutResponse)`, because
+  the `.withResponse` figure is 512 there and a longer write goes out as a
+  prepared write, which this peripheral refuses. `BleManager` takes the bound
+  from the Hello characteristic's `max_write_without_response_size`, never from
+  the client's `mtu_size`: bleak's BlueZ client reports 23 until the MTU is
+  explicitly acquired, which skipped every hello from Linux. `BleManager` also
+  announces the peer only after the hello's response (or a 3 second deadline),
+  because the announce is what makes the core push a key package, and one
+  written ahead of the hello is refused by a peripheral that cannot yet name
+  the link. The peripheral refuses a batch carrying a hello (a prepared write)
+  as a whole, before any request in it reaches the verifier.
+- **One client link per peer.** A second link that verifies as a peer already
+  held is closed unannounced, on Android and in `BleManager`, and its address
+  is left undialed for a minute or until the kept link is gone, whichever
+  comes first. Kept, two such peers fill Android's four connection slots, and
+  the cap then refuses every inbound central. Without the early lapse a peer
+  whose kept link died stayed undialed at the address it still advertises.
+- **On macOS a notification goes to the recipient's central** when that
+  central said hello, through `updateValue:forCharacteristic:onSubscribedCentrals:`,
+  and a `NO` from it (a full transmit queue) waits for the stack's ready
+  signal and is retried. bless ignores that `NO`, which dropped fragments of
+  every burst.
+- **A dead client link is found.** CoreBluetooth kept a link to a Mac whose
+  service process had restarted "connected" for over five minutes while every
+  write into it vanished. `BleManager` reads each link's Device id back every
+  15 seconds and drops a link whose read fails, hangs past 5 seconds, or names
+  another address. A peer whose central is still bound on our peripheral is
+  not reported lost when our client link goes, in either direction
+  (`holds_peer` on each role, wired by `ProtocolManager`): a notification still
+  reaches it, and a lost report would drop the core's route.
+- **A Bluetooth stack that never comes up fails the start.** bless's
+  CoreBluetooth delegate waits in its constructor, with no deadline, for a
+  power-on that never comes when the process is not authorised (a service
+  started over ssh). On the loop thread that froze the whole service past the
+  local API server's start deadline. The server is now built on a daemon
+  thread with a 20 second deadline, and a process macOS reports as denied or
+  restricted is refused before the stack is touched. A construction that
+  never returned keeps bless's delegate swapped and its lock held, so a later
+  start in the same process waits 2 seconds for it and then says so, rather
+  than waiting out the deadline and blaming the adapter.
+
+`test_ble_hello.py` pins each of these, and each has a mutation that turns it
+red. The macOS pieces were run between two Macs and a Galaxy M36 (Android 16).
 
 ## Testing
 

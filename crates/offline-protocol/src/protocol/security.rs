@@ -1413,15 +1413,7 @@ impl OfflineProtocol {
         let Some(storage) = &self.secure_storage else {
             return;
         };
-        let entry = EncryptionCapableEntry {
-            last_seen_ms: Utc::now().timestamp_millis(),
-            ctrl_freshness_proved: true,
-            last_reset_ms: self
-                .control_reset_watermark
-                .get(peer_id)
-                .copied()
-                .unwrap_or(0),
-        };
+        let entry = self.current_capable_entry(peer_id);
         match serde_json::to_vec(&entry) {
             Ok(data) => {
                 if let Err(e) =
@@ -1432,6 +1424,59 @@ impl OfflineProtocol {
             }
             Err(e) => {
                 warn!(peer_id = %peer_id, error = %e, "Failed to serialize control-freshness ratchet");
+            }
+        }
+    }
+
+    /// The durable capability record for `peer_id` as this node knows it now:
+    /// every ratchet and mark read from memory.
+    ///
+    /// Every writer of [`EncryptionCapableEntry`] builds it here. Each one
+    /// rewrites the whole record, so a writer that spelled a ratchet field out
+    /// itself and got it wrong (a literal `false`, a field added later and
+    /// missed) would clear a ratchet that is set, and a ratchet any ordinary
+    /// write can clear is not one.
+    pub(crate) fn current_capable_entry(&self, peer_id: &str) -> EncryptionCapableEntry {
+        EncryptionCapableEntry {
+            last_seen_ms: Utc::now().timestamp_millis(),
+            ctrl_freshness_proved: self.signs_freshness_bound_control(peer_id),
+            last_reset_ms: self
+                .control_reset_watermark
+                .get(peer_id)
+                .copied()
+                .unwrap_or(0),
+            svc_sealed_proved: self.svc_sealed_proved_peers.contains(peer_id),
+        }
+    }
+
+    /// Records that `peer_id` sent us a service frame sealed inside the 1:1
+    /// session, so it routes the sealed form, in memory and durably.
+    ///
+    /// Same subset rule and same once-per-peer write as
+    /// [`Self::record_control_freshness_proved`]. Refusing a peer the capped
+    /// encryption-capable set did not accept costs only the ratchet: its
+    /// service bodies still seal while its key package advertises the form.
+    pub(crate) fn record_svc_sealed_proved(&mut self, peer_id: &str) {
+        if !self.is_encryption_capable(peer_id) {
+            return;
+        }
+        if !self.svc_sealed_proved_peers.insert(peer_id.to_string()) {
+            return;
+        }
+        let Some(storage) = &self.secure_storage else {
+            return;
+        };
+        let entry = self.current_capable_entry(peer_id);
+        match serde_json::to_vec(&entry) {
+            Ok(data) => {
+                if let Err(e) =
+                    storage.store(storage_keys::ENCRYPTION_CAPABLE_PEERS, peer_id, &data)
+                {
+                    warn!(peer_id = %peer_id, error = %e, "Failed to persist the sealed-service ratchet");
+                }
+            }
+            Err(e) => {
+                warn!(peer_id = %peer_id, error = %e, "Failed to serialize the sealed-service ratchet");
             }
         }
     }
@@ -1473,11 +1518,7 @@ impl OfflineProtocol {
         let Some(storage) = &self.secure_storage else {
             return;
         };
-        let entry = EncryptionCapableEntry {
-            last_seen_ms: Utc::now().timestamp_millis(),
-            ctrl_freshness_proved: self.signs_freshness_bound_control(peer_id),
-            last_reset_ms: signed_ms,
-        };
+        let entry = self.current_capable_entry(peer_id);
         match serde_json::to_vec(&entry) {
             Ok(data) => {
                 if let Err(e) =
@@ -1508,21 +1549,11 @@ impl OfflineProtocol {
         let Some(storage) = &self.secure_storage else {
             return false;
         };
-        let entry = EncryptionCapableEntry {
-            last_seen_ms: Utc::now().timestamp_millis(),
-            // Carried forward rather than defaulted. This path writes the
-            // whole record, so spelling `false` here would clear a ratchet
-            // that is set — and a ratchet any ordinary frame can clear is not
-            // one. In practice the elision cache means this rarely rewrites an
-            // existing record, which is exactly the kind of "cannot happen"
-            // that stops being true after a refactor.
-            ctrl_freshness_proved: self.signs_freshness_bound_control(peer_id),
-            last_reset_ms: self
-                .control_reset_watermark
-                .get(peer_id)
-                .copied()
-                .unwrap_or(0),
-        };
+        // Carried forward rather than defaulted (see `current_capable_entry`).
+        // In practice the elision cache means this rarely rewrites an existing
+        // record, which is exactly the kind of "cannot happen" that stops
+        // being true after a refactor.
+        let entry = self.current_capable_entry(peer_id);
         match serde_json::to_vec(&entry) {
             Ok(data) => {
                 match storage.store(storage_keys::ENCRYPTION_CAPABLE_PEERS, peer_id, &data) {
@@ -1584,7 +1615,7 @@ impl OfflineProtocol {
         let listed = peer_ids.len();
         // Collected before marking: `mark_encryption_capable` takes `&mut self`
         // while `storage` is borrowed from `self`.
-        let mut capable: Vec<(String, bool, i64)> = Vec::new();
+        let mut capable: Vec<(String, bool, i64, bool)> = Vec::new();
         for peer_id in peer_ids.iter().take(MAX_RESTORE_KEYS_PER_CATEGORY) {
             // Storage keys bypass `UserId::new()`, so a corrupted or
             // pre-validation-era entry could contain hostile characters.
@@ -1603,6 +1634,7 @@ impl OfflineProtocol {
                         peer_id.clone(),
                         entry.ctrl_freshness_proved,
                         entry.last_reset_ms,
+                        entry.svc_sealed_proved,
                     )),
                     Err(e) => {
                         warn!(peer_id = %peer_id, error = %e, "Skipping corrupted capability record");
@@ -1615,7 +1647,7 @@ impl OfflineProtocol {
             }
         }
         let restored = capable.len() as u32;
-        for (peer_id, ctrl_freshness_proved, last_reset_ms) in capable {
+        for (peer_id, ctrl_freshness_proved, last_reset_ms, svc_sealed_proved) in capable {
             // Read back from the category, so the record demonstrably exists:
             // seeding the elision cache here is what keeps the first verified
             // frame from a restored peer from rewriting a record that is
@@ -1628,6 +1660,11 @@ impl OfflineProtocol {
                 // cannot seed a set that the cap is supposed to bound.
                 if ctrl_freshness_proved {
                     self.control_freshness_peers.insert(peer_id.clone());
+                }
+                // Losing this across a restart would let one replayed key
+                // package send that peer's service bodies in plaintext again.
+                if svc_sealed_proved {
+                    self.svc_sealed_proved_peers.insert(peer_id.clone());
                 }
                 if last_reset_ms != 0 {
                     // Losing this across a restart would make every reset this

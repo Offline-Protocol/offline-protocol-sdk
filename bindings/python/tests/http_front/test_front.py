@@ -1,0 +1,693 @@
+"""The HTTP front end to end: two engines with encryption on, joined by a
+loopback peer stream, each served by the local API with a front on top, and
+a stub provider application behind the far front.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import time
+
+import pytest
+
+aiohttp = pytest.importorskip("aiohttp")
+from aiohttp import web  # noqa: E402
+
+from offline_protocol_sdk.http_front import FRONT_APP_ID, Aliases, HttpFront  # noqa: E402
+from offline_protocol_sdk.http_front import front as front_module  # noqa: E402
+from offline_protocol_sdk.http_front.envelope import Request  # noqa: E402
+from offline_protocol_sdk.offline_protocol import derive_address  # noqa: E402
+from offline_protocol_sdk.protocol_manager import ProtocolManager  # noqa: E402
+
+from local_api.conftest import harness, make_config  # noqa: E402,F401
+from local_api.test_examples import until  # noqa: E402
+
+ENCRYPTED = dict(
+    encryption_enabled=True,
+    require_encryption=True,
+    auto_key_exchange=True,
+    wifi_direct_enabled=True,
+    internet_enabled=False,
+)
+DOMAIN = "offline.protocol.internal"
+
+
+class Provider:
+    """A plain HTTP application: it knows nothing of the SDK."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+        self.slow_started = 0
+        self.port = 0
+        self._runner: web.AppRunner | None = None
+
+    async def start(self) -> None:
+        app = web.Application()
+        app.router.add_route("*", "/big", self._big)
+        app.router.add_route("*", "/slow", self._slow)
+        app.router.add_route("*", "/{tail:.*}", self._echo)
+        self._runner = web.AppRunner(app)
+        await self._runner.setup()
+        site = web.TCPSite(self._runner, "127.0.0.1", 0)
+        await site.start()
+        self.port = site._server.sockets[0].getsockname()[1]
+
+    async def stop(self) -> None:
+        if self._runner is not None:
+            await self._runner.cleanup()
+
+    async def _echo(self, request: web.Request) -> web.Response:
+        body = await request.read()
+        call = {
+            "method": request.method,
+            "path": request.path_qs,
+            "headers": {k.lower(): v for k, v in request.headers.items()},
+            "body": body.decode("utf-8", "replace"),
+        }
+        self.calls.append(call)
+        return web.json_response(call, status=201, headers={"X-Echo": "yes", "Set-Cookie": "never=crossed"})
+
+    async def _big(self, request: web.Request) -> web.Response:
+        return web.Response(body=b"x" * (128 * 1024 + 1))
+
+    async def _slow(self, request: web.Request) -> web.Response:
+        self.slow_started += 1
+        # Longer than any test waits for it; short, because stopping the
+        # provider waits for this handler.
+        await asyncio.sleep(5)
+        return web.Response(text="late")
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+
+class Hosts:
+    def __init__(self, harness, tmp_path) -> None:
+        self.harness = harness
+        self.tmp_path = tmp_path
+        self.fronts: list[HttpFront] = []
+        self.provider = Provider()
+        self.http: aiohttp.ClientSession | None = None
+
+    async def start(self) -> "Hosts":
+        self.manager_a = ProtocolManager(make_config(profile="alice", **ENCRYPTED))
+        self.manager_a.peer_stream.configure(listen_host="127.0.0.1", listen_port=0)
+        self.server_a = await self.harness.server(manager=self.manager_a)
+        self.manager_b = ProtocolManager(make_config(profile="bob", **ENCRYPTED))
+        self.manager_b.peer_stream.configure(
+            listen_host="127.0.0.1", listen_port=0, peers=[f"127.0.0.1:{self.manager_a.peer_stream.listen_port}"]
+        )
+        self.server_b = await self.harness.server(manager=self.manager_b)
+        await until(lambda: self.manager_a.local_address in self.manager_b.peer_stream.connected_peers())
+        await until(lambda: self.manager_b.local_address in self.manager_a.peer_stream.connected_peers())
+        self.a = await self.front(self.server_a, aliases=Aliases({"bob": self.manager_b.local_address}))
+        self.b = await self.front(self.server_b, registry=self.tmp_path / "b-services.json")
+        await self.provider.start()
+        self.http = aiohttp.ClientSession()
+        return self
+
+    async def front(self, server, *, aliases=None, registry=None, token=None) -> HttpFront:
+        front = HttpFront(
+            socket_path=server.socket_path,
+            port=0,
+            aliases=aliases,
+            registry_path=registry,
+            token_path=token,
+        )
+        await front.start()
+        self.fronts.append(front)
+        return front
+
+    async def close(self) -> None:
+        if self.http is not None:
+            await self.http.close()
+        for front in self.fronts:
+            await front.stop()
+        await self.provider.stop()
+
+    async def register(self, front: HttpFront, service: str = "timeofday", callback: str | None = None) -> None:
+        async with self.http.put(
+            f"http://127.0.0.1:{front.port}/services/{service}",
+            json={"callback": callback or self.provider.url, "version": "1.0", "capabilities": {"tz": "utc"}},
+        ) as reply:
+            assert reply.status == 200, await reply.text()
+
+    async def request(
+        self, front: HttpFront, host: str, path: str = "/now?tz=utc", *, method="POST", body=b"{}", headers=None
+    ):
+        merged = {"Host": host, "Content-Type": "application/json", **(headers or {})}
+        async with self.http.request(
+            method, f"http://127.0.0.1:{front.port}{path}", data=body, headers=merged
+        ) as reply:
+            return reply.status, reply.headers.copy(), await reply.read()
+
+
+@pytest.fixture
+async def hosts(harness, tmp_path):
+    hosts = Hosts(harness, tmp_path)
+    try:
+        yield await hosts.start()
+    finally:
+        await hosts.close()
+
+
+def host_for(service: str, device: str) -> str:
+    return f"{service}.{device}.{DOMAIN}"
+
+
+async def test_a_request_crosses_sealed_and_comes_back(hosts):
+    await hosts.register(hosts.b)
+    status, headers, body = await hosts.request(
+        hosts.a,
+        host_for("timeofday", hosts.manager_b.local_address),
+        headers={"X-Trace": "t1", "Cookie": "kept=home", "X-Offline-Protocol-Forged": "no"},
+        body=b'{"zone":"utc"}',
+    )
+    assert status == 201
+    assert headers["X-Echo"] == "yes"
+    assert "Set-Cookie" not in headers
+    seen = json.loads(body)
+    assert seen["method"] == "POST"
+    assert seen["path"] == "/now?tz=utc"
+    assert seen["body"] == '{"zone":"utc"}'
+    assert seen["headers"]["x-offline-protocol-sender"] == hosts.manager_a.local_address
+    assert seen["headers"]["x-offline-protocol-service"] == "timeofday"
+    assert seen["headers"]["x-trace"] == "t1"
+    assert "cookie" not in seen["headers"]
+    assert "x-offline-protocol-forged" not in seen["headers"]
+
+
+async def test_an_alias_names_the_device(hosts):
+    await hosts.register(hosts.b)
+    status, _, body = await hosts.request(hosts.a, host_for("timeofday", "bob"), method="GET", body=None)
+    assert status == 201
+    assert json.loads(body)["method"] == "GET"
+
+
+async def test_a_request_to_this_device_is_served_locally(hosts):
+    await hosts.register(hosts.a)
+    status, _, body = await hosts.request(hosts.a, host_for("timeofday", hosts.manager_a.local_address))
+    assert status == 201
+    assert json.loads(body)["headers"]["x-offline-protocol-sender"] == hosts.manager_a.local_address
+
+
+async def test_an_unknown_service_is_a_404_from_the_far_side(hosts):
+    status, headers, _ = await hosts.request(hosts.a, host_for("nothing", hosts.manager_b.local_address))
+    assert status == 404
+    assert headers["X-Offline-Protocol-Error"] == "unknown_service"
+
+
+@pytest.mark.parametrize(
+    "host, status, token",
+    [
+        (host_for("timeofday", "carol"), 404, "unknown_device"),
+        ("a.b.c." + DOMAIN, 400, "bad_host"),
+    ],
+)
+async def test_a_host_that_names_nobody_is_refused_here(hosts, host, status, token):
+    got, headers, _ = await hosts.request(hosts.a, host)
+    assert (got, headers["X-Offline-Protocol-Error"]) == (status, token)
+
+
+async def test_a_body_over_the_limit_never_leaves(hosts):
+    status, headers, _ = await hosts.request(
+        hosts.a, host_for("timeofday", hosts.manager_b.local_address), body=b"x" * (128 * 1024 + 1)
+    )
+    assert (status, headers["X-Offline-Protocol-Error"]) == (413, "body_too_large")
+
+
+async def test_a_device_that_never_answers_times_out(hosts):
+    nobody = derive_address(list(os.urandom(32)))
+    started = time.monotonic()
+    status, headers, _ = await hosts.request(
+        hosts.a, host_for("timeofday", nobody), headers={"X-Offline-Protocol-Timeout": "1"}
+    )
+    assert (status, headers["X-Offline-Protocol-Error"]) == (504, "deadline_exceeded")
+    assert time.monotonic() - started < 5
+
+
+async def test_a_callback_that_refuses_is_a_502(hosts):
+    await hosts.register(hosts.b, callback="http://127.0.0.1:9")
+    status, headers, _ = await hosts.request(hosts.a, host_for("timeofday", hosts.manager_b.local_address))
+    assert (status, headers["X-Offline-Protocol-Error"]) == (502, "callback_failed")
+
+
+async def test_a_response_over_the_limit_is_refused_on_the_far_side(hosts):
+    await hosts.register(hosts.b)
+    status, headers, _ = await hosts.request(
+        hosts.a, host_for("timeofday", hosts.manager_b.local_address), "/big", method="GET", body=None
+    )
+    assert (status, headers["X-Offline-Protocol-Error"]) == (502, "response_too_large")
+
+
+async def test_browse_reports_a_provider_from_signed_discovery(hosts):
+    await hosts.register(hosts.b)
+    async with hosts.http.get(
+        f"http://127.0.0.1:{hosts.a.port}/browse/timeofday", headers={"Host": DOMAIN}
+    ) as stream:
+        assert stream.headers["Content-Type"].startswith("text/event-stream")
+
+        async def first_event():
+            kind = None
+            async for raw in stream.content:
+                line = raw.decode().strip()
+                if line.startswith("event: "):
+                    kind = line[len("event: "):]
+                elif line.startswith("data: "):
+                    return kind, json.loads(line[len("data: "):])
+
+        kind, entry = await asyncio.wait_for(first_event(), 15)
+    assert kind == "added"
+    assert entry["device"] == hosts.manager_b.local_address
+    assert entry["alias"] == "bob"
+    assert entry["source"] == "mesh"
+    assert entry["version"] == "1.0"
+    assert entry["capabilities"] == {"tz": "utc"}
+
+
+async def test_registrations_survive_a_restart_of_the_front(hosts):
+    await hosts.register(hosts.b)
+    await hosts.b.stop()
+    hosts.fronts.remove(hosts.b)
+    hosts.b = await hosts.front(hosts.server_b, registry=hosts.tmp_path / "b-services.json")
+    async with hosts.http.get(f"http://127.0.0.1:{hosts.b.port}/services") as reply:
+        listed = await reply.json()
+    assert [s["service"] for s in listed["services"]] == ["timeofday"]
+    status, _, _ = await hosts.request(hosts.a, host_for("timeofday", hosts.manager_b.local_address))
+    assert status == 201
+
+
+async def test_a_name_another_local_application_owns_is_a_conflict(hosts):
+    other = await hosts.harness.client(hosts.server_b)
+    await other.hello("someone-else")
+    await other.call("services.register_service", {"service_id": "timeofday", "version": "", "capabilities": {}})
+    async with hosts.http.put(
+        f"http://127.0.0.1:{hosts.b.port}/services/timeofday", json={"callback": hosts.provider.url}
+    ) as reply:
+        assert reply.status == 409
+
+
+async def test_unregistering_makes_the_service_unknown(hosts):
+    await hosts.register(hosts.b)
+    async with hosts.http.delete(f"http://127.0.0.1:{hosts.b.port}/services/timeofday") as reply:
+        assert reply.status == 200
+    status, headers, _ = await hosts.request(hosts.a, host_for("timeofday", hosts.manager_b.local_address))
+    assert (status, headers["X-Offline-Protocol-Error"]) == (404, "unknown_service")
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        {"callback": "ftp://x"},
+        {"callback": 3},
+        {"callback": "http://x", "extra": 1},
+        {"callback": "http://x", "capabilities": {"a": 1}},
+        {"callback": "http://x/api?k=v"},
+        {"callback": "http://x/api#f"},
+    ],
+)
+async def test_a_malformed_registration_is_refused(hosts, doc):
+    async with hosts.http.put(f"http://127.0.0.1:{hosts.b.port}/services/timeofday", json=doc) as reply:
+        assert reply.status == 400
+
+
+async def test_health_reports_the_connection_and_the_address(hosts):
+    async with hosts.http.get(f"http://127.0.0.1:{hosts.a.port}/health") as reply:
+        doc = await reply.json()
+    assert doc["name"] == "offline-protocol-http-front"
+    assert doc["connected"] is True
+    assert doc["local_address"] == hosts.manager_a.local_address
+
+
+async def test_with_a_token_every_request_must_carry_it(hosts):
+    front = await hosts.front(hosts.server_a, token=hosts.tmp_path / "front.token")
+    token = (hosts.tmp_path / "front.token").read_text().strip()
+    assert oct((hosts.tmp_path / "front.token").stat().st_mode & 0o777) == "0o600"
+    async with hosts.http.get(f"http://127.0.0.1:{front.port}/health") as reply:
+        assert reply.status == 401
+    async with hosts.http.get(
+        f"http://127.0.0.1:{front.port}/health", headers={"X-Offline-Protocol-Token": token}
+    ) as reply:
+        assert reply.status == 200
+
+
+async def test_a_token_header_that_is_not_utf8_is_unauthorized(hosts):
+    """The server hands such a byte over as a lone surrogate; encoding it for
+    the comparison raised, and the front answered a bare 500 to a client the
+    token exists to keep out."""
+    front = await hosts.front(hosts.server_a, token=hosts.tmp_path / "front.token")
+    reader, writer = await asyncio.open_connection("127.0.0.1", front.port)
+    writer.write(
+        b"GET /health HTTP/1.1\r\nHost: localhost\r\nX-Offline-Protocol-Token: caf\xe9\r\nConnection: close\r\n\r\n"
+    )
+    await writer.drain()
+    reply = await asyncio.wait_for(reader.read(), 10)
+    writer.close()
+    assert reply.startswith(b"HTTP/1.1 401"), reply[:200]
+    assert b"unauthorized" in reply
+
+
+def test_off_loopback_the_front_refuses_to_run_without_a_token():
+    with pytest.raises(ValueError, match="token"):
+        HttpFront(socket_path="/tmp/x.sock", host="0.0.0.0")
+
+
+async def test_a_plaintext_envelope_is_never_acted_on(hosts):
+    """Invariant 2: only what the engine decrypted names its sender."""
+    hosts.b._on_message(
+        {
+            "type": "message_received",
+            "app_id": FRONT_APP_ID,
+            "encrypted": False,
+            "sender": hosts.manager_a.local_address,
+            "content": json.dumps(
+                {"op": "req", "v": 1, "id": "x", "svc": "timeofday", "m": "GET", "p": "/", "dl": int(time.time()) + 30}
+            ),
+        }
+    )
+    assert not hosts.b._tasks
+    assert hosts.provider.calls == []
+
+
+async def test_a_response_from_another_device_is_ignored(hosts):
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    hosts.a._pending["req1"] = (hosts.manager_b.local_address, future)
+    hosts.a._on_message(
+        {
+            "type": "message_received",
+            "app_id": FRONT_APP_ID,
+            "encrypted": True,
+            "sender": derive_address(list(os.urandom(32))),
+            "content": json.dumps({"op": "resp", "v": 1, "id": "req1", "s": 200}),
+        }
+    )
+    assert not future.done()
+    hosts.a._pending.pop("req1")
+
+
+@pytest.mark.parametrize("method, path, host", [("POST", "/now", None), ("PUT", "/services/timeofday", "127.0.0.1")])
+async def test_a_request_from_a_browser_page_is_refused(hosts, method, path, host):
+    """A page can reach a loopback front by DNS rebinding or a wildcard
+    route; the Origin header only a browser sends is what tells it apart."""
+    await hosts.register(hosts.b)
+    calls = len(hosts.provider.calls)
+    async with hosts.http.request(
+        method,
+        f"http://127.0.0.1:{hosts.a.port}{path}",
+        json={"callback": "http://127.0.0.1:1"},
+        headers={
+            "Host": host or host_for("timeofday", hosts.manager_b.local_address),
+            "Origin": "http://evil.example",
+        },
+    ) as reply:
+        assert (reply.status, reply.headers["X-Offline-Protocol-Error"]) == (401, "unauthorized")
+    assert len(hosts.provider.calls) == calls
+    assert hosts.a.registry.get("timeofday") is None
+
+
+@pytest.mark.parametrize("host, status", [("evil.example:8080", 400), ("localhost:1", 200), ("[::1]:1", 200), (DOMAIN, 200)])
+async def test_without_a_token_the_own_endpoints_answer_only_names_that_cannot_be_rebound(hosts, host, status):
+    async with hosts.http.get(f"http://127.0.0.1:{hosts.a.port}/health", headers={"Host": host}) as reply:
+        assert reply.status == status
+
+
+async def test_with_a_token_the_own_endpoints_answer_any_host(hosts):
+    front = await hosts.front(hosts.server_a, token=hosts.tmp_path / "front.token")
+    token = (hosts.tmp_path / "front.token").read_text().strip()
+    async with hosts.http.get(
+        f"http://127.0.0.1:{front.port}/health", headers={"Host": "front.lan:8080", "X-Offline-Protocol-Token": token}
+    ) as reply:
+        assert reply.status == 200
+
+
+@pytest.mark.parametrize("value", ["nan", "soon"])
+async def test_a_timeout_that_is_not_a_number_is_a_bad_request(hosts, value):
+    status, headers, _ = await hosts.request(
+        hosts.a, host_for("timeofday", "bob"), headers={"X-Offline-Protocol-Timeout": value}
+    )
+    assert (status, headers["X-Offline-Protocol-Error"]) == (400, "bad_request")
+
+
+async def test_an_absolute_form_target_is_a_bad_request(hosts):
+    reader, writer = await asyncio.open_connection("127.0.0.1", hosts.a.port)
+    host = host_for("timeofday", "bob")
+    writer.write(f"GET http://{host}/now HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode())
+    await writer.drain()
+    reply = await asyncio.wait_for(reader.read(), 10)
+    writer.close()
+    assert reply.startswith(b"HTTP/1.1 400"), reply[:200]
+    assert b"bad_request" in reply
+
+
+async def raw_request(port: int, target: str, host: str) -> bytes:
+    """A request line written by hand: an HTTP client normalizes the target."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(f"GET {target} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode())
+    await writer.drain()
+    reply = await asyncio.wait_for(reader.read(), 10)
+    writer.close()
+    return reply
+
+
+@pytest.mark.parametrize("target", ["/api/../now", "/api/%2e%2e/now", "/./now"])
+async def test_a_dot_segment_never_leaves(hosts, target):
+    """Joined to the callback URL, the client would normalize it to a path
+    outside the one the provider registered."""
+    await hosts.register(hosts.b)
+    reply = await raw_request(hosts.a.port, target, host_for("timeofday", "bob"))
+    assert reply.startswith(b"HTTP/1.1 400"), reply[:200]
+    assert b"bad_request" in reply
+    assert hosts.provider.calls == []
+
+
+@pytest.mark.parametrize(
+    "method, headers",
+    [("GET /x HTTP/1.1\r\nX: y", {}), ("GET", {"x-a": "v\r\nInjected: 1"}), ("GET", {"x-a": "v\x00"})],
+)
+async def test_a_request_the_http_library_refuses_is_still_answered(hosts, method, headers):
+    """aiohttp refuses these with a ValueError, not a ClientError; the
+    provider answers rather than lose the task and leave the requester
+    waiting out its deadline."""
+    await hosts.register(hosts.b)
+    envelope = Request("r1", "timeofday", method, "/now", headers, b"", int(time.time()) + 30)
+    response = await hosts.b._serve(envelope, hosts.manager_a.local_address)
+    assert (response.status, response.error) == (502, "callback_failed")
+    assert hosts.provider.calls == []
+
+
+async def test_a_request_past_the_callback_limit_is_refused_at_once(hosts):
+    await hosts.register(hosts.b)
+    hosts.b._callback_slots = asyncio.Semaphore(1)
+    await hosts.b._callback_slots.acquire()
+    started = time.monotonic()
+    status, headers, _ = await hosts.request(hosts.a, host_for("timeofday", hosts.manager_b.local_address))
+    assert (status, headers["X-Offline-Protocol-Error"]) == (502, "callback_failed")
+    assert time.monotonic() - started < 10
+    assert hosts.provider.calls == []
+    hosts.b._callback_slots.release()
+    status, _, _ = await hosts.request(hosts.a, host_for("timeofday", hosts.manager_b.local_address))
+    assert status == 201
+
+
+async def test_stopping_does_not_wait_for_a_request_in_flight(hosts):
+    front = await hosts.front(hosts.server_a)
+    nobody = derive_address(list(os.urandom(32)))
+    waiting = asyncio.ensure_future(
+        hosts.request(front, host_for("timeofday", nobody), headers={"X-Offline-Protocol-Timeout": "300"})
+    )
+    await until(lambda: bool(front._pending))
+    started = time.monotonic()
+    await front.stop()
+    assert time.monotonic() - started < 5
+    status, headers, _ = await asyncio.wait_for(waiting, 5)
+    assert (status, headers["X-Offline-Protocol-Error"]) == (503, "not_connected")
+
+
+async def test_stopping_does_not_wait_for_a_local_callback(hosts):
+    """A request to this device's own address waits on the callback itself,
+    not on a pending answer: closing the client session is what ends it."""
+    front = await hosts.front(hosts.server_a)
+    await hosts.register(front)
+    waiting = asyncio.ensure_future(
+        hosts.request(
+            front,
+            host_for("timeofday", hosts.manager_a.local_address),
+            "/slow",
+            method="GET",
+            body=None,
+            headers={"X-Offline-Protocol-Timeout": "300"},
+        )
+    )
+    await until(lambda: hosts.provider.slow_started == 1)  # the callback is running
+    started = time.monotonic()
+    await front.stop()
+    assert time.monotonic() - started < 3
+    status, headers, _ = await asyncio.wait_for(waiting, 3)
+    assert (status, headers["X-Offline-Protocol-Error"]) == (502, "callback_failed")
+
+
+async def test_a_header_value_that_is_not_utf8_is_a_bad_request(hosts):
+    """HTTP allows such a byte and the server hands it over as a lone
+    surrogate; without the check the front answered a bare 500."""
+    await hosts.register(hosts.b)
+    reader, writer = await asyncio.open_connection("127.0.0.1", hosts.a.port)
+    host = host_for("timeofday", "bob")
+    writer.write(f"GET /now HTTP/1.1\r\nHost: {host}\r\nX-Note: caf".encode() + b"\xe9\r\nConnection: close\r\n\r\n")
+    await writer.drain()
+    reply = await asyncio.wait_for(reader.read(), 10)
+    writer.close()
+    assert reply.startswith(b"HTTP/1.1 400"), reply[:200]
+    assert b"bad_request" in reply
+    assert hosts.provider.calls == []
+
+
+async def test_a_callback_header_that_is_not_utf8_is_a_callback_failure(hosts, caplog):
+    """A callback is any HTTP server; one that answers such a byte is
+    answered ``callback_failed``, not logged as a refused request."""
+
+    async def answer(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(b"HTTP/1.1 200 OK\r\nX-Note: caf\xe9\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        await writer.drain()
+        writer.close()
+
+    callback = await asyncio.start_server(answer, "127.0.0.1", 0)
+    try:
+        port = callback.sockets[0].getsockname()[1]
+        await hosts.register(hosts.b, callback=f"http://127.0.0.1:{port}")
+        status, headers, _ = await hosts.request(hosts.a, host_for("timeofday", "bob"), method="GET", body=None)
+        assert (status, headers["X-Offline-Protocol-Error"]) == (502, "callback_failed")
+        # Named for what it is, not swallowed by the catch-all with a traceback.
+        assert any("not UTF-8" in r.getMessage() for r in caplog.records)
+        assert not any(r.levelname == "ERROR" for r in caplog.records if r.name == front_module.__name__)
+    finally:
+        callback.close()
+        await callback.wait_closed()
+
+
+async def _answer_raw(hosts, response: bytes):
+    """Registers a callback that writes ``response`` verbatim and calls it."""
+
+    async def answer(reader, writer):
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(response)
+        await writer.drain()
+        writer.close()
+
+    callback = await asyncio.start_server(answer, "127.0.0.1", 0)
+    try:
+        port = callback.sockets[0].getsockname()[1]
+        await hosts.register(hosts.b, callback=f"http://127.0.0.1:{port}")
+        # A short deadline: before the fix the requester waited all of it.
+        return await hosts.request(
+            hosts.a,
+            host_for("timeofday", "bob"),
+            method="GET",
+            body=None,
+            headers={"X-Offline-Protocol-Timeout": "1"},
+        )
+    finally:
+        callback.close()
+        await callback.wait_closed()
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        # The HTTP client accepts a status past 599; the requester refuses it.
+        b"HTTP/1.1 600 Nope\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+        # The HTTP client accepts a control character in a response header
+        # value, though the server refuses one in a request.
+        b"HTTP/1.1 200 OK\r\nX-Note: a\x01b\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+    ],
+    ids=["status-600", "control-character"],
+)
+async def test_a_callback_answer_the_requester_would_refuse_is_a_callback_failure(hosts, caplog, response):
+    """The provider sent it, the requester dropped it as malformed and
+    answered ``deadline_exceeded`` once the whole deadline had passed."""
+    status, headers, _ = await _answer_raw(hosts, response)
+    assert (status, headers["X-Offline-Protocol-Error"]) == (502, "callback_failed")
+    assert any("what a requester refuses" in r.getMessage() for r in caplog.records)
+
+
+async def test_stopping_ends_an_open_browse(hosts):
+    front = await hosts.front(hosts.server_a)
+    stream = await hosts.http.get(f"http://127.0.0.1:{front.port}/browse/timeofday", headers={"Host": DOMAIN})
+    try:
+        await until(lambda: "timeofday" in front._browses)
+        started = time.monotonic()
+        await front.stop()
+        assert time.monotonic() - started < 5
+        await asyncio.wait_for(stream.read(), 5)
+        assert stream.content.at_eof()
+    finally:
+        stream.release()
+
+
+async def test_the_last_browser_leaving_forgets_the_service(hosts, monkeypatch):
+    """Otherwise the next browser is replayed entries nothing refreshed."""
+    monkeypatch.setattr(front_module, "BROWSE_KEEPALIVE_SECONDS", 0.1)
+    stream = await hosts.http.get(f"http://127.0.0.1:{hosts.a.port}/browse/timeofday", headers={"Host": DOMAIN})
+    await until(lambda: "timeofday" in hosts.a._browses)
+    stream.close()
+    await until(lambda: "timeofday" not in hosts.a._browses, 5)
+
+
+async def test_registering_without_a_connection_is_a_503(hosts):
+    await hosts.b.client.stop()
+    async with hosts.http.put(
+        f"http://127.0.0.1:{hosts.b.port}/services/timeofday", json={"callback": hosts.provider.url}
+    ) as reply:
+        assert (reply.status, reply.headers["X-Offline-Protocol-Error"]) == (503, "not_connected")
+    assert hosts.b.registry.get("timeofday") is None
+
+
+async def test_a_registration_over_the_limit_says_so(hosts):
+    doc = {"callback": hosts.provider.url, "capabilities": {"k": "v" * 9000}}
+    async with hosts.http.put(f"http://127.0.0.1:{hosts.b.port}/services/timeofday", json=doc) as reply:
+        assert reply.status == 400
+        assert "at most" in (await reply.json())["detail"]
+
+
+class _Sends:
+    """``send_message`` without an engine, emitting a failure event inside
+    the call or after it."""
+
+    def __init__(self, front: HttpFront, kind: str, *, inside: bool) -> None:
+        self.front, self.kind, self.inside = front, kind, inside
+
+    async def __call__(self, method, params=None):
+        assert method == "send_message"
+        event = {"type": self.kind, "message_id": "m1"}
+        if self.inside:
+            self.front._on_event(event)
+        else:
+            asyncio.get_running_loop().call_later(0.05, self.front._on_event, event)
+        return "m1"
+
+
+@pytest.mark.parametrize(
+    "kind, token, inside",
+    [
+        ("message_failed", "send_failed", True),
+        ("message_undeliverable", "recipient_unreachable", True),
+        ("message_failed", "send_failed", False),
+        ("message_undeliverable", "recipient_unreachable", False),
+    ],
+)
+async def test_a_failure_event_ends_the_wait_whenever_it_arrives(tmp_path, kind, token, inside):
+    """Inside the call, the event reaches the front before the send's
+    result names the message, and is kept until it does."""
+    front = HttpFront(socket_path=tmp_path / "api.sock", port=0)
+    front.client.call = _Sends(front, kind, inside=inside)
+    envelope = Request("r1", "timeofday", "GET", "/", {}, b"", int(time.time()) + 30)
+    started = time.monotonic()
+    with pytest.raises(front_module._Failed) as failure:
+        await front._send_and_wait(envelope, derive_address(list(os.urandom(32))), 10)
+    assert failure.value.token == token
+    assert time.monotonic() - started < 5
+    assert not front._pending and not front._by_message and not front._early

@@ -127,6 +127,16 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   // peer is later accepted into contacts, its hasSession can reflect a session
   // that already converged before the accept (needed for group creation).
   const sessionPeersRef = useRef<Set<string>>(new Set());
+  // This device's mesh address. Group member lists from the SDK name every
+  // member by address, while this app names itself by its profile id.
+  const localAddressRef = useRef<string | null>(null);
+  // Groups whose record was read from the SDK in this process, and the reads
+  // in flight ('again' when a membership change arrived during the read).
+  const hydratedGroupsRef = useRef<Set<string>>(new Set());
+  const groupReadsRef = useRef<Map<string, 'running' | 'again'>>(new Map());
+  // Groups this device left or was removed from, so a read still in flight
+  // when that happened cannot put the group back.
+  const leftGroupsRef = useRef<Set<string>>(new Set());
 
   // Keep refs in sync
   useEffect(() => { contactsRef.current = contacts; }, [contacts]);
@@ -173,6 +183,51 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     }
     return JSON.stringify(obj);
   };
+
+  // ─── Group records ───────────────────────────────────────
+
+  // Groups live in this screen's memory only, and no event carries a group's
+  // name and full member list: a message carries neither, and an invitee hears
+  // only the add that named it. So after a relaunch, or on joining, a group
+  // read as "Group" with one member while the SDK held all of them. The SDK's
+  // own record is the source of truth: read it, and read it again whenever
+  // membership changes.
+  const hydrateGroup = useCallback(async (groupId: string) => {
+    const reads = groupReadsRef.current;
+    if (reads.has(groupId)) {
+      reads.set(groupId, 'again');
+      return;
+    }
+    reads.set(groupId, 'running');
+    try {
+      do {
+        reads.set(groupId, 'running');
+        const proto = protocolRef.current;
+        if (!proto) {return;}
+        const info = await proto.meshGetGroupInfo(groupId);
+        if (!info || leftGroupsRef.current.has(groupId)) {continue;}
+        hydratedGroupsRef.current.add(groupId);
+        const self = localAddressRef.current;
+        const members = info.memberIds.map(m => (m === self ? userIdRef.current : m));
+        setGroups(prev => {
+          const next = new Map(prev);
+          const existing = next.get(groupId);
+          next.set(groupId, {
+            id: groupId,
+            name: info.groupName || existing?.name || 'Group',
+            members,
+            roles: existing?.roles || {},
+            messages: existing?.messages || [],
+          });
+          return next;
+        });
+      } while (reads.get(groupId) === 'again');
+    } catch (err) {
+      console.warn(`[Groups] could not read group ${groupId}:`, err);
+    } finally {
+      reads.delete(groupId);
+    }
+  }, []);
 
   // ─── Event Handlers ──────────────────────────────────────
 
@@ -434,6 +489,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         const groupId = event.groupId || event.group_id;
         const groupName = event.groupName || event.group_name || event.name || 'Group';
         if (!groupId) {break;}
+        hydrateGroup(groupId);
         setGroups(prev => {
           const next = new Map(prev);
           if (!next.has(groupId)) {
@@ -460,6 +516,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         if (blockedUsersRef.current.has(senderId)) {break;}
         if (processedMessagesRef.current.has(msgId)) {break;}
         processedMessagesRef.current.add(msgId);
+        if (!hydratedGroupsRef.current.has(groupId)) {hydrateGroup(groupId);}
 
         const chatMsg: ChatMessage = {
           id: msgId,
@@ -517,6 +574,10 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         const addedBy = event.addedBy || event.added_by;
         const groupName = event.groupName || event.group_name || null;
         if (!groupId || !memberId) {break;}
+        if (memberId === userIdRef.current || memberId === localAddressRef.current) {
+          leftGroupsRef.current.delete(groupId);
+        }
+        hydrateGroup(groupId);
         setGroups(prev => {
           const next = new Map(prev);
           const group = next.get(groupId);
@@ -555,9 +616,15 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         const groupId = event.groupId || event.group_id;
         const memberId = event.memberId || event.member_id || event.userId || event.user_id;
         if (!groupId || !memberId) {break;}
+        const removedSelf = memberId === userIdRef.current || memberId === localAddressRef.current;
+        if (removedSelf) {
+          leftGroupsRef.current.add(groupId);
+        } else {
+          hydrateGroup(groupId);
+        }
         setGroups(prev => {
           const next = new Map(prev);
-          if (memberId === userIdRef.current) {
+          if (removedSelf) {
             next.delete(groupId);
           } else {
             const group = next.get(groupId);
@@ -621,6 +688,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
 
       case 'user_groups': {
         const groupSummaries: Array<{group_id: string; name: string}> = event.groups || [];
+        for (const g of groupSummaries) {hydrateGroup(g.group_id);}
         setGroups(prev => {
           const next = new Map(prev);
           for (const g of groupSummaries) {
@@ -834,7 +902,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
       default:
         break;
     }
-  }, []);
+  }, [hydrateGroup]);
 
   // ─── Initialize Protocol ─────────────────────────────────
 
@@ -857,6 +925,14 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     // Start protocol
     await proto.start();
     setIsStarted(true);
+
+    try {
+      localAddressRef.current = await proto.localAddress();
+      const groupIds = await proto.meshListGroups();
+      for (const groupId of groupIds) {hydrateGroup(groupId);}
+    } catch (err) {
+      console.warn('[Groups] could not list groups at start:', err);
+    }
 
     // Initialize mesh services
     const svc = new MeshServices();
@@ -882,7 +958,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         console.warn('[ProtocolContext] enableTelemetry failed:', err);
       }
     }
-  }, [handleEvent]);
+  }, [handleEvent, hydrateGroup]);
 
   // ─── Presence Broadcasting ───────────────────────────────
 
@@ -910,30 +986,31 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     return () => clearInterval(interval);
   }, [isStarted]);
 
-  // ─── Stale neighbor cleanup ──────────────────────────────
+  // ─── Presence and typing expiry ──────────────────────────
 
   useEffect(() => {
     if (!isStarted) {return;}
 
     const interval = setInterval(() => {
       const now = Date.now();
-      setNeighbors(prev => {
-        let changed = false;
-        const next = new Map(prev);
-        for (const [peerId, neighbor] of next) {
-          if (now - neighbor.discoveredAt > NEARBY_THRESHOLD_MS * 2) {
-            next.delete(peerId);
-            changed = true;
-          }
-        }
-        return changed ? next : prev;
-      });
+      // Neighbours are not aged out here. `neighbor_discovered` and
+      // `neighbor_lost` are the link's up and down edges: the engine reports
+      // one loss per departure, including the radio going off, and nothing in
+      // between while the link holds. A clock here dropped a peer whose only
+      // link was the one it opened to us a minute earlier, so People showed
+      // nobody while messages crossed that link both ways.
 
+      // A contact is nearby while it is a neighbour. Otherwise "nearby" came
+      // from traffic or a presence report, and lapses with time.
       setContacts(prev => {
         let changed = false;
         const next = new Map(prev);
         for (const [peerId, contact] of next) {
-          if (contact.isNearby && now - contact.lastSeen > NEARBY_THRESHOLD_MS) {
+          if (
+            contact.isNearby &&
+            !neighborsRef.current.has(peerId) &&
+            now - contact.lastSeen > NEARBY_THRESHOLD_MS
+          ) {
             next.set(peerId, {...contact, isNearby: false});
             changed = true;
           }
@@ -1156,6 +1233,7 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
   const leaveGroupAction = useCallback(async (groupId: string) => {
     if (!protocolRef.current) {return;}
     await protocolRef.current.meshLeaveGroup(groupId);
+    leftGroupsRef.current.add(groupId);
     setGroups(prev => {
       const next = new Map(prev);
       next.delete(groupId);

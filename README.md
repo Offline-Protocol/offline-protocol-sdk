@@ -21,7 +21,7 @@
 - **Reliability**: ACKs, retries, and deduplication built-in
 - **Cross-Platform Bindings**: React Native for iOS/Android and Python for macOS/Linux/Windows, plus an early native Swift package and Android library
 
-> **What you must implement:** the Rust crates are I/O-free protocol engines for everything that moves a message. They queue, route, encrypt, and select transports, but never open a socket or touch a radio for the protocol itself. A *platform bridge* does the actual I/O: it drains each transport's outbound queue, performs the send, reports the outcome, and injects inbound bytes. The React Native binding ships these bridges for iOS and Android (BLE, WiFi Direct, Internet, Nostr, Reticulum), and the Python binding ships BLE and Internet bridges. If you consume the Rust crates directly via `cargo add`, you write the bridge yourself; the contract is documented in the [`offline-protocol-transport`](crates/offline-protocol-transport/src/lib.rs) crate docs. The one socket the crates do open is the [telemetry pipe](docs/telemetry.md)'s HTTPS upload, and only once an app enables telemetry with a key.
+> **What you must implement:** the Rust crates are I/O-free protocol engines for everything that moves a message. They queue, route, encrypt, and select transports, but never open a socket or touch a radio for the protocol itself. A *platform bridge* does the actual I/O: it drains each transport's outbound queue, performs the send, reports the outcome, and injects inbound bytes. The React Native binding ships these bridges for iOS and Android (BLE, WiFi Direct, Internet, Nostr, Reticulum), and the Python binding ships BLE, Internet, LAN peer-stream (the WiFi Direct slot) and gateway client (the Reticulum slot) bridges. If you consume the Rust crates directly via `cargo add`, you write the bridge yourself; the contract is documented in the [`offline-protocol-transport`](crates/offline-protocol-transport/src/lib.rs) crate docs. The one socket the crates do open is the [telemetry pipe](docs/telemetry.md)'s HTTPS upload, and only once an app enables telemetry with a key.
 
 ## Install
 
@@ -48,7 +48,7 @@ source](#build-python-desktop-bindings) instead. The import name is
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/Offline-Protocol/offline-protocol-swift.git", from: "0.28.0")
+    .package(url: "https://github.com/Offline-Protocol/offline-protocol-swift.git", from: "0.29.0")
 ],
 targets: [
     .target(name: "YourApp", dependencies: [
@@ -96,10 +96,9 @@ const protocol = new OfflineProtocol({
   // Encryption is enabled by default!
 });
 
+// start() also initializes MLS with the platform's secure storage,
+// unless encryption.enabled is false
 await protocol.start();
-
-// Initialize MLS encryption (required once)
-await protocol.initializeMlsWithSecureStorage();
 
 // Messages are automatically encrypted!
 const messageId = await protocol.sendMessage({
@@ -238,8 +237,9 @@ The SDK consists of modular Rust crates:
 - **offline-protocol-services** - Service discovery and request/response over mesh
 - **offline-protocol-data** - Replicated documents (CRDT) that merge after offline edits
 - **offline-protocol-leaf** - A constrained device (lock, sensor) as a never-committing MLS member, for bare metal
+- **offline-protocol-telemetry-wire** - The telemetry pipe's batch envelope and event payloads, shared with the ingest
 - **offline-protocol** - Main protocol engine with auto-encryption
-- **offline-protocol-uniffi** - UniFFI bindings for Swift/Kotlin
+- **offline-protocol-uniffi** - UniFFI bindings for Swift/Kotlin/Python
 
 ## DORS: Dynamic Offline Relay Switch
 

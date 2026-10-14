@@ -1143,10 +1143,10 @@ impl TransportManager {
     /// by other devices.
     ///
     /// This exists because **a send returning `Ok` is not evidence of
-    /// reachability**. Only BLE refuses a recipient it holds no link to; Wi-Fi
-    /// Direct and Reticulum enqueue for any recipient and report success, so a
-    /// frame handed to them for someone out of range is queued for a link that
-    /// will never drain — reported as sent, silently swallowed. Anything that
+    /// reachability**. BLE and Wi-Fi Direct refuse a recipient they hold no
+    /// link to, but the internet transport and Reticulum enqueue for any
+    /// recipient and report success, so a frame handed to them for someone
+    /// neither can reach is reported as sent and never arrives. Anything that
     /// decides "the mesh has to carry this" from a send failure therefore never
     /// fires on a device where one of those carriers is up. Asking this instead
     /// keeps that decision on facts we can check.
@@ -1214,9 +1214,9 @@ impl TransportManager {
     /// The narrower question [`Self::can_reach_without_carrying`] answers across
     /// every carrier, asked of one. It exists for the same reason: a transport
     /// returning `Ok` is not evidence the frame can arrive. A **mesh** carrier
-    /// can only address a peer it holds a live link to, and Wi-Fi Direct
-    /// enqueues for any recipient regardless — so a frame handed to it for
-    /// someone several hops away is queued for a link that never drains.
+    /// can only address a peer it holds a live link to: BLE and Wi-Fi Direct
+    /// both refuse a send to anyone else, and asking first lets a caller choose
+    /// another route before it spends a send, rather than after the refusal.
     /// **Infrastructure** carriers do their own routing, so for them the answer
     /// is yes whenever they are available.
     ///

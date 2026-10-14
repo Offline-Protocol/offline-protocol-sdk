@@ -15,14 +15,16 @@ class GroupOwnerRedialTest {
 
     private fun next(
         ended: String = "192.168.49.1",
-        proved: Boolean = false,
+        carried: Boolean = false,
+        held: Boolean = false,
         running: Boolean = true,
         isGroupOwner: Boolean = false,
         owner: String? = "192.168.49.1",
         currentDelayMs: Long = 8_000,
     ) = GroupOwnerRedial.next(
         ended = ended,
-        proved = proved,
+        carried = carried,
+        held = held,
         running = running,
         isGroupOwner = isGroupOwner,
         owner = owner,
@@ -42,8 +44,20 @@ class GroupOwnerRedialTest {
     }
 
     @Test
-    fun `a stream that proved its peer starts the ladder over`() {
-        assertEquals(GroupOwnerRedial.Plan("192.168.49.1", 1_000, 2_000), next(proved = true))
+    fun `a stream that carried its peer starts the ladder over`() {
+        assertEquals(GroupOwnerRedial.Plan("192.168.49.1", 1_000, 2_000), next(carried = true))
+    }
+
+    @Test
+    fun `a stream the owner proved but refused climbs the ladder`() {
+        // The owner's stale stream wins there: a reset here redialed every second.
+        assertEquals(GroupOwnerRedial.Plan("192.168.49.1", 8_000, 16_000), next(carried = false))
+    }
+
+    @Test
+    fun `no redial while another stream holds the owner's address`() {
+        assertNull(next(held = true))
+        assertNull(next(held = true, carried = true))
     }
 
     @Test

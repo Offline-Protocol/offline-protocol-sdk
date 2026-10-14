@@ -1,0 +1,67 @@
+# Two boxes on one machine, each running the service with the HTTP front,
+# and two programs that know nothing of the SDK: the provider on box B and
+# the client on box A. Run from this directory:
+#
+#   printf 'BOX_A_STORE_KEY=%s\nBOX_B_STORE_KEY=%s\n' \
+#       "$(openssl rand -hex 32)" "$(openssl rand -hex 32)" > .env   # once; keep it
+#   docker compose up -d --build
+#   docker compose logs provider          # {"registered": ..., "address": "off1..."}
+#   docker compose run --rm client off1...   # box B's address from that line
+#
+# The front listens on each box's loopback, so an application reaches it by
+# sharing the box's network namespace (`network_mode: service:<box>`), the
+# way the provider and the client do here. That also means every program
+# sharing that namespace can reach the front and the provider's callback.
+#
+# The image installs the released package from PyPI, which has the HTTP
+# front from 0.29.0. To run a checkout instead, see
+# bindings/python/docker/README.md, "Building from a checkout".
+services:
+  box-a:
+    build: ../../bindings/python/docker
+    image: offline-protocol-service:http-demo
+    hostname: box-a
+    environment:
+      OFFLINE_PROTOCOL_STORE_KEY: ${BOX_A_STORE_KEY:?set BOX_A_STORE_KEY in .env}
+      OP_LAN: "1"
+    volumes:
+      - data-a:/var/lib/offline-protocol
+    networks: [lan]
+
+  box-b:
+    image: offline-protocol-service:http-demo
+    hostname: box-b
+    depends_on: [box-a]   # built once, by box-a
+    environment:
+      OFFLINE_PROTOCOL_STORE_KEY: ${BOX_B_STORE_KEY:?set BOX_B_STORE_KEY in .env}
+      OP_LAN: "1"
+    volumes:
+      - data-b:/var/lib/offline-protocol
+    networks: [lan]
+
+  # Registers `timeofday` with box B's front and serves it on box B's
+  # loopback. Add `--allow off1...` (box A's address) to serve only box A.
+  provider:
+    image: offline-protocol-service:http-demo
+    network_mode: service:box-b
+    depends_on: [box-b]
+    entrypoint: ["python3", "/demo/provider.py", "--front", "http://127.0.0.1:8080", "--port", "9000", "--wait", "60"]
+    volumes:
+      - ./:/demo:ro
+
+  # One call through box A's front: `docker compose run --rm client ADDRESS`.
+  client:
+    image: offline-protocol-service:http-demo
+    network_mode: service:box-a
+    depends_on: [box-a]
+    profiles: [client]
+    entrypoint: ["python3", "/demo/client.py", "--front", "http://127.0.0.1:8080"]
+    volumes:
+      - ./:/demo:ro
+
+networks:
+  lan: {}
+
+volumes:
+  data-a:
+  data-b:

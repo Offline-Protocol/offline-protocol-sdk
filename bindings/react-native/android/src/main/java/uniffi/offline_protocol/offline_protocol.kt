@@ -8978,6 +8978,8 @@ data class ProtocolConfig (
     var `dataEnabled`: kotlin.Boolean = true 
     , 
     var `controlFreshnessEnforced`: kotlin.Boolean = true 
+    , 
+    var `encryptServiceMessages`: kotlin.Boolean = true 
     
 ){
     
@@ -9026,6 +9028,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterOptionalTypeCustodyConfig.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -9063,7 +9066,8 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterOptionalTypeMeshRelayConfig.allocationSize(value.`meshRelay`) +
             FfiConverterOptionalTypeCustodyConfig.allocationSize(value.`custody`) +
             FfiConverterBoolean.allocationSize(value.`dataEnabled`) +
-            FfiConverterBoolean.allocationSize(value.`controlFreshnessEnforced`)
+            FfiConverterBoolean.allocationSize(value.`controlFreshnessEnforced`) +
+            FfiConverterBoolean.allocationSize(value.`encryptServiceMessages`)
     )
 
     override fun write(value: ProtocolConfig, buf: ByteBuffer) {
@@ -9101,6 +9105,7 @@ public object FfiConverterTypeProtocolConfig: FfiConverterRustBuffer<ProtocolCon
             FfiConverterOptionalTypeCustodyConfig.write(value.`custody`, buf)
             FfiConverterBoolean.write(value.`dataEnabled`, buf)
             FfiConverterBoolean.write(value.`controlFreshnessEnforced`, buf)
+            FfiConverterBoolean.write(value.`encryptServiceMessages`, buf)
     }
 }
 

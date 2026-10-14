@@ -20,7 +20,7 @@ import { OfflineProtocol, MessagePriority } from '@offline-protocol/mesh-sdk';
 
 const protocol = new OfflineProtocol({
   appId: 'my-app',
-  userId: 'current-user-id',
+  profile: 'default',
 });
 
 await protocol.start();
@@ -30,7 +30,7 @@ await protocol.start();
 
 ```typescript
 const messageId = await protocol.sendMessage({
-  recipient: 'friend-user-id',
+  recipient: peerAddress,  // the peer's off1… address; a username reaches nobody
   content: 'Hello!',
   priority: MessagePriority.Medium,
 });
@@ -103,7 +103,7 @@ This produces `liboffline_protocol_uniffi.so`.
 ### 2. Add to Android Project
 
 Copy it into `app/src/main/jniLibs/arm64-v8a/` as `libuniffi_offline_protocol.so` (the name
-UniFFI's loader expects). The `scripts/build-uniffi-android.sh` helper builds every ABI and
+UniFFI's loader expects). The `bindings/react-native/scripts/build-uniffi-android.sh` helper builds every ABI and
 renames automatically.
 
 ### 3. Use in Kotlin
@@ -116,7 +116,7 @@ val protocol = OfflineProtocol(config)
 protocol.start()
 
 val messageId = protocol.sendMessage(
-    recipient = "friend",
+    recipient = peerAddress, // the peer's off1… address
     content = "Hello!",
     priority = MessagePriority.HIGH,
     replyToMsg = null,
@@ -144,8 +144,8 @@ This produces `liboffline_protocol_uniffi.a`.
 
 ### 2. Add to Xcode
 
-Add `liboffline_protocol_uniffi.a` (or the device/simulator slices from
-`scripts/build-uniffi-ios.sh`) and the generated `offline_protocol.swift` to your project.
+Add `liboffline_protocol_uniffi.a` (or the device and simulator XCFramework that
+`bindings/react-native/scripts/build-uniffi-ios.sh` builds) and the generated `offline_protocol.swift` to your project.
 
 ### 3. Use in Swift
 
@@ -155,7 +155,7 @@ let mesh = try OfflineProtocol(config: config)
 try mesh.start()
 
 let messageId = try mesh.sendMessage(
-    recipient: "friend",
+    recipient: peerAddress, // the peer's off1… address
     content: "Hello!",
     priority: .high,
     replyToMsg: nil

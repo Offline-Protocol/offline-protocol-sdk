@@ -436,6 +436,8 @@ pub(crate) mod tests {
                 sender: String::new(),
                 code: crate::events::DecryptionFailureCode::Unknown,
                 reason: String::new(),
+                sealed_at_ms: None,
+                session_established_at_ms: None,
             },
             Event::TransportSwitched {
                 from: None,
@@ -725,6 +727,7 @@ pub(crate) mod tests {
                 method: String::new(),
                 body: String::new(),
                 sender: String::new(),
+                encrypted: false,
             },
             Event::ServiceResponseReceived {
                 request_id: String::new(),
@@ -732,6 +735,7 @@ pub(crate) mod tests {
                 status: String::new(),
                 body: String::new(),
                 provider_peer_id: String::new(),
+                encrypted: false,
             },
             Event::PresenceUpdated {
                 peer_id: String::new(),

@@ -172,6 +172,32 @@ class TestProtocolManagerTransports:
         assert pm.ble is not None
         assert pm.ble_peripheral is not None
 
+    def test_each_ble_role_asks_the_other_before_reporting_a_peer_lost(self):
+        """The central's client link going does not drop a peer whose central
+        is bound on our peripheral, and the other way round. The probes are
+        weak, so the two roles do not keep each other, and the core, alive."""
+        import weakref
+
+        config = _make_config(ble_enabled=True)
+        from offline_protocol_sdk.protocol_manager import ProtocolManager
+
+        pm = ProtocolManager(config)
+        pm.ble._device_id_to_addr["off1peer"] = "AA:01"
+        pm.ble._clients["AA:01"] = MagicMock(is_connected=True)
+        assert pm.ble_peripheral.peer_linked_elsewhere("off1peer")
+        assert not pm.ble_peripheral.peer_linked_elsewhere("off1other")
+
+        pm.ble_peripheral._connected_centrals["C1"] = 1.0
+        pm.ble_peripheral._central_to_user_id["C1"] = "off1peer"
+        assert pm.ble.peer_linked_elsewhere("off1peer")
+        assert not pm.ble.peer_linked_elsewhere("off1other")
+
+        peripheral = weakref.ref(pm.ble_peripheral)
+        probe = pm.ble.peer_linked_elsewhere
+        pm.ble_peripheral = None
+        assert peripheral() is None, "the central's probe must not keep the peripheral alive"
+        assert not probe("off1peer")
+
     def test_ble_none_when_disabled(self):
         config = _make_config(ble_enabled=False)
         from offline_protocol_sdk.protocol_manager import ProtocolManager

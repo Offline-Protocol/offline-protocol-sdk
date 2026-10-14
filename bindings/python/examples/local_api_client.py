@@ -22,7 +22,7 @@ import itertools
 import json
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from websockets.asyncio.client import connect, unix_connect
 from websockets.exceptions import WebSocketException
@@ -107,11 +107,33 @@ async def hello(client: Client, app_id: str, token: str | None) -> dict[str, Any
     return await client.call("hello", params)
 
 
-async def send_and_confirm(client: Client, recipient: str, content: str) -> dict[str, Any]:
-    """Sends, then waits for the terminal event naming the returned id:
-    ``message_delivered``, or ``message_undeliverable`` when the engine gives up."""
+async def send_and_confirm(
+    client: Client,
+    recipient: str,
+    content: str,
+    on_status: Callable[[dict[str, Any]], None] | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    """Sends, then waits for the event that settles the returned id:
+    ``message_delivered``, or ``message_failed`` when the engine gives up.
+
+    ``message_undeliverable`` settles nothing: the recipient is away, the
+    engine keeps the message and may say so again on every probe, and
+    delivers it when the recipient is back. Each one is handed to
+    ``on_status`` and the wait goes on."""
     message_id = await client.call("send_message", {"recipient": recipient, "content": content, "priority": "Medium"})
-    return await client.next_event(("message_delivered", "message_undeliverable"), message_id=message_id)
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        remaining = max(deadline - asyncio.get_running_loop().time(), 0.01)
+        event = await client.next_event(
+            ("message_delivered", "message_failed", "message_undeliverable"),
+            timeout=remaining,
+            message_id=message_id,
+        )
+        if event["type"] != "message_undeliverable":
+            return event
+        if on_status is not None:
+            on_status(event)
 
 
 async def edit_document(client: Client, space_id: str, doc_id: str, key: str, text: str) -> dict[str, Any]:
@@ -144,9 +166,18 @@ async def run(args: argparse.Namespace) -> int:
         client, token = await open_client(args.socket, args.tcp, args.token_file)
         greeting = await hello(client, args.app_id, token)
         print(json.dumps({"hello": greeting}))
-        await client.call("subscribe", {"types": ["message_received", "message_delivered", "message_undeliverable"]})
+        await client.call(
+            "subscribe",
+            {"types": ["message_received", "message_delivered", "message_failed", "message_undeliverable"]},
+        )
         if args.to:
-            outcome = await send_and_confirm(client, args.to, args.content)
+            outcome = await send_and_confirm(
+                client,
+                args.to,
+                args.content,
+                on_status=lambda event: print(json.dumps({"undeliverable": event}), flush=True),
+                timeout=args.deliver_timeout,
+            )
             print(json.dumps({outcome["type"].removeprefix("message_"): outcome}))
         document = await edit_document(client, args.space, args.doc, "edited_by", args.app_id)
         print(json.dumps({"document": document}))
@@ -183,6 +214,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--app-id", default="notes")
     parser.add_argument("--to", help="an off1... address to send one message to")
     parser.add_argument("--content", default="hello from the local API")
+    parser.add_argument(
+        "--deliver-timeout",
+        type=float,
+        default=30.0,
+        help="seconds to wait for the message to be delivered; a recipient that is away is waited for",
+    )
     parser.add_argument("--space", default="notes-1")
     parser.add_argument("--doc", default="todo")
     parser.add_argument("--wait", type=float, default=0, help="seconds to wait for one inbound message")

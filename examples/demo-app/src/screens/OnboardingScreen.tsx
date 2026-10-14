@@ -1,4 +1,4 @@
-import React, {useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import {
   View,
   Text,
@@ -9,7 +9,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import {SafeAreaView} from 'react-native-safe-area-context';
-import {generateUserId, generateUserName, requestBluetoothPermissions, ensureBluetoothEnabled, showPermissionDeniedAlert} from '../utils';
+import {loadUserId, loadUserName, saveUserName, generateUserName, requestBluetoothPermissions, ensureBluetoothEnabled, showPermissionDeniedAlert} from '../utils';
 import {useProtocol} from '../context/ProtocolContext';
 
 interface OnboardingScreenProps {
@@ -20,6 +20,21 @@ export function OnboardingScreen({onComplete}: OnboardingScreenProps) {
   const [name, setName] = useState(generateUserName);
   const [isLoading, setIsLoading] = useState(false);
   const {initialize} = useProtocol();
+
+  // The name chosen last time, so a relaunch comes back as the same person.
+  // Skipped once the user has typed: a late read must not overwrite them.
+  const nameEdited = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+    loadUserName().then(saved => {
+      if (saved && !cancelled && !nameEdited.current) {
+        setName(saved);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleStart = async () => {
     if (!name.trim()) {
@@ -49,7 +64,8 @@ export function OnboardingScreen({onComplete}: OnboardingScreenProps) {
       }
 
       // Initialize protocol
-      const userId = generateUserId();
+      const userId = await loadUserId();
+      await saveUserName(name.trim());
       await initialize(userId, name.trim());
       onComplete();
     } catch (error) {
@@ -61,6 +77,7 @@ export function OnboardingScreen({onComplete}: OnboardingScreenProps) {
   };
 
   const handleRandomize = () => {
+    nameEdited.current = true;
     setName(generateUserName());
   };
 
@@ -79,7 +96,10 @@ export function OnboardingScreen({onComplete}: OnboardingScreenProps) {
             <TextInput
               style={styles.input}
               value={name}
-              onChangeText={setName}
+              onChangeText={text => {
+                nameEdited.current = true;
+                setName(text);
+              }}
               placeholder="Enter your name"
               maxLength={20}
               autoCapitalize="words"

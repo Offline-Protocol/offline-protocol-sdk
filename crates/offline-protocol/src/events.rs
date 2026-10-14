@@ -736,6 +736,17 @@ pub enum Event {
         code: DecryptionFailureCode,
         /// Clear failure reason for application handling/logging.
         reason: String,
+        /// When the sender sealed the frame (sender clock, ms), read from the
+        /// cleartext envelope. Unauthenticated: a hint for local heuristics,
+        /// never for security decisions. `None` when the failure is not a 1:1
+        /// decrypt attempt (pending-queue drop, unparseable envelope, group).
+        sealed_at_ms: Option<u64>,
+        /// When this device's current session with `sender` was created or
+        /// adopted (local clock, ms). `None` when there is no session, or it
+        /// was established by an SDK that did not record the time. A frame
+        /// sealed before this cannot have been sealed under this session, so
+        /// its failure says nothing about whether the two sides agree now.
+        session_established_at_ms: Option<u64>,
     },
 
     /// Transport was switched by DORS.
@@ -1656,6 +1667,12 @@ pub enum Event {
         body: String,
         /// Peer user ID of the requester.
         sender: String,
+        /// Whether the request arrived sealed inside the 1:1 MLS session with
+        /// `sender`, so no device that carried it could read the body and the
+        /// session authenticated `sender`. `false` means it arrived as signed
+        /// plaintext, readable by every hop (threat model R9).
+        #[serde(default)]
+        encrypted: bool,
     },
 
     /// A response to a service request was received.
@@ -1670,6 +1687,11 @@ pub enum Event {
         body: String,
         /// Peer user ID of the provider.
         provider_peer_id: String,
+        /// Whether the response arrived sealed inside the 1:1 MLS session
+        /// with the provider. `false` means it arrived as signed plaintext,
+        /// readable by every hop (threat model R9).
+        #[serde(default)]
+        encrypted: bool,
     },
 
     // --- Presence, typing, and read receipts ---
@@ -2025,6 +2047,29 @@ impl Event {
             sender,
             code,
             reason,
+            sealed_at_ms: None,
+            session_established_at_ms: None,
+        }
+    }
+
+    /// Creates a MessageDecryptionFailed event for a failed 1:1 decrypt,
+    /// carrying the frame's seal time and the current session's
+    /// establishment time (see the variant's fields).
+    pub fn message_decryption_failed_for_frame(
+        message_id: MessageId,
+        sender: String,
+        code: DecryptionFailureCode,
+        reason: String,
+        sealed_at_ms: u64,
+        session_established_at_ms: Option<u64>,
+    ) -> Self {
+        Self::MessageDecryptionFailed {
+            message_id: message_id.as_str(),
+            sender,
+            code,
+            reason,
+            sealed_at_ms: Some(sealed_at_ms),
+            session_established_at_ms,
         }
     }
 
@@ -2749,7 +2794,8 @@ impl Event {
         }
     }
 
-    /// Creates a ServiceRequestReceived event.
+    /// Creates a ServiceRequestReceived event for a request that arrived as
+    /// signed plaintext (`encrypted: false`).
     pub fn service_request_received(
         request_id: String,
         service_id: String,
@@ -2763,10 +2809,12 @@ impl Event {
             method,
             body,
             sender,
+            encrypted: false,
         }
     }
 
-    /// Creates a ServiceResponseReceived event.
+    /// Creates a ServiceResponseReceived event for a response that arrived as
+    /// signed plaintext (`encrypted: false`).
     pub fn service_response_received(
         request_id: String,
         service_id: String,
@@ -2780,6 +2828,7 @@ impl Event {
             status,
             body,
             provider_peer_id,
+            encrypted: false,
         }
     }
 
@@ -3006,6 +3055,9 @@ impl From<ServiceEvent> for Event {
                 method,
                 body,
                 sender,
+                // The service layer cannot know; the engine sets it for a
+                // frame that arrived sealed (`handle_service_message`).
+                encrypted: false,
             },
             ServiceEvent::ServiceResponseReceived {
                 request_id,
@@ -3019,6 +3071,7 @@ impl From<ServiceEvent> for Event {
                 status,
                 body,
                 provider_peer_id,
+                encrypted: false,
             },
         }
     }
@@ -3111,12 +3164,16 @@ impl fmt::Debug for Event {
                 sender: _,
                 code,
                 reason,
+                sealed_at_ms,
+                session_established_at_ms,
             } => f
                 .debug_struct("MessageDecryptionFailed")
                 .field("message_id", message_id)
                 .field("sender", &"[REDACTED]")
                 .field("code", code)
                 .field("reason", reason)
+                .field("sealed_at_ms", sealed_at_ms)
+                .field("session_established_at_ms", session_established_at_ms)
                 .finish(),
             Self::TransportSwitched { from, to, reason } => f
                 .debug_struct("TransportSwitched")
@@ -3470,6 +3527,7 @@ impl fmt::Debug for Event {
                 method,
                 body,
                 sender: _,
+                encrypted,
             } => f
                 .debug_struct("ServiceRequestReceived")
                 .field("request_id", request_id)
@@ -3477,6 +3535,7 @@ impl fmt::Debug for Event {
                 .field("method", method)
                 .field("body", &format!("[REDACTED {} bytes]", body.len()))
                 .field("sender", &"[REDACTED]")
+                .field("encrypted", encrypted)
                 .finish(),
             Self::ServiceResponseReceived {
                 request_id,
@@ -3484,6 +3543,7 @@ impl fmt::Debug for Event {
                 status,
                 body,
                 provider_peer_id: _,
+                encrypted,
             } => f
                 .debug_struct("ServiceResponseReceived")
                 .field("request_id", request_id)
@@ -3491,6 +3551,7 @@ impl fmt::Debug for Event {
                 .field("status", status)
                 .field("body", &format!("[REDACTED {} bytes]", body.len()))
                 .field("provider_peer_id", &"[REDACTED]")
+                .field("encrypted", encrypted)
                 .finish(),
             Self::GroupCreated { group_id, name } => f
                 .debug_struct("GroupCreated")
@@ -4378,6 +4439,7 @@ mod tests {
                 status: "ok".to_string(),
                 body: "body".to_string(),
                 provider_peer_id: SENTINEL.to_string(),
+                encrypted: true,
             },
             Event::PresenceUpdated {
                 peer_id: SENTINEL.to_string(),

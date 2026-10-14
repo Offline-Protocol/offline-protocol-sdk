@@ -224,6 +224,12 @@ class PeerStreamFramingTest {
 
     private val a = "off1qysluvwl5922yctzd0u9gpr06gn3k7ldfvgtwgvn"
     private val b = "off1qyqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqn8antf"
+    private val me = "off1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+
+    // Swift's helper: we are the lowest address, so an outbound stream wins.
+    private fun PeerStreamLinks<String>.announce(
+        handle: String, address: String, outbound: Boolean = true,
+    ) = announce(handle, address, outbound, me)
 
     @Test
     fun `the first stream for an address is announced`() {
@@ -253,6 +259,71 @@ class PeerStreamFramingTest {
         assertEquals(a, links.remove("new"))
         assertNull(links.handleFor(a))
         assertTrue(links.isEmpty())
+    }
+
+    @Test
+    fun `the first stream is announced whichever kind it is`() {
+        val links = PeerStreamLinks<String>()
+        assertEquals(
+            PeerStreamLinks.Announcement<String>(true, null),
+            links.announce("in", a, outbound = false),
+        )
+    }
+
+    @Test
+    fun `a second stream of the losing kind is refused and the held one stays`() {
+        val links = PeerStreamLinks<String>()
+        links.announce("out", a)
+        assertEquals(
+            PeerStreamLinks.Announcement<String>(false, null, refused = true),
+            links.announce("in", a, outbound = false),
+        )
+        assertEquals("out", links.handleFor(a))
+        assertNull("a refused stream was never announced", links.remove("in"))
+        assertEquals(a, links.remove("out"))
+    }
+
+    @Test
+    fun `the winning kind is whatever the lower address opened`() {
+        // Python's `_new_stream_wins` and the Swift copy, case for case (ADR 0028).
+        assertTrue(PeerStreamLinks.newStreamWins(outbound = true, localAddress = me, peer = a))
+        assertFalse(PeerStreamLinks.newStreamWins(outbound = false, localAddress = me, peer = a))
+        assertFalse(PeerStreamLinks.newStreamWins(outbound = true, localAddress = a, peer = me))
+        assertTrue(PeerStreamLinks.newStreamWins(outbound = false, localAddress = a, peer = me))
+        assertTrue(
+            "b sorts below a at the first differing character",
+            PeerStreamLinks.newStreamWins(outbound = true, localAddress = b, peer = a),
+        )
+        assertFalse(PeerStreamLinks.newStreamWins(outbound = true, localAddress = null, peer = a))
+        assertFalse(PeerStreamLinks.newStreamWins(outbound = false, localAddress = null, peer = a))
+    }
+
+    @Test
+    fun `addresses compare by their UTF-8 bytes, not UTF-16 units`() {
+        // U+FF5E is one UTF-16 unit above the surrogate U+D83D that starts
+        // U+1F600, so String.compareTo puts it after; in UTF-8 (EF.. vs F0..)
+        // it comes first, as Python's `<` does.
+        val bmp = "\uFF5E"
+        val astral = "\uD83D\uDE00"
+        assertTrue(bmp > astral)
+        assertTrue(PeerStreamLinks.newStreamWins(outbound = true, localAddress = bmp, peer = astral))
+    }
+
+    @Test
+    fun `both ends of a pair keep the same stream`() {
+        // `mine` is the stream the lower address (me) opened; `theirs` the
+        // other. Each end sees one as outbound and the other as inbound.
+        for (firstArrives in listOf("mine", "theirs")) {
+            val low = PeerStreamLinks<String>()
+            val high = PeerStreamLinks<String>()
+            val order = if (firstArrives == "mine") listOf("mine", "theirs") else listOf("theirs", "mine")
+            for (stream in order) {
+                low.announce(stream, a, stream == "mine", me)
+                high.announce(stream, me, stream == "theirs", a)
+            }
+            assertEquals(firstArrives, "mine", low.handleFor(a))
+            assertEquals(firstArrives, "mine", high.handleFor(me))
+        }
     }
 
     @Test

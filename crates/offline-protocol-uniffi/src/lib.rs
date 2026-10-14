@@ -2017,6 +2017,10 @@ pub struct ProtocolConfig {
     /// Kill switch for 1:1 MLS crypto-failure recovery (default on). See the UDL
     /// dictionary and `EncryptionConfig::crypto_recovery_enabled` for semantics.
     pub crypto_recovery_enabled: bool,
+    /// Whether service request and response bodies are sealed toward peers
+    /// that route the sealed form (default on). See the UDL dictionary and
+    /// `EncryptionConfig::encrypt_service_messages` for semantics.
+    pub encrypt_service_messages: bool,
     /// Mesh forwarding tunables. `None` (and any `None` field inside it)
     /// leaves the core default alone — see [`MeshRelayConfig`].
     pub mesh_relay: Option<MeshRelayConfig>,
@@ -2406,6 +2410,7 @@ impl From<ProtocolConfig> for CoreConfig {
         core_config.encryption.compact_envelope_enabled = config.compact_envelope_enabled;
         core_config.encryption.rich_payload_enabled = config.rich_payload_enabled;
         core_config.encryption.crypto_recovery_enabled = config.crypto_recovery_enabled;
+        core_config.encryption.encrypt_service_messages = config.encrypt_service_messages;
         core_config.dors.prefer_online = config.prefer_online;
         core_config.initial_ttl = config.initial_ttl;
         core_config.encryption.enabled = config.encryption_enabled;
@@ -4918,27 +4923,47 @@ impl OfflineProtocol {
         // The links visible before and after, read under the one lock that
         // flips the status. Leaving Available clears every link silently, so
         // `before` is also exactly the set this flip ends.
-        let (ended, after) = self
+        let (before, revealed) = self
             .with_transport_fallible(CoreTransportType::WiFiDirect, |transport| {
                 let before = transport.connected_peers();
                 transport.on_status_changed(new_status);
-                (before, transport.connected_peers().len())
+                let revealed: Vec<_> = transport
+                    .connected_peers()
+                    .into_iter()
+                    .filter(|link| !before.iter().any(|b| b.peer_id == link.peer_id))
+                    .collect();
+                (before, revealed)
             })?
             .unwrap_or_default();
+        let after = if is_connected {
+            before.len() + revealed.len()
+        } else {
+            0
+        };
 
         // The layer itself is not a switch: a platform manager brings it up
         // at start whether or not any peer is there, and announcing that as
         // "connected to a peer group" told every app Wi-Fi Direct was
         // carrying traffic while every send went over Bluetooth LE. Only the
         // links it hides or reveals move the edge.
-        self.emit_wifi_direct_switch(ended.len(), after);
+        self.emit_wifi_direct_switch(before.len(), after);
+
+        // A link revealed here was proved while the layer was down: a host's
+        // listener accepts before the host reports the layer. Its announcement
+        // ran discovery against a layer with no usable link, so the key
+        // package push failed, and a failed push is left for the next
+        // discovery to retry. This is that discovery; without it the reveal
+        // is silent and a quiet pair never pushes again.
+        for link in revealed {
+            self.notify_neighbor_reachable(&link.peer_id, "WiFiDirect", None)?;
+        }
 
         // Not every platform ends its streams before the layer: iOS flips it
         // on backgrounding and the OS kills the streams later, so a link this
         // flip cleared is reported lost here, once. The stream's own late end
         // then finds no link and adds nothing (wifi_direct_peer_disconnected).
         if after == 0 {
-            for link in ended {
+            for link in before {
                 if self.peer_linked_elsewhere(&link.peer_id, CoreTransportType::WiFiDirect) {
                     continue;
                 }
@@ -8476,6 +8501,7 @@ mod tests {
             group_enforce_admin_commits: false,
             require_transport_identity: false,
             control_freshness_enforced: true,
+            encrypt_service_messages: true,
         }
     }
 
@@ -8515,6 +8541,7 @@ mod tests {
             group_enforce_admin_commits: false,
             require_transport_identity: false,
             control_freshness_enforced: true,
+            encrypt_service_messages: true,
         }
     }
 
@@ -8831,6 +8858,7 @@ mod tests {
             group_enforce_admin_commits: false,
             require_transport_identity: false,
             control_freshness_enforced: true,
+            encrypt_service_messages: true,
         }
     }
 
@@ -10434,6 +10462,67 @@ mod tests {
         );
     }
 
+    /// A peer proved while the layer is still coming up gets our key package
+    /// once the layer is up. A host's listener accepts before the host
+    /// reports the layer (the Python manager starts DNS-SD in between, about
+    /// three seconds on a Pi), so the announcement's discovery pushes into a
+    /// layer with no usable link, the push fails, and nothing pushes again:
+    /// the failed push is not recorded as sent, on the understanding that a
+    /// later discovery will retry, and the layer coming up revealed the link
+    /// without one. A pair whose other push was lost too (a superseded
+    /// stream) then waited for an application message to start a session.
+    #[test]
+    fn test_wifi_direct_link_proved_while_down_gets_the_key_package_when_the_layer_comes_up() {
+        let engine = |profile: &str| {
+            let engine = OfflineProtocol::new(ProtocolConfig {
+                profile: profile.to_string(),
+                ..create_test_config()
+            })
+            .unwrap();
+            engine
+                .initialize_mls(
+                    Box::new(TestMlsStorageProvider::default()),
+                    Box::new(TestMlsStorageProvider::default()),
+                )
+                .unwrap();
+            engine.start().unwrap();
+            engine
+        };
+        let a = engine("early-a");
+        let b = engine("early-b");
+        let b_address = b.local_address().expect("address after init");
+
+        a.wifi_direct_peer_connected(b_address.clone()).unwrap();
+        assert!(
+            a.wifi_direct_get_next_message().is_none(),
+            "nothing can be queued on a layer that is down"
+        );
+
+        a.wifi_direct_status_changed(true).unwrap();
+        let outbound = a
+            .wifi_direct_get_next_message()
+            .expect("the key package goes out once the layer is up");
+        assert_eq!(outbound.recipient_id, b_address);
+
+        // The body is A's key package: B, which had nothing from A, has it.
+        let a_address = a.local_address().expect("address after init");
+        b.wifi_direct_status_changed(true).unwrap();
+        b.wifi_direct_peer_connected(a_address.clone()).unwrap();
+        assert!(matches!(
+            b.get_establishment_state(a_address.clone()).unwrap(),
+            EstablishmentState::NoKeyPackage
+        ));
+        b.wifi_direct_message_received(a_address.clone(), outbound.data)
+            .unwrap();
+        assert!(
+            !matches!(
+                b.get_establishment_state(a_address).unwrap(),
+                EstablishmentState::NoKeyPackage
+            ),
+            "B holds A's key package"
+        );
+    }
+
     /// A stream that never proved a peer was never announced; its end is not
     /// a loss and not a switch.
     #[test]
@@ -11516,6 +11605,94 @@ mod tests {
         }
         protocol.disable_telemetry().expect("disable");
         offline_protocol::telemetry::pipe::testing::stop_capturing_uploads();
+    }
+
+    /// Every encryption switch the flat UDL `ProtocolConfig` declares is read
+    /// by both native config readers, in both spellings, and carried by the
+    /// TypeScript wrapper in both the flat and the nested shape.
+    ///
+    /// The failure this catches: a switch added to the UDL and the Rust config
+    /// that one bridge never reads. The generated initializer supplies the
+    /// UDL default, so everything compiles and every test that does not set
+    /// the switch passes, while an app that turns it off on that platform is
+    /// silently ignored. That is a runtime-only failure (C1, C5), and until
+    /// this guard nothing pinned the encryption section across bridges.
+    #[test]
+    fn every_bridge_reads_the_encryption_config_section() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rn = manifest.join("../../bindings/react-native");
+        let read = |rel: std::path::PathBuf| -> String {
+            std::fs::read_to_string(&rel)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", rel.display()))
+        };
+        let udl = read(manifest.join("src/offline_protocol.udl"));
+        let swift_reader = read(rn.join("ios/EncryptionConfigReader.swift"));
+        let swift_module = read(rn.join("ios/OfflineProtocolModule.swift"));
+        let kotlin_parser =
+            read(rn.join("android/src/main/java/com/offlineprotocol/ProtocolConfigParser.kt"));
+        let index = read(rn.join("src/index.ts"));
+        let types = read(rn.join("src/types.ts"));
+
+        // The encryption switches a bridge reads from the `encryption`
+        // section, by their UDL (snake_case) name.
+        let switches = [
+            ("auto_key_exchange", "autoKeyExchange"),
+            ("store_pending", "storePending"),
+            ("require_encryption", "requireEncryption"),
+            ("compact_envelope_enabled", "compactEnvelopeEnabled"),
+            ("rich_payload_enabled", "richPayloadEnabled"),
+            ("crypto_recovery_enabled", "cryptoRecoveryEnabled"),
+            ("encrypt_service_messages", "encryptServiceMessages"),
+        ];
+        for (snake, camel) in switches {
+            assert!(
+                udl.contains(&format!("boolean {snake} = "))
+                    || udl.contains(&format!("boolean {snake};")),
+                "the UDL ProtocolConfig no longer declares {snake}"
+            );
+            for (name, source) in [
+                ("EncryptionConfigReader.swift", &swift_reader),
+                ("ProtocolConfigParser.kt", &kotlin_parser),
+            ] {
+                assert!(
+                    source.contains(&format!("\"{camel}\"")),
+                    "{name} does not read {camel}"
+                );
+                assert!(
+                    source.contains(&format!("\"{snake}\"")),
+                    "{name} does not read {snake}"
+                );
+            }
+            assert!(
+                swift_module.contains(&format!("encryption.{camel}")),
+                "OfflineProtocolModule.swift does not pass {camel} to the ProtocolConfig"
+            );
+            assert!(
+                kotlin_parser.contains(&format!("{camel} = {camel}")),
+                "ProtocolConfigParser.kt does not pass {camel} to the ProtocolConfig"
+            );
+            assert!(
+                types.contains(&format!("{camel}?: boolean")),
+                "types.ts does not declare {camel} on the encryption config"
+            );
+            // The effective value, the flat copy the bridges read, and the
+            // field on both the flat and the nested native config type: miss
+            // one and the two shapes diverge.
+            assert!(
+                index.contains(&format!("{camel}: encryptionSource?.{camel}")),
+                "index.ts does not resolve {camel} from the app's encryption config"
+            );
+            assert!(
+                index.contains(&format!("{camel}: encryption.{camel},")),
+                "index.ts does not copy {camel} into the flat shape"
+            );
+            assert!(
+                index.matches(&format!("{camel}: boolean")).count()
+                    + index.matches(&format!("{camel}?: boolean")).count()
+                    >= 2,
+                "index.ts does not declare {camel} on both the flat and the nested native config"
+            );
+        }
     }
 
     /// The telemetry config section must be read by every bridge that
@@ -13730,6 +13907,313 @@ mod tests {
              per connection; repeating them on an announced peer costs two GATT round trips plus \
              a signature verification and an address derivation on the main thread, and \
              completePeerHandshake discards the result"
+        );
+    }
+
+    /// The iOS central writes its hello: once per connection, after the
+    /// Message subscription and before the handshake reads.
+    ///
+    /// Without it a peripheral that cannot otherwise name the link (the Python
+    /// service's) attributes our writes to a connection id, and the core
+    /// refuses our key package, whose sender must be the link's identity: an
+    /// iPhone could find and verify a Python box and never start a session
+    /// through that link. `BleHelloPolicy` is unit-tested, but a policy nobody
+    /// calls passes its own tests, and `BleManager` sits behind CoreBluetooth,
+    /// so the call site is pinned here:
+    ///
+    /// 1. The UUID is the Rust constant, and Hello is discovered on every path
+    ///    that discovers the handshake characteristics.
+    /// 2. The write goes through the policy, with response, and sits below the
+    ///    announce gate (one-shot per connection) and above the first handshake
+    ///    read (so before any Message write, in CoreBluetooth's GATT order).
+    /// 3. The per-connection record is cleared wherever `announcedPeripherals`
+    ///    is, or a reconnect would never say hello again.
+    #[test]
+    fn react_native_ios_central_writes_its_hello() {
+        use offline_protocol_transport::constants::BLE_HELLO_CHAR_UUID;
+
+        let swift = rn_source_code_only("ios/BleManager.swift");
+        assert!(
+            swift.contains(&format!("CBUUID(string: \"{BLE_HELLO_CHAR_UUID}\")")),
+            "BleManager.swift must declare the Hello characteristic as {BLE_HELLO_CHAR_UUID}"
+        );
+        let discoveries: Vec<&str> = swift
+            .split("discoverCharacteristics(")
+            .skip(1)
+            .map(|rest| &rest[..rest.find(']').unwrap_or(rest.len())])
+            .filter(|list| list.contains("IDENTITY_CHAR_UUID"))
+            .collect();
+        assert!(
+            !discoveries.is_empty(),
+            "BleManager.swift must discover the handshake characteristics somewhere"
+        );
+        for list in &discoveries {
+            assert!(
+                list.contains("HELLO_CHAR_UUID"),
+                "every discoverCharacteristics call that discovers the handshake characteristics \
+                 must also discover HELLO_CHAR_UUID: a path that omits it hands the discovery \
+                 delegate no Hello characteristic, and that link never says hello ({list}])"
+            );
+        }
+
+        let body_start = swift
+            .find(
+                "public func peripheral(_ peripheral: CBPeripheral, \
+                 didDiscoverCharacteristicsFor service: CBService, error: Error?) {",
+            )
+            .expect("BleManager.swift must implement didDiscoverCharacteristicsFor");
+        let body_end = swift
+            .find(
+                "public func peripheral(_ peripheral: CBPeripheral, \
+                 didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {",
+            )
+            .expect("BleManager.swift must implement didUpdateValueFor");
+        let body = &swift[body_start..body_end];
+
+        let gate = body
+            .find("guard !announcedPeripherals.contains(peripheral.identifier) else { return }")
+            .expect("the discovery delegate must keep its announce gate");
+        let policy = body.find("BleHelloPolicy.helloToWrite(").expect(
+            "the hello must be decided by BleHelloPolicy.helloToWrite in the discovery delegate",
+        );
+        let write = body
+            .find("peripheral.writeValue(hello, for: helloCharacteristic, type: .withResponse)")
+            .expect("the hello must be written with response in the discovery delegate");
+        let first_read = body
+            .find("peripheral.readValue(for: characteristic)")
+            .expect("the discovery delegate must issue the handshake reads");
+        assert!(
+            gate < policy && policy < write && write < first_read,
+            "the hello must sit below the announce gate (one per connection) and above the first \
+             handshake read (so it precedes every Message write in CoreBluetooth's GATT order)"
+        );
+        assert!(
+            body.contains(
+                "maximumWriteLength: peripheral.maximumWriteValueLength(for: .withoutResponse)"
+            ),
+            "the hello must be bounded by one packet's payload: iOS reports 512 for \
+             .withResponse and sends anything longer than one packet as a prepared write, which \
+             a peripheral refuses for a hello"
+        );
+        assert!(
+            body.contains("alreadyWritten: helloWritten.contains(peripheral.identifier)")
+                && body.contains("helloWritten.insert(peripheral.identifier)"),
+            "the hello must be recorded per connection, or a discovery replay writes it again"
+        );
+        assert_eq!(
+            swift.matches("helloWritten.removeAll()").count(),
+            swift.matches("announcedPeripherals.removeAll()").count(),
+            "helloWritten must be cleared wherever announcedPeripherals is cleared"
+        );
+        assert_eq!(
+            swift
+                .matches("helloWritten.remove(peripheral.identifier)")
+                .count(),
+            swift
+                .matches("announcedPeripherals.remove(peripheral.identifier)")
+                .count(),
+            "helloWritten must be cleared wherever announcedPeripherals is cleared for one link"
+        );
+    }
+
+    /// The Android central refuses a second client link to a peer it already
+    /// holds, before announcing it, and leaves the address undialed.
+    ///
+    /// A macOS peripheral rotates its address and advertises under both, so
+    /// the scanner dials both and both verify as one peer. Two such links per
+    /// peer filled the four connection slots, and the cap then refused every
+    /// inbound central. `MeshConnectionRegistry` is unit-tested; the order in
+    /// `handleIdentityRead` and the dial-time check are not reachable from a
+    /// JVM test, so they are pinned here:
+    ///
+    /// 1. The duplicate check runs on the verified arm, before
+    ///    `announceVerifiedPeer`: an announce first would re-point the peer's
+    ///    address at the duplicate and register a second mesh connection.
+    /// 2. The refusal records the peer with the deadline, so it lapses with
+    ///    the kept link.
+    /// 3. `connectToDevice` consults the refusal before the connection cap.
+    #[test]
+    fn react_native_android_central_refuses_a_second_client_link_to_one_peer() {
+        let central = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/CentralGattClient.kt",
+        );
+        let facade = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+        let section = |source: &str, start: &str| -> String {
+            let from = source
+                .find(start)
+                .unwrap_or_else(|| panic!("missing {start}"));
+            let rest = &source[from + start.len()..];
+            rest[..rn_kotlin_body_end(rest)].to_string()
+        };
+
+        let identity = section(&central, "private fun handleIdentityRead(");
+        let verified = identity
+            .find("is PeerIdentityBinding.Outcome.Verified ->")
+            .expect("handleIdentityRead must have a verified arm");
+        let check = identity
+            .find("if (host.connections.hasOtherClientLink(outcome.peerId, address)) {")
+            .expect("the verified arm must check for another client link to the peer");
+        let refuse = identity
+            .find("refuseDuplicateLink(gatt, outcome.peerId)")
+            .expect("a duplicate must be refused through refuseDuplicateLink");
+        let announce = identity
+            .find("announceVerifiedPeer(gatt, outcome.peerId)")
+            .expect("the verified arm must announce the peer");
+        assert!(
+            verified < check && check < refuse && refuse < announce,
+            "the duplicate check must run on the verified arm before announceVerifiedPeer"
+        );
+
+        let refusal = section(&central, "private fun refuseDuplicateLink(");
+        assert!(
+            refusal.contains("host.connections.suppressDuplicate( address, peerId,"),
+            "the refusal must record the peer it duplicated, so it lapses with the kept link"
+        );
+        assert!(
+            refusal.contains("closeGattClient(gatt, \"duplicate_identity\")"),
+            "the duplicate link must be closed"
+        );
+        assert!(
+            !refusal.contains("blePeerDiscovered"),
+            "a duplicate link is closed unannounced"
+        );
+
+        let dial = section(&facade, "private fun connectToDevice(");
+        let suppressed = dial
+            .find(
+                "connections.isSuppressedDuplicate(device.address, SystemClock.elapsedRealtime())",
+            )
+            .expect("connectToDevice must consult the duplicate refusal");
+        let cap = dial
+            .find("if (dialWouldExceedCap(device.address)) {")
+            .expect("connectToDevice must keep its connection cap");
+        let connect = dial
+            .find("device.connectGatt(")
+            .expect("connectToDevice must dial");
+        assert!(
+            suppressed < cap && cap < connect,
+            "a refused duplicate address must be skipped before the cap and the dial"
+        );
+    }
+
+    /// A dial that never connects must not hold its address and its slot for
+    /// the life of the process (issue #549). The scan answers an address with
+    /// a registered client by "already connected/connecting" and never
+    /// redials it, so a dial whose link was cancelled underneath it, and which
+    /// got no callback, wedged that peer and counted against the cap until the
+    /// app restarted. And Android reports our own dial to the GATT server as
+    /// a central connecting: refusing that report for the cap cancelled the
+    /// link the dial was waiting on.
+    ///
+    /// 1. `connectToDevice` arms the connect watchdog for every gatt it
+    ///    registers, and the watchdog closes only its own, unconnected dial.
+    /// 2. The inbound path neither rejects nor counts a central at an address
+    ///    we dialed, and counts completed links only against the cap.
+    #[test]
+    fn react_native_android_a_dial_that_never_connects_is_closed_and_redialed() {
+        let facade = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+        let section = |start: &str| -> String {
+            let from = facade
+                .find(start)
+                .unwrap_or_else(|| panic!("missing {start}"));
+            let rest = &facade[from + start.len()..];
+            rest[..rn_kotlin_body_end(rest)].to_string()
+        };
+
+        let dial = section("private fun connectToDevice(");
+        let register = dial
+            .find("connections.registerGatt(device.address, gatt)")
+            .expect("connectToDevice must register the dial");
+        let arm = dial
+            .find("armConnectWatchdog(device.address, gatt)")
+            .expect("connectToDevice must arm the connect watchdog for the dial it registers");
+        assert!(
+            register < arm,
+            "the watchdog is armed for the registered dial"
+        );
+
+        let watchdog = section("private fun armConnectWatchdog(");
+        assert!(
+            watchdog.contains("}, CONNECTION_TIMEOUT_MS)"),
+            "the watchdog must fire after CONNECTION_TIMEOUT_MS"
+        );
+        assert!(
+            watchdog.contains(
+                "if (connections.getGatt(address) !== gatt || \
+                 connections.isClientEstablished(address)) { return@postDelayed }"
+            ),
+            "the watchdog must leave a later dial and a completed link alone"
+        );
+        assert!(
+            watchdog.contains("connections.removeGatt(address)"),
+            "the watchdog must free the address for the scan to redial"
+        );
+
+        let inbound = section("private fun handleCentralConnectedOnBleThread(");
+        assert!(
+            inbound.contains("val ownDial = connections.getGatt(device.address) != null"),
+            "the inbound path must recognise the server-side report of our own dial"
+        );
+        assert!(
+            inbound.contains("if (decision.intent == ConnectionIntent.REJECTED && !ownDial) {"),
+            "the mesh decision must not cancel our own dial's link"
+        );
+        assert!(
+            inbound.contains(
+                "if (!ownDial && connections.establishedLinkCount() >= MAX_CONNECTIONS_PER_DEVICE) {"
+            ),
+            "the inbound cap must count completed links and skip our own dial"
+        );
+    }
+
+    /// The hello's length bounds are written down in three languages, and a
+    /// central and a peripheral that disagree fail silently: a peripheral
+    /// refuses a hello shorter than its floor before verifying, and a central
+    /// whose bound is wider spends a write that can only be refused. The
+    /// floor is the codec's ([`offline_protocol_sealed::IDENTITY_ASSERTION_MIN_LEN`]);
+    /// the ceiling is one attribute value, held by the Android server, which
+    /// was the first to serve Hello.
+    #[test]
+    fn ble_hello_length_bounds_agree_in_every_binding() {
+        let floor = offline_protocol_sealed::IDENTITY_ASSERTION_MIN_LEN;
+        let server = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/PeripheralGattServer.kt",
+        );
+        let marker = "const val MAX_HELLO_WRITE_BYTES = ";
+        let at = server
+            .find(marker)
+            .expect("PeripheralGattServer.kt must declare MAX_HELLO_WRITE_BYTES")
+            + marker.len();
+        let ceiling: usize = server[at..]
+            .split_whitespace()
+            .next()
+            .and_then(|v| v.parse().ok())
+            .expect("MAX_HELLO_WRITE_BYTES must be an integer literal");
+
+        let python = python_module_constants("offline_protocol_sdk/ble_manager.py");
+        assert_eq!(
+            python("HELLO_MIN_LEN"),
+            floor.to_string(),
+            "ble_manager.py HELLO_MIN_LEN must equal IDENTITY_ASSERTION_MIN_LEN"
+        );
+        assert_eq!(
+            python("HELLO_MAX_LEN"),
+            ceiling.to_string(),
+            "ble_manager.py HELLO_MAX_LEN must equal Android's MAX_HELLO_WRITE_BYTES"
+        );
+
+        let swift = rn_source_code_only("ios/BleHelloPolicy.swift");
+        assert!(
+            swift.contains(&format!("static let minLength = {floor}")),
+            "BleHelloPolicy.swift minLength must equal IDENTITY_ASSERTION_MIN_LEN ({floor})"
+        );
+        assert!(
+            swift.contains(&format!("static let maxLength = {ceiling}")),
+            "BleHelloPolicy.swift maxLength must equal Android's MAX_HELLO_WRITE_BYTES ({ceiling})"
         );
     }
 
@@ -17149,7 +17633,7 @@ mod tests {
             ),
             (
                 "the question and what an answer does",
-                "private fun adoptExistingGroup() { \
+                "private fun adoptExistingGroup() { if (channel == null) return \
                  wifiP2pManager?.requestConnectionInfo(channel) { info -> if \
                  (info?.groupFormed == true && state == TransportState.RUNNING) {",
             ),
@@ -18052,20 +18536,21 @@ mod tests {
         );
     }
 
-    /// The iOS and Python peer-stream managers keep the same one of two
-    /// streams for an address.
+    /// The iOS, Android and Python peer-stream managers keep the same one of
+    /// two streams for an address.
     ///
-    /// Both ends of a pair may dial, and a Python host on a LAN dials every
-    /// peer it discovers, so the choice of which stream to keep is a
+    /// Both ends of a pair may dial, and every manager on a LAN dials the
+    /// peers it discovers, so the choice of which stream to keep is a
     /// hand-mirrored policy (docs/bridges C5): the stream the lower address
-    /// opened wins. If the two copies drift, an iPhone and a Python host each
-    /// keep the stream the other closes, and the pair reconnects forever,
-    /// with no error on either side (ADR 0027). Pinned as the two lines each
-    /// rule is made of. Android keeps the newer stream instead, because a
-    /// Wi-Fi Direct group has one dialer.
+    /// opened wins, addresses ordered by their UTF-8 bytes. If two copies
+    /// drift, a pair each keeps the stream the other closes and reconnects
+    /// forever, with no error on either side (ADR 0027, ADR 0028). Pinned as
+    /// the lines each rule is made of.
     #[test]
-    fn ios_and_python_peer_streams_keep_the_same_stream() {
+    fn every_peer_stream_manager_keeps_the_same_stream() {
         let swift = rn_source_code_only("ios/PeerStreamFraming.swift");
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/PeerStreamFraming.kt");
         let python_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../bindings/python/offline_protocol_sdk/peer_stream_manager.py");
         let python = std::fs::read_to_string(&python_path)
@@ -18086,6 +18571,22 @@ mod tests {
             );
         }
         for needed in [
+            "val local = localAddress ?: return false",
+            "val weOpen = utf8Precedes(local, peer) return outbound == weOpen",
+            "val x = a.encodeToByteArray() val y = b.encodeToByteArray()",
+            "val d = (x[i].toInt() and 0xff) - (y[i].toInt() and 0xff) \
+             if (d != 0) return d < 0 } return x.size < y.size",
+            "if (byAddress.containsKey(address) && \
+             !newStreamWins(outbound, localAddress, address) ) { \
+             return Announcement(firstForAddress = false, superseded = null, refused = true) }",
+        ] {
+            assert!(
+                kotlin.contains(needed),
+                "android PeerStreamFraming.kt: the stream the lower address opened must win, \
+                 by UTF-8 bytes, as on iOS and in Python. Expected to find:\n  {needed}"
+            );
+        }
+        for needed in [
             "if local is None:\n            # No address of our own to order by; keep what is announced.\n            return False",
             "we_open = local < peer\n        return new.outbound == we_open",
         ] {
@@ -18093,6 +18594,103 @@ mod tests {
                 python.contains(needed),
                 "peer_stream_manager.py: the stream the lower address opened must win, as in \
                  ios/PeerStreamFraming.swift. Expected to find:\n  {needed}"
+            );
+        }
+    }
+
+    /// A peer-stream redial ladder starts over only after a stream that
+    /// carried its peer (a body after the preamble, or the address held
+    /// through the keepalive window), on iOS and Android alike.
+    ///
+    /// A stream the peer refuses for its own held one proves the address all
+    /// the same, so a ladder that reset on proof redialed every second, with a
+    /// connect and a loss reported each round, until the peer's stale stream
+    /// died. A body alone is too narrow the other way: two peers with a
+    /// session may reconnect and send nothing, and each ordinary drop of such
+    /// a stream climbed the ladder for good. Each platform holds its copy of
+    /// the rule in its own words, so the lines are pinned here (docs/bridges
+    /// C5, ADR 0028).
+    #[test]
+    fn peer_stream_redial_ladders_reset_only_on_a_carried_stream() {
+        let swift = rn_source_code_only("ios/WifiDirectManager.swift");
+        let lan =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/LanPeerDiscovery.kt");
+        let manager =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/WifiDirectManager.kt");
+        let sockets =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/PeerStreamSockets.kt");
+        for (code, needed) in [
+            (&swift, "if stream.proved { stream.carried = true }"),
+            (
+                &swift,
+                "stream.carried || stream.provedAt.map({ \
+                 ProcessInfo.processInfo.systemUptime - $0 >= Self.CARRIED_AFTER \
+                 }) == true { dialPolicy.proved(address) }",
+            ),
+            (&sockets, "carried = delivered || ("),
+            (&lan, "if (ran.proved == address && ran.carried) {"),
+            (&manager, "carried = ran.carried,"),
+            (
+                &manager,
+                "if (ran.carried) reconnectDelayMs.set(RECONNECT_INITIAL_DELAY_MS)",
+            ),
+        ] {
+            assert!(
+                code.contains(needed),
+                "a redial ladder must start over only on a stream that carried its peer. \
+                 Expected to find:\n  {needed}"
+            );
+        }
+        assert_eq!(
+            swift.matches("dialPolicy.proved(").count(),
+            1,
+            "ios/WifiDirectManager.swift: the ladder starts over in one place"
+        );
+    }
+
+    /// Android's LAN carrier publishes and reads the record iOS and Python do.
+    ///
+    /// A browser finds a peer only by the service type, names its record by
+    /// the address's digest so a restarted advert replaces the stale one, and
+    /// dials with the record's `addr` as the address the preamble must prove.
+    /// Each is a hand-mirrored literal (docs/bridges C5) whose drift fails
+    /// silently: an Android phone and an iPhone on one network that never
+    /// find each other, or two records for one peer (ADR 0028).
+    #[test]
+    fn android_lan_peer_streams_publish_the_ios_and_python_record() {
+        let formation = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/WifiDirectGroupFormation.kt",
+        );
+        let lan =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/LanPeerDiscovery.kt");
+        let swift = rn_source_code_only("ios/WifiDirectManager.swift");
+        for (code, needed) in [
+            (
+                &formation,
+                "const val SERVICE_TYPE = \"_offlineprotocol._tcp\"",
+            ),
+            (&swift, "static let SERVICE_TYPE = \"_offlineprotocol._tcp\""),
+            (&formation, "const val KEY_VERSION = \"txtvers\""),
+            (&formation, "const val KEY_ADDRESS = \"addr\""),
+            (
+                &lan,
+                "setAttribute(WifiDirectGroupFormation.KEY_VERSION, \"1\") \
+                 setAttribute(WifiDirectGroupFormation.KEY_ADDRESS, address)",
+            ),
+            (
+                &lan,
+                "\"op-\" + WifiDirectGroupFormation.hex(WifiDirectGroupFormation.sha256(address), 8)",
+            ),
+            (
+                &lan,
+                "sockets.run(socket, outbound = true, PeerStreamSockets.Carrier.LAN, \
+                 expected = address)",
+            ),
+        ] {
+            assert!(
+                code.contains(needed),
+                "the Android LAN record must match the iOS and Python one. \
+                 Expected to find:\n  {needed}"
             );
         }
     }
@@ -18223,7 +18821,10 @@ mod tests {
                 ],
                 &[
                     "is PeerStreamPreamble.Outcome.Announce -> outcome.address",
-                    "if (!announce(stream, address)) {",
+                    "if (!announce(stream, address, outbound)) {",
+                    "PeerStreamDialPolicy.admitsInbound(host, inboundHosts, reserved, limits)",
+                    "val announcement = links.announce(stream, address, outbound, local) \
+                     if (announcement.refused) {",
                     "if (!deliver(stream, address, body)) {",
                     "links.remove(stream)?.let { address -> try { host.peerDisconnected(address)",
                     "if (announcement.firstForAddress) { try { host.peerConnected(address)",

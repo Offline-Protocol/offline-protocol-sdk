@@ -106,8 +106,11 @@ Add to `AndroidManifest.xml`:
 ```
 
 Wi-Fi Direct and the internet need nothing in your manifest: the SDK's own
-manifest declares `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE`, `INTERNET` and
-`NEARBY_WIFI_DEVICES`, and the build merges them into your app. It declares
+manifest declares `ACCESS_WIFI_STATE`, `CHANGE_WIFI_STATE`, `INTERNET`,
+`ACCESS_NETWORK_STATE`, `CHANGE_WIFI_MULTICAST_STATE` and `NEARBY_WIFI_DEVICES`, and the build merges them
+into your app. The peer-stream slot also finds iPhones and hosts on the Wi-Fi
+network the phone is on, which needs no runtime grant unless your app
+targets Android 17 (API 37): then an app targeting Android 17 (API 37) must declare `ACCESS_LOCAL_NETWORK` and request it before `start()`, or the LAN carrier stays off with a warning diagnostic. The SDK does not declare it, because a declaration revokes the grant apps targeting 36 and lower hold by default. The SDK's manifest declares
 `NEARBY_WIFI_DEVICES` with `android:usesPermissionFlags="neverForLocation"`,
 and that flag reaches your merged manifest too: the transport derives no
 location from Wi-Fi, so on Android 13+ it needs `NEARBY_WIFI_DEVICES` alone.
@@ -222,7 +225,7 @@ await protocol.start(); // MLS auto-initialized when encryption.enabled is true
 // Key packages are exchanged automatically when peers are discovered.
 ```
 
-Four runtime kill switches (all default `true`) let you disable a negotiated
+Five runtime kill switches (all default `true`) let you disable a negotiated
 format or the recovery path without an SDK release:
 
 | Flag | Disables |
@@ -231,6 +234,7 @@ format or the recovery path without an SDK release:
 | `encryption.compactEnvelopeEnabled` | Compact MLS envelope, back to the JSON floor |
 | `encryption.richPayloadEnabled` | Sealing rich extras — they drop rather than going cleartext |
 | `encryption.cryptoRecoveryEnabled` | Epoch-desync healing, back to legacy drop-and-ACK |
+| `encryption.encryptServiceMessages` | Sealed service request and response bodies, back to signed plaintext |
 
 Each degrades independently, and inbound parsing of every format stays on
 regardless, so a disabled fleet still interoperates with an enabled one. See
@@ -519,7 +523,7 @@ interface TransportsConfig {
     reconnectDelay?: number;    // ms
   };
   wifiDirect?: {
-    enabled: boolean;           // default: false (Android only)
+    enabled: boolean;           // default: false. Android: Wi-Fi Direct and the Wi-Fi network; iOS: the LAN and AWDL
     deviceName?: string;
     autoAccept?: boolean;       // Android 10+: form the group without the system settings
     groupOwnerIntent?: number;  // deprecated, not used
@@ -572,6 +576,7 @@ interface EncryptionConfig {
   compactEnvelopeEnabled?: boolean;  // default: true (kill switch)
   richPayloadEnabled?: boolean;      // default: true (kill switch)
   cryptoRecoveryEnabled?: boolean;   // default: true (kill switch)
+  encryptServiceMessages?: boolean;  // default: true (kill switch)
   pendingQueue?: PendingQueueConfig;
 }
 
@@ -1174,9 +1179,7 @@ interface DedupStats {
 ```typescript
 interface FileProgress {
   file_id: string;
-  file_name: string;
-  file_size: number;
-  chunks_completed: number;
+  chunks_sent: number;
   total_chunks: number;
   percentage: number;
 }
@@ -1186,9 +1189,9 @@ interface FileProgress {
 
 ```typescript
 enum ProtocolState {
-  Stopped = 0,
-  Running = 1,
-  Paused = 2,
+  Stopped = 'Stopped',
+  Running = 'Running',
+  Paused = 'Paused',
 }
 ```
 
@@ -1342,15 +1345,15 @@ protocol.on('group_role_changed', (event) => {
 ### Acknowledgments
 
 - Messages require ACK for delivery confirmation
-- Default timeout: 5 seconds
+- Default timeout: 10 seconds
 - `message_delivered` event fires on ACK receipt
 
 ### Retry Queue
 
 - Failed messages are retried with exponential backoff
 - Initial delay: 1 second
-- Maximum delay: 30 seconds
-- Maximum retries: 5
+- Maximum delay: 300 seconds
+- Maximum retries: 10
 
 ### Deduplication
 
@@ -1367,9 +1370,9 @@ Prevents duplicate message processing:
 
 ```typescript
 const fileId = await protocol.sendFile({
-  filePath: '/path/to/file.pdf',
   recipient: 'user456',
-  fileName: 'document.pdf',  // optional
+  fileData: base64Contents,  // the file's bytes as base64; the app reads the file
+  fileName: 'document.pdf',
 });
 
 protocol.on('file_progress', (event) => {

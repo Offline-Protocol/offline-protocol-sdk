@@ -58,6 +58,12 @@ POLICY_VIOLATION = 1008
 #: The engine's own rule for an application id (``ProtocolConfig`` validation).
 APP_ID_MAX_BYTES = 256
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1"})
+#: Seconds one transport may take to start before it counts as failed. The
+#: Bluetooth backends go through D-Bus or CoreBluetooth with no deadline of
+#: their own, and the API socket opens only after every transport has had
+#: its turn: without this, a backend that hangs is a server that never
+#: serves and a supervisor that restarts it forever.
+CARRIER_START_TIMEOUT = 30.0
 
 
 def _package_version() -> str:
@@ -100,8 +106,8 @@ class LocalApiServer:
     ----------
     manager:
         A manager that has not been started. The server registers itself as
-        its event handler, starts it, and starts its peer-stream transport
-        when the configuration enables one.
+        its event handler, starts it, and then starts every transport the
+        configuration enables and can run (see :meth:`_start_carriers`).
     policy:
         The space allow-lists and method denials; empty by default.
     socket_path:
@@ -129,6 +135,9 @@ class LocalApiServer:
         Serve ``GET /health`` through the request hook.
     max_size:
         The inbound frame limit.
+    carrier_start_timeout:
+        Seconds one transport may take to start before it is logged as
+        failed and left stopped.
     """
 
     def __init__(
@@ -142,6 +151,7 @@ class LocalApiServer:
         token_path: str | Path | None = None,
         health: bool = True,
         max_size: int = MAX_MESSAGE_SIZE,
+        carrier_start_timeout: float = CARRIER_START_TIMEOUT,
     ) -> None:
         if (socket_path is None) == (tcp_port is None):
             raise ValueError("pass exactly one of socket_path or tcp_port")
@@ -160,6 +170,7 @@ class LocalApiServer:
         self.token_path = Path(token_path) if token_path is not None else None
         self._health = health
         self._max_size = max_size
+        self._carrier_start_timeout = carrier_start_timeout
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server: Server | None = None
         self._dispatcher: Dispatcher | None = None
@@ -193,13 +204,7 @@ class LocalApiServer:
         self._manager.on_event(self._on_engine_event)
         await self._manager.start()
         try:
-            if self._manager.peer_stream is not None:
-                await self._manager.peer_stream.start()
-            # Only once configured: an unconfigured gateway client has no
-            # daemon to dial, and starting it would refuse the whole server.
-            gateway = self._manager.gateway
-            if gateway is not None and gateway.is_available():
-                await gateway.start()
+            await self._start_carriers()
             engine = self._manager.protocol
             services = generated.MeshServices(engine)
             data: Any
@@ -270,6 +275,79 @@ class LocalApiServer:
         )
         self.port = server.sockets[0].getsockname()[1]
         return server
+
+    def _configured_carriers(self) -> list[tuple[str, Any]]:
+        """The transports this server starts, in order, as (name, manager).
+
+        A transport is listed when the configuration built its manager and
+        the manager can run here: the peer stream always, the Bluetooth
+        central and peripheral where the platform has a backend, the
+        internet relay and the gateway client only once an address to dial
+        was configured (unconfigured, each has nothing to connect to and
+        would refuse to start).
+        """
+        manager = self._manager
+        carriers: list[tuple[str, Any]] = []
+        if manager.peer_stream is not None:
+            carriers.append(("peer stream", manager.peer_stream))
+        for name, transport in (
+            ("Bluetooth LE central", manager.ble),
+            ("Bluetooth LE peripheral", manager.ble_peripheral),
+            ("internet relay", manager.internet),
+            ("gateway", manager.gateway),
+        ):
+            if transport is not None and transport.is_available():
+                carriers.append((name, transport))
+        return carriers
+
+    async def _start_carriers(self) -> None:
+        """Starts every configured transport; fails only when none starts.
+
+        The engine is already running, so this device has the address the
+        peer stream and the peripheral prove. A transport that fails to
+        start is logged and left stopped, and the others run: a radio that
+        another process holds must not take the LAN path down with it. When
+        every configured transport failed, the server has no way to reach
+        anyone and the first failure is raised.
+        """
+        carriers = self._configured_carriers()
+        failures: list[Exception] = []
+        for name, transport in carriers:
+            try:
+                # A start cut off by the deadline leaves the transport in
+                # STARTING, which every transport's stop() accepts.
+                await asyncio.wait_for(transport.start(), self._carrier_start_timeout)
+            except asyncio.CancelledError:
+                raise
+            except asyncio.TimeoutError:
+                logger.error("the %s did not start within %s s and is stopped", name, self._carrier_start_timeout)
+                failures.append(TimeoutError(f"the {name} did not start within {self._carrier_start_timeout} s"))
+                await self._stop_late_carrier(name, transport)
+            except Exception as exc:
+                logger.error("the %s did not start and stays stopped: %s", name, exc)
+                failures.append(exc)
+            else:
+                logger.info("the %s is running", name)
+        if carriers and len(failures) == len(carriers):
+            raise failures[0]
+
+    async def _stop_late_carrier(self, name: str, transport: Any) -> None:
+        """Tears down a transport whose start ran past the deadline.
+
+        The cancel landed at whatever the backend was awaiting, and the
+        backend may still finish it: a Bluetooth peripheral has its GATT
+        callbacks wired before it awaits the advertisement, so one that
+        un-wedges later would advertise and take writes with nothing
+        watching it until shutdown. Stopped now, under the same deadline.
+        """
+        try:
+            await asyncio.wait_for(transport.stop(), self._carrier_start_timeout)
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            logger.error("the %s did not stop within %s s either", name, self._carrier_start_timeout)
+        except Exception as exc:
+            logger.error("the %s could not be stopped either: %s", name, exc)
 
     async def stop(self) -> None:
         """Closes every connection, then the engine and its transports."""
