@@ -4454,14 +4454,14 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// legacy React Native bridge does not have to iterate an
     /// `NSArray<NSNumber *>` of boxed bytes. Produces byte-identical
     /// signatures to `signData` for the same input.
-    @objc func signDataBase64(_ dataBase64: NSString,
+    @objc func signDataBase64(_ dataBase64: String,
                               resolver: @escaping RCTPromiseResolveBlock,
                               rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {
             rejecter("ERROR_NOT_INITIALIZED", "Protocol not initialized", nil)
             return
         }
-        guard let decoded = Data(base64Encoded: dataBase64 as String) else {
+        guard let decoded = Data(base64Encoded: dataBase64) else {
             rejecter("ERROR_CRYPTO", "signDataBase64: invalid base64 input", nil)
             return
         }
