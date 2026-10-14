@@ -379,6 +379,10 @@ the two above:
   and the `message_decryption_failed` that stands in for one. By the time they
   are emitted the core has ACKed the message, dedup-marked its id and dropped
   its queued copy, so nothing will restate them and a drop is a lost message.
+  `message_delivered` and `message_failed` are held for the sender's half of
+  the same reason: each is emitted after the pending acknowledgement, retry
+  and outbox entry are gone, so a drop leaves the message shown as in flight
+  forever (#514).
   They do not collapse per type, since every message is its own fact, so the
   hold is keyed `type:message_id`, kept in arrival order, and capped at a real
   capacity (256, oldest dropped) rather than a backstop. Each bridge holds
@@ -392,14 +396,26 @@ the two above:
 
 None of the three shapes covers an event the native module hands over and
 React Native then loses: a bridgeless emit reports failure by rejecting a task
-rather than throwing, so the module sees a success. Such a loss is made
-**visible**, not prevented. Both native modules number every event they hand
-over on the main event name (`seq`, given out and handed over under one lock),
-and the TypeScript layer reports a gap as a `diagnostic` event at level
-`warning` with message `native_event_gap` and the missing range. A gap says
-the event left the native module; no gap and no event says it never reached
-it. Nothing is refetched. `react_native_events_are_numbered_for_gap_detection`
-pins the field name in all three languages.
+rather than throwing, so the module sees a success. Such a loss is
+**recovered** by a fourth shape, a numbered replay. Both native modules number
+every event they hand over on the main event name (`seq`) and keep the last
+256 of them (`EventReplayRing`), and the number, the hand-over and the record
+happen under one lock, so the ring holds a contiguous run with each event
+under its own number. When the TypeScript layer sees a number skipped it
+pauses dispatch, pulls the missing range with `replayEvents`, and dispatches
+the recovered events in their place before anything that arrived after them,
+reporting a `diagnostic` at level `info` with message `native_event_replayed`.
+Only a number the ring no longer holds is reported as lost, at level `warning`
+with message `native_event_gap` and the missing range. A gap says the event
+left the native module; no gap and no event says it never reached it.
+
+The pull, not a re-emit, is the shape for a reason: a re-emit would be
+numbered again and arrive after the events that followed the lost one, and a
+push from the native side has no way to know JavaScript missed anything. The
+pause is bounded (2 s, 1024 deferred events) so a module that never answers
+degrades to the reporting-only behaviour rather than stalling the app.
+`react_native_events_are_numbered_for_gap_detection` pins the field name, the
+record, the bridge method and the ring capacity in all three languages.
 
 ## C11. A storage adapter is a supported extension point, and is verified
 

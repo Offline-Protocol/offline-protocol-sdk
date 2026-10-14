@@ -57,6 +57,9 @@ breaks one build, narrowly: Rust code that names every field of
 new `encrypted` field or a `..`. Android's peer-stream slot joins the Wi-Fi
 network it is on, and service bodies are sealed between peers
 ([§27](#27-behaviour-that-changes-without-a-compile-error-v0290)).
+The next release changes how React Native delivers events after a loss
+inside React Native, and holds two more event types
+([§28](#28-behaviour-that-changes-without-a-compile-error-unreleased)).
 
 Otherwise, where a later section documents an
 addition or a behaviour change, it is labelled inline with the release that
@@ -2608,6 +2611,35 @@ re-seals and resends once, then leaves the message to its retry ladder
 to honour, so an offline peer is no longer woken with "new message" for them.
 User messages, connection requests and accepts, group chat messages and group
 invites still push.
+
+---
+
+## 28. Behaviour that changes without a compile error *(Unreleased)*
+
+Nothing breaks a build. Each paragraph says what to check.
+
+**React Native: a lost event is fetched back, so events can pause briefly.**
+When the SDK sees a skipped event number it now asks the native module for
+the missing events and delivers them in order before anything that arrived
+after them. That pause is normally a fraction of a millisecond and is capped
+at two seconds. A recovered loss is reported as a `diagnostic` at level
+`info` with `message: "native_event_replayed"` and
+`context: { from, to, recovered, missing }`. `native_event_gap` still
+reports what could not be recovered, which is now only an event older than
+the last 256 the module kept.
+
+**React Native: `message_delivered` and `message_failed` can arrive late.**
+Both are now held while JavaScript cannot take them, such as while the app is
+backgrounded, and are delivered on the next subscription or foreground, as
+`message_received` already was. Each still names the message it settles.
+An app that compared a delivery's arrival time with its send time to measure
+latency should read the event's `latency_ms` instead. Keep the handlers
+idempotent on `message_id`.
+
+**React Native, custom native modules:** a module that replaces the SDK's
+own must add `replayEvents(fromSeq, toSeq)`, resolving the kept events as
+`{ seq, eventJson }`, or the SDK falls back to reporting gaps without
+recovering them.
 
 ---
 
