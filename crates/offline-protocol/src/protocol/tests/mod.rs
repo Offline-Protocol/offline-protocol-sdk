@@ -28881,6 +28881,74 @@ fn test_legacy_event_handler_panic_does_not_poison_shared_state() {
     );
 }
 
+#[test]
+fn a_panicking_handler_is_counted_once_per_missed_event() {
+    // #514: a panicking handler missed an event the engine has already acted
+    // on, so the miss is counted where a test can see it rather than only
+    // written to a log target no device shows.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    protocol.on_event(|_event| panic!("simulated handler panic"));
+
+    protocol.emit_event(crate::events::Event::neighbor_lost("alice".to_string()));
+    protocol.emit_event(crate::events::Event::neighbor_lost("bob".to_string()));
+
+    let panics = protocol
+        .shared_state
+        .lock()
+        .unwrap()
+        .handler_panics
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(panics, 2);
+}
+
+#[test]
+fn a_poisoned_shared_state_still_surfaces_a_received_message() {
+    // #514: the receive path ACKs a message and then locks the shared state
+    // to emit `message_received`. A poisoned lock used to refuse that lock,
+    // which skipped the emit, and every later one, for a message the sender
+    // had already been told arrived. The lock now recovers.
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+
+    let received = Arc::new(Mutex::new(Vec::new()));
+    let received_handle = received.clone();
+    protocol.on_event(move |event| {
+        if let Event::MessageReceived { message_id, .. } = event {
+            received_handle.lock().unwrap().push(message_id);
+        }
+    });
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    let message = Message::builder(
+        UserId::new("alice").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content("after the panic")
+    .build();
+    mock_transport.queue_message(message.clone());
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let shared = protocol.shared_state.clone();
+    let poisoner = std::thread::spawn(move || {
+        let _guard = shared.lock().unwrap();
+        panic!("poison the shared state");
+    });
+    assert!(poisoner.join().is_err());
+    assert!(protocol.shared_state.is_poisoned());
+
+    let surfaced = protocol.receive_message();
+    assert_eq!(surfaced.map(|m| m.id), Some(message.id.clone()));
+    assert_eq!(*received.lock().unwrap(), vec![message.id.as_str()]);
+    assert!(
+        !protocol.shared_state.is_poisoned(),
+        "the lock is cleared once recovered, so it is not recovered again on every call"
+    );
+}
+
 use crate::telemetry::routing::RoutingDecision;
 use crate::telemetry::transport_state::TransportStateEvent;
 
