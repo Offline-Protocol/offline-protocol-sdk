@@ -118,9 +118,11 @@ Three details in that table are load-bearing and easy to lose in a refactor:
   delivery sample. BLE once counted one as a send failure with no success ever
   recorded to balance it, which read as a 0% delivery ratio for the life of
   the process, hid every later acknowledgement, and tripped the low-success-rate
-  emergency switch. The sample floor does not prevent that: DORS takes one
-  sample per selection, so a stale ratio fills the window in a few sends
+  emergency switch
   ([#557](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/557)).
+  The sample floor did not stop it, because DORS sampled the counts once per
+  selection, so one stale ratio filled the window in a few sends
+  ([#559](https://github.com/Offline-Protocol/offline-protocol-sdk/issues/559)).
 
 ## Default gating parameters
 
