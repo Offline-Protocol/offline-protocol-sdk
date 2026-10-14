@@ -9,7 +9,7 @@ and a classification in ``dispatch.py``.
 
 from __future__ import annotations
 
-UDL_SHA256 = "fde449d34b2410e5d6ab608bd964ce0c22691a66689dff84cc9433a012015e05"
+UDL_SHA256 = "f717c4ae13ef510032a013e717f9ad2d39d0aaa57aa95f91c52db03bdae2ff72"
 
 TABLE = {'callbacks': ('MlsStorageProvider',
                'ProtocolStateStorageProvider',
@@ -488,6 +488,7 @@ TABLE = {'callbacks': ('MlsStorageProvider',
                                                                         'void'),
                                  'should_escalate_to_wifi': ((), 'boolean'),
                                  'sign_data': ((('data', 'sequence<u8>'),), 'sequence<u8>'),
+                                 'sign_data_bytes': ((('data', 'bytes'),), 'bytes'),
                                  'start': ((), 'void'),
                                  'stop': ((), 'void'),
                                  'telemetry_install_id': ((), 'string?'),
@@ -505,6 +506,10 @@ TABLE = {'callbacks': ('MlsStorageProvider',
                                                        ('data', 'sequence<u8>'),
                                                        ('signature', 'sequence<u8>')),
                                                       'boolean'),
+                                 'verify_signature_bytes': ((('public_key', 'bytes'),
+                                                             ('data', 'bytes'),
+                                                             ('signature', 'bytes')),
+                                                            'boolean'),
                                  'wifi_direct_get_next_message': ((), 'WifiDirectMessage?'),
                                  'wifi_direct_message_received': ((('sender_id', 'string'),
                                                                    ('data', 'sequence<u8>')),

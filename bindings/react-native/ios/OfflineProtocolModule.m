@@ -782,9 +782,19 @@ RCT_EXTERN_METHOD(signData:(NSArray *)data
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(signDataBase64:(NSString *)dataBase64
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(verifySignature:(NSArray *)publicKey
                   data:(NSArray *)data
                   signature:(NSArray *)signature
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(verifySignatureBase64:(NSString *)publicKeyBase64
+                  data:(NSString *)dataBase64
+                  signature:(NSString *)signatureBase64
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)
 
