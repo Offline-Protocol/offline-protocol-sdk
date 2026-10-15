@@ -75,7 +75,14 @@ export const ONE_SHOT_EVENT_TYPES = [
  * buffers key them `type:message_id` and the JS-side hold is a FIFO, both
  * capped at 256 entries.
  *
- * The same three tags are enrolled in the native buffers on both platforms
+ * `message_delivered` and `message_failed` are the sender's half of the same
+ * fact (#514). Each settles one outgoing message for good, after the core has
+ * removed its pending acknowledgement, retry and outbox entry, so nothing
+ * restates it either, and a dropped one leaves the app showing the message as
+ * in flight forever. A held one can arrive late, after a background gap; it
+ * still names the message it settles.
+ *
+ * The same tags are enrolled in the native buffers on both platforms
  * (`OfflineProtocolModule.BUFFERED_INBOUND_EVENT_TYPES` in Kotlin,
  * `InboundEventBuffer.bufferedEventTypes` in Swift), which hold them across
  * the *native→JS* gap; this set drives the JS-side hold that covers the
@@ -87,10 +94,33 @@ export const BUFFERED_INBOUND_EVENT_TYPES = [
   'message_received',
   'file_received',
   'message_decryption_failed',
+  'message_delivered',
+  'message_failed',
 ] as const;
 
 /** Most inbound events the JS-side hold keeps; the oldest is dropped past it. */
 export const MAX_PENDING_INBOUND_EVENTS = 256;
+
+/**
+ * How many of the most recent events each native module keeps for
+ * `replayEvents` (#514). Must match `EventReplayRing.DEFAULT_CAPACITY` on
+ * Android and `EventReplayRing.defaultCapacity` on iOS; pinned by
+ * `react_native_events_are_numbered_for_gap_detection`.
+ */
+export const NATIVE_EVENT_REPLAY_CAPACITY = 256;
+
+/**
+ * How long dispatch waits for `replayEvents` before going on without it.
+ * The call is an in-memory read on the native side, so this only bounds a
+ * module that never answers.
+ */
+export const NATIVE_EVENT_REPLAY_TIMEOUT_MS = 2_000;
+
+/**
+ * Most events held behind a paused dispatch before it gives up on the
+ * replay and reports what is still missing.
+ */
+export const MAX_DEFERRED_NATIVE_EVENTS = 1_024;
 
 /**
  * The Headless JS task key the Android keep-alive uses to wake JavaScript after

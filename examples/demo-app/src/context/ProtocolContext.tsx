@@ -899,6 +899,16 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
         break;
       }
 
+      case 'diagnostic': {
+        // The two event-gap diagnostics are what a soak reads to tell a
+        // message lost in React Native from one the core never produced
+        // (#514): one recovered, one not.
+        if (event.message === 'native_event_replayed' || event.message === 'native_event_gap') {
+          console.warn(`[ProtocolContext] ${event.message}`, JSON.stringify(event.context));
+        }
+        break;
+      }
+
       default:
         break;
     }

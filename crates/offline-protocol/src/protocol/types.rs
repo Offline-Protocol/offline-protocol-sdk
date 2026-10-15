@@ -2340,6 +2340,12 @@ pub(crate) struct SharedState {
     /// `TelemetryRecord::Protocol`, with identifier scrubbing applied per
     /// `ctx.config`. Set via `OfflineProtocol::install_telemetry_sink`.
     pub(crate) telemetry: Option<Arc<TelemetryContext>>,
+
+    /// Handler calls that panicked and were isolated by [`Self::emit_event`].
+    /// Each one is an event at least one handler never saw, after the engine
+    /// had already acted on what it reports (#514), so it is counted where a
+    /// test can read it rather than only logged.
+    pub(crate) handler_panics: std::sync::atomic::AtomicU64,
 }
 
 impl SharedState {
@@ -2349,6 +2355,7 @@ impl SharedState {
             event_handlers: Vec::new(),
             received_messages: VecDeque::new(),
             telemetry: None,
+            handler_panics: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -2367,9 +2374,17 @@ impl SharedState {
                 handler(event_for_handler);
             }));
             if result.is_err() {
+                // Counted, and named by type only: the event's fields carry
+                // senders, peers and message content, and an embedder's own
+                // subscriber would print them. The event is already settled
+                // in the engine (a received message is ACKed, a delivered one
+                // has left the outbox), so this is a message the app will not
+                // hear about.
+                self.handler_panics
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::error!(
-                    event = ?event,
-                    "EventCallback panicked; continuing. Handlers must not panic — see OfflineProtocol::on_event.",
+                    event = event.telemetry_name(),
+                    "EventCallback panicked; this handler missed the event. Handlers must not panic, see OfflineProtocol::on_event.",
                 );
             }
         }
@@ -2398,13 +2413,29 @@ impl SharedState {
     }
 }
 
-/// Helper function to lock a mutex and convert poison errors to protocol errors.
+/// Locks the shared state, recovering it if an earlier holder panicked.
+///
+/// Recovering rather than refusing is what keeps events flowing (#514). The
+/// callers that emit `message_received` and `message_delivered` act first
+/// (the ACK is sent, the outbox entry removed) and lock to emit afterwards, so
+/// a refusal here does not undo anything: it silently drops the one event
+/// that reports what was done, and then every later one too, since a std
+/// mutex stays poisoned for good. Nothing under this lock is left
+/// half-written by a panic that matters: handler and sink calls, the only
+/// foreign code run under it, are panic-isolated in
+/// [`SharedState::emit_event`], and the remaining writes are single pushes
+/// and pops on a queue or a field store.
+///
+/// Still returns a `Result`, so the call sites' existing handling stays
+/// valid, but never `Err`.
 pub(crate) fn lock_shared_state(
     state: &Arc<Mutex<SharedState>>,
 ) -> std::result::Result<std::sync::MutexGuard<'_, SharedState>, Error> {
-    state
-        .lock()
-        .map_err(|_| Error::Other("Shared state mutex poisoned".to_string()))
+    Ok(state.lock().unwrap_or_else(|poisoned| {
+        tracing::error!("Shared state mutex was poisoned by a panic; recovering it");
+        state.clear_poison();
+        poisoned.into_inner()
+    }))
 }
 
 /// Provenance kept on an outbox entry so an encrypted DM can be *re-sealed*

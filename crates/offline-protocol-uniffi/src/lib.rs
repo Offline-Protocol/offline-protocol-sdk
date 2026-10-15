@@ -2801,7 +2801,20 @@ impl OfflineProtocol {
                     .as_ref()
                     .cloned();
                 if let Some(callback) = callback_arc {
-                    callback.on_event(event_json.clone());
+                    // A foreign callback that throws reaches here as a panic:
+                    // UniFFI has no error type to lift a void callback's
+                    // exception into. Isolated here rather than left to the
+                    // engine's own isolation so the polling queue below still
+                    // gets the event, and the miss is named by type (#514).
+                    let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        callback.on_event(event_json.clone());
+                    }));
+                    if delivered.is_err() {
+                        tracing::error!(
+                            event = event.telemetry_name(),
+                            "EventCallback.on_event threw; the binding missed this event",
+                        );
+                    }
                 }
 
                 // Add to event queue for polling
@@ -15129,27 +15142,77 @@ mod tests {
     /// bridgeless emit fails without the module seeing it. The field name is
     /// written in three languages; one that drifts makes `seq` undefined at JS,
     /// which reads as "an old native module" and silently reports nothing.
+    ///
+    /// Each module also keeps the events it numbered, so the TypeScript layer
+    /// fetches a lost one back instead of only reporting it. Every half of
+    /// that fails silently too: a module that stops recording, or a method
+    /// the bridge no longer exports, turns recovery back into a report.
     #[test]
     fn react_native_events_are_numbered_for_gap_detection() {
         let kotlin = rn_source_code_only(
             "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
         );
+        let kotlin_ring =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/EventReplayRing.kt");
         let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        let swift_bridge = rn_source_code_only("ios/OfflineProtocolModule.m");
+        let swift_ring = rn_source_code_only("ios/EventReplayRing.swift");
+        let podspec = rn_source_code_only("MeshSdk.podspec");
         let ts = rn_source_code_only("src/index.ts");
+        let constants = rn_source_code_only("src/constants.ts");
         assert!(
             kotlin.contains("const val EVENT_SEQ_FIELD = \"seq\"")
-                && kotlin.contains("putInt(EVENT_SEQ_FIELD, eventSeq)")
-                && kotlin.contains("if (numbered) eventSeq += 1"),
+                && kotlin.contains("putInt(EVENT_SEQ_FIELD, eventSeq)"),
             "OfflineProtocolModule.kt must number every event on its event name as `seq`"
+        );
+        // Recorded after the emit returned and before the number moves on, in
+        // the block that spends it: an event recorded under the wrong number
+        // would be replayed in another's place (#514).
+        assert!(
+            kotlin.contains(
+                "if (numbered) { replayJson?.let { eventReplay.record(eventSeq, it) } eventSeq += 1 }"
+            ) && kotlin.contains("private val eventReplay = EventReplayRing()")
+                && kotlin.contains(
+                    "fun replayEvents(fromSeq: Double, toSeq: Double, promise: Promise)"
+                )
+                && kotlin.contains("eventReplay.replay(fromSeq.toInt(), toSeq.toInt())"),
+            "OfflineProtocolModule.kt must keep every numbered event for replayEvents"
         );
         assert!(
             swift.contains("static let eventSeqField = \"seq\"")
-                && swift.contains("numbered[Self.eventSeqField] = eventSeq"),
-            "OfflineProtocolModule.swift must number every event on its event name as `seq`"
+                && swift.contains(
+                    "numbered[Self.eventSeqField] = eventSeq if let eventJson = \
+                     numbered[\"eventJson\"] as? String { eventReplay.record(seq: eventSeq, \
+                     eventJson: eventJson) } eventSeq += 1"
+                ),
+            "OfflineProtocolModule.swift must number every event as `seq` and keep it for replay"
         );
         assert!(
-            ts.contains("(data: { eventJson: string; seq?: number }) => { this.checkEventSequence(data.seq);"),
-            "index.ts must check each event's `seq` before handling it"
+            swift.contains("private let eventReplay = EventReplayRing()")
+                && swift.contains("@objc func replayEvents(_ fromSeq: NSNumber,")
+                && swift_bridge
+                    .contains("RCT_EXTERN_METHOD(replayEvents:(nonnull NSNumber *)fromSeq"),
+            "the iOS module must export replayEvents to JavaScript"
+        );
+        assert!(
+            podspec.contains("\"ios/EventReplayRing.swift\","),
+            "MeshSdk.podspec must ship ios/EventReplayRing.swift: the pod lists sources \
+             explicitly, so a missing entry is a link error in every consuming app"
+        );
+        assert!(
+            ts.contains(
+                "(data: { eventJson: string; seq?: number }) => { \
+                 this.admitNativeEvent(data.eventJson, data.seq); }"
+            ) && ts.contains("replayEvents.call(OfflineProtocolNativeModule, fromSeq, toSeq)"),
+            "index.ts must admit each event by its `seq` and fetch a gap back with replayEvents"
+        );
+        // Three capacities, one number: the TypeScript doc promises what the
+        // native rings keep.
+        assert!(
+            kotlin_ring.contains("const val DEFAULT_CAPACITY = 256")
+                && swift_ring.contains("static let defaultCapacity = 256")
+                && constants.contains("export const NATIVE_EVENT_REPLAY_CAPACITY = 256;"),
+            "the replay ring capacity must agree across Kotlin, Swift and TypeScript"
         );
     }
 
@@ -15159,7 +15222,11 @@ mod tests {
     /// `message_received`, `file_received` and `message_decryption_failed`
     /// each report one message the core has already ACKed, dedup-marked and
     /// dropped its queued copy of, so nothing will ever restate them and a
-    /// drop between the core and the app's handler is a lost message. Three
+    /// drop between the core and the app's handler is a lost message.
+    /// `message_delivered` and `message_failed` are the sender's half (#514):
+    /// each settles one outgoing message after its pending acknowledgement,
+    /// retry and outbox entry are gone, so they qualify for the same reason.
+    /// Three
     /// definitions and three holds have to agree for that not to happen —
     /// the native buffers (Kotlin `BUFFERED_INBOUND_EVENT_TYPES`, Swift
     /// `InboundEventBuffer.bufferedEventTypes`) cover the native→JS gap and
@@ -15170,10 +15237,12 @@ mod tests {
     /// periodic event here would replay stale state.
     #[test]
     fn react_native_buffered_inbound_event_set_matches_native() {
-        const INBOUND_TAGS: [&str; 3] = [
+        const INBOUND_TAGS: [&str; 5] = [
             "message_received",
             "file_received",
             "message_decryption_failed",
+            "message_delivered",
+            "message_failed",
         ];
 
         let rn_dir =

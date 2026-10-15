@@ -62,6 +62,26 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   failure became five identical 0.0 samples after five sends and met
   `min_ble_samples_before_success_rate_escalation` with no new evidence. It
   now samples only when the delivery counts change (#559).
+- **React Native recovers an event lost on the way to JavaScript instead of
+  only reporting it.** A device test saw a sender get a receipt for a
+  message whose recipient app never got `message_received`, and a sender
+  whose app never got `message_delivered` although the message stopped
+  retrying (#514). In both cases the core had already acted: the message was
+  acknowledged and its id marked, or its outbox entry and retry removed, so
+  nothing would ever restate the event. Each native module now keeps the
+  last 256 events it handed over, by the `seq` number 0.28.0 added, and
+  serves them through a new `replayEvents` bridge method. When a number is
+  skipped, the TypeScript layer pauses dispatch, fetches the missing events,
+  and delivers them in their place, reporting the recovery as a `diagnostic`
+  with `message: "native_event_replayed"`. `native_event_gap` now reports
+  only what the module no longer held. Three further ways to lose one of
+  these events silently are closed. `message_delivered` and `message_failed`
+  are held for redelivery when JavaScript cannot take them, as
+  `message_received` already was. A poisoned shared-state lock no longer
+  skips every later event emission. And an exception thrown inside the
+  Android module's event callback is caught and logged by event type, where
+  it used to become a panic in the core that only a filtered log target
+  recorded.
 
 ### Removed
 

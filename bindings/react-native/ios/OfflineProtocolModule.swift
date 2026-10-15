@@ -1109,6 +1109,9 @@ class OfflineProtocolModule: RCTEventEmitter {
         defer { eventSeqLock.unlock() }
         if eventName == Events.onEvent, var numbered = body as? [String: Any] {
             numbered[Self.eventSeqField] = eventSeq
+            if let eventJson = numbered["eventJson"] as? String {
+                eventReplay.record(seq: eventSeq, eventJson: eventJson)
+            }
             eventSeq += 1
             sendEvent(withName: eventName, body: numbered)
         } else {
@@ -1124,6 +1127,23 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// React Native, and nothing is refetched.
     private var eventSeq = 0
     private let eventSeqLock = NSLock()
+    /// Every event recently handed over on `Events.onEvent`, by its
+    /// `eventSeq`, so the TypeScript layer can fetch one React Native lost
+    /// instead of only reporting it. Recorded under `eventSeqLock`, in the
+    /// same block that spends the number. See `EventReplayRing`.
+    private let eventReplay = EventReplayRing()
+
+    /// Hands back the events numbered `fromSeq` to `toSeq` that are still
+    /// kept, as `{seq, eventJson}` in order (#514). The TypeScript layer calls
+    /// this when a number it expected never arrived, and reports as lost only
+    /// what this cannot serve. A pull, so not gated on `canEmitToJs`.
+    @objc func replayEvents(_ fromSeq: NSNumber,
+                            toSeq: NSNumber,
+                            resolver: @escaping RCTPromiseResolveBlock,
+                            rejecter: @escaping RCTPromiseRejectBlock) {
+        let replayed = eventReplay.replay(fromSeq: fromSeq.intValue, toSeq: toSeq.intValue)
+        resolver(replayed.map { [Self.eventSeqField: $0.seq, "eventJson": $0.eventJson] as [String: Any] })
+    }
     /// Field on every `Events.onEvent` payload carrying `eventSeq`.
     static let eventSeqField = "seq"
     
