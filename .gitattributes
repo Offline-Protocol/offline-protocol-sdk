@@ -18,6 +18,11 @@
 #     go stale unpinned. Several were only ever exercised on Unix runners,
 #     because `cargo test` stops at the first failing binary and an earlier
 #     crate always failed on Windows first.
+#   - Generated Rust checked in beside its generator (the C binding's
+#     dispatcher, `capi/generated.rs`) is compared byte for byte with what
+#     the generator builds with `\n`, by `the_generated_c_dispatch_is_current`
+#     and by `tools/capi-dispatch-gen --check`. Pinning `*.rs` rather than
+#     that one file covers the next guard that reads Rust source too.
 #
 # Pinning these to LF makes the bytes on disk the bytes the tests expect on
 # every platform. Nothing in the toolchain (cargo, gradle, node, Xcode) wants
@@ -30,6 +35,7 @@
 *.js text eol=lf
 *.py text eol=lf
 *.udl text eol=lf
+*.rs text eol=lf
 *.podspec text eol=lf
 *.h text eol=lf
 *.m text eol=lf

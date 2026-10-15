@@ -24,6 +24,8 @@ offline-protocol-core = { workspace = true }
 offline-protocol-router = { workspace = true }
 offline-protocol-transport = { workspace = true }
 offline-protocol-mls = { workspace = true }
+# The C binding's byte strings, which cross as base64 as on the local API.
+base64 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

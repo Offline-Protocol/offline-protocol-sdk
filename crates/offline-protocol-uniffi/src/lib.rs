@@ -11,6 +11,7 @@
 #![allow(unsafe_code)] // Required for UniFFI generated scaffolding
 #![allow(missing_docs)] // Types are documented in offline_protocol.udl
 
+pub mod capi;
 mod host_log;
 
 use offline_protocol::{

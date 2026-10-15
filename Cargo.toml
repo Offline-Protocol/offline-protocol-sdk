@@ -16,11 +16,13 @@ members = [
     "crates/offline-protocol-bench",
 ]
 
-# Has its own `[workspace]` table, so cargo already keeps it out. Named here so
-# the exclusion is visible from the root rather than only on opening the crate:
-# it builds for bare metal only, and as a member it would make every
-# `cargo build --workspace` demand a Cortex-M toolchain.
-exclude = ["tools/embedded-footprint"]
+# Each has its own `[workspace]` table, so cargo already keeps it out. Named
+# here so the exclusion is visible from the root rather than only on opening
+# the crate. The footprint harness builds for bare metal only, and as a member
+# it would make every `cargo build --workspace` demand a Cortex-M toolchain.
+# The C dispatcher's generator must run while the FFI crate does not compile
+# (see its manifest), so it cannot be a member of the workspace that crate is.
+exclude = ["tools/embedded-footprint", "tools/capi-dispatch-gen"]
 
 [workspace.package]
 # The release version, shared with the `vX.Y.Z` git tag and the npm package —
