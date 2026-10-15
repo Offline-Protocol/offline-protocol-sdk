@@ -98,6 +98,10 @@ build_fixture() {
   echo "fixture so x86_64" >"$root/desktop-libs/linux-x86_64/liboffline_protocol_uniffi.so"
   echo "fixture so aarch64" >"$root/desktop-libs/linux-aarch64/liboffline_protocol_uniffi.so"
   echo "fixture dll" >"$root/desktop-libs/windows-x86_64/offline_protocol_uniffi.dll"
+  echo "fixture import library" >"$root/desktop-libs/windows-x86_64/offline_protocol_uniffi.dll.lib"
+
+  mkdir -p "$root/bindings/c/include"
+  echo "fixture c header" >"$root/bindings/c/include/offline_protocol.h"
 
   # The archive as build-ios zips it, and the package assembled against it.
   local swiftpm="$root/swiftpm/offline_protocolFFI.xcframework"
@@ -240,6 +244,7 @@ check_desktop() {
   assert_entry "$archive" "$loader_name"
   assert_entry "$archive" "offline_protocol.py"
   assert_entry "$archive" "offline_protocolFFI.h"
+  assert_entry "$archive" "offline_protocol.h"
   assert_entry "$archive" "VERSION"
   assert_entry "$archive" "README.md"
   assert_entry "$archive" "LICENSE"
@@ -254,6 +259,7 @@ check_desktop "$ASSETS/offline-protocol-$TEST_VERSION-linux-aarch64.tar.gz" \
   liboffline_protocol_uniffi.so libuniffi.so
 check_desktop "$ASSETS/offline-protocol-$TEST_VERSION-windows-x86_64.zip" \
   offline_protocol_uniffi.dll uniffi.dll
+assert_entry "$ASSETS/offline-protocol-$TEST_VERSION-windows-x86_64.zip" offline_protocol_uniffi.dll.lib
 
 # Windows extractors do not create symlinks, so uniffi.dll has to be a real copy
 # of the DLL rather than a link that arrives broken.
@@ -349,6 +355,8 @@ drop_desktop_lib() { rm -rf "${1:?}/desktop-libs/linux-aarch64"; }
 drop_ios_generated() { rm -rf "${1:?}/bindings/react-native/ios/Generated"; }
 drop_python_module() { rm -f "${1:?}/bindings/python/offline_protocol_sdk/offline_protocol.py"; }
 drop_legal() { rm -f "${1:?}/EXPORT.md"; }
+drop_c_header() { rm -f "${1:?}/bindings/c/include/offline_protocol.h"; }
+drop_import_lib() { rm -f "${1:?}/desktop-libs/windows-x86_64/offline_protocol_uniffi.dll.lib"; }
 drop_android_abis() { rm -rf "${1:?}/bindings/react-native/android/src/main/jniLibs"; }
 drop_swiftpm() { rm -rf "${1:?}/swiftpm"; }
 drop_swift_package() { rm -rf "${1:?}/swift-package"; }
@@ -385,6 +393,8 @@ expect_failure "missing-desktop-lib" drop_desktop_lib
 expect_failure "missing-ios-generated" drop_ios_generated
 expect_failure "missing-python-module" drop_python_module
 expect_failure "missing-export-notice" drop_legal
+expect_failure "missing-c-header" drop_c_header
+expect_failure "missing-windows-import-library" drop_import_lib
 expect_failure "missing-android-abis" drop_android_abis
 expect_failure "missing-swiftpm-xcframework" drop_swiftpm
 expect_failure "missing-swift-package" drop_swift_package

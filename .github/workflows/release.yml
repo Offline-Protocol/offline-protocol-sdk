@@ -443,15 +443,19 @@ jobs:
         run: |
           mkdir -p desktop-libs/windows-x86_64
           SO_ROOT="target/x86_64-pc-windows-msvc/release"
-          if [ -f "$SO_ROOT/offline_protocol_uniffi.dll" ]; then
-            cp "$SO_ROOT/offline_protocol_uniffi.dll" "desktop-libs/windows-x86_64/"
-          elif [ -f "$SO_ROOT/deps/offline_protocol_uniffi.dll" ]; then
-            cp "$SO_ROOT/deps/offline_protocol_uniffi.dll" "desktop-libs/windows-x86_64/"
-          else
-            echo "ERROR: offline_protocol_uniffi.dll not found"
-            ls -la "$SO_ROOT"/ "$SO_ROOT/deps"/ 2>/dev/null || true
-            exit 1
-          fi
+          # The DLL, and the import library rustc writes beside it, which is
+          # what an MSVC linker needs to link the DLL from C (docs/bridges/c.md).
+          for file in offline_protocol_uniffi.dll offline_protocol_uniffi.dll.lib; do
+            if [ -f "$SO_ROOT/$file" ]; then
+              cp "$SO_ROOT/$file" "desktop-libs/windows-x86_64/"
+            elif [ -f "$SO_ROOT/deps/$file" ]; then
+              cp "$SO_ROOT/deps/$file" "desktop-libs/windows-x86_64/"
+            else
+              echo "ERROR: $file not found"
+              ls -la "$SO_ROOT"/ "$SO_ROOT/deps"/ 2>/dev/null || true
+              exit 1
+            fi
+          done
 
       - uses: actions/upload-artifact@v7
         with:
@@ -1103,6 +1107,7 @@ jobs:
           test -f desktop-libs/linux-x86_64/liboffline_protocol_uniffi.so
           test -f desktop-libs/linux-aarch64/liboffline_protocol_uniffi.so
           test -f desktop-libs/windows-x86_64/offline_protocol_uniffi.dll
+          test -f desktop-libs/windows-x86_64/offline_protocol_uniffi.dll.lib
 
           echo "Checking Python bindings..."
           test -s bindings/python/offline_protocol_sdk/offline_protocol.py
