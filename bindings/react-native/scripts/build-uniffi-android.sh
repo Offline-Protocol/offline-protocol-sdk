@@ -158,7 +158,10 @@ for i in "${!ABIS[@]}"; do
   target="${TARGETS[$i]}"
   echo "Building for $abi ($target)..."
   
-  cargo build --release --target "$target" --package offline-protocol-uniffi
+  # Without the C binding: a cdylib exports every C symbol, so the dispatcher
+  # behind them could not be stripped (the `capi` feature in the crate).
+  cargo build --release --target "$target" --package offline-protocol-uniffi \
+    --no-default-features
   
   # Create output directory for this ABI
   mkdir -p "$OUTPUT_DIR/$abi"

@@ -482,6 +482,11 @@ jobs:
       - name: Header is current
         run: scripts/generate-c-header.sh --check
 
+      # The Android builds turn the C binding off (the `capi` feature), and
+      # nothing else in CI builds the crate that way before a release does.
+      - name: The crate builds without the C binding
+        run: cargo clippy --locked --package offline-protocol-uniffi --no-default-features -- -D warnings
+
       # The in-crate test already fails on a stale dispatcher. This runs the
       # standalone generator, which is the only way to regenerate after a
       # rename in the definition, so that it cannot rot unnoticed.

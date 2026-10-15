@@ -191,6 +191,17 @@ runs all four on Linux and macOS, building the library once through the
 probe that reads the static library's system dependencies. Windows is
 built by the release and not yet linked by CI.
 
+## Which builds carry it
+
+**The C binding is the crate's `capi` feature, on by default and off in the
+Android builds.** A shared library exports every `#[no_mangle]` symbol, so
+nothing can strip the dispatcher behind the C functions, and an Android
+application has no C host to call them. The desktop libraries the release
+ships carry it. The iOS builds keep the default: an application links the
+static library with dead stripping, which drops exports nothing references.
+CI builds the crate without the feature under `-D warnings`, so a change
+that only compiles with the C binding fails before a release does.
+
 ## What this does not cover
 
 - **A typed C++ API.** The header compiles as C++; a class wrapper is a

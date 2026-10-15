@@ -22,10 +22,15 @@ if [ "$installed" != "cbindgen $CBINDGEN_VERSION" ]; then
 fi
 
 # cbindgen's warnings for the crate's Rust-only constants are expected; its
-# errors still fail the run through `set -e`.
+# errors still fail the run through `set -e`. So is one per item about the
+# `capi` feature: the module is behind it, and a `[defines]` entry would wrap
+# every declaration in a preprocessor guard a C host would have to define.
+# The header describes the library that has the feature; one without it has
+# no such symbols to declare.
 generate() {  # generate <output path>
   cbindgen --config "$CRATE_DIR/cbindgen.toml" --crate offline-protocol-uniffi \
-    --lang c --output "$1" "$CRATE_DIR" 2> >(grep -v '^WARN: Skip ' >&2)
+    --lang c --output "$1" "$CRATE_DIR" \
+    2> >(grep -v -e '^WARN: Skip ' -e '^WARN: Missing `\[defines\]` entry for `feature = "capi"`' >&2)
 }
 
 case "${1:-}" in
