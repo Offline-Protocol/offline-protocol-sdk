@@ -265,7 +265,11 @@ fn the_binding_fills_the_telemetry_platform_and_refuses_one_from_the_caller() {
         panic!("the binding did not fill os: {m}");
     }
     let _ = engine.call("disable_telemetry", None);
-    assert!(["Ios", "Android", "Linux", "Macos", "Windows", "Other"].contains(&TELEMETRY_OS));
+    // The spelling comes from the codec, so it is one the decoder accepts.
+    assert_eq!(
+        crate::TelemetryOs::decode(&TELEMETRY_OS.encode(), "os").ok(),
+        Some(TELEMETRY_OS)
+    );
 }
 
 /// The `extern "C"` layer hands one engine to whichever host thread calls

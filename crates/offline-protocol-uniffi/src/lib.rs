@@ -11907,7 +11907,7 @@ mod tests {
             .1;
         assert!(
             fill.contains("config.contains_key(\"os\")")
-                && fill.contains("config.insert(\"os\".to_owned(), Value::from(TELEMETRY_OS))"),
+                && fill.contains("config.insert(\"os\".to_owned(), TELEMETRY_OS.encode())"),
             "the C binding must refuse a caller's os and fill its own"
         );
     }

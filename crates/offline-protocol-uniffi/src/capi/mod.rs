@@ -38,24 +38,28 @@ use serde_json::Value;
 pub use codec::CallError;
 use codec::{Codec, Fields};
 
-use crate::{DataStore, MeshServices, OfflineProtocol, ProtocolConfig};
+use crate::{DataStore, MeshServices, OfflineProtocol, ProtocolConfig, TelemetryOs};
 
 /// The `TelemetryConfig.os` this build reports. The binding fills it, and
 /// never reads it from the application (bridge contract C12): a batch's
 /// platform is the platform the library was built for, not a string an
 /// application forwarded.
-pub const TELEMETRY_OS: &str = if cfg!(target_os = "ios") {
-    "Ios"
+///
+/// The definition's enum rather than its spelling, so the text on the wire
+/// comes from the generated codec and a platform no CI runner builds for
+/// cannot carry a misspelt value to the ingest.
+pub const TELEMETRY_OS: TelemetryOs = if cfg!(target_os = "ios") {
+    TelemetryOs::Ios
 } else if cfg!(target_os = "android") {
-    "Android"
+    TelemetryOs::Android
 } else if cfg!(target_os = "linux") {
-    "Linux"
+    TelemetryOs::Linux
 } else if cfg!(target_os = "macos") {
-    "Macos"
+    TelemetryOs::Macos
 } else if cfg!(target_os = "windows") {
-    "Windows"
+    TelemetryOs::Windows
 } else {
-    "Other"
+    TelemetryOs::Other
 };
 
 /// One engine and the two objects built on it.
@@ -184,6 +188,6 @@ fn fill_telemetry_platform(params: &mut Option<Value>) -> Result<(), CallError> 
                 .to_owned(),
         ));
     }
-    config.insert("os".to_owned(), Value::from(TELEMETRY_OS));
+    config.insert("os".to_owned(), TELEMETRY_OS.encode());
     Ok(())
 }
