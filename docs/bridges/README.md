@@ -577,7 +577,12 @@ level, Swift sets `.ios` and the major of `UIDevice.current.systemVersion`,
 Python maps `platform.system()`. The TypeScript `TelemetryConfig` does not
 expose them, and `every_bridge_reads_the_telemetry_config_section` pins both
 halves: every other field is read under its camelCase name, and these two
-are not read at all.
+are not read at all. The C binding is the one exception, for `os_major`
+only: it fills `os` from the target it was built for and refuses one from
+the caller, and takes `os_major` from the host, because there the host is
+the platform and the only side that can read its version
+([c.md K3](c.md#k3-the-binding-fills-the-telemetry-platform)). The same guard
+pins that the C binding fills `os`.
 
 **The binding owns the lifecycle.** Entering the background is the session
 boundary. Kotlin reports it from an `ActivityLifecycleCallbacks` watcher on
