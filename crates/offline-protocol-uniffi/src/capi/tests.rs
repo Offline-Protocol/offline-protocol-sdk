@@ -220,11 +220,10 @@ fn sending_before_storage_is_the_engines_refusal() {
         "send_message",
         Some(r#"{"recipient":"off1qyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyr4s29s","content":"hi","priority":"Medium"}"#),
     );
+    // Encryption is required by default and no storage is attached. The
+    // local API's error table gives EncryptFailed as -32006.
     let variant = result.as_ref().err().and_then(CallError::engine_variant);
-    assert!(
-        variant.is_some(),
-        "the engine refuses, not the codec: {result:?}"
-    );
+    assert_eq!(variant, Some(("EncryptFailed", 6)), "{result:?}");
     engine.call("stop", None).expect("stops");
 }
 

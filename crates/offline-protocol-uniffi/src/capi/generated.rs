@@ -3451,6 +3451,20 @@ pub fn protocol_error_variant(e: &crate::ProtocolError) -> (&'static str, i32) {
     }
 }
 
+/// A C storage function's answer as the definition's `MlsStorageError`:
+/// variant `n` (zero-based) is code `n + 1`, and zero is success. `None` for
+/// any other value, which the adapter reads as the operation's own failure.
+pub fn mls_storage_error_from_code(code: i32) -> Option<crate::MlsStorageError> {
+    match code {
+        1 => Some(crate::MlsStorageError::StoreFailed),
+        2 => Some(crate::MlsStorageError::LoadFailed),
+        3 => Some(crate::MlsStorageError::DeleteFailed),
+        4 => Some(crate::MlsStorageError::KeyNotFound),
+        5 => Some(crate::MlsStorageError::CorruptedData),
+        _ => None,
+    }
+}
+
 /// The definition's instance-less functions, which need no engine.
 pub const NAMESPACE: &[&str] = &[
     "derive_address",

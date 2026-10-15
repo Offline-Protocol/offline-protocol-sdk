@@ -434,6 +434,66 @@ jobs:
       - name: Build release cdylib
         run: cargo build --release --locked --target ${{ matrix.release_target }} --package offline-protocol-uniffi
 
+  # The C binding (docs/bridges/c.md). `cargo test` covers the dispatcher and
+  # the boundary from Rust; this is the other side: the committed header is
+  # what the Rust exports today, and a C program compiled against it with
+  # -Wpedantic -Werror links against the shared and the static library and
+  # runs. Nothing else in CI puts a C compiler on the far side of the ABI.
+  c-binding:
+    name: C Binding (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-c-binding
+
+      # Pinned in the generation script, because cbindgen's formatting moves
+      # between releases and would read as drift; read from there so this job
+      # and a local regeneration can never disagree.
+      - name: Read pinned cbindgen version
+        id: pin
+        shell: bash
+        run: |
+          version="$(sed -n 's/^CBINDGEN_VERSION="\(.*\)"$/\1/p' scripts/generate-c-header.sh)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache cbindgen binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cbindgen
+          key: cbindgen-${{ steps.pin.outputs.version }}-${{ runner.os }}
+
+      - name: Install cbindgen
+        shell: bash
+        run: |
+          if ! cbindgen --version 2>/dev/null | grep -qFx "cbindgen ${{ steps.pin.outputs.version }}"; then
+            cargo install cbindgen --version "${{ steps.pin.outputs.version }}" --locked --force
+          fi
+
+      - name: Header is current
+        run: scripts/generate-c-header.sh --check
+
+      # The in-crate test already fails on a stale dispatcher. This runs the
+      # standalone generator, which is the only way to regenerate after a
+      # rename in the definition, so that it cannot rot unnoticed.
+      - name: Dispatcher generator runs and agrees
+        run: cargo run --locked --manifest-path tools/capi-dispatch-gen/Cargo.toml -- --check
+
+      - name: Build the library
+        run: cargo build --locked --package offline-protocol-uniffi
+
+      - name: Compile and run the C consumer check
+        run: make -C bindings/c/consumer-check
+
   security:
     name: Dependency Audit
     runs-on: ubuntu-latest

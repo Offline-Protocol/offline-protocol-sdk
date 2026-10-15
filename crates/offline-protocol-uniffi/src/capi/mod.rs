@@ -14,11 +14,18 @@
 //! written by `generator.rs`), so a method added there is callable from C
 //! without anyone writing a line here.
 //!
-//! This module is the safe half. The `extern "C"` functions sit on top of it.
+//! This module is the safe half. The `extern "C"` functions sit on top of it,
+//! in `ffi.rs`, with the adapters that put host C functions behind the
+//! wrapper's callback traits in `adapters.rs`. Those two files are the only
+//! ones in this crate that write `unsafe`, which a guard holds.
 
+mod adapters;
 mod codec;
+pub mod ffi;
 #[rustfmt::skip]
 mod generated;
+#[cfg(test)]
+mod ffi_tests;
 #[cfg(test)]
 mod generator;
 #[cfg(test)]
