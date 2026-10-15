@@ -79,7 +79,8 @@ typedef enum OfflineProtocolTransport {
 /**
  * What a storage function answers. The nonzero values are the definition's
  * `MlsStorageError` variants, in its order, so a value means the same
- * thing here as in every other binding.
+ * thing here as in every other binding. The values are append-only: a new
+ * variant takes the next number and no existing one ever changes.
  *
  * Report `CorruptedData` only for a record no later launch can read. A
  * locked keystore or any I/O failure is `LoadFailed`: the engine answers
@@ -358,7 +359,8 @@ enum OfflineProtocolStatus offline_protocol_set_transport_callback(const struct 
  * for key material (back it with the platform's keystore) and
  * `protocol_state_storage` for install-scoped state. Same lifecycle as
  * every binding: before `start`, idempotent. The library copies both
- * structs; each provider's `drop` is called once when the engine lets go.
+ * structs; each provider's `drop` is called once when the engine lets go,
+ * or before this returns when the call is refused for any reason.
  *
  * `initialize_mls_with_file_stores` needs no provider and is reached through
  * `offline_protocol_call`.

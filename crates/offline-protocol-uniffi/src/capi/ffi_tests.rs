@@ -2,7 +2,7 @@
 //! hold the boundary's files and documents together.
 
 use core::ffi::{c_char, c_void};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -353,6 +353,43 @@ fn a_refused_transport_registration_still_releases_its_context() {
     );
 }
 
+#[test]
+fn a_registration_refused_for_a_null_handle_still_releases_its_context() {
+    let seen = Box::new(Seen::default());
+    let ctx = std::ptr::from_ref::<Seen>(&seen)
+        .cast_mut()
+        .cast::<c_void>();
+    let mut err = zeroed_error();
+    // SAFETY: a null handle is refused before anything is dereferenced.
+    let status = unsafe {
+        offline_protocol_set_event_callback(
+            std::ptr::null(),
+            Some(record_event),
+            Some(count_drop),
+            ctx,
+            &mut err,
+        )
+    };
+    assert_eq!(status, OfflineProtocolStatus::InvalidArgument);
+    error_text(&mut err);
+    assert_eq!(seen.drops.load(Ordering::SeqCst), 1, "event callback");
+
+    // SAFETY: as above.
+    let status = unsafe {
+        offline_protocol_set_transport_callback(
+            std::ptr::null(),
+            OfflineProtocolTransport::Ble as i32,
+            None,
+            Some(count_drop),
+            ctx,
+            &mut err,
+        )
+    };
+    assert_eq!(status, OfflineProtocolStatus::InvalidArgument);
+    error_text(&mut err);
+    assert_eq!(seen.drops.load(Ordering::SeqCst), 2, "transport callback");
+}
+
 /// A host provider written the way a C host writes one, over a map.
 #[derive(Default)]
 struct HostStore {
@@ -607,10 +644,15 @@ fn the_storage_status_values_are_the_definitions_positions_plus_one() {
         ("KeyNotFound", OfflineProtocolStorageStatus::KeyNotFound),
         ("CorruptedData", OfflineProtocolStorageStatus::CorruptedData),
     ];
+    // Positions are C ABI: a compiled provider answers by number. A new
+    // variant goes at the END of the definition and gets the next value
+    // here; never renumber an existing one (C2, c.md K6).
     assert_eq!(
         declared.len(),
         ours.len(),
-        "a variant was added to the definition: {declared:?}"
+        "the definition's MlsStorageError list changed: {declared:?}. Append a \
+         new variant at the end and give it the next value; never insert, \
+         remove or reorder (docs/bridges/c.md K6)"
     );
     for (name, status) in ours {
         let position = declared.iter().position(|d| *d == name).expect("declared");
@@ -659,6 +701,94 @@ fn no_mangle_functions(text: &str) -> Vec<String> {
         }
     }
     names
+}
+
+/// The crate's default features, from its manifest's one-line `default`.
+fn default_features() -> BTreeSet<String> {
+    let manifest = read(&crate_dir().join("Cargo.toml"));
+    let line = manifest
+        .lines()
+        .find(|l| l.trim_start().starts_with("default ="))
+        .expect("the manifest declares default features");
+    let list = line
+        .split_once('[')
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(list, _)| list)
+        .expect("`default = [...]` on one line");
+    list.split(',')
+        .map(|f| f.trim().trim_matches('"').to_owned())
+        .filter(|f| !f.is_empty())
+        .collect()
+}
+
+/// Shell commands with their `\` continuations joined.
+fn commands(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        match line.strip_suffix('\\') {
+            Some(head) => {
+                current.push_str(head);
+                current.push(' ');
+            }
+            None => {
+                current.push_str(line);
+                out.push(std::mem::take(&mut current));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn the_builds_without_the_c_binding_turn_off_only_the_c_binding() {
+    // `--no-default-features` turns off EVERY default, not just `capi`. With
+    // `capi` the only default that is the same thing; a second default would
+    // silently vanish from the Android libraries. So each such command must
+    // add back every default except `capi`, which today is none.
+    let defaults = default_features();
+    assert!(defaults.contains("capi"), "{defaults:?}");
+    let wanted: BTreeSet<String> = defaults.into_iter().filter(|f| f != "capi").collect();
+    for (path, why) in [
+        (".github/workflows/release.yml", "the Android release build"),
+        (
+            "bindings/react-native/scripts/build-uniffi-android.sh",
+            "the React Native Android build",
+        ),
+        (
+            ".github/workflows/ci.yml",
+            "the CI build without the C binding",
+        ),
+    ] {
+        let text = read(&crate_dir().join("../..").join(path));
+        let found: Vec<String> = commands(&text)
+            .into_iter()
+            .filter(|c| {
+                c.contains("offline-protocol-uniffi")
+                    && c.contains("--no-default-features")
+                    && (c.contains("cargo build") || c.contains("cargo clippy"))
+            })
+            .collect();
+        assert!(
+            !found.is_empty(),
+            "{path}: {why} no longer builds without the C binding"
+        );
+        for command in found {
+            let words: Vec<&str> = command.split_whitespace().collect();
+            let added: BTreeSet<String> = words
+                .windows(2)
+                .filter(|w| w[0] == "--features")
+                .flat_map(|w| w[1].trim_matches('"').split(','))
+                .map(str::to_owned)
+                .collect();
+            assert_eq!(
+                added, wanted,
+                "{path}: `--no-default-features` drops every default, so this command \
+                 must add back each default except `capi` with `--features`: {command}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -808,6 +938,62 @@ fn initialize_mls_after_start_is_refused_and_releases_both_providers() {
     assert_eq!(secure.drops.load(Ordering::SeqCst), 1, "secure provider");
     assert_eq!(state.drops.load(Ordering::SeqCst), 1, "state provider");
     handle.call("stop", None).expect("stops");
+}
+
+#[test]
+fn initialize_mls_refused_for_a_null_handle_releases_both_providers() {
+    let secure = Box::leak(Box::new(HostStore::default()));
+    let state = Box::leak(Box::new(HostStore::default()));
+    let (mut secure_vt, mut state_vt) = (provider(secure), provider(state));
+    secure_vt.drop = Some(h_drop);
+    state_vt.drop = Some(h_drop);
+    let mut err = zeroed_error();
+    // SAFETY: a null handle is refused; both providers are valid.
+    let status = unsafe {
+        offline_protocol_initialize_mls(std::ptr::null(), &secure_vt, &state_vt, &mut err)
+    };
+    assert_eq!(status, OfflineProtocolStatus::InvalidArgument);
+    error_text(&mut err);
+    assert_eq!(secure.drops.load(Ordering::SeqCst), 1, "secure provider");
+    assert_eq!(state.drops.load(Ordering::SeqCst), 1, "state provider");
+}
+
+#[test]
+fn an_incomplete_provider_is_released_and_so_is_its_partner() {
+    let handle = Handle::new();
+    for incomplete_first in [true, false] {
+        let secure = Box::leak(Box::new(HostStore::default()));
+        let state = Box::leak(Box::new(HostStore::default()));
+        let (mut secure_vt, mut state_vt) = (provider(secure), provider(state));
+        secure_vt.drop = Some(h_drop);
+        state_vt.drop = Some(h_drop);
+        if incomplete_first {
+            secure_vt.load = None;
+        } else {
+            state_vt.remove = None;
+        }
+        let mut err = zeroed_error();
+        // SAFETY: valid handle; valid, if incomplete, providers.
+        let status =
+            unsafe { offline_protocol_initialize_mls(handle.0, &secure_vt, &state_vt, &mut err) };
+        assert_eq!(status, OfflineProtocolStatus::InvalidArgument);
+        error_text(&mut err);
+        assert_eq!(secure.drops.load(Ordering::SeqCst), 1, "secure provider");
+        assert_eq!(state.drops.load(Ordering::SeqCst), 1, "state provider");
+    }
+
+    // The conformance entry point releases a refused provider too.
+    let store = Box::leak(Box::new(HostStore::default()));
+    let mut vt = provider(store);
+    vt.drop = Some(h_drop);
+    vt.store = None;
+    let mut out = std::ptr::null_mut();
+    let mut err = zeroed_error();
+    // SAFETY: a valid, if incomplete, provider.
+    let status = unsafe { offline_protocol_run_storage_conformance(&vt, &mut out, &mut err) };
+    assert_eq!(status, OfflineProtocolStatus::InvalidArgument);
+    error_text(&mut err);
+    assert_eq!(store.drops.load(Ordering::SeqCst), 1);
 }
 
 /// A callback that blocks inside its call until the test releases it.

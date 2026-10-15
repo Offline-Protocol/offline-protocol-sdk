@@ -39,7 +39,8 @@ pub type OfflineProtocolDropFn = Option<unsafe extern "C" fn(ctx: *mut c_void)>;
 
 /// What a storage function answers. The nonzero values are the definition's
 /// `MlsStorageError` variants, in its order, so a value means the same
-/// thing here as in every other binding.
+/// thing here as in every other binding. The values are append-only: a new
+/// variant takes the next number and no existing one ever changes.
 ///
 /// Report `CorruptedData` only for a record no later launch can read. A
 /// locked keystore or any I/O failure is `LoadFailed`: the engine answers
@@ -224,8 +225,17 @@ impl NostrTransportCallback for Host<OfflineProtocolNotifyFn> {
 /// A host storage provider, as either of the wrapper's provider traits.
 pub(super) struct Storage(Host<OfflineProtocolStorage>);
 
-/// Why a provider cannot be used at all.
+/// The provider as an adapter, or why it cannot be used at all.
+///
+/// The adapter is built before the check, so an incomplete provider is
+/// dropped on refusal and its host `drop` still runs once: the caller handed
+/// its `ctx` over, and a refusal is not a reason to leak it.
 pub(super) fn storage(provider: &OfflineProtocolStorage) -> Result<Storage, &'static str> {
+    let adapter = Storage(Host {
+        f: *provider,
+        drop: provider.drop,
+        ctx: provider.ctx,
+    });
     if provider.store.is_none()
         || provider.load.is_none()
         || provider.remove.is_none()
@@ -233,11 +243,7 @@ pub(super) fn storage(provider: &OfflineProtocolStorage) -> Result<Storage, &'st
     {
         return Err("a storage provider needs store, load, remove and list_keys");
     }
-    Ok(Storage(Host {
-        f: *provider,
-        drop: provider.drop,
-        ctx: provider.ctx,
-    }))
+    Ok(adapter)
 }
 
 /// The variant a host's answer names, or `own` for a value outside the
