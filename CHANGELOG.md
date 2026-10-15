@@ -30,7 +30,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   and committed; a C program built with `-Wpedantic -Werror` links against
   the shared and the static library and runs in CI on Linux and macOS. The
   desktop release archives now carry the header, and the Windows archive
-  the DLL's import library. The contract is `docs/bridges/c.md`.
+  the DLL's import library. The macOS library's install name is now
+  `@rpath/liboffline_protocol_uniffi.dylib` rather than the build machine's
+  path, so a host linked against it finds it through its own rpath. The contract is `docs/bridges/c.md`.
 - **Signing large payloads from React Native no longer boxes every byte.**
   `signDataBytes(Uint8Array)` and `verifySignatureBytes` sit beside
   `signData` and `verifySignature`, which are unchanged. They cross the bridge

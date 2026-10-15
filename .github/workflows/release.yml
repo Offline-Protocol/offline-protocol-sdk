@@ -353,6 +353,17 @@ jobs:
             ls -la "$SO_ROOT"/ "$SO_ROOT/deps"/ 2>/dev/null || true
             exit 1
           fi
+          # rustc records the build path as the install name
+          # (/Users/runner/work/.../deps/...), which a C host links against
+          # and dyld then cannot find on any other machine; the rpath in the
+          # archive README's link line is never consulted. An @rpath name
+          # makes that line work. Python is unaffected: ctypes loads by path.
+          # install_name_tool invalidates the ad-hoc signature, so re-sign.
+          LIB="desktop-libs/macos-${{ matrix.arch }}/${{ matrix.lib_name }}"
+          install_name_tool -id "@rpath/${{ matrix.lib_name }}" "$LIB"
+          codesign --force --sign - "$LIB"
+          otool -D "$LIB" | tail -n 1 | grep -qx "@rpath/${{ matrix.lib_name }}" || {
+            echo "ERROR: install name is not @rpath-relative"; otool -D "$LIB"; exit 1; }
 
       - uses: actions/upload-artifact@v7
         with:

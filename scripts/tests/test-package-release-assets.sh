@@ -261,6 +261,58 @@ check_desktop "$ASSETS/offline-protocol-$TEST_VERSION-windows-x86_64.zip" \
   offline_protocol_uniffi.dll uniffi.dll
 assert_entry "$ASSETS/offline-protocol-$TEST_VERSION-windows-x86_64.zip" offline_protocol_uniffi.dll.lib
 
+# The README is generated per platform, so its C section is checked line for
+# line: a wrong link line ships a binary that links and then cannot load.
+readme_of() {
+  local archive="$1"
+  case "$archive" in
+    *.tar.gz) tar -xOzf "$archive" ./README.md 2>/dev/null || tar -xOzf "$archive" README.md ;;
+    *.zip) unzip -p "$archive" README.md ;;
+  esac
+}
+assert_readme_line() {
+  local archive="$1" line="$2"
+  if readme_of "$archive" | grep -qxF -- "$line"; then
+    pass "$(basename "$archive") README has: $line"
+  else
+    fail "$(basename "$archive") README is missing the line: $line"
+  fi
+}
+assert_readme_lacks() {
+  local archive="$1" text="$2"
+  if readme_of "$archive" | grep -qF -- "$text"; then
+    fail "$(basename "$archive") README should not mention: $text"
+  else
+    pass "$(basename "$archive") README does not mention: $text"
+  fi
+}
+# shellcheck disable=SC2016 # the dollar sign is literal README text
+ORIGIN_LINE='cc -I. app.c -L. -loffline_protocol_uniffi -Wl,-rpath,'"'"'$ORIGIN'"'"
+for plat in linux-x86_64 linux-aarch64; do
+  assert_readme_line "$ASSETS/offline-protocol-$TEST_VERSION-$plat.tar.gz" "$ORIGIN_LINE"
+  assert_readme_lacks "$ASSETS/offline-protocol-$TEST_VERSION-$plat.tar.gz" "dll.lib"
+done
+assert_readme_line "$ASSETS/offline-protocol-$TEST_VERSION-macos-arm64.tar.gz" \
+  'cc -I. app.c -L. -loffline_protocol_uniffi -Wl,-rpath,@loader_path'
+assert_readme_lacks "$ASSETS/offline-protocol-$TEST_VERSION-macos-arm64.tar.gz" "dll.lib"
+WIN_ZIP="$ASSETS/offline-protocol-$TEST_VERSION-windows-x86_64.zip"
+assert_readme_line "$WIN_ZIP" 'cl /I. app.c offline_protocol_uniffi.dll.lib'
+assert_readme_line "$WIN_ZIP" \
+  '| `offline_protocol_uniffi.dll.lib` | The import library an MSVC linker needs to link the DLL. |'
+for plat in macos-arm64 linux-x86_64 linux-aarch64 windows-x86_64; do
+  archive="$(ls "$ASSETS"/offline-protocol-"$TEST_VERSION"-"$plat".*)"
+  assert_readme_line "$archive" \
+    "[docs/bridges/c.md](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/v$TEST_VERSION/docs/bridges/c.md)"
+  # The import row is empty on every platform but Windows; a stray blank line
+  # in its place would end the file table early, before the VERSION row.
+  last_row="$(readme_of "$archive" | sed -n '/^| File/,/^$/p' | sed '/^$/d' | tail -n 1)"
+  if [ "$last_row" = '| `VERSION` | Version and commit this archive was built from. |' ]; then
+    pass "$(basename "$archive") README file table runs unbroken to its VERSION row"
+  else
+    fail "$(basename "$archive") README file table ends early, at: $last_row"
+  fi
+done
+
 # Windows extractors do not create symlinks, so uniffi.dll has to be a real copy
 # of the DLL rather than a link that arrives broken.
 WIN_DIR="$WORK/win-extract"

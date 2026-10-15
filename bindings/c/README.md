@@ -34,8 +34,9 @@ Linking the static archive needs the system libraries rustc names:
 cargo rustc --release -p offline-protocol-uniffi --lib -- --print native-static-libs
 ```
 
-The iOS XCFramework and the Android libraries in the same release carry the
-same C functions; the same header applies.
+The iOS XCFramework in the same release carries the same C functions, and
+the same header applies. The Android libraries do not: the C binding is off
+in the Android builds ([which builds carry it](../../docs/bridges/c.md#which-builds-carry-it)).
 
 ## Quick start
 
@@ -76,7 +77,13 @@ int main(void) {
   }
   offline_protocol_string_free(result);
 
-  offline_protocol_call(engine, "start", NULL, &result, &err);
+  /* A failed call leaves `result` as it was, so free it only on success. */
+  if (offline_protocol_call(engine, "start", NULL, &result, &err) != OfflineProtocolStatus_Ok) {
+    fprintf(stderr, "start: %s\n", err.message);
+    offline_protocol_error_clear(&err);
+    offline_protocol_free(engine);
+    return 1;
+  }
   offline_protocol_string_free(result);
 
   if (offline_protocol_call(engine, "local_address", NULL, &result, &err) ==
@@ -97,8 +104,12 @@ int main(void) {
     offline_protocol_error_clear(&err);
   }
 
-  offline_protocol_call(engine, "stop", NULL, &result, &err);
-  offline_protocol_string_free(result);
+  if (offline_protocol_call(engine, "stop", NULL, &result, &err) == OfflineProtocolStatus_Ok) {
+    offline_protocol_string_free(result);
+  } else {
+    fprintf(stderr, "stop: %s\n", err.message);
+    offline_protocol_error_clear(&err);
+  }
   offline_protocol_free(engine);
   return 0;
 }

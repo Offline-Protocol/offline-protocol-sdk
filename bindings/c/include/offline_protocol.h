@@ -248,7 +248,8 @@ const char *offline_protocol_version(void);
  *
  * `params_json` is a JSON object keyed by the definition's parameter names,
  * or null for none. On success `*out_result` is the result as JSON, freed
- * with `offline_protocol_string_free`.
+ * with `offline_protocol_string_free`. On failure `*out_result` is left as
+ * it was: free it only after a call returned `Ok`.
  *
  * # Safety
  *
@@ -263,7 +264,8 @@ enum OfflineProtocolStatus offline_protocol_call_static(const char *method,
 /**
  * Creates an engine from a `ProtocolConfig` given as a JSON object. Fields
  * the definition gives a default may be omitted. On success `*out_handle`
- * is the engine, freed with `offline_protocol_free`.
+ * is the engine, freed with `offline_protocol_free`. On failure it is left
+ * as it was.
  *
  * # Safety
  *
@@ -293,7 +295,9 @@ void offline_protocol_free(struct OfflineProtocolHandle *handle);
  * `params_json` is a JSON object keyed by the definition's parameter names,
  * or null for none. On success `*out_result` is the result as JSON (`null`
  * for a method that returns nothing), freed with
- * `offline_protocol_string_free`.
+ * `offline_protocol_string_free`. On failure `*out_result` is left as it
+ * was: free it only after a call returned `Ok`, or reset it to null after
+ * each free.
  *
  * # Safety
  *
@@ -374,7 +378,8 @@ enum OfflineProtocolStatus offline_protocol_initialize_mls(const struct OfflineP
  * provider, as `run_storage_conformance`, and returns the report as JSON:
  * `{"passed":[...],"failures":[{"check","detail"}]}`. Green is the
  * definition of a supported backend. Probe a new backend on a scratch
- * instance: the suite writes and deletes its own probe keys.
+ * instance: the suite writes and deletes its own probe keys. On failure
+ * `*out_result` is left as it was.
  *
  * # Safety
  *
