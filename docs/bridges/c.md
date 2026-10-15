@@ -88,7 +88,11 @@ the engine's (the telemetry uploader). So:
 Every function that takes a callback also takes a `drop` function and a
 `ctx`. The library calls `drop(ctx)` exactly once, when it no longer holds
 the callback: when it is replaced, when the engine is freed, or when the
-registration is refused. A replaced event callback can still be running on
+registration is refused for any reason, a null handle included. Storage
+providers follow the same rule, and a refused `offline_protocol_initialize_mls`
+drops both, even when only one of them was incomplete. The library wraps
+`ctx` before it checks anything, so no refusal path can skip the drop; a
+host that frees `ctx` itself after a refusal frees it twice. A replaced event callback can still be running on
 another thread at the moment it is replaced; `drop` comes after that call
 returns, which is the only point at which freeing `ctx` is safe.
 
@@ -160,6 +164,16 @@ data:
   (8 MiB) by checking the stored size first. The library can only check a
   length it has already been handed.
 
+**The storage status values are append-only.** `OfflineProtocolStorageStatus`
+is the definition's `MlsStorageError` in order, each value its position plus
+one, and a compiled C host switches on those numbers. The rule is C2's, and
+it now reaches `MlsStorageError` as well as `ProtocolError`: a new variant
+goes at the end of the definition and takes the next value in the header,
+and an existing variant never moves. Inserting one would make every
+compiled provider that answers `KeyNotFound` answer something else.
+`the_storage_status_values_are_the_definitions_positions_plus_one` fails on
+any change to the definition's list.
+
 `load` answers absent as success with `*out_data = NULL`, and `list_keys`
 answers a JSON array of strings, as bytes. The library copies every buffer
 it is handed and returns it through `release` before the call that received
@@ -208,6 +222,13 @@ ships carry it. The iOS builds keep the default: an application links the
 static library with dead stripping, which drops exports nothing references.
 CI builds the crate without the feature under `-D warnings`, so a change
 that only compiles with the C binding fails before a release does.
+
+The Android builds turn it off with `--no-default-features`, which turns off
+every default, not only `capi`. A second default feature would vanish from
+the Android libraries without a word, so each of those commands must add
+back every default except `capi` with `--features`.
+`the_builds_without_the_c_binding_turn_off_only_the_c_binding` reads the
+manifest and the three commands and fails when they disagree.
 
 ## What this does not cover
 

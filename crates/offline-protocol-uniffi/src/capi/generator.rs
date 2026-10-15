@@ -366,6 +366,7 @@ pub(super) fn generate(udl: &str) -> String {
         objects: names(Kind::Interface),
         callbacks: names(Kind::Callback),
     };
+    refuse_shared_names(&blocks);
 
     let mut out = String::new();
     out.push_str(
@@ -557,6 +558,39 @@ fn emit_dictionary(out: &mut String, block: &Block, universe: &Universe) {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The name `offline_protocol_call` reaches a declaration by.
+fn wire_name(prefix: &str, m: &Method) -> String {
+    let bare = if m.constructor && m.name == "new" {
+        "constructor"
+    } else {
+        &m.name
+    };
+    format!("{prefix}{bare}")
+}
+
+/// Refuses a definition in which a namespace function and an engine method
+/// share a name. Both are called bare, and `call` tries the namespace first,
+/// so the engine method would become unreachable from C without any error:
+/// the call would silently run the namespace function instead. A hand-written
+/// name counts too, because `call` refuses those by name before dispatching.
+fn refuse_shared_names(blocks: &[Block]) {
+    let bare = |keep: &dyn Fn(&Block) -> bool| -> BTreeSet<String> {
+        blocks
+            .iter()
+            .filter(|b| keep(b))
+            .flat_map(|b| b.statements.iter().map(|s| wire_name("", &method(s))))
+            .collect()
+    };
+    let namespace = bare(&|b| b.kind == Kind::Namespace);
+    let engine = bare(&|b| b.kind == Kind::Interface && b.name == "OfflineProtocol");
+    let shared: Vec<&String> = namespace.intersection(&engine).collect();
+    assert!(
+        shared.is_empty(),
+        "{shared:?} is both a namespace function and an OfflineProtocol method; \
+         offline_protocol_call reaches both bare, so rename one in the definition"
+    );
+}
+
 fn emit_dispatch(
     out: &mut String,
     block: &Block,
@@ -577,18 +611,7 @@ fn emit_dispatch(
     );
     for statement in &block.statements {
         let m = method(statement);
-        let wire = if m.constructor {
-            format!(
-                "{prefix}{}",
-                if m.name == "new" {
-                    "constructor"
-                } else {
-                    &m.name
-                }
-            )
-        } else {
-            format!("{prefix}{}", m.name)
-        };
+        let wire = wire_name(prefix, &m);
         let bridged = !m.constructor
             && m.params.iter().all(|(_, ty)| universe.json_type(ty))
             && (m.ret == "void" || universe.json_type(&m.ret));
@@ -687,6 +710,22 @@ mod tests {
         );
         assert!(
             refusal(udl).contains("has no JSON form"),
+            "{}",
+            refusal(udl)
+        );
+    }
+
+    #[test]
+    fn a_namespace_function_named_like_an_engine_method_stops_the_generator() {
+        let udl: &'static str = Box::leak(
+            format!(
+                "namespace n {{ string version(); }}; \
+                 interface OfflineProtocol {{ string version(); }}; {ERRORS}"
+            )
+            .into_boxed_str(),
+        );
+        assert!(
+            refusal(udl).contains("both a namespace function and an OfflineProtocol method"),
             "{}",
             refusal(udl)
         );

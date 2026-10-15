@@ -32,7 +32,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   desktop release archives now carry the header, and the Windows archive
   the DLL's import library. The macOS library's install name is now
   `@rpath/liboffline_protocol_uniffi.dylib` rather than the build machine's
-  path, so a host linked against it finds it through its own rpath. The contract is `docs/bridges/c.md`.
+  path, so a host linked against it finds it through its own rpath. Every
+  callback and storage provider handed to the library has its `drop`
+  called exactly once, a refused registration included, so a host never
+  frees its own context. The contract is `docs/bridges/c.md`.
 - **Signing large payloads from React Native no longer boxes every byte.**
   `signDataBytes(Uint8Array)` and `verifySignatureBytes` sit beside
   `signData` and `verifySignature`, which are unchanged. They cross the bridge

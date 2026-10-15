@@ -351,10 +351,11 @@ pub unsafe extern "C" fn offline_protocol_set_event_callback(
     // SAFETY: every pointer is the caller's, as documented.
     unsafe {
         boundary(err, || {
+            // Built before anything can refuse, so every refusal, a null
+            // handle included, drops it and so calls the host's `drop`.
+            let callback = adapters::event_callback(on_event, drop, ctx);
             let engine = engine(handle)?;
-            engine
-                .protocol()
-                .set_event_callback(adapters::event_callback(on_event, drop, ctx));
+            engine.protocol().set_event_callback(callback);
             Ok(())
         })
     }
@@ -399,8 +400,10 @@ pub unsafe extern "C" fn offline_protocol_set_transport_callback(
     // SAFETY: every pointer is the caller's, as documented.
     unsafe {
         boundary(err, || {
-            let engine = engine(handle)?;
+            // Built before anything can refuse, so every refusal, a null
+            // handle included, drops it and so calls the host's `drop`.
             let callback = adapters::notify_callback(notify, drop, ctx);
+            let engine = engine(handle)?;
             let protocol = engine.protocol();
             // An `i32` rather than the enum type: a value C passes outside the
             // enum's range would be undefined behaviour as a Rust enum.
@@ -448,7 +451,8 @@ unsafe fn provider(
 /// for key material (back it with the platform's keystore) and
 /// `protocol_state_storage` for install-scoped state. Same lifecycle as
 /// every binding: before `start`, idempotent. The library copies both
-/// structs; each provider's `drop` is called once when the engine lets go.
+/// structs; each provider's `drop` is called once when the engine lets go,
+/// or before this returns when the call is refused for any reason.
 ///
 /// `initialize_mls_with_file_stores` needs no provider and is reached through
 /// `offline_protocol_call`.
@@ -467,9 +471,13 @@ pub unsafe extern "C" fn offline_protocol_initialize_mls(
     // SAFETY: every pointer is the caller's, as documented.
     unsafe {
         boundary(err, || {
+            // Both adapters are built before anything can refuse, so a
+            // refusal of either provider, or of the handle, still drops the
+            // other and calls each host `drop` once.
+            let secure = provider(secure_storage, "secure_storage");
+            let state = provider(protocol_state_storage, "protocol_state_storage");
             let engine = engine(handle)?;
-            let secure = provider(secure_storage, "secure_storage")?;
-            let state = provider(protocol_state_storage, "protocol_state_storage")?;
+            let (secure, state) = (secure?, state?);
             engine
                 .protocol()
                 .initialize_mls(Box::new(secure), Box::new(state))?;

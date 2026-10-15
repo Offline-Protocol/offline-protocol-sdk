@@ -60,6 +60,11 @@ in every language, silently, by shifting every variant after the edit.
 
 New variants are appended. Never inserted, never removed, never reordered.
 
+The same holds for `MlsStorageError`. The C binding's
+`OfflineProtocolStorageStatus` gives each of its variants its position plus
+one, so a compiled C storage provider answers by position too
+([K6](c.md#k6-storage-providers)).
+
 The core maps its internal errors to this enum by classifying every variant
 explicitly. That match is **no longer compiler-enforced**: the engine error
 types are `#[non_exhaustive]`, which forces a wildcard arm, so a newly added
