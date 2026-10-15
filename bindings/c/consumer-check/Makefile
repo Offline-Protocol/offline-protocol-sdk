@@ -20,17 +20,21 @@ CXX      ?= c++
 CFLAGS   := -std=c99 -Wall -Wextra -Wpedantic -Werror -I$(INCLUDE)
 CXXFLAGS := -std=c++11 -Wall -Wextra -Wpedantic -Werror -I$(INCLUDE)
 
-ifeq ($(shell uname),Darwin)
-SHARED_EXT := dylib
-else
-SHARED_EXT := so
-endif
-
 # rustc prints the system libraries a staticlib needs on its own line; the
 # library itself does not record them anywhere a linker can find.
-NATIVE_STATIC_LIBS ?= $(shell cd $(ROOT) && cargo rustc -q -p offline-protocol-uniffi --lib \
+#
+# Two traps in reading that line. Under CARGO_TERM_COLOR=always (CI sets it
+# for the whole workflow) cargo passes --color always to rustc, and the line
+# ends in an escape sequence that the linker then reads as part of the last
+# library's name (`-lc<ESC>[0m`): hence --color never, and the escapes
+# stripped besides for a cargo that colours anyway. And `cargo rustc` with
+# extra arguments is fingerprinted apart from `cargo build`, so this probe
+# relinks the library; CI builds through the probe once and passes the flags
+# in, and a local run after `cargo build` pays one extra link.
+ESC := $(shell printf '\033')
+NATIVE_STATIC_LIBS ?= $(shell cd $(ROOT) && cargo rustc -q --color never -p offline-protocol-uniffi --lib \
 	$(if $(filter release,$(PROFILE)),--release,) -- --print native-static-libs 2>&1 \
-	| sed -n 's/.*native-static-libs: //p' | tail -1)
+	| sed -n 's/.*native-static-libs: //p' | tail -1 | sed 's/$(ESC)\[[0-9;]*m//g')
 
 .PHONY: all run clean
 all: run

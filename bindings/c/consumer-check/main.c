@@ -11,6 +11,7 @@
 #define _XOPEN_SOURCE 700
 #define _DARWIN_C_SOURCE
 
+#include <ftw.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -195,6 +196,22 @@ static OfflineProtocolStorage provider(struct store *s) {
   return p;
 }
 
+/* ---- scratch directories ------------------------------------------------------ */
+
+static int remove_one(const char *path, const struct stat *sb, int flag, struct FTW *ftw) {
+  (void)sb;
+  (void)flag;
+  (void)ftw;
+  return remove(path);
+}
+
+/* Removes a directory the run made, and everything the file stores wrote. */
+static void remove_tree(const char *dir) {
+  if (nftw(dir, remove_one, 8, FTW_DEPTH | FTW_PHYS) != 0) {
+    fprintf(stderr, "note: could not remove %s\n", dir);
+  }
+}
+
 /* ---- the run --------------------------------------------------------------- */
 
 static const char *CONFIG =
@@ -327,6 +344,10 @@ int main(void) {
   EXPECT(call(h, "close_file_stores", NULL, &out, &err) == OfflineProtocolStatus_Ok, "close_file_stores");
   offline_protocol_string_free(out);
   offline_protocol_free(h);
+  remove_tree(mls_dir);
+  remove_tree(state_dir);
+  pthread_mutex_destroy(&secure.lock);
+  pthread_mutex_destroy(&state.lock);
 
   if (failures == 0) {
     printf("c consumer check: ok (library %s)\n", offline_protocol_version());

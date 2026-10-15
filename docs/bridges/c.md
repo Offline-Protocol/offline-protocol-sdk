@@ -187,8 +187,9 @@ The first runs the dispatcher's and the boundary's tests and the guards.
 The consumer check compiles a C program against the header with
 `-std=c99 -Wall -Wextra -Wpedantic -Werror`, links it against the shared and
 the static library in turn, runs both, and compiles the header as C++. CI
-runs all four on Linux and macOS. Windows is built by the release and not
-yet linked by CI.
+runs all four on Linux and macOS, building the library once through the
+probe that reads the static library's system dependencies. Windows is
+built by the release and not yet linked by CI.
 
 ## What this does not cover
 

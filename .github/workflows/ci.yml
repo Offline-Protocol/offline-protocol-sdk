@@ -488,11 +488,25 @@ jobs:
       - name: Dispatcher generator runs and agrees
         run: cargo run --locked --manifest-path tools/capi-dispatch-gen/Cargo.toml -- --check
 
+      # One link, through the probe that also prints what the static library
+      # needs from the system. `cargo rustc` with extra arguments has its own
+      # fingerprint, so building with `cargo build` first and letting the
+      # Makefile probe afterwards would link the library twice. --color never
+      # because the workflow sets CARGO_TERM_COLOR=always, and a coloured
+      # note ends in an escape sequence the linker reads as a library name.
       - name: Build the library
-        run: cargo build --locked --package offline-protocol-uniffi
+        id: lib
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo rustc --locked --color never --package offline-protocol-uniffi --lib \
+            -- --print native-static-libs 2>&1 | tee "$RUNNER_TEMP/c-lib-build.log"
+          flags="$(sed -n 's/.*native-static-libs: //p' "$RUNNER_TEMP/c-lib-build.log" | tail -1)"
+          test -n "$flags"
+          echo "native_static_libs=$flags" >> "$GITHUB_OUTPUT"
 
       - name: Compile and run the C consumer check
-        run: make -C bindings/c/consumer-check
+        run: make -C bindings/c/consumer-check NATIVE_STATIC_LIBS="${{ steps.lib.outputs.native_static_libs }}"
 
   security:
     name: Dependency Audit
