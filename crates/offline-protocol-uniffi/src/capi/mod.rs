@@ -54,9 +54,11 @@ pub const TELEMETRY_OS: &str = if cfg!(target_os = "ios") {
 /// One engine and the two objects built on it.
 ///
 /// `MeshServices` and `DataStore` are constructed on the first `services.`
-/// or `data.` call rather than at creation: the data store refuses before
-/// `initialize_mls`, and a construction that failed is retried on the next
-/// call rather than remembered.
+/// or `data.` call rather than at creation, so an engine that is only ever
+/// driven through the bare method names never builds them. Both constructors
+/// are fallible in the definition; a construction that fails leaves its slot
+/// empty, so the next call tries again rather than repeating a remembered
+/// refusal.
 pub struct Engine {
     protocol: Arc<OfflineProtocol>,
     services: Mutex<Option<Arc<MeshServices>>>,

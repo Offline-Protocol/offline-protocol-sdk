@@ -29,7 +29,11 @@ use serde_json::{Map, Value};
 use crate::ProtocolError;
 
 /// Why a call produced no result.
+///
+/// Non-exhaustive because this crate is published and the type is public:
+/// a refusal class added later must not break a Rust host's `match`.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum CallError {
     /// A required argument was missing or was not what the boundary accepts:
     /// a null pointer, text that is not UTF-8, parameters that are not JSON.
