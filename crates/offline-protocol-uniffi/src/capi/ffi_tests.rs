@@ -358,6 +358,8 @@ fn a_refused_transport_registration_still_releases_its_context() {
 struct HostStore {
     map: Mutex<BTreeMap<(String, String), Vec<u8>>>,
     store_answer: Mutex<Option<i32>>,
+    releases: AtomicUsize,
+    drops: AtomicUsize,
 }
 
 fn host(ctx: *mut c_void) -> &'static HostStore {
@@ -438,9 +440,36 @@ unsafe extern "C" fn h_list(
     0
 }
 
-unsafe extern "C" fn h_release(_ctx: *mut c_void, data: *mut u8, len: usize) {
+unsafe extern "C" fn h_release(ctx: *mut c_void, data: *mut u8, len: usize) {
+    host(ctx).releases.fetch_add(1, Ordering::SeqCst);
     // SAFETY: a buffer `hand_back` made with exactly this length.
     drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(data, len)) });
+}
+
+unsafe extern "C" fn h_drop(ctx: *mut c_void) {
+    host(ctx).drops.fetch_add(1, Ordering::SeqCst);
+}
+
+/// A `load` that fails and hands back a buffer anyway.
+unsafe extern "C" fn h_load_fails_with_a_buffer(
+    _ctx: *mut c_void,
+    _t: *const c_char,
+    _i: *const c_char,
+    out: *mut *mut u8,
+    n: *mut usize,
+) -> i32 {
+    hand_back(b"partial", out, n);
+    OfflineProtocolStorageStatus::LoadFailed as i32
+}
+
+/// A `list_keys` that succeeds without writing a buffer.
+unsafe extern "C" fn h_list_nothing(
+    _ctx: *mut c_void,
+    _t: *const c_char,
+    _out: *mut *mut u8,
+    _n: *mut usize,
+) -> i32 {
+    OfflineProtocolStorageStatus::Ok as i32
 }
 
 fn provider(host: &HostStore) -> OfflineProtocolStorage {
@@ -726,4 +755,172 @@ fn the_hand_written_declarations_are_the_ones_the_bridge_doc_lists() {
         listed, ours,
         "docs/bridges/c.md must list every declaration offline_protocol_call does not reach"
     );
+}
+
+#[test]
+fn a_failed_load_still_releases_the_buffer_it_was_handed() {
+    let store = Box::leak(Box::new(HostStore::default()));
+    let mut vt = provider(store);
+    vt.load = Some(h_load_fails_with_a_buffer);
+    let adapter = adapters::storage(&vt)
+        .map_err(|e| e.to_owned())
+        .expect("complete");
+    let result = MlsStorageProvider::load(&adapter, "t".into(), "i".into());
+    assert!(
+        matches!(result, Err(MlsStorageError::LoadFailed)),
+        "{result:?}"
+    );
+    assert_eq!(
+        store.releases.load(Ordering::SeqCst),
+        1,
+        "the buffer goes back to the host even when the answer is a failure"
+    );
+}
+
+#[test]
+fn list_keys_with_no_buffer_is_an_empty_list() {
+    let store = Box::leak(Box::new(HostStore::default()));
+    let mut vt = provider(store);
+    vt.list_keys = Some(h_list_nothing);
+    let adapter = adapters::storage(&vt)
+        .map_err(|e| e.to_owned())
+        .expect("complete");
+    let keys = MlsStorageProvider::list_keys(&adapter, "t".into());
+    assert_eq!(keys.ok(), Some(Vec::new()));
+}
+
+#[test]
+fn initialize_mls_after_start_is_refused_and_releases_both_providers() {
+    let secure = Box::leak(Box::new(HostStore::default()));
+    let state = Box::leak(Box::new(HostStore::default()));
+    let (mut secure_vt, mut state_vt) = (provider(secure), provider(state));
+    secure_vt.drop = Some(h_drop);
+    state_vt.drop = Some(h_drop);
+    let handle = Handle::new();
+    handle.call("start", None).expect("starts");
+    let mut err = zeroed_error();
+    // SAFETY: valid handle and providers.
+    let status =
+        unsafe { offline_protocol_initialize_mls(handle.0, &secure_vt, &state_vt, &mut err) };
+    assert_eq!(status, OfflineProtocolStatus::EngineError);
+    let (variant, _) = error_text(&mut err);
+    assert_eq!(variant.as_deref(), Some("InvalidState"));
+    assert_eq!(secure.drops.load(Ordering::SeqCst), 1, "secure provider");
+    assert_eq!(state.drops.load(Ordering::SeqCst), 1, "state provider");
+    handle.call("stop", None).expect("stops");
+}
+
+/// A callback that blocks inside its call until the test releases it.
+#[derive(Default)]
+struct Gate {
+    /// Whether the callback has entered, and whether the test released it.
+    state: Mutex<(bool, bool)>,
+    changed: std::sync::Condvar,
+    drops: AtomicUsize,
+}
+
+unsafe extern "C" fn blocking_event(ctx: *mut c_void, _json: *const c_char) {
+    // SAFETY: a `Gate` the test keeps alive past the handle.
+    let gate = unsafe { &*ctx.cast::<Gate>() };
+    let mut state = gate.state.lock().expect("lock");
+    state.0 = true;
+    gate.changed.notify_all();
+    while !state.1 {
+        state = gate.changed.wait(state).expect("wait");
+    }
+}
+
+unsafe extern "C" fn gate_drop(ctx: *mut c_void) {
+    // SAFETY: as above.
+    let gate = unsafe { &*ctx.cast::<Gate>() };
+    gate.drops.fetch_add(1, Ordering::SeqCst);
+}
+
+/// The handle, shared with the threads of one test. The header promises a
+/// handle is usable from any thread.
+struct Shared(*mut OfflineProtocolHandle);
+// SAFETY: the engine is `Send + Sync` (`the_engine_is_shareable_across_threads`).
+unsafe impl Send for Shared {}
+// SAFETY: as above.
+unsafe impl Sync for Shared {}
+
+#[test]
+fn a_replaced_callback_is_dropped_only_after_its_running_call_returns() {
+    let handle = Handle::new();
+    let gate = Gate::default();
+    let ctx = std::ptr::from_ref(&gate).cast_mut().cast::<c_void>();
+    let mut err = zeroed_error();
+    // SAFETY: valid handle; `gate` outlives the handle.
+    let status = unsafe {
+        offline_protocol_set_event_callback(
+            handle.0,
+            Some(blocking_event),
+            Some(gate_drop),
+            ctx,
+            &mut err,
+        )
+    };
+    assert_eq!(status, OfflineProtocolStatus::Ok);
+    let shared = Shared(handle.0);
+
+    std::thread::scope(|scope| {
+        let shared = &shared;
+        let emitter = scope.spawn(move || {
+            let method = c("emit_test_event");
+            let mut out = std::ptr::null_mut();
+            // SAFETY: a live handle; the out pointer is this thread's.
+            let status = unsafe {
+                offline_protocol_call(
+                    shared.0,
+                    method.as_ptr(),
+                    std::ptr::null(),
+                    &mut out,
+                    std::ptr::null_mut(),
+                )
+            };
+            take(out);
+            status
+        });
+        {
+            let mut state = gate.state.lock().expect("lock");
+            while !state.0 {
+                state = gate.changed.wait(state).expect("wait");
+            }
+        }
+
+        // The callback is now running on the emitter. Replace it from here.
+        let replacer = scope.spawn(move || {
+            // SAFETY: a live handle; a null function stops delivery.
+            unsafe {
+                offline_protocol_set_event_callback(
+                    shared.0,
+                    None,
+                    None,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert_eq!(
+            gate.drops.load(Ordering::SeqCst),
+            0,
+            "dropped while its call was still running"
+        );
+
+        gate.state.lock().expect("lock").1 = true;
+        gate.changed.notify_all();
+        assert_eq!(emitter.join().expect("emitter"), OfflineProtocolStatus::Ok);
+        assert_eq!(
+            replacer.join().expect("replacer"),
+            OfflineProtocolStatus::Ok
+        );
+    });
+    assert_eq!(
+        gate.drops.load(Ordering::SeqCst),
+        1,
+        "dropped once, after the call returned"
+    );
+    drop(handle);
+    assert_eq!(gate.drops.load(Ordering::SeqCst), 1, "not again at free");
 }
