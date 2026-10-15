@@ -268,3 +268,102 @@ fn the_binding_fills_the_telemetry_platform_and_refuses_one_from_the_caller() {
     let _ = engine.call("disable_telemetry", None);
     assert!(["Ios", "Android", "Linux", "Macos", "Windows", "Other"].contains(&TELEMETRY_OS));
 }
+
+/// The `extern "C"` layer hands one engine to whichever host thread calls
+/// it, so the engine must be shareable across threads. A field added later
+/// that is not would otherwise surface only as a compile error there.
+#[test]
+fn the_engine_is_shareable_across_threads() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Engine>();
+}
+
+#[test]
+fn a_nested_dictionary_takes_its_own_defaults_and_round_trips() {
+    let mut config = minimal_config();
+    config["mesh_relay"] = json!({ "fanout": 3, "rate_per_sec": 2.5 });
+    let decoded = ProtocolConfig::decode(&config, "config").expect("decodes");
+    let relay = decoded.mesh_relay.as_ref().expect("present");
+    assert_eq!(relay.fanout, Some(3));
+    assert_eq!(relay.rate_per_sec, Some(2.5));
+    assert!(relay.max_ttl.is_none() && relay.queue_capacity.is_none());
+
+    // Encoding writes every field, defaults included, and decoding that
+    // object again gives the same object: the two directions agree.
+    let encoded = decoded.encode();
+    let again = ProtocolConfig::decode(&encoded, "config").expect("re-decodes");
+    assert_eq!(again.encode(), encoded);
+
+    // An unknown key inside the nested object is refused at its own path.
+    config["mesh_relay"] = json!({ "fanot": 3 });
+    let err = ProtocolConfig::decode(&config, "config").expect_err("a misspelled field");
+    assert!(format!("{err:?}").contains("config.mesh_relay"), "{err:?}");
+}
+
+#[test]
+fn a_sequence_of_dictionaries_encodes_as_an_array() {
+    let engine = Engine::create(&minimal_config().to_string()).expect("creates");
+    let stats: Value =
+        serde_json::from_str(&engine.call("get_message_stats", None).expect("answers"))
+            .expect("json");
+    assert!(stats.is_array(), "{stats}");
+}
+
+#[test]
+fn a_record_parameter_reaches_the_services_object() {
+    let engine = Engine::create(&minimal_config().to_string()).expect("creates");
+    engine
+        .call(
+            "services.register_service",
+            Some(r#"{"service_id":"svc.capi","version":"1","capabilities":{"k":"v"}}"#),
+        )
+        .expect("registers");
+    let removed = engine
+        .call(
+            "services.unregister_service",
+            Some(r#"{"service_id":"svc.capi"}"#),
+        )
+        .expect("unregisters");
+    assert_eq!(removed, "true", "the registration landed");
+
+    let not_a_record = engine.call(
+        "services.register_service",
+        Some(r#"{"service_id":"s","version":"1","capabilities":{"k":1}}"#),
+    );
+    assert!(params_error(not_a_record).contains("params.capabilities.k"));
+}
+
+#[test]
+fn the_data_object_is_reached_through_its_prefix() {
+    let mls = Scratch::new("data-mls");
+    let state = Scratch::new("data-state");
+    let engine = Engine::create(&minimal_config().to_string()).expect("creates");
+    let params = json!({
+        "mls_root": mls.0.to_string_lossy(),
+        "state_root": state.0.to_string_lossy(),
+        "store_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+    });
+    engine
+        .call("initialize_mls_with_file_stores", Some(&params.to_string()))
+        .expect("attaches the stores");
+
+    engine
+        .call(
+            "data.create_doc",
+            Some(r#"{"space_id":"capi","doc_id":"notes"}"#),
+        )
+        .expect("creates a document");
+    let docs: Vec<String> = serde_json::from_str(
+        &engine
+            .call("data.list_docs", Some(r#"{"space_id":"capi"}"#))
+            .expect("lists"),
+    )
+    .expect("json");
+    assert!(docs.iter().any(|d| d == "notes"), "{docs:?}");
+
+    match engine.call("data.no_such_method", None) {
+        Err(CallError::MethodNotFound(m)) => assert!(m.contains("data."), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    engine.call("close_file_stores", None).expect("closes");
+}
