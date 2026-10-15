@@ -1,0 +1,14 @@
+[package]
+name = "capi-dispatch-gen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Writes the C binding's dispatcher from the interface definition"
+
+# Its own workspace, and no dependency on the crate it writes into, on
+# purpose: when a declaration is renamed or removed in the interface
+# definition, the checked-in dispatcher still calls the old name, so the FFI
+# crate does not compile until the dispatcher is regenerated. A generator
+# that needed that crate to compile could never be run at the one moment it
+# is needed.
+[workspace]

@@ -2492,6 +2492,7 @@ name = "offline-protocol-uniffi"
 version = "0.29.0"
 dependencies = [
  "android_logger",
+ "base64 0.22.1",
  "log",
  "offline-protocol",
  "offline-protocol-core",
