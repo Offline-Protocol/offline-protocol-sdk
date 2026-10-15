@@ -86,10 +86,14 @@ int main(void) {
   }
   offline_protocol_string_free(result);
 
+  /* A failed call writes `err` over whatever it held, so clear it after
+   * every failure, including one you otherwise ignore. */
   if (offline_protocol_call(engine, "local_address", NULL, &result, &err) ==
       OfflineProtocolStatus_Ok) {
     printf("this device is %s\n", result); /* "off1..." as a JSON string */
     offline_protocol_string_free(result);
+  } else {
+    offline_protocol_error_clear(&err);
   }
 
   /* An engine refusal names the definition's variant and its position;
