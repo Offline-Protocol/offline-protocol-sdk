@@ -17,6 +17,12 @@ server written against it serves any conforming client. The reference server
 ships in the Python package; it is one implementation of this contract, not
 the contract.
 
+The same method table, encoding and error positions are also the C API
+([the C binding](../bridges/c.md)), called in process rather than over a
+socket: a method named here is callable from C by the same name with the
+same parameters. The session, the routing and the per-application rules of
+this chapter are the server's and have no counterpart there.
+
 Three things this chapter deliberately does not do. It does not invent a
 second API: every method is one of the interface definition's own methods
 under its own name, with its own parameters, returning its own result, and

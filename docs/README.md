@@ -111,6 +111,7 @@ in here fails **silently** when violated.
 | [Python](bridges/python.md) | Desktop and tooling |
 | [TypeScript](bridges/typescript.md) | The React Native JavaScript surface |
 | [Local API](bridges/local-api.md) | A server fronting one engine for several local clients over a socket |
+| [C](bridges/c.md) | The C API: the local API called in process, for C and every language that calls C |
 
 ## Release history
 

@@ -54,6 +54,13 @@ also resets the structure for reuse. The library writes an error only when a
 call fails and never reads one, so a host that reuses an error clears it
 first, or leaks the previous strings.
 
+The mirror image holds for results: the library writes `*out_result` (and
+`*out_handle`) only when a call succeeds, and leaves it as it was when the
+call fails. A host that frees a result after a call it did not check frees
+whatever the variable held before, which is the previous call's string,
+already freed. Free a result only after `Ok`, or reset the variable to null
+after every free.
+
 Strings the host passes in are borrowed for the call. `offline_protocol_version`
 returns a static string.
 

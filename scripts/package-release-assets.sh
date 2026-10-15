@@ -35,6 +35,9 @@ IOS_GENERATED="$RN/ios/Generated"
 # but it is not iOS-specific — it is the only header a C or C++ consumer of the
 # desktop cdylib has to work from, so the desktop archives carry it too.
 FFI_HEADER="$IOS_GENERATED/offline_protocolFFI.h"
+# The C binding's header (docs/bridges/c.md): the C API over the same library,
+# and the one a C host should use. Checked in, so it is always present.
+C_HEADER="$ROOT/bindings/c/include/offline_protocol.h"
 ANDROID_JNILIBS="$RN/android/src/main/jniLibs"
 ANDROID_KOTLIN="$RN/android/src/main/java/uniffi"
 PYTHON_MODULE="$ROOT/bindings/python/offline_protocol_sdk/offline_protocol.py"
@@ -90,6 +93,7 @@ sha256_manifest() {
 # Resolves the per-platform desktop naming. Used twice: once in pre-flight to
 # check every input before anything is written, once while packaging.
 desktop_spec() {
+  import_lib=""
   case "$1" in
     macos-*)
       lib=liboffline_protocol_uniffi.dylib
@@ -106,6 +110,10 @@ desktop_spec() {
     windows-*)
       lib=offline_protocol_uniffi.dll
       loader_name=uniffi.dll
+      # MSVC links against a DLL through its import library, which rustc
+      # writes beside it as <name>.dll.lib. Without it a C host on Windows
+      # can load the DLL at run time but cannot link it at build time.
+      import_lib=offline_protocol_uniffi.dll.lib
       fmt=zip
       built_on="windows-latest (MSVC toolchain)"
       ;;
@@ -131,6 +139,7 @@ done
 require_file "$IOS_XCFRAMEWORK/Info.plist"
 require_nonempty_dir "$IOS_GENERATED"
 require_file "$FFI_HEADER"
+require_file "$C_HEADER"
 require_nonempty_dir "$ANDROID_JNILIBS"
 require_nonempty_dir "$ANDROID_KOTLIN"
 require_file "$PYTHON_MODULE"
@@ -138,6 +147,9 @@ require_file "$PYTHON_MODULE"
 for plat in "${DESKTOP_PLATFORMS[@]}"; do
   desktop_spec "$plat"
   require_file "$DESKTOP_LIBS/$plat/$lib"
+  if [ -n "$import_lib" ]; then
+    require_file "$DESKTOP_LIBS/$plat/$import_lib"
+  fi
 done
 
 require_file "$SWIFTPM_ARCHIVE"
@@ -302,6 +314,21 @@ for plat in "${DESKTOP_PLATFORMS[@]}"; do
   cp "$DESKTOP_LIBS/$plat/$lib" "$stage/"
   cp "$PYTHON_MODULE" "$stage/"
   cp "$FFI_HEADER" "$stage/"
+  cp "$C_HEADER" "$stage/"
+  if [ -n "$import_lib" ]; then
+    cp "$DESKTOP_LIBS/$plat/$import_lib" "$stage/"
+    # Ends in a newline so an empty row on the other platforms leaves no
+    # blank line, which would end the table.
+    import_row="| \`$import_lib\` | The import library an MSVC linker needs to link the DLL. |"$'\n'
+    link_line="cl /I. app.c $import_lib"
+  else
+    import_row=""
+    if [ "$fmt" = tar ] && [ "${plat%%-*}" = macos ]; then
+      link_line="cc -I. app.c -L. -loffline_protocol_uniffi -Wl,-rpath,@loader_path"
+    else
+      link_line="cc -I. app.c -L. -loffline_protocol_uniffi -Wl,-rpath,'\$ORIGIN'"
+    fi
+  fi
 
   # _uniffi_load_indirect() in offline_protocol.py loads the library by the
   # fixed name UniFFI bakes into its codegen, not by the cargo output name.
@@ -326,8 +353,9 @@ Version $VERSION. Built on $built_on.
 | \`$lib\` | The native library, under its build name. |
 | \`$loader_name\` | The same library under the name the generated bindings load. |
 | \`offline_protocol.py\` | Generated Python bindings. Import from this directory. |
-| \`offline_protocolFFI.h\` | C scaffolding header, for consumers linking directly. |
-| \`VERSION\` | Version and commit this archive was built from. |
+| \`offline_protocol.h\` | The C API. Use this one from C, C++, Go, C# or any language that calls C. |
+| \`offline_protocolFFI.h\` | UniFFI's internal scaffolding header, which the generated bindings call through. Not a C API. |
+${import_row}| \`VERSION\` | Version and commit this archive was built from. |
 
 ## Python
 
@@ -336,6 +364,19 @@ generated loader resolves the library relative to its own file — then:
 
 \`\`\`python
 import offline_protocol
+\`\`\`
+
+## C
+
+\`offline_protocol.h\` declares the C API: create an engine from a JSON
+configuration, call any method of the interface definition by name with
+JSON parameters, receive events as JSON. The contract is
+[docs/bridges/c.md](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/v$VERSION/docs/bridges/c.md)
+and a worked example is
+[bindings/c](https://github.com/Offline-Protocol/offline-protocol-sdk/tree/v$VERSION/bindings/c).
+
+\`\`\`sh
+$link_line
 \`\`\`
 
 ## Licensing
