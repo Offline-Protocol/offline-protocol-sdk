@@ -11,6 +11,7 @@
 #![allow(unsafe_code)] // Required for UniFFI generated scaffolding
 #![allow(missing_docs)] // Types are documented in offline_protocol.udl
 
+#[cfg(feature = "capi")]
 pub mod capi;
 mod host_log;
 
@@ -11884,6 +11885,30 @@ mod tests {
         assert!(
             package.contains("js-ci-harness/telemetry-config.test.js"),
             "the JS harness test for the section must run under test:js"
+        );
+
+        // The C binding decodes the section by the definition's own field
+        // list, so every field but the two platform ones is read without a
+        // per-field line to pin. What has to be pinned is that it fills `os`
+        // itself and refuses one from the caller, before the decoder runs.
+        let capi = read(manifest.join("src/capi/mod.rs"));
+        let call = capi
+            .split_once("pub fn call(&self")
+            .expect("the C dispatcher's call")
+            .1;
+        assert!(
+            call.contains("if method == \"enable_telemetry\" {")
+                && call.contains("fill_telemetry_platform(&mut params)?;"),
+            "the C binding must fill the telemetry platform on enable_telemetry"
+        );
+        let fill = capi
+            .split_once("fn fill_telemetry_platform(")
+            .expect("the C binding's platform filler")
+            .1;
+        assert!(
+            fill.contains("config.contains_key(\"os\")")
+                && fill.contains("config.insert(\"os\".to_owned(), TELEMETRY_OS.encode())"),
+            "the C binding must refuse a caller's os and fill its own"
         );
     }
 

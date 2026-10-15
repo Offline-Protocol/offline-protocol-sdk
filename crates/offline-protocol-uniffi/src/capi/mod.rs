@@ -14,11 +14,18 @@
 //! written by `generator.rs`), so a method added there is callable from C
 //! without anyone writing a line here.
 //!
-//! This module is the safe half. The `extern "C"` functions sit on top of it.
+//! This module is the safe half. The `extern "C"` functions sit on top of it,
+//! in `ffi.rs`, with the adapters that put host C functions behind the
+//! wrapper's callback traits in `adapters.rs`. Those two files are the only
+//! ones in this crate that write `unsafe`, which a guard holds.
 
+mod adapters;
 mod codec;
+pub mod ffi;
 #[rustfmt::skip]
 mod generated;
+#[cfg(test)]
+mod ffi_tests;
 #[cfg(test)]
 mod generator;
 #[cfg(test)]
@@ -31,24 +38,28 @@ use serde_json::Value;
 pub use codec::CallError;
 use codec::{Codec, Fields};
 
-use crate::{DataStore, MeshServices, OfflineProtocol, ProtocolConfig};
+use crate::{DataStore, MeshServices, OfflineProtocol, ProtocolConfig, TelemetryOs};
 
 /// The `TelemetryConfig.os` this build reports. The binding fills it, and
 /// never reads it from the application (bridge contract C12): a batch's
 /// platform is the platform the library was built for, not a string an
 /// application forwarded.
-pub const TELEMETRY_OS: &str = if cfg!(target_os = "ios") {
-    "Ios"
+///
+/// The definition's enum rather than its spelling, so the text on the wire
+/// comes from the generated codec and a platform no CI runner builds for
+/// cannot carry a misspelt value to the ingest.
+pub const TELEMETRY_OS: TelemetryOs = if cfg!(target_os = "ios") {
+    TelemetryOs::Ios
 } else if cfg!(target_os = "android") {
-    "Android"
+    TelemetryOs::Android
 } else if cfg!(target_os = "linux") {
-    "Linux"
+    TelemetryOs::Linux
 } else if cfg!(target_os = "macos") {
-    "Macos"
+    TelemetryOs::Macos
 } else if cfg!(target_os = "windows") {
-    "Windows"
+    TelemetryOs::Windows
 } else {
-    "Other"
+    TelemetryOs::Other
 };
 
 /// One engine and the two objects built on it.
@@ -177,6 +188,6 @@ fn fill_telemetry_platform(params: &mut Option<Value>) -> Result<(), CallError> 
                 .to_owned(),
         ));
     }
-    config.insert("os".to_owned(), Value::from(TELEMETRY_OS));
+    config.insert("os".to_owned(), TELEMETRY_OS.encode());
     Ok(())
 }

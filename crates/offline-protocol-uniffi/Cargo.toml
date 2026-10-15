@@ -67,4 +67,12 @@ crate-type = ["cdylib", "staticlib", "lib"]
 name = "offline_protocol_uniffi"
 
 [features]
-default = []
+default = ["capi"]
+# The C binding (docs/bridges/c.md): the JSON dispatcher and its `extern "C"`
+# functions. On by default, because the desktop libraries the release ships
+# are what a C host links. The Android builds turn it off: a cdylib exports
+# every `#[no_mangle]` symbol, so nothing can strip the dispatcher behind
+# them, and an Android application has no C host to call it. An iOS
+# application links the static library with dead stripping, which drops the
+# unreferenced exports, so the iOS builds keep the default.
+capi = []

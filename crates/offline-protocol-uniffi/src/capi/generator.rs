@@ -439,6 +439,25 @@ pub(super) fn generate(udl: &str) -> String {
     }
     out.push_str("    }\n}\n\n");
 
+    let storage_error = blocks
+        .iter()
+        .find(|b| b.kind == Kind::Enum && b.name == "MlsStorageError")
+        .expect("the definition declares MlsStorageError");
+    out.push_str(
+        "/// A C storage function's answer as the definition's `MlsStorageError`:\n\
+         /// variant `n` (zero-based) is code `n + 1`, and zero is success. `None` for\n\
+         /// any other value, which the adapter reads as the operation's own failure.\n\
+         pub fn mls_storage_error_from_code(code: i32) -> Option<crate::MlsStorageError> {\n    match code {\n",
+    );
+    for (i, v) in enum_variants(storage_error).iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "        {} => Some(crate::MlsStorageError::{v}),",
+            i + 1
+        );
+    }
+    out.push_str("        _ => None,\n    }\n}\n\n");
+
     let namespace = blocks
         .iter()
         .find(|b| b.kind == Kind::Namespace)

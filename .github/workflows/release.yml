@@ -234,7 +234,10 @@ jobs:
           export "CC_${TARGET_VAR}=$NDK_TOOLCHAIN/${{ matrix.linker_bin }}"
           export "CXX_${TARGET_VAR}=$NDK_TOOLCHAIN/${{ matrix.linker_bin }}++"
 
-          cargo build --release --locked --target ${{ matrix.target }} --package offline-protocol-uniffi
+          # Without the C binding: a cdylib exports every C symbol, so the
+          # dispatcher behind them could not be stripped (the `capi` feature).
+          cargo build --release --locked --target ${{ matrix.target }} --package offline-protocol-uniffi \
+            --no-default-features
 
           mkdir -p jniLibs/${{ matrix.abi }}
           SO_ROOT="target/${{ matrix.target }}/release"
