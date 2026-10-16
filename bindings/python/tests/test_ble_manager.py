@@ -128,6 +128,7 @@ class TestAdvertisementHandling:
         device = MagicMock()
         device.address = "AA:BB:CC:DD:EE:FF"
         adv = MagicMock()
+        adv.service_uuids = [SERVICE_UUID]
         adv.rssi = ADAPTIVE_MIN_RSSI - 1  # too weak
 
         manager._on_advertisement(device, adv)
@@ -151,6 +152,7 @@ class TestAdvertisementHandling:
         device = MagicMock()
         device.address = "AA:BB:CC:DD:EE:FF"
         adv = MagicMock()
+        adv.service_uuids = [SERVICE_UUID]
         adv.rssi = -60
 
         manager._on_advertisement(device, adv)
@@ -171,6 +173,7 @@ class TestAdvertisementHandling:
         device = MagicMock()
         device.address = addr
         adv = MagicMock()
+        adv.service_uuids = [SERVICE_UUID]
         adv.rssi = -55
 
         manager._on_advertisement(device, adv)
@@ -189,12 +192,46 @@ class TestAdvertisementHandling:
         device = MagicMock()
         device.address = "AA:BB:CC:DD:EE:FF"
         adv = MagicMock()
+        adv.service_uuids = [SERVICE_UUID]
         adv.rssi = -60
 
         manager._on_advertisement(device, adv)
 
         mock_loop.call_soon_threadsafe.assert_called_once()
         assert "AA:BB:CC:DD:EE:FF" in manager._connecting
+
+    def test_an_advertisement_without_the_mesh_service_is_ignored(
+        self, manager, mock_protocol
+    ):
+        """On BlueZ the scan carries no service filter (bluetoothd 5.87 exits
+        when one is set), so this callback is the filter: every other
+        advertiser in range must be dropped before it is tracked or dialled."""
+        mock_loop = MagicMock()
+        manager._loop = mock_loop
+        device = MagicMock()
+        device.address = "AA:BB:CC:DD:EE:FF"
+        adv = MagicMock()
+        adv.service_uuids = ["0000180f-0000-1000-8000-00805f9b34fb"]
+        adv.rssi = -40
+
+        manager._on_advertisement(device, adv)
+
+        assert manager._last_seen == {}
+        assert manager._connecting == set()
+        mock_loop.call_soon_threadsafe.assert_not_called()
+
+    def test_the_mesh_service_matches_in_any_case(self, manager):
+        mock_loop = MagicMock()
+        manager._loop = mock_loop
+        device = MagicMock()
+        device.address = "AA:BB:CC:DD:EE:FF"
+        adv = MagicMock()
+        adv.service_uuids = [SERVICE_UUID.upper()]
+        adv.rssi = -40
+
+        manager._on_advertisement(device, adv)
+
+        assert "AA:BB:CC:DD:EE:FF" in manager._last_seen
 
     def test_already_connected_peer_not_reconnected(self, manager, mock_protocol):
         """Peers already in _clients don't trigger new connections."""
@@ -209,6 +246,7 @@ class TestAdvertisementHandling:
         device = MagicMock()
         device.address = addr
         adv = MagicMock()
+        adv.service_uuids = [SERVICE_UUID]
         adv.rssi = -60
 
         manager._on_advertisement(device, adv)
@@ -656,6 +694,27 @@ class TestPeerCleanup:
 # ---------------------------------------------------------------------------
 # A stop() cancelled part-way
 # ---------------------------------------------------------------------------
+
+
+class TestScanFilter:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("platform, uuids", [("linux", None), ("darwin", [SERVICE_UUID])])
+    async def test_the_service_filter_is_left_off_on_bluez_only(
+        self, manager, monkeypatch, platform, uuids
+    ):
+        """bluetoothd 5.87 exits the moment a discovery filter naming a
+        service UUID is set, and with it goes every registration on the
+        adapter; CoreBluetooth needs the filter to scan in the background."""
+        monkeypatch.setattr("sys.platform", platform)
+        scanner = MagicMock()
+        scanner.start = AsyncMock()
+        scanner.stop = AsyncMock()
+        with patch.object(ble_manager_module, "BleakScanner", return_value=scanner) as made:
+            await manager.start()
+        try:
+            assert made.call_args.kwargs["service_uuids"] == uuids
+        finally:
+            await manager.stop()
 
 
 class TestInterruptedStop:

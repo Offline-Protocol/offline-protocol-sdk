@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 import threading
 import time
 from typing import Any
@@ -34,6 +35,7 @@ from bleak import BleakClient, BleakScanner
 from bleak.backends.device import BLEDevice
 from bleak.backends.scanner import AdvertisementData
 
+from .bluez_restarts import StaysRegistered
 from .offline_protocol import verify_identity_assertion
 from .transport_manager import TransportError, TransportManager, TransportState
 
@@ -159,6 +161,11 @@ class BleManager(TransportManager):
         # Tasks
         self._peer_cleanup_task: asyncio.Task[None] | None = None
 
+        # Registered again with bluetoothd whenever it restarts (Linux).
+        self._registration = StaysRegistered(
+            self._start_scanning, self._stop_scanning, self._emit_diagnostic
+        )
+
     # -- TransportManager interface -------------------------------------------
 
     def is_available(self) -> bool:
@@ -167,6 +174,16 @@ class BleManager(TransportManager):
         return True
 
     async def start(self) -> None:
+        # Refused here, before the registration: inside it, the refusal's
+        # cleanup would stop the running scan's bluetoothd watch.
+        if self._state == TransportState.RUNNING:
+            raise TransportError("BLE transport is already running")
+        await self._registration.start()
+
+    async def stop(self) -> None:
+        await self._registration.stop()
+
+    async def _start_scanning(self) -> None:
         if self._state == TransportState.RUNNING:
             raise TransportError("BLE transport is already running")
 
@@ -177,9 +194,14 @@ class BleManager(TransportManager):
         })
 
         try:
+            # No service filter on BlueZ: bluetoothd 5.87 exits the moment a
+            # discovery filter naming a service UUID is set, which took the
+            # central's scan and the peripheral's advertisement down with it.
+            # _on_advertisement filters on the UUID instead. CoreBluetooth
+            # keeps the filter, which it needs to scan in the background.
             self._scanner = BleakScanner(
                 detection_callback=self._on_advertisement,
-                service_uuids=[SERVICE_UUID],
+                service_uuids=None if sys.platform == "linux" else [SERVICE_UUID],
             )
             await self._scanner.start()
         except Exception as exc:
@@ -201,7 +223,7 @@ class BleManager(TransportManager):
 
         self._emit_diagnostic("info", "BLE transport started")
 
-    async def stop(self) -> None:
+    async def _stop_scanning(self) -> None:
         # STOPPING too: a stop() cancelled part-way (a shutdown deadline)
         # leaves the transport there, and a retry that returned at once would
         # leave it half torn down for good. Every step below is idempotent.
@@ -272,6 +294,10 @@ class BleManager(TransportManager):
         NOTE: This is invoked from bleak's scanner thread, not the asyncio
         event loop.  All shared-state mutations go through ``_lock``.
         """
+        # The scan is unfiltered on BlueZ (see _start_scanning).
+        if SERVICE_UUID not in (uuid.lower() for uuid in adv_data.service_uuids):
+            return
+
         addr = device.address
         rssi = adv_data.rssi if adv_data.rssi is not None else -100
 

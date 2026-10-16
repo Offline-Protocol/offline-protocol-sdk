@@ -503,6 +503,47 @@ The pieces, each of which the failure needs only one of to come back:
 `test_ble_hello.py` pins each of these, and each has a mutation that turns it
 red. The macOS pieces were run between two Macs and a Galaxy M36 (Android 16).
 
+## P16. On BlueZ the central scans unfiltered, and both roles register again when bluetoothd restarts
+
+**Invariant:** what a Bluetooth LE role registered with bluetoothd is
+registered with the bluetoothd that is running now. Everything either role
+registers lives in the bluetoothd process (the central's discovery session,
+the peripheral's GATT application and advertisement), a new bluetoothd starts
+with none of it, and nothing on the bus tells the process that registered it.
+On BlueZ 5.87 both roles kept logging themselves running for the
+life of the service while the device was off the air: the peripheral said
+"advertising" with no advertisement registered, the central waited on a scan
+that had ended, and a peer's identity read failed with `Unlikely Error`
+because the link died with bluetoothd mid-read.
+
+Two pieces, each closing a different half:
+
+- **No service filter on the BlueZ scan.** bluetoothd 5.87 exits the moment a
+  discovery filter naming a service UUID is set (bisected on a Raspberry Pi 4 running BlueZ 5.87:
+  an unfiltered scan, a GATT application and an advertisement each leave it
+  running; `SetDiscoveryFilter` with `UUIDs` alone ends it). The central set
+  exactly that filter at every start, so every start of the service took the
+  adapter down, usually within half a second of the peripheral registering.
+  On Linux `BleManager` scans unfiltered and `_on_advertisement` drops any
+  advertisement without the mesh service UUID before tracking or dialling
+  it. CoreBluetooth keeps the filter, which it needs to scan in the
+  background.
+- **Both roles follow bluetoothd.** `bluez_restarts.StaysRegistered` watches
+  the bus's `NameOwnerChanged` for `org.bluez`. A start cut short because
+  bluetoothd exited part-way (BlueZ answers "Message recipient disconnected
+  from message bus without replying") is tried again once the new bluetoothd
+  holds the name; a start refused for any other reason is raised at once. A
+  role running when bluetoothd restarts is torn down and brought up again,
+  retrying with backoff for about fifteen seconds, because a bluetoothd that
+  has just started refuses for a while (`InProgress` for a discovery it is
+  still setting up). The helper holds the role's methods weakly: a strong
+  cycle kept a dropped `ProtocolManager`, and the stores it holds open, alive
+  until the cycle collector ran, and the next manager over the same
+  directories was refused.
+
+The watch is Linux only and best effort: with no system bus to watch it logs
+and stays inert, which is the behaviour before it existed.
+
 ## Testing
 
 ```bash

@@ -58,6 +58,7 @@ from .ble_manager import (
     MESSAGE_CHAR_UUID,
     SERVICE_UUID,
 )
+from .bluez_restarts import StaysRegistered
 from .offline_protocol import verify_identity_assertion
 from .transport_manager import TransportError, TransportManager, TransportState
 
@@ -486,6 +487,13 @@ class BlePeripheral(TransportManager):
         # _BlueZCentrals). None on CoreBluetooth, whose bless delegate
         # tracks them itself.
         self._bluez_centrals: _BlueZCentrals | None = None
+
+        # Registered again with bluetoothd whenever it restarts (Linux): a
+        # restart drops the GATT application and the advertisement, and
+        # nothing on the bus tells the process that registered them.
+        self._registration = StaysRegistered(
+            self._start_advertising, self._stop_advertising, self._emit_diagnostic
+        )
         # Central id -> the address its hello proved. A link bound here feeds
         # its fragments to the core under that address, which is what lets a
         # key package from it through the core's transport-sender check.
@@ -547,6 +555,17 @@ class BlePeripheral(TransportManager):
 
     async def start(self) -> None:
         """Set up the GATT server, register characteristics, and advertise."""
+        # Refused here, before the registration: inside it, the refusal's
+        # cleanup would stop the running server's bluetoothd watch.
+        if self._state == TransportState.RUNNING:
+            raise TransportError("BLE peripheral is already running")
+        await self._registration.start()
+
+    async def stop(self) -> None:
+        """Stop advertising and disconnect all centrals."""
+        await self._registration.stop()
+
+    async def _start_advertising(self) -> None:
         if self._state == TransportState.RUNNING:
             raise TransportError("BLE peripheral is already running")
 
@@ -606,8 +625,7 @@ class BlePeripheral(TransportManager):
 
         self._emit_diagnostic("info", "BLE peripheral started — advertising")
 
-    async def stop(self) -> None:
-        """Stop advertising and disconnect all centrals."""
+    async def _stop_advertising(self) -> None:
         # STOPPING too: a stop() cancelled part-way (a shutdown deadline)
         # leaves the transport there, and a retry that returned at once would
         # leave it half torn down for good. Every step below is idempotent.
