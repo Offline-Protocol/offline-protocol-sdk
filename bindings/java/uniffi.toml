@@ -1,0 +1,5 @@
+# Configuration for uniffi-bindgen-java. scripts/generate-bindings.sh passes this
+# file with --config; see docs/bridges/java.md.
+[defaults.bindings.java]
+package_name = "com.offlineprotocol.sdk"
+cdylib_name = "offline_protocol_uniffi"
