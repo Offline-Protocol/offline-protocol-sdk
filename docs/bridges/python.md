@@ -561,12 +561,55 @@ Three details, each of which a simpler version got wrong:
   registered another copy of the service and each recovery leaked a
   system-bus connection.
 - **A recovery that runs out of tries stays down.** After the last try fails
-  the role reports "could not register with the restarted bluetoothd" at
+  the role reports "could not register with bluetoothd again" at
   error level, and nothing tries again until bluetoothd restarts once more or
   the owner restarts the role.
 
 The watch is Linux only and best effort: with no system bus to watch it logs
 and stays inert, which is the behaviour before it existed.
+
+## P17. On BlueZ a controller left advertising behind the kernel's back is reset once
+
+**Invariant:** a peripheral whose advertisement the kernel refused while BlueZ
+reports free advertising slots resets the adapter once and starts again, and
+both roles register again once the adapter is powered back on.
+
+The kernel loses track of the controller's advertising. Linux clears its own
+"advertising" flag on every LE connection complete, assuming the controller
+stopped advertising, but a controller only stops for a link in which it is the
+peripheral. When advertising is on while our central's dial is pending (a
+discovery restart re-enables it in the window), the dial completes in the
+central role, the controller keeps advertising, and the kernel believes it
+stopped. From then on the kernel never disables it, every `LE Set Advertising
+Parameters` is answered `Command Disallowed`, and every new advertisement is
+refused with "Failed to register advertisement". The state outlives the
+process: on two Raspberry Pi 4s (Linux 6.18, BlueZ 5.87) a replaced service
+could not advertise again, which looked like advertisements left behind by the
+replaced container holding the slots, while BlueZ reported all of them free.
+The trace that showed it is in the HCI log: a central-role `LE Connection
+Complete` with advertising enabled, then `Command Disallowed` on every
+advertising and random address command, and no `LE Set Advertise Enable`
+again.
+
+- **The reset.** Powering the adapter off and on re-initialises the controller
+  with an HCI Reset, which ends the stale advertising.
+  `ble_peripheral._reset_wedged_advertising` does it through BlueZ's own
+  `Adapter1.Powered`, so it needs no more than the Bluetooth grant the
+  peripheral already has.
+- **Only for this refusal, and only once.** The reset drops every link the
+  adapter holds, for every process using it. It runs only for "Failed to
+  register advertisement", only when `SupportedInstances` (the free slots)
+  is above zero, and only once per start: with no slot free the refusal is
+  about the slots, and a refusal that survives a reset has another cause.
+- **The central follows the power.** BlueZ drops every discovery session when
+  the adapter powers off, and the scan does not come back with the power.
+  `bluez_restarts` treats `Powered` turning true on `org.bluez.Adapter1` like a
+  new bluetoothd, so a running central registers again. Without it the
+  central in the same process stopped hearing anyone after the peripheral's
+  reset, and after any power toggle by anyone else.
+
+The kernel's flag is the defect, and a kernel without it never takes this
+path: the refusal never comes.
 
 ## Testing
 

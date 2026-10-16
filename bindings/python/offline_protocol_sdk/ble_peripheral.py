@@ -306,6 +306,112 @@ async def _unregister_bluez_application(server: Any) -> None:
         logger.debug("unexporting the GATT application failed", exc_info=True)
 
 
+# BlueZ's answer to a RegisterAdvertisement the kernel refused. A full set of
+# advertising slots is answered differently ("Maximum advertisements
+# reached"), before the kernel is asked.
+_ADVERTISEMENT_REFUSED = "Failed to register advertisement"
+_BLUEZ_ADAPTER_IFACE = "org.bluez.Adapter1"
+_BLUEZ_ADVERTISING_IFACE = "org.bluez.LEAdvertisingManager1"
+
+# Seconds to let a re-powered adapter settle before registering again.
+_ADAPTER_RESET_SETTLE = 1.0
+
+
+async def _reset_wedged_advertising() -> bool:
+    """Power-cycle an adapter whose controller refuses every advertisement.
+
+    Returns whether it did. Best effort, and never raises.
+
+    Linux loses track of the controller's advertising: the kernel clears its
+    "advertising" flag on every LE connection complete, assuming the
+    controller stopped advertising, which a controller only does for a link
+    in which it is the peripheral. When advertising is enabled while our
+    central's dial is pending (a discovery restart re-enables it), the dial
+    completes in the central role and the controller keeps advertising while
+    the kernel believes it stopped. From then on the kernel never disables it,
+    every LE Set Advertising Parameters is answered Command Disallowed, and
+    every new advertisement is refused with "Failed to register
+    advertisement", for this process and every later one, until the
+    controller is reset. Seen on Raspberry Pi 4s (Linux 6.18, BlueZ 5.87): a
+    replaced service could not advertise again, which looked like
+    advertisements left behind holding the slots, while BlueZ reported all of
+    them free.
+
+    Powering the adapter off and on re-initialises the controller with an
+    HCI Reset, which ends the stale advertising. It also drops every link the
+    adapter holds, for every process using it, which is why it runs only for
+    this refusal, and only when BlueZ reports a free slot: with none free the
+    refusal is about the slots, and a reset would not help.
+    """
+    try:
+        from dbus_next import BusType, Message, MessageType, Variant  # type: ignore[import-not-found]
+        from dbus_next.aio import MessageBus  # type: ignore[import-not-found]
+    except Exception:
+        return False
+    bus: Any = None
+    try:
+        bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+        reply = await bus.call(Message(
+            destination=_BLUEZ_SERVICE,
+            path="/",
+            interface="org.freedesktop.DBus.ObjectManager",
+            member="GetManagedObjects",
+        ))
+        if reply.message_type != MessageType.METHOD_RETURN:
+            return False
+        adapter = _advertising_adapter(reply.body[0])
+        if adapter is None:
+            return False
+        path, free_slots = adapter
+        if free_slots < 1:
+            return False
+        logger.warning(
+            "the controller refuses every advertisement while BlueZ has %d free; "
+            "power-cycling %s to reset it", free_slots, path,
+        )
+        for powered in (False, True):
+            reply = await bus.call(Message(
+                destination=_BLUEZ_SERVICE,
+                path=path,
+                interface="org.freedesktop.DBus.Properties",
+                member="Set",
+                signature="ssv",
+                body=[_BLUEZ_ADAPTER_IFACE, "Powered", Variant("b", powered)],
+            ))
+            if reply.message_type != MessageType.METHOD_RETURN:
+                logger.warning("powering %s %s failed: %s", path,
+                               "on" if powered else "off", reply.error_name)
+                return False
+        await asyncio.sleep(_ADAPTER_RESET_SETTLE)
+        return True
+    except Exception:
+        logger.debug("resetting the adapter failed", exc_info=True)
+        return False
+    finally:
+        if bus is not None:
+            try:
+                bus.disconnect()
+            except Exception:
+                logger.debug("closing the adapter reset bus failed", exc_info=True)
+
+
+def _advertising_adapter(objects: Any) -> tuple[str, int] | None:
+    """The first adapter that advertises, and its free advertising slots.
+
+    The first in path order, as bless picks it: ``hci0`` before ``hci1``.
+    """
+    for path in sorted(objects):
+        interfaces = objects[path]
+        if _BLUEZ_ADAPTER_IFACE not in interfaces:
+            continue
+        manager = interfaces.get(_BLUEZ_ADVERTISING_IFACE)
+        if manager is None:
+            continue
+        free = manager.get("SupportedInstances")
+        return path, int(getattr(free, "value", free) or 0)
+    return None
+
+
 def _central_id_from_device_path(path: Any) -> str | None:
     """``/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF`` -> ``AA:BB:CC:DD:EE:FF``."""
     if not isinstance(path, str):
@@ -536,7 +642,7 @@ class BlePeripheral(TransportManager):
         # restart drops the GATT application and the advertisement, and
         # nothing on the bus tells the process that registered them.
         self._registration = StaysRegistered(
-            self._start_advertising, self._stop_advertising, self._emit_diagnostic
+            self._bring_up, self._stop_advertising, self._emit_diagnostic
         )
         # Central id -> the address its hello proved. A link bound here feeds
         # its fragments to the core under that address, which is what lets a
@@ -608,6 +714,27 @@ class BlePeripheral(TransportManager):
     async def stop(self) -> None:
         """Stop advertising and disconnect all centrals."""
         await self._registration.stop()
+
+    async def _bring_up(self) -> None:
+        """Start advertising, resetting a wedged controller once (Linux).
+
+        See :func:`_reset_wedged_advertising`. Once, not in a loop: a refusal
+        that survives a controller reset has another cause, and resetting
+        again would only drop every link on the adapter again.
+        """
+        try:
+            await self._start_advertising()
+        except TransportError as exc:
+            if sys.platform != "linux" or _ADVERTISEMENT_REFUSED not in str(exc):
+                raise
+            if not await _reset_wedged_advertising():
+                raise
+            self._emit_diagnostic(
+                "warning",
+                "the controller refused the advertisement; reset the adapter, starting again",
+                {"error": str(exc)},
+            )
+            await self._start_advertising()
 
     async def _start_advertising(self) -> None:
         if self._state == TransportState.RUNNING:
