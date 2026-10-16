@@ -513,6 +513,43 @@ jobs:
       - name: Compile and run the C consumer check
         run: make -C bindings/c/consumer-check NATIVE_STATIC_LIBS="${{ steps.lib.outputs.native_static_libs }}"
 
+  # The Java binding (docs/bridges/java.md): a JNA wrapper over the C API. The
+  # tests load the real library, so they are what says the declarations in
+  # NativeApi and the committed header still describe the same ABI.
+  java-binding:
+    name: Java Binding (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-java-binding
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "8.9"
+
+      - name: Build the library
+        run: cargo build --locked --package offline-protocol-uniffi
+
+      # Compiles with -Xlint:all -Werror, runs the consumer check against the
+      # library built above, and builds the sources and Javadoc jars.
+      - name: Build and test the Java binding
+        working-directory: bindings/java
+        run: gradle --no-daemon --stacktrace build
+
   security:
     name: Dependency Audit
     runs-on: ubuntu-latest
