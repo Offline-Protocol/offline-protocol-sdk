@@ -320,15 +320,11 @@ for plat in "${DESKTOP_PLATFORMS[@]}"; do
     # Ends in a newline so an empty row on the other platforms leaves no
     # blank line, which would end the table.
     import_row="| \`$import_lib\` | The import library an MSVC linker needs to link the DLL. |"$'\n'
-    link_line="cl /I. app.c $import_lib"
   else
     import_row=""
-    if [ "$fmt" = tar ] && [ "${plat%%-*}" = macos ]; then
-      link_line="cc -I. app.c -L. -loffline_protocol_uniffi -Wl,-rpath,@loader_path"
-    else
-      link_line="cc -I. app.c -L. -loffline_protocol_uniffi -Wl,-rpath,'\$ORIGIN'"
-    fi
   fi
+  # The release's C library check runs the same line against the same library.
+  link_line="$(bash "$SCRIPT_DIR/c-link-line.sh" "$plat")"
 
   # _uniffi_load_indirect() in offline_protocol.py loads the library by the
   # fixed name UniFFI bakes into its codegen, not by the cargo output name.

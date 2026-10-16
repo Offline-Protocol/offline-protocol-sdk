@@ -202,15 +202,31 @@ cargo test -p offline-protocol-uniffi --lib capi
 scripts/generate-c-header.sh --check
 cargo build -p offline-protocol-uniffi
 make -C bindings/c/consumer-check
+make -C bindings/c/consumer-check SANITIZE=1
 ```
 
-The first runs the dispatcher's and the boundary's tests and the guards.
-The consumer check compiles a C program against the header with
-`-std=c99 -Wall -Wextra -Wpedantic -Werror`, links it against the shared and
-the static library in turn, runs both, and compiles the header as C++. CI
-runs all four on Linux and macOS, building the library once through the
-probe that reads the static library's system dependencies. Windows is
-built by the release and not yet linked by CI.
+Each layer catches a failure the others cannot:
+
+| Check | What it proves | Where it runs |
+|---|---|---|
+| `cargo test ... capi` | The dispatcher and the boundary from Rust, the guards, and every arm of the dispatcher: each one, called with parameters it cannot take, answers `InvalidParams` naming the parameter and never reaches the engine (`every_arm_refuses_bad_parameters_before_it_reaches_the_engine`) | CI, every system |
+| `consumer-check/main.c` | The contract from C: statuses, refusals, events, a storage provider written in C, under `-std=c99 -Wpedantic -Werror`, against the shared and the static library | CI, Linux and macOS |
+| `consumer-check/exchange.c` | What the host owes, done in C: two engines, a host carrying stream frames between them as base64 in JSON, a transport notification that fires, and an MLS session formed over it with a message each way | CI, Linux and macOS |
+| The quick start | The program in `bindings/c/README.md`, extracted and compiled as written, then run with its placeholders filled in | CI, Linux and macOS, and Windows under `cl -W4 -WX` |
+| `SANITIZE=1` | The same programs under AddressSanitizer and UBSan, and LeakSanitizer on Linux. The library allocates with the system allocator, so a string freed twice, freed with the host's `free` or never freed is reported where it happened: K1 checked rather than read | CI, Linux and macOS |
+| `scripts/check-c-library.sh` | The library a release ships, used as its archive's README says: the quick start beside the library and the header, linked with the archive's own line (`scripts/c-link-line.sh`, which the packager also writes into the README), run from another directory after the directory moved | The release, before anything publishes, on macOS, Linux and Windows; CI on Windows against a debug build |
+| `tools/capi-fuzz` | Arbitrary method names and parameters through `Engine::call`. A panic, `Internal`, or a success that is not JSON is a crash: K4 holds only for a build that unwinds | Nightly (`fuzz.yml`), and on demand |
+
+To fuzz locally, on Linux or in a Linux container (nightly toolchain,
+`cargo install cargo-fuzz`; on macOS the build does not link):
+
+```bash
+cargo +nightly fuzz run --sanitizer none --fuzz-dir tools/capi-fuzz call \
+  tools/capi-fuzz/corpus/call tools/capi-fuzz/seeds/call -- -max_total_time=300
+```
+
+`main.c` and `exchange.c` are POSIX programs (threads, `mkdtemp`), so
+Windows compiles the header and the quick start, not those two.
 
 ## Which builds carry it
 

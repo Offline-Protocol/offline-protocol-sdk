@@ -35,7 +35,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   path, so a host linked against it finds it through its own rpath. Every
   callback and storage provider handed to the library has its `drop`
   called exactly once, a refused registration included, so a host never
-  frees its own context. The contract is `docs/bridges/c.md`.
+  frees its own context. Before anything publishes, the release builds
+  the quick start in `bindings/c/README.md` against each desktop library
+  with that archive's own link line and runs it, on macOS, Linux and
+  Windows. CI also runs two engines exchanging messages through a C host,
+  every C program under AddressSanitizer and UBSan, and the quick start
+  under MSVC, and a nightly job fuzzes the JSON boundary. The contract is
+  `docs/bridges/c.md`.
 - **Signing large payloads from React Native no longer boxes every byte.**
   `signDataBytes(Uint8Array)` and `verifySignatureBytes` sit beside
   `signData` and `verifySignature`, which are unchanged. They cross the bridge
