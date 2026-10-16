@@ -564,7 +564,7 @@ jobs:
       # Keep in sync with the `uniffi` pin in crates/offline-protocol-uniffi/Cargo.toml;
       # scripts/generate-bindings.sh fails the build if the two disagree.
       - name: Install uniffi-bindgen
-        run: cargo install uniffi --version 0.30.0 --features cli --locked
+        run: cargo install uniffi --version 0.32.2 --features cli --locked
 
       # Delete the generated files first, so the drift gate below proves they
       # were *written* and not merely unchanged. `git diff --exit-code` on a
@@ -689,11 +689,11 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/uniffi-bindgen*
-          key: uniffi-bindgen-${{ runner.os }}-0.30.0
+          key: uniffi-bindgen-${{ runner.os }}-0.32.2
 
       - name: Install uniffi-bindgen
         if: steps.cache-uniffi.outputs.cache-hit != 'true'
-        run: cargo install uniffi --version 0.30.0 --features cli --locked
+        run: cargo install uniffi --version 0.32.2 --features cli --locked
 
       - name: Build the desktop library and the bindings
         shell: bash

@@ -72,7 +72,7 @@ A modern, user-friendly messaging application built with the Offline Protocol SD
 
    Needs `uniffi-bindgen` at the crate's pinned version — the build regenerates
    the UniFFI bindings alongside the native libraries and refuses to run on a
-   mismatch: `cargo install uniffi --version 0.30.0 --features cli --locked`.
+   mismatch: `cargo install uniffi --version 0.32.2 --features cli --locked`.
    ```bash
    cd ../../bindings/react-native
    npm run build:all

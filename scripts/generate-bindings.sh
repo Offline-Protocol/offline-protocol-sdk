@@ -75,9 +75,9 @@ if ! command -v uniffi-bindgen &>/dev/null; then
 fi
 
 # Compare at major.minor on *both* sides. The crate pin and the installed
-# version are written to different precisions by convention — `uniffi = "0.30"`
+# version are written to different precisions by convention — `uniffi = "0.32"`
 # against a bindgen that reports `0.30.0` — so normalizing only the installed
-# side makes a patch-level pin (`uniffi = "0.30.1"`) permanently unsatisfiable,
+# side makes a patch-level pin (`uniffi = "0.32.1"`) permanently unsatisfiable,
 # killing all codegen with a message naming a version that cannot fix it.
 INSTALLED_VERSION="$(uniffi-bindgen --version | awk '{print $NF}')"
 INSTALLED_MAJOR_MINOR="$(printf '%s' "$INSTALLED_VERSION" | cut -d. -f1,2)"

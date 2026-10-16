@@ -8,7 +8,7 @@ Thank you for your interest in contributing! This document provides guidelines f
 
 - Rust 1.87+ (`rustup default stable`)
 - For mobile bindings: Android NDK, Xcode
-- For regenerating UniFFI bindings: `cargo install uniffi --version 0.30.0 --features cli --locked` (the CLI version must match the workspace `uniffi = "0.30"` pin; CI uses this exact command)
+- For regenerating UniFFI bindings: `cargo install uniffi --version 0.32.2 --features cli --locked` (the CLI version must match the workspace `uniffi = "0.32"` pin; CI uses this exact command)
 
 ### Clone and Build
 

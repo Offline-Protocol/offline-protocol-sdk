@@ -62,6 +62,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   is how 0.29.0 is published. It never pushes `X.Y.Z` a second time unless
   told to, for an image that failed its checks.
 
+### Changed
+
+- **UniFFI is now 0.32** (was 0.30). The Swift, Kotlin and Python bindings are
+  regenerated together from the unchanged interface definition, and the
+  `uniffi-bindgen` the build scripts and CI install is `0.32.2`. No API a
+  binding exposes changes. A checkout that regenerates bindings needs
+  `cargo install uniffi --version 0.32.2 --features cli --locked --force`,
+  and a React Native app rebuilds its native code to pick up the new
+  generated files.
+
 ### Fixed
 
 - **One lost inbound Bluetooth fragment no longer marks BLE as a failing
