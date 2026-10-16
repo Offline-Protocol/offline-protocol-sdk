@@ -93,7 +93,7 @@ criterion = "0.8"
 openmls = "0.7"
 openmls_rust_crypto = "0.4"
 openmls_basic_credential = "0.4"
-openmls_traits = "0.4"
+openmls_traits = "0.6"
 
 # Encoding
 base64 = "0.22"
