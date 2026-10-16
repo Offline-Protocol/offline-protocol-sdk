@@ -370,3 +370,109 @@ fn the_data_object_is_reached_through_its_prefix() {
     }
     engine.call("close_file_stores", None).expect("closes");
 }
+
+/// Every declaration `offline_protocol_call` reaches, as `(wire name,
+/// parameters)`, read from the definition rather than from the dispatcher,
+/// so the test below cannot agree with a dispatcher that dropped an arm.
+fn every_callable_declaration() -> Vec<(String, Vec<(String, String)>)> {
+    use super::generator::{method, parse, Kind};
+    const UDL: &str = include_str!("../offline_protocol.udl");
+    let mut out = Vec::new();
+    for block in parse(UDL) {
+        let prefix = match (block.kind, block.name.as_str()) {
+            (Kind::Namespace, _) | (Kind::Interface, "OfflineProtocol") => "",
+            (Kind::Interface, "MeshServices") => "services.",
+            (Kind::Interface, "DataStore") => "data.",
+            _ => continue,
+        };
+        for statement in &block.statements {
+            let m = method(statement);
+            if m.constructor {
+                continue;
+            }
+            let wire = format!("{prefix}{}", m.name);
+            if super::generated::HAND_WRITTEN.contains(&wire.as_str()) {
+                continue;
+            }
+            out.push((wire, m.params));
+        }
+    }
+    out
+}
+
+/// Every arm decodes its parameters before it reaches the engine, and a
+/// mistake in them is `InvalidParams`, never `Internal` (a panic) and never
+/// an engine error. Called through every arm, so the 200-odd arms no other
+/// test names are exercised too: a generator change that decodes after
+/// calling, takes a parameter under the wrong name or panics on a shape
+/// fails here, and nothing reaches the engine (it is still stopped at the
+/// end, though `start` was among the calls).
+#[test]
+fn every_arm_refuses_bad_parameters_before_it_reaches_the_engine() {
+    let mls = Scratch::new("arms-mls");
+    let state = Scratch::new("arms-state");
+    let engine = Engine::create(&minimal_config().to_string()).expect("creates");
+    // The data object refuses to exist before storage, which would answer
+    // its arms with an engine error before they decode anything.
+    let stores = json!({
+        "mls_root": mls.0.to_string_lossy(),
+        "state_root": state.0.to_string_lossy(),
+        "store_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+    });
+    engine
+        .call("initialize_mls_with_file_stores", Some(&stores.to_string()))
+        .expect("attaches the stores");
+
+    let declarations = every_callable_declaration();
+    assert!(
+        declarations.len() > 200,
+        "read {} declarations; the parser lost some",
+        declarations.len()
+    );
+    let mut with_a_required_parameter = 0;
+    for (wire, params) in &declarations {
+        // An unknown key: refused by every arm, whatever it declares,
+        // because a missing required parameter or the unknown key itself
+        // stops the decode.
+        let probe = engine.call(wire, Some(r#"{"__capi_probe__":true}"#));
+        let message = match probe {
+            Err(CallError::InvalidParams(m)) => m,
+            other => panic!("{wire} with an unknown key answered {other:?}"),
+        };
+        match params.iter().find(|(_, ty)| !ty.ends_with('?')) {
+            // A required parameter is taken before the unknown key is seen.
+            Some((first, _)) => {
+                with_a_required_parameter += 1;
+                assert!(
+                    message.contains(first.as_str()),
+                    "{wire}: expected the missing {first:?} named, got {message:?}"
+                );
+                let empty = params_error(engine.call(wire, Some("{}")));
+                assert!(
+                    empty.contains(first.as_str()),
+                    "{wire} with no parameters: expected {first:?} named, got {empty:?}"
+                );
+            }
+            None => assert!(
+                message.contains("__capi_probe__"),
+                "{wire}: expected the unknown key named, got {message:?}"
+            ),
+        }
+        // The same parameters as a JSON array rather than an object.
+        let shaped = engine.call(wire, Some("[]"));
+        assert!(
+            matches!(shaped, Err(CallError::InvalidParams(_))),
+            "{wire} with an array answered {shaped:?}"
+        );
+    }
+    assert!(
+        with_a_required_parameter > 100,
+        "{with_a_required_parameter}"
+    );
+    assert_eq!(
+        engine.call("get_state", None).expect("answers"),
+        "\"Stopped\"",
+        "a refused call reached the engine"
+    );
+    engine.call("close_file_stores", None).expect("closes");
+}

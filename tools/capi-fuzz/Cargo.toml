@@ -1,0 +1,26 @@
+[package]
+name = "capi-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Fuzzes the C binding's JSON boundary: method names and parameters a C host can send"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace: cargo-fuzz builds with a nightly toolchain and
+# sanitizer flags that the main workspace never sees, and a member would put
+# libfuzzer-sys in every `cargo build --workspace`.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+offline-protocol-uniffi = { path = "../../crates/offline-protocol-uniffi" }
+serde_json = "1"
+
+[[bin]]
+name = "call"
+path = "fuzz_targets/call.rs"
+test = false
+doc = false
+bench = false
