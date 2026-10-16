@@ -27,6 +27,14 @@ if ! command -v uniffi-bindgen &> /dev/null; then
   echo "" >&2
   exit 1
 fi
+if ! command -v uniffi-bindgen-java &> /dev/null; then
+  echo "❌ Error: uniffi-bindgen-java not found — the generator writes the Java" >&2
+  echo "   binding in the same run as Swift, Kotlin and Python." >&2
+  echo "" >&2
+  echo "   cargo install uniffi-bindgen-java --version 0.5.2 --locked" >&2
+  echo "" >&2
+  exit 1
+fi
 
 # Build iOS
 echo "📱 Building iOS + generating bindings..."

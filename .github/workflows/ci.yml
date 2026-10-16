@@ -629,6 +629,11 @@ jobs:
       - name: Install uniffi-bindgen
         run: cargo install uniffi --version 0.32.2 --features cli --locked --force
 
+      # Versioned apart from uniffi; the 0.5 series generates for UniFFI 0.32.
+      # scripts/generate-bindings.sh fails the build if the series disagrees.
+      - name: Install uniffi-bindgen-java
+        run: cargo install uniffi-bindgen-java --version 0.5.2 --locked --force
+
       # Delete the generated files first, so the drift gate below proves they
       # were *written* and not merely unchanged. `git diff --exit-code` on a
       # path nothing wrote to reports no diff, which makes "up to date" and
@@ -645,6 +650,7 @@ jobs:
           rm -rf bindings/react-native/ios/Generated \
                  bindings/react-native/android/src/main/java/uniffi
           rm -f bindings/python/offline_protocol_sdk/offline_protocol.py
+          rm -rf bindings/java/src/main/java/com/offlineprotocol/sdk
 
       # Regenerate before building anything. Bindgen reads the UDL and nothing
       # else, so putting this ahead of the cdylib compile means drift surfaces
@@ -653,7 +659,7 @@ jobs:
       - name: Regenerate all UniFFI bindings
         run: bash scripts/generate-bindings.sh
 
-      # One regeneration, one gate: the three files are one artifact set off one
+      # One regeneration, one gate: the four sets are one artifact set off one
       # UDL, so checking them separately would let a half-updated commit pass
       # the half of the gate it happened to satisfy.
       - name: Fail on stale bindings
@@ -661,9 +667,10 @@ jobs:
           if ! git diff --exit-code -- \
             bindings/python/offline_protocol_sdk/offline_protocol.py \
             bindings/react-native/ios/Generated/ \
-            bindings/react-native/android/src/main/java/uniffi/; then
+            bindings/react-native/android/src/main/java/uniffi/ \
+            bindings/java/src/main/java/com/offlineprotocol/sdk/; then
             echo "::error::Committed UniFFI bindings are out of date."
-            echo "Run: bash scripts/generate-bindings.sh and commit all three."
+            echo "Run: bash scripts/generate-bindings.sh and commit all four."
             exit 1
           fi
 
@@ -752,12 +759,13 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/uniffi-bindgen*
-          key: uniffi-bindgen-${{ runner.os }}-0.32.2
+          key: uniffi-bindgen-${{ runner.os }}-0.32.2-java-0.5.2
 
-      # --force: see the Python Bindings job's install step.
-      - name: Install uniffi-bindgen
+      - name: Install uniffi-bindgen and uniffi-bindgen-java
         if: steps.cache-uniffi.outputs.cache-hit != 'true'
-        run: cargo install uniffi --version 0.32.2 --features cli --locked --force
+        run: |
+          cargo install uniffi --version 0.32.2 --features cli --locked --force
+          cargo install uniffi-bindgen-java --version 0.5.2 --locked --force
 
       - name: Build the desktop library and the bindings
         shell: bash

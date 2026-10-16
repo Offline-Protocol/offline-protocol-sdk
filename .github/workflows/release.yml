@@ -35,6 +35,9 @@ env:
   # moved can already be in ~/.cargo/bin, and `cargo install` refuses to
   # overwrite a binary it does not know it installed (see ci.yml).
   UNIFFI_VERSION: "0.32.2"
+  # The community Java generator, versioned apart from uniffi. Its 0.5 series
+  # generates for UniFFI 0.32; scripts/generate-bindings.sh refuses another.
+  UNIFFI_BINDGEN_JAVA_VERSION: "0.5.2"
 
 # ---------------------------------------------------------------------------
 # Third-party action pinning
@@ -126,12 +129,14 @@ jobs:
         id: cache-uniffi
         uses: actions/cache@v6
         with:
-          path: ~/.cargo/bin/uniffi-bindgen
-          key: uniffi-bindgen-${{ runner.os }}-${{ env.UNIFFI_VERSION }}
+          path: ~/.cargo/bin/uniffi-bindgen*
+          key: uniffi-bindgen-${{ runner.os }}-${{ env.UNIFFI_VERSION }}-java-${{ env.UNIFFI_BINDGEN_JAVA_VERSION }}
 
-      - name: Install uniffi-bindgen
+      - name: Install uniffi-bindgen and uniffi-bindgen-java
         if: steps.cache-uniffi.outputs.cache-hit != 'true'
-        run: cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked --force
+        run: |
+          cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked --force
+          cargo install uniffi-bindgen-java --version ${{ env.UNIFFI_BINDGEN_JAVA_VERSION }} --locked --force
 
       - name: Build iOS Libraries
         working-directory: bindings/react-native
@@ -281,12 +286,14 @@ jobs:
         id: cache-uniffi
         uses: actions/cache@v6
         with:
-          path: ~/.cargo/bin/uniffi-bindgen
-          key: uniffi-bindgen-${{ runner.os }}-${{ env.UNIFFI_VERSION }}
+          path: ~/.cargo/bin/uniffi-bindgen*
+          key: uniffi-bindgen-${{ runner.os }}-${{ env.UNIFFI_VERSION }}-java-${{ env.UNIFFI_BINDGEN_JAVA_VERSION }}
 
-      - name: Install uniffi-bindgen
+      - name: Install uniffi-bindgen and uniffi-bindgen-java
         if: steps.cache-uniffi.outputs.cache-hit != 'true'
-        run: cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked --force
+        run: |
+          cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked --force
+          cargo install uniffi-bindgen-java --version ${{ env.UNIFFI_BINDGEN_JAVA_VERSION }} --locked --force
 
       # The Kotlin this job uploads is downloaded *over* the committed Android
       # bindings in the publish job, so it — not the committed file — is what
@@ -530,12 +537,14 @@ jobs:
         id: cache-uniffi
         uses: actions/cache@v6
         with:
-          path: ~/.cargo/bin/uniffi-bindgen
-          key: uniffi-bindgen-${{ runner.os }}-${{ env.UNIFFI_VERSION }}
+          path: ~/.cargo/bin/uniffi-bindgen*
+          key: uniffi-bindgen-${{ runner.os }}-${{ env.UNIFFI_VERSION }}-java-${{ env.UNIFFI_BINDGEN_JAVA_VERSION }}
 
-      - name: Install uniffi-bindgen
+      - name: Install uniffi-bindgen and uniffi-bindgen-java
         if: steps.cache-uniffi.outputs.cache-hit != 'true'
-        run: cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked --force
+        run: |
+          cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked --force
+          cargo install uniffi-bindgen-java --version ${{ env.UNIFFI_BINDGEN_JAVA_VERSION }} --locked --force
 
       # Generates all three languages; only the Python file is uploaded here.
       # Going through the shared script keeps the released wheel's bindings
