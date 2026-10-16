@@ -15,6 +15,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **A Java binding.** `bindings/java` wraps the C API for the JVM on desktop
+  and server, through JNA, with Java 11 or later: `OfflineProtocol.create`,
+  `call` by local API method name with JSON parameters, event and transport
+  listeners, a poll queue, `StorageProvider` for storage written in Java, and
+  the storage conformance suite. It parses no JSON and changes with nothing
+  when the definition grows a method. Failures are an
+  `OfflineProtocolException` carrying the status and the definition's variant
+  and position. A test reads the committed C header and fails if the JNA
+  declarations or the enum values drift from it, and a consumer check runs
+  against the real library in CI on Linux and macOS. The native library is not
+  bundled: point `jna.library.path` at it. The contract is
+  `docs/bridges/java.md`.
 - **A C API.** `bindings/c/include/offline_protocol.h` declares about a
   dozen functions over the native library every release already ships:
   create an engine from a JSON configuration, call any method of the

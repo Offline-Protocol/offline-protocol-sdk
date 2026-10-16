@@ -1,6 +1,6 @@
 # Bridge contracts
 
-The Rust core is exposed to Swift, Kotlin, Python, TypeScript and C. This
+The Rust core is exposed to Swift, Kotlin, Python, TypeScript, C and Java. This
 directory states what each binding owes the core and what the core owes each
 binding.
 
@@ -13,6 +13,7 @@ binding.
 | [TypeScript](typescript.md) | The React Native JavaScript surface |
 | [Local API](local-api.md) | A server fronting one engine for several local clients over a socket, and the reference server |
 | [C](c.md) | The C API in `bindings/c`: the local API called in process |
+| [Java](java.md) | The JVM wrapper in `bindings/java`: the C API through JNA |
 
 Integration **guides** live elsewhere: [iOS](../ios-integration.md),
 [Android](../android-integration.md),
