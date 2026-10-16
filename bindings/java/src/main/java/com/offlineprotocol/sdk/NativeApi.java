@@ -81,7 +81,7 @@ interface NativeApi extends Library {
     }
 
     interface LoadFn extends Callback {
-        int invoke(Pointer ctx, Pointer keyType, Pointer keyId, PointerByReference outData, Pointer outLen);
+        int invoke(Pointer ctx, Pointer keyType, Pointer keyId, Pointer outData, Pointer outLen);
     }
 
     interface RemoveFn extends Callback {
@@ -89,7 +89,7 @@ interface NativeApi extends Library {
     }
 
     interface ListKeysFn extends Callback {
-        int invoke(Pointer ctx, Pointer keyType, PointerByReference outJson, Pointer outLen);
+        int invoke(Pointer ctx, Pointer keyType, Pointer outJson, Pointer outLen);
     }
 
     interface ReleaseFn extends Callback {

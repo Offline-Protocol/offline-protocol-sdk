@@ -158,6 +158,45 @@ public final class OfflineProtocol implements AutoCloseable {
         }
     }
 
+    /**
+     * Attaches the two storage providers: {@code secureStorage} for key material (back it
+     * with the platform's keystore) and {@code protocolStateStorage} for install-scoped
+     * state. Before {@code start}, idempotent. Each provider is released once the engine lets
+     * go of it, or before this returns if the call is refused.
+     *
+     * <p>{@code initialize_mls_with_file_stores}, through {@link #call}, needs no provider
+     * and is the simplest route for a host with a filesystem and no keystore.
+     */
+    public void initializeMls(StorageProvider secureStorage, StorageProvider protocolStateStorage) {
+        Objects.requireNonNull(secureStorage, "secureStorage");
+        Objects.requireNonNull(protocolStateStorage, "protocolStateStorage");
+        Lock lock = lifecycle.readLock();
+        lock.lock();
+        try {
+            requireOpen();
+            NativeApi.ErrorStruct err = new NativeApi.ErrorStruct();
+            NativeApi.check(NativeApi.INSTANCE.offline_protocol_initialize_mls(
+                    handle, StorageBridge.struct(secureStorage), StorageBridge.struct(protocolStateStorage), err), err);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Runs the storage adapter conformance suite against a protocol-state provider and
+     * returns the report as JSON: {@code {"passed":[...],"failures":[{"check","detail"}]}}.
+     * Green is the definition of a supported backend. Probe a new backend on a scratch
+     * instance: the suite writes and deletes its own probe keys.
+     */
+    public static String runStorageConformance(StorageProvider storage) {
+        Objects.requireNonNull(storage, "storage");
+        NativeApi.ErrorStruct err = new NativeApi.ErrorStruct();
+        PointerByReference out = new PointerByReference();
+        NativeApi.check(NativeApi.INSTANCE.offline_protocol_run_storage_conformance(
+                StorageBridge.struct(storage), out, err), err);
+        return NativeApi.takeString(out.getValue());
+    }
+
     /** Frees the engine, once. Waits for calls in flight; later calls throw {@link IllegalStateException}. */
     @Override
     public void close() {
