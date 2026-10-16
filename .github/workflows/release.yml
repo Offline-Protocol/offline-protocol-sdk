@@ -31,7 +31,7 @@ env:
   # a uniffi bump still means editing several files that name the version
   # prescriptively (this, ci.yml, README, CLAUDE.md, CONTRIBUTING.md and the
   # install hints the scripts print).
-  UNIFFI_VERSION: "0.30.0"
+  UNIFFI_VERSION: "0.32.2"
 
 # ---------------------------------------------------------------------------
 # Third-party action pinning

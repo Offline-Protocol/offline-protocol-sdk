@@ -23,7 +23,7 @@ if ! command -v uniffi-bindgen &> /dev/null; then
   echo "❌ Error: uniffi-bindgen not found — the platform builds below would" >&2
   echo "   compile the native libraries and then fail at binding generation." >&2
   echo "" >&2
-  echo "   cargo install uniffi --version 0.30.0 --features cli --locked" >&2
+  echo "   cargo install uniffi --version 0.32.2 --features cli --locked" >&2
   echo "" >&2
   exit 1
 fi
