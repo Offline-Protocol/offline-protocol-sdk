@@ -37,7 +37,7 @@ zeroize = { workspace = true }
 # logger in `host_log.rs`; see that module for why.
 tracing = { workspace = true, features = ["log"] }
 log = "0.4"
-uniffi = "0.30"
+uniffi = "0.32"
 
 # The platform loggers the host logger writes to. Only the one for the
 # target being built is compiled; a desktop build writes to stderr instead.
@@ -60,7 +60,7 @@ offline-protocol-telemetry-wire = { workspace = true }
 offline-protocol-sealed = { workspace = true }
 
 [build-dependencies]
-uniffi = { version = "0.30", features = ["build"] }
+uniffi = { version = "0.32", features = ["build"] }
 
 [lib]
 crate-type = ["cdylib", "staticlib", "lib"]
