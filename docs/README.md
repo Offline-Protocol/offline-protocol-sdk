@@ -112,6 +112,7 @@ in here fails **silently** when violated.
 | [TypeScript](bridges/typescript.md) | The React Native JavaScript surface |
 | [Local API](bridges/local-api.md) | A server fronting one engine for several local clients over a socket |
 | [C](bridges/c.md) | The C API: the local API called in process, for C and every language that calls C |
+| [Java](bridges/java.md) | The generated Java binding for the JVM, over the foreign function API |
 
 ## Release history
 

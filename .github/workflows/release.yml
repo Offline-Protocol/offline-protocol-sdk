@@ -546,7 +546,7 @@ jobs:
           cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked --force
           cargo install uniffi-bindgen-java --version ${{ env.UNIFFI_BINDGEN_JAVA_VERSION }} --locked --force
 
-      # Generates all three languages; only the Python file is uploaded here.
+      # Generates all four languages; only the Python file is uploaded here.
       # Going through the shared script keeps the released wheel's bindings
       # produced exactly the way CI's drift gate verified them, and picks up its
       # check that uniffi-bindgen agrees with the crate's uniffi pin to the

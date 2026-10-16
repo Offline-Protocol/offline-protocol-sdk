@@ -1,6 +1,6 @@
 # Bridge contracts
 
-The Rust core is exposed to Swift, Kotlin, Python, TypeScript and C. This
+The Rust core is exposed to Swift, Kotlin, Python, TypeScript, C and Java. This
 directory states what each binding owes the core and what the core owes each
 binding.
 
@@ -13,6 +13,7 @@ binding.
 | [TypeScript](typescript.md) | The React Native JavaScript surface |
 | [Local API](local-api.md) | A server fronting one engine for several local clients over a socket, and the reference server |
 | [C](c.md) | The C API in `bindings/c`: the local API called in process |
+| [Java](java.md) | The generated Java binding in `bindings/java` |
 
 Integration **guides** live elsewhere: [iOS](../ios-integration.md),
 [Android](../android-integration.md),
@@ -31,9 +32,10 @@ green `tsc` say nothing about any of them.
 
 ## C1. Regenerate every binding together
 
-The Swift, Kotlin, and Python bindings are **one artifact set**, not three
-independent ones. They come from one bindgen run over one interface definition
-and carry the FFI checksums of the library they were generated against.
+The Swift, Kotlin, Python and Java bindings are **one artifact set**, not four
+independent ones. They come from one interface definition, through
+`uniffi-bindgen` for the first three and `uniffi-bindgen-java` for the last, and
+carry the FFI checksums of the library they were generated against.
 
 ```bash
 ./scripts/generate-bindings.sh
