@@ -85,6 +85,31 @@ class TestTheWatch:
         watch._observe(SimpleNamespace(member="PropertiesChanged", body=["org.bluez", ":1.2", ""]))
         assert watch.exits == 0 and calls == []
 
+    def test_an_adapter_powering_on_calls_back_without_counting_an_exit(self):
+        """BlueZ drops every discovery session when the adapter powers off,
+        and the peripheral power-cycles it to reset a wedged controller: the
+        central in the same process must register again when it is back."""
+        calls = []
+        watch = BlueZRestarts(lambda: calls.append(1))
+
+        def powered(value, interface="org.bluez.Adapter1"):
+            return SimpleNamespace(
+                member="PropertiesChanged",
+                body=[interface, {"Powered": SimpleNamespace(value=value)}, []],
+            )
+
+        watch._observe(powered(False))
+        assert calls == []
+        watch._observe(powered(True))
+        assert calls == [1] and watch.exits == 0
+        # Another interface's Powered, or an adapter change without it, is not one.
+        watch._observe(powered(True, interface="org.bluez.Device1"))
+        watch._observe(SimpleNamespace(
+            member="PropertiesChanged",
+            body=["org.bluez.Adapter1", {"Discovering": SimpleNamespace(value=True)}, []],
+        ))
+        assert calls == [1]
+
     @pytest.mark.asyncio
     async def test_waiting_for_the_owner_returns_when_the_name_is_claimed(self):
         watch = BlueZRestarts(lambda: None)

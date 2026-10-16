@@ -70,6 +70,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **Python: a Linux box that could no longer advertise recovers on its own.**
+  Linux loses track of the controller's advertising when a central-role
+  connection completes while advertising is on: the controller keeps
+  advertising, the kernel believes it stopped, and every later advertisement
+  is refused with "Failed to register advertisement" until the controller is
+  reset, across service restarts. When BlueZ refuses an advertisement that
+  way while reporting free slots, the peripheral now powers the adapter off
+  and on once (which resets the controller) and starts again, and both roles
+  register again whenever an adapter powers back on.
 - **Python: Bluetooth LE no longer takes bluetoothd down, and survives it
   restarting.** On BlueZ 5.87 bluetoothd exits the moment a
   discovery filter naming a service UUID is set, and the central set one at

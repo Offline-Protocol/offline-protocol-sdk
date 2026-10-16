@@ -15,6 +15,14 @@ new one when its successor claims the name. This watches for that and calls
 ``on_restart`` once the name has a new owner, which is when registering
 again can succeed.
 
+An adapter powered off and on again is the same loss for the central: BlueZ
+drops every discovery session when the adapter powers off, and the scan does
+not come back with the power. So ``on_restart`` is also called when an
+adapter's ``Powered`` turns true. The peripheral powers the adapter off and on
+itself to reset a controller that refuses every advertisement (see
+``ble_peripheral._reset_wedged_advertising``); without this the central in
+the same process stopped hearing anyone from then on.
+
 Linux only, and best effort: where there is no system bus to watch (a test
 host, a container without the grant) it logs and stays inert, which is the
 behaviour that existed before it.
@@ -32,10 +40,15 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 _MATCH = "type='signal',sender='org.freedesktop.DBus',member='NameOwnerChanged',arg0='org.bluez'"
+_POWER_MATCH = (
+    "type='signal',sender='org.bluez',interface='org.freedesktop.DBus.Properties',"
+    "member='PropertiesChanged',arg0='org.bluez.Adapter1'"
+)
 
 
 class BlueZRestarts:
-    """Counts bluetoothd's exits and calls ``on_restart`` when it is back."""
+    """Counts bluetoothd's exits and calls ``on_restart`` when it is back, or
+    when an adapter powers back on."""
 
     def __init__(self, on_restart: Callable[[], None]) -> None:
         self._on_restart = on_restart
@@ -57,16 +70,17 @@ class BlueZRestarts:
             from dbus_fast.aio import MessageBus
 
             bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
-            await bus.call(
-                Message(
-                    destination="org.freedesktop.DBus",
-                    path="/org/freedesktop/DBus",
-                    interface="org.freedesktop.DBus",
-                    member="AddMatch",
-                    signature="s",
-                    body=[_MATCH],
+            for rule in (_MATCH, _POWER_MATCH):
+                await bus.call(
+                    Message(
+                        destination="org.freedesktop.DBus",
+                        path="/org/freedesktop/DBus",
+                        interface="org.freedesktop.DBus",
+                        member="AddMatch",
+                        signature="s",
+                        body=[rule],
+                    )
                 )
-            )
         except Exception as exc:
             logger.info("bluetoothd restarts are not watched here: %s", exc)
             return
@@ -95,6 +109,10 @@ class BlueZRestarts:
             logger.debug("closing the bluetoothd watch failed", exc_info=True)
 
     def _observe(self, message: Any) -> None:
+        if _powered_on(message):
+            logger.warning("the Bluetooth adapter powered on again; what was registered with it is gone")
+            self._call_back()
+            return
         if message.member != "NameOwnerChanged" or not message.body or message.body[0] != "org.bluez":
             return
         _, old_owner, new_owner = message.body
@@ -104,10 +122,26 @@ class BlueZRestarts:
             logger.warning("bluetoothd left the bus; what was registered with it is gone")
         elif new_owner:
             self._owned.set()
-            try:
-                self._on_restart()
-            except Exception:
-                logger.exception("handling a bluetoothd restart failed")
+            self._call_back()
+
+    def _call_back(self) -> None:
+        try:
+            self._on_restart()
+        except Exception:
+            logger.exception("handling a bluetoothd restart failed")
+
+
+def _powered_on(message: Any) -> bool:
+    """Whether ``message`` says an adapter's ``Powered`` turned true."""
+    if message.member != "PropertiesChanged" or not message.body:
+        return False
+    if message.body[0] != "org.bluez.Adapter1" or len(message.body) < 2:
+        return False
+    changed = message.body[1]
+    if not isinstance(changed, dict) or "Powered" not in changed:
+        return False
+    powered = changed["Powered"]
+    return bool(getattr(powered, "value", powered))
 
 
 class StaysRegistered:
@@ -120,8 +154,9 @@ class StaysRegistered:
       "Message recipient disconnected from message bus without replying") is
       retried once the new bluetoothd is up. A start refused for any other
       reason is raised at once, as before.
-    - A role that is running when bluetoothd restarts is torn down and
-      brought up again, so it is registered with the new process.
+    - A role that is running when bluetoothd restarts, or when an adapter
+      powers on again, is torn down and brought up again, so it is
+      registered with the process and the adapter as they are now.
 
     Only one of the two ever drives the role. A start cut short by an exit
     is followed, about 150 ms later, by the successor claiming the name; that
@@ -225,7 +260,7 @@ class StaysRegistered:
         self._recovery = asyncio.ensure_future(self._register_again())
 
     async def _register_again(self) -> None:
-        self._emit("warning", "bluetoothd restarted; registering with it again", None)
+        self._emit("warning", "bluetoothd restarted or the adapter powered on again; registering again", None)
         await self._tear_down()
         # A bluetoothd that has just started can refuse a registration for a
         # while (its adapter still powering up, or "InProgress" for a
@@ -241,11 +276,11 @@ class StaysRegistered:
                 error = exc
                 await self._tear_down()
             else:
-                self._emit("info", "registered with the restarted bluetoothd", None)
+                self._emit("info", "registered with bluetoothd again", None)
                 return
         # Nothing tries again after this until bluetoothd restarts once more
         # or the owner restarts the role: the error is the operator's signal.
-        self._emit("error", "could not register with the restarted bluetoothd", {"error": str(error)})
+        self._emit("error", "could not register with bluetoothd again", {"error": str(error)})
 
 
 def _weakly(fn: Callable[..., Any]) -> Callable[..., Any]:
