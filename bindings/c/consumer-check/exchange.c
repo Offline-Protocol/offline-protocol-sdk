@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h> /* mkdtemp, on macOS */
 
 #include "offline_protocol.h"
 
