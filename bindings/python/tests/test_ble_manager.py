@@ -717,6 +717,23 @@ class TestScanFilter:
             await manager.stop()
 
 
+class TestAFailedStartReleasesTheScanner:
+    @pytest.mark.asyncio
+    async def test_a_scanner_that_failed_to_start_is_stopped_and_dropped(self, manager):
+        """Once the state is STOPPED a stop returns at once, so a scanner a
+        failed start left in place outlived it, and a start tried again opened
+        a second one beside it."""
+        scanner = MagicMock()
+        scanner.start = AsyncMock(side_effect=RuntimeError("org.bluez.Error.InProgress"))
+        scanner.stop = AsyncMock(side_effect=RuntimeError("not scanning"))
+        with patch.object(ble_manager_module, "BleakScanner", return_value=scanner):
+            with pytest.raises(TransportError, match="scan start failed"):
+                await manager._start_scanning()
+        scanner.stop.assert_awaited_once()
+        assert manager._scanner is None
+        assert manager.state == TransportState.STOPPED
+
+
 class TestInterruptedStop:
     @pytest.mark.asyncio
     async def test_a_stop_cancelled_inside_the_scanner_can_be_finished(

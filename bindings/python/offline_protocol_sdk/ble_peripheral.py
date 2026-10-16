@@ -262,6 +262,50 @@ _BLUEZ_DEVICE_IFACE = "org.bluez.Device1"
 _BLUEZ_CHAR_IFACE = "org.bluez.GattCharacteristic1"
 
 
+async def _release_server(server: Any) -> None:
+    """Give up everything a bless server holds, however far its start got.
+
+    Best effort, and never raises. On BlueZ, bless's own ``stop()`` is not
+    enough: it removes the advertisement first and raises when there is none
+    (a start refused at ``RegisterAdvertisement``, or one whose bluetoothd has
+    since restarted), which skips unregistering the GATT application, and it
+    never closes the bus connection the server opened. A start that is tried
+    again would then register a second copy of the mesh service, and every
+    retry or recovery would leak one system-bus connection.
+    """
+    task = getattr(server, "setup_task", None)
+    if task is not None and not task.done():
+        task.cancel()
+    try:
+        await server.stop()
+    except Exception:
+        logger.debug("bless server stop failed", exc_info=True)
+        if sys.platform == "linux":
+            await _unregister_bluez_application(server)
+    if sys.platform == "linux":
+        bus = getattr(server, "bus", None)
+        if bus is not None:
+            try:
+                bus.disconnect()
+            except Exception:
+                logger.debug("closing the bless bus failed", exc_info=True)
+
+
+async def _unregister_bluez_application(server: Any) -> None:
+    app = getattr(server, "app", None)
+    adapter = getattr(server, "adapter", None)
+    if app is None or adapter is None:
+        return
+    try:
+        await app.unregister(adapter)
+    except Exception:
+        logger.debug("unregistering the GATT application failed", exc_info=True)
+    try:
+        server.bus.unexport(app.path, app)
+    except Exception:
+        logger.debug("unexporting the GATT application failed", exc_info=True)
+
+
 def _central_id_from_device_path(path: Any) -> str | None:
     """``/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF`` -> ``AA:BB:CC:DD:EE:FF``."""
     if not isinstance(path, str):
@@ -605,6 +649,11 @@ class BlePeripheral(TransportManager):
             if sys.platform == "linux":
                 self._attach_bluez_centrals()
         except Exception as exc:
+            # Released here: once the state is STOPPED, _stop_advertising
+            # returns at once, so a half-built server left in place would
+            # outlive the failure, and a start tried again would register a
+            # second copy of the service next to it.
+            await self._release_partial_start()
             self._update_state(TransportState.STOPPED)
             raise TransportError(
                 f"BLE peripheral start failed: {exc}"
@@ -624,6 +673,15 @@ class BlePeripheral(TransportManager):
         )
 
         self._emit_diagnostic("info", "BLE peripheral started — advertising")
+
+    async def _release_partial_start(self) -> None:
+        if self._bluez_centrals is not None:
+            self._bluez_centrals.detach()
+            self._bluez_centrals = None
+        if self._server is not None:
+            await _release_server(self._server)
+            self._server = None
+        self._is_advertising = False
 
     async def _stop_advertising(self) -> None:
         # STOPPING too: a stop() cancelled part-way (a shutdown deadline)
@@ -651,12 +709,11 @@ class BlePeripheral(TransportManager):
             self._bluez_centrals.detach()
             self._bluez_centrals = None
 
-        # Stop GATT server
+        # Stop GATT server, and close its bus: a recovery after a bluetoothd
+        # restart runs this, and each start opens a new connection. Dropped
+        # only once released, so a stop cancelled inside it can be finished.
         if self._server is not None:
-            try:
-                await self._server.stop()
-            except Exception:
-                pass
+            await _release_server(self._server)
             self._server = None
         self._is_advertising = False
 

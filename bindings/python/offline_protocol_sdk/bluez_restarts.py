@@ -44,6 +44,10 @@ class BlueZRestarts:
         #: that fails reads it before and after to tell a refusal from a
         #: registration cut short by bluetoothd exiting part-way.
         self.exits = 0
+        # Set while org.bluez has an owner. Assumed owned until an exit is
+        # seen: the watch starts while the role is about to register.
+        self._owned = asyncio.Event()
+        self._owned.set()
 
     async def start(self) -> None:
         if sys.platform != "linux" or self._bus is not None:
@@ -73,6 +77,13 @@ class BlueZRestarts:
     def watching(self) -> bool:
         return self._bus is not None
 
+    async def wait_for_owner(self, timeout: float) -> None:
+        """Return once ``org.bluez`` has an owner again, or after ``timeout``."""
+        try:
+            await asyncio.wait_for(self._owned.wait(), timeout)
+        except asyncio.TimeoutError:
+            logger.warning("bluetoothd did not come back within %.0f s", timeout)
+
     def stop(self) -> None:
         bus, self._bus = self._bus, None
         if bus is None:
@@ -89,8 +100,10 @@ class BlueZRestarts:
         _, old_owner, new_owner = message.body
         if old_owner and not new_owner:
             self.exits += 1
+            self._owned.clear()
             logger.warning("bluetoothd left the bus; what was registered with it is gone")
         elif new_owner:
+            self._owned.set()
             try:
                 self._on_restart()
             except Exception:
@@ -110,11 +123,20 @@ class StaysRegistered:
     - A role that is running when bluetoothd restarts is torn down and
       brought up again, so it is registered with the new process.
 
+    Only one of the two ever drives the role. A start cut short by an exit
+    is followed, about 150 ms later, by the successor claiming the name; that
+    claim must not also start a recovery, or the role is brought up twice at
+    once (two scanners, or two copies of the GATT service). While a start is
+    in progress the start owns the role, and it waits on the claim itself.
+
     Off Linux, or with no system bus to watch, both are plain calls.
     """
 
     #: Starts tried per bring-up when bluetoothd exits during them.
     ATTEMPTS = 3
+    #: Seconds a start cut short waits for a new bluetoothd to claim the
+    #: name before trying again regardless.
+    OWNER_TIMEOUT = 10.0
     #: Seconds to let a new bluetoothd finish starting before registering.
     SETTLE = 1.0
     #: Waits before each registration after a restart; four tries over
@@ -139,6 +161,9 @@ class StaysRegistered:
         self._emit = _weakly(emit)
         self._watch = BlueZRestarts(self._restarted)
         self._wanted = False
+        # True while start() is bringing the role up: a restart seen then is
+        # the start's to handle, not a recovery's.
+        self._starting = False
         self._recovery: Any = None
 
     async def start(self) -> None:
@@ -161,28 +186,41 @@ class StaysRegistered:
         await self._tear_down()
 
     async def _bring_up_with_retries(self) -> None:
-        for attempt in range(1, self.ATTEMPTS + 1):
-            exits = self._watch.exits
-            try:
-                await self._bring_up()
-                return
-            except Exception as exc:
-                if not self._watch.watching or attempt == self.ATTEMPTS:
-                    raise
-                # The exit signal and the failed call arrive together; give
-                # the signal a moment before deciding which this was.
-                await asyncio.sleep(self.SIGNAL_GRACE)
-                if self._watch.exits == exits:
-                    raise
-                self._emit("warning", "bluetoothd exited during the start; starting again", {
-                    "attempt": attempt,
-                    "error": str(exc),
-                })
-                await self._tear_down()
-                await asyncio.sleep(self.SETTLE)
+        self._starting = True
+        try:
+            for attempt in range(1, self.ATTEMPTS + 1):
+                exits = self._watch.exits
+                try:
+                    await self._bring_up()
+                    return
+                except Exception as exc:
+                    if not self._watch.watching or attempt == self.ATTEMPTS:
+                        raise
+                    # The exit signal and the failed call arrive together;
+                    # give the signal a moment before deciding which this was.
+                    await asyncio.sleep(self.SIGNAL_GRACE)
+                    if self._watch.exits == exits:
+                        raise
+                    self._emit("warning", "bluetoothd exited during the start; starting again", {
+                        "attempt": attempt,
+                        "error": str(exc),
+                    })
+                    await self._tear_down()
+                    await self._watch.wait_for_owner(self.OWNER_TIMEOUT)
+                    await asyncio.sleep(self.SETTLE)
+                    # stop() cannot cancel this path (it runs inside the
+                    # caller's start()), so it is checked for here: a role
+                    # the owner stopped while this waited stays stopped, and
+                    # the start reports that it did not succeed.
+                    if not self._wanted:
+                        raise
+        finally:
+            self._starting = False
 
     def _restarted(self) -> None:
-        if not self._wanted or (self._recovery is not None and not self._recovery.done()):
+        if not self._wanted or self._starting:
+            return
+        if self._recovery is not None and not self._recovery.done():
             return
         self._recovery = asyncio.ensure_future(self._register_again())
 
@@ -205,6 +243,8 @@ class StaysRegistered:
             else:
                 self._emit("info", "registered with the restarted bluetoothd", None)
                 return
+        # Nothing tries again after this until bluetoothd restarts once more
+        # or the owner restarts the role: the error is the operator's signal.
         self._emit("error", "could not register with the restarted bluetoothd", {"error": str(error)})
 
 

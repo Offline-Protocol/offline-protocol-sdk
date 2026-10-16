@@ -198,13 +198,23 @@ class BleManager(TransportManager):
             # discovery filter naming a service UUID is set, which took the
             # central's scan and the peripheral's advertisement down with it.
             # _on_advertisement filters on the UUID instead. CoreBluetooth
-            # keeps the filter, which it needs to scan in the background.
+            # keeps the filter: bleak delivers no advertisement data at all
+            # without one on macOS 12.0 to 12.2.
             self._scanner = BleakScanner(
                 detection_callback=self._on_advertisement,
                 service_uuids=None if sys.platform == "linux" else [SERVICE_UUID],
             )
             await self._scanner.start()
         except Exception as exc:
+            # Released here: once the state is STOPPED, _stop_scanning
+            # returns at once, so a scanner left in place would outlive the
+            # failure and a start tried again would open a second one.
+            if self._scanner is not None:
+                try:
+                    await self._scanner.stop()
+                except Exception:
+                    logger.debug("stopping a scanner that failed to start", exc_info=True)
+                self._scanner = None
             self._update_state(TransportState.STOPPED)
             raise TransportError(f"BLE scan start failed: {exc}") from exc
 

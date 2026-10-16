@@ -526,8 +526,9 @@ Two pieces, each closing a different half:
   adapter down, usually within half a second of the peripheral registering.
   On Linux `BleManager` scans unfiltered and `_on_advertisement` drops any
   advertisement without the mesh service UUID before tracking or dialling
-  it. CoreBluetooth keeps the filter, which it needs to scan in the
-  background.
+  it. CoreBluetooth keeps the filter: bleak delivers no advertisement data
+  without one on macOS 12.0 to 12.2, and it already drops non-matching
+  advertisements in-process, so the callback check changes nothing there.
 - **Both roles follow bluetoothd.** `bluez_restarts.StaysRegistered` watches
   the bus's `NameOwnerChanged` for `org.bluez`. A start cut short because
   bluetoothd exited part-way (BlueZ answers "Message recipient disconnected
@@ -540,6 +541,29 @@ Two pieces, each closing a different half:
   cycle kept a dropped `ProtocolManager`, and the stores it holds open, alive
   until the cycle collector ran, and the next manager over the same
   directories was refused.
+
+Three details, each of which a simpler version got wrong:
+
+- **One driver at a time.** A start cut short by an exit is followed about
+  150 ms later by the successor claiming the name. While a start is in
+  progress that claim does not start a recovery: the start waits for the
+  claim itself and tries again. With both reacting, the role was brought up
+  twice at once (two scanners, or two copies of the GATT service), or the
+  start failed with "already running" while the recovery had the role up. A
+  `stop()` that arrives while the start waits wins, and the start raises.
+- **A failed start releases what it built.** Once a role is `STOPPED` its
+  stop returns at once, so the start's own failure branch gives up the
+  scanner or the bless server. On BlueZ bless's `stop()` removes the
+  advertisement first and raises when there is none, which skips
+  unregistering the GATT application, and it never closes the bus connection
+  it opened; the peripheral unregisters the application itself and closes the
+  bus, on a failed start and on every stop. Without that, each retry
+  registered another copy of the service and each recovery leaked a
+  system-bus connection.
+- **A recovery that runs out of tries stays down.** After the last try fails
+  the role reports "could not register with the restarted bluetoothd" at
+  error level, and nothing tries again until bluetoothd restarts once more or
+  the owner restarts the role.
 
 The watch is Linux only and best effort: with no system bus to watch it logs
 and stays inert, which is the behaviour before it existed.
