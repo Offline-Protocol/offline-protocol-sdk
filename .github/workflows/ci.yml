@@ -571,6 +571,47 @@ jobs:
         shell: bash
         run: bash scripts/check-c-library.sh windows-x86_64 target/debug
 
+  # The Java binding (docs/bridges/java.md). Its sources are generated from the
+  # UDL and their drift is gated with the other bindings (python-bindings). This
+  # is the other side: the generated Java, compiled and run against the
+  # library built from the same definition. The generated code verifies the
+  # library's FFI checksums before the first call, so the tests fail if the two
+  # were produced from different definitions. JDK 22 or later is required for
+  # the foreign function API; Gradle 8.9 cannot run on it, hence 9.x here.
+  java-binding:
+    name: Java Binding (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-java-binding
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Build the library
+        run: cargo build --locked --package offline-protocol-uniffi
+
+      # Compiles the committed generated sources, runs the consumer check
+      # against the library built above, and builds the Javadoc and sources jars.
+      - name: Build and test the Java binding
+        working-directory: bindings/java
+        run: gradle --no-daemon --stacktrace build
+
   security:
     name: Dependency Audit
     runs-on: ubuntu-latest
