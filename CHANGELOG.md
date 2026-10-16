@@ -70,6 +70,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **Python: Bluetooth LE no longer takes bluetoothd down, and survives it
+  restarting.** On BlueZ 5.87 bluetoothd exits the moment a
+  discovery filter naming a service UUID is set, and the central set one at
+  every start, so each start of the service ended the advertisement and the
+  scan within about half a second while both roles went on logging themselves
+  running. Two Linux boxes never formed a Bluetooth LE link, and a box dropped
+  off the air for a phone. On Linux the central now scans unfiltered and
+  filters on the mesh service UUID itself, and both roles watch for
+  bluetoothd restarting: a start cut short by bluetoothd exiting is retried,
+  and a running role registers again with the new bluetoothd.
 - **One lost inbound Bluetooth fragment no longer marks BLE as a failing
   link.** When a partial message idled out of the reassembly cache or was
   evicted at capacity, the BLE transport counted it as a failed send, and

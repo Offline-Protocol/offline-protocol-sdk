@@ -941,3 +941,80 @@ def test_bless_dispatches_gatt_calls_synchronously():
         # pass for a coroutine too.
         dispatched = getattr(BlueZGattCharacteristic, name).__dict__["__DBUS_METHOD"]
         assert not inspect.iscoroutinefunction(dispatched.fn), name
+
+
+# ---------------------------------------------------------------------------
+# A failed start releases what it built
+# ---------------------------------------------------------------------------
+
+
+def _bluez_like_server(stop_raises: bool) -> MagicMock:
+    """A bless BlueZ server as far as release is concerned."""
+    server = MagicMock()
+    server.setup_task.done.return_value = True
+    server.stop = AsyncMock(side_effect=IndexError("pop from empty list") if stop_raises else None)
+    server.app.unregister = AsyncMock()
+    return server
+
+
+class TestAFailedStartReleasesTheServer:
+    """Once the state is STOPPED a stop returns at once, so a server a failed
+    start left in place outlived it, and a start tried again (the bluetoothd
+    restart handling does) registered a second copy of the mesh service."""
+
+    @pytest.mark.asyncio
+    async def test_a_start_refused_at_advertising_releases_the_server(self, peripheral, monkeypatch):
+        server = _bluez_like_server(stop_raises=False)
+        server.start = AsyncMock(side_effect=RuntimeError("org.bluez.Error.Failed"))
+        monkeypatch.setattr(peripheral, "_build_server", AsyncMock(return_value=server))
+        monkeypatch.setattr(peripheral, "_setup_gatt_server", AsyncMock())
+        monkeypatch.setattr(peripheral, "_install_attribution", MagicMock())
+        with patch.object(BlePeripheral, "is_available", return_value=True), patch(
+            "offline_protocol_sdk.ble_peripheral._bluetooth_authorization_refusal", return_value=None
+        ):
+            with pytest.raises(TransportError, match="start failed"):
+                await peripheral._start_advertising()
+
+        server.stop.assert_awaited_once()
+        assert peripheral._server is None
+        assert peripheral.state == TransportState.STOPPED
+
+    @pytest.mark.asyncio
+    async def test_on_bluez_the_application_is_unregistered_when_bless_stop_raises(self, monkeypatch):
+        """bless's stop removes the advertisement first and raises when there
+        is none, which skips unregistering the application."""
+        from offline_protocol_sdk import ble_peripheral as module
+
+        monkeypatch.setattr(module.sys, "platform", "linux")
+        server = _bluez_like_server(stop_raises=True)
+        await module._release_server(server)
+
+        server.app.unregister.assert_awaited_once_with(server.adapter)
+        server.bus.unexport.assert_called_once_with(server.app.path, server.app)
+        server.bus.disconnect.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_on_bluez_every_release_closes_the_bus(self, monkeypatch):
+        """Each start opens its own system-bus connection; a recovery after
+        every bluetoothd restart would otherwise leak one."""
+        from offline_protocol_sdk import ble_peripheral as module
+
+        monkeypatch.setattr(module.sys, "platform", "linux")
+        server = _bluez_like_server(stop_raises=False)
+        await module._release_server(server)
+
+        server.app.unregister.assert_not_awaited()
+        server.bus.disconnect.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_a_server_still_setting_up_is_cancelled(self, monkeypatch):
+        from offline_protocol_sdk import ble_peripheral as module
+
+        monkeypatch.setattr(module.sys, "platform", "linux")
+        server = _bluez_like_server(stop_raises=True)
+        server.setup_task.done.return_value = False
+        del server.adapter  # setup never located the adapter
+        await module._release_server(server)
+
+        server.setup_task.cancel.assert_called_once()
+        server.app.unregister.assert_not_awaited()
