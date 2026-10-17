@@ -175,8 +175,9 @@ make -C bindings/c/consumer-check SANITIZE=1   # AddressSanitizer and UBSan
 A wrapper in another language binds these few functions and marshals JSON,
 and keeps working as the interface definition grows, because nothing in the
 C signatures changes when a method is added. For Go, there is also the
-community generator `uniffi-bindgen-go`, whose v0.6.0 targets the UniFFI
-version this SDK pins (0.30); it binds UniFFI's own ABI rather than this one.
+community generator `uniffi-bindgen-go`, in a release that targets the
+UniFFI version this SDK pins (see `crates/offline-protocol-uniffi/Cargo.toml`);
+it binds UniFFI's own ABI rather than this one.
 
 ## Licensing
 

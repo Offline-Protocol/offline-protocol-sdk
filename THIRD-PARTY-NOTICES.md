@@ -4940,7 +4940,6 @@ Used by:
 - [r-efi 5.3.0](https://github.com/r-efi/r-efi)
 - [serde_columnar 0.3.14](https://github.com/loro-dev/columnar)
 - [serde_columnar_derive 0.3.7](https://crates.io/crates/serde_columnar_derive)
-- [siphasher 0.3.11](https://github.com/jedisct1/rust-siphash)
 - [wasip2 1.0.1+wasi-0.2.4](https://github.com/bytecodealliance/wasi-rs)
 - [windows-core 0.62.2](https://github.com/microsoft/windows-rs)
 - [windows-implement 0.60.2](https://github.com/microsoft/windows-rs)
@@ -5155,8 +5154,8 @@ Used by:
 
 - [anyhow 1.0.100](https://github.com/dtolnay/anyhow)
 - [camino 1.2.1](https://github.com/camino-rs/camino)
-- [cargo-platform 0.1.9](https://github.com/rust-lang/cargo)
-- [cargo_metadata 0.19.2](https://github.com/oli-obk/cargo_metadata)
+- [cargo-platform 0.3.3](https://github.com/rust-lang/cargo)
+- [cargo_metadata 0.23.1](https://github.com/oli-obk/cargo_metadata)
 - [curve25519-dalek-derive 0.1.1](https://github.com/dalek-cryptography/curve25519-dalek)
 - [fastrand 2.3.0](https://github.com/smol-rs/fastrand)
 - [group 0.13.0](https://github.com/zkcrypto/group)
@@ -5224,7 +5223,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [fs-err 2.11.0](https://github.com/andrewhickman/fs-err)
+- [fs-err 3.3.2](https://github.com/andrewhickman/fs-err)
 
 ```
 Permission is hereby granted, free of charge, to any
@@ -5280,6 +5279,35 @@ NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
 LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+```
+
+---
+
+### MIT License
+
+Used by:
+
+- [siphasher 1.0.4](https://github.com/jedisct1/rust-siphash)
+
+```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ```
 
@@ -6214,12 +6242,12 @@ Used by:
 - [hpke-rs-crypto 0.6.1](https://github.com/cryspen/hpke-rs)
 - [hpke-rs-rust-crypto 0.6.1](https://github.com/cryspen/hpke-rs)
 - [hpke-rs 0.6.1](https://github.com/cryspen/hpke-rs)
-- [uniffi 0.30.0](https://github.com/mozilla/uniffi-rs)
-- [uniffi_core 0.30.0](https://github.com/mozilla/uniffi-rs)
-- [uniffi_internal_macros 0.30.0](https://github.com/mozilla/uniffi-rs)
-- [uniffi_macros 0.30.0](https://github.com/mozilla/uniffi-rs)
-- [uniffi_meta 0.30.0](https://github.com/mozilla/uniffi-rs)
-- [uniffi_pipeline 0.30.0](https://github.com/mozilla/uniffi-rs)
+- [uniffi 0.32.2](https://github.com/mozilla/uniffi-rs)
+- [uniffi_core 0.32.2](https://github.com/mozilla/uniffi-rs)
+- [uniffi_internal_macros 0.32.2](https://github.com/mozilla/uniffi-rs)
+- [uniffi_macros 0.32.2](https://github.com/mozilla/uniffi-rs)
+- [uniffi_meta 0.32.2](https://github.com/mozilla/uniffi-rs)
+- [uniffi_pipeline 0.32.2](https://github.com/mozilla/uniffi-rs)
 
 ```
 Mozilla Public License Version 2.0
