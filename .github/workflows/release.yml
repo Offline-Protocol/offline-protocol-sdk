@@ -128,7 +128,7 @@ jobs:
 
       - name: Install uniffi-bindgen
         if: steps.cache-uniffi.outputs.cache-hit != 'true'
-        run: cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked
+        run: cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked --force
 
       - name: Build iOS Libraries
         working-directory: bindings/react-native
@@ -283,7 +283,7 @@ jobs:
 
       - name: Install uniffi-bindgen
         if: steps.cache-uniffi.outputs.cache-hit != 'true'
-        run: cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked
+        run: cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked --force
 
       # The Kotlin this job uploads is downloaded *over* the committed Android
       # bindings in the publish job, so it — not the committed file — is what
@@ -497,7 +497,7 @@ jobs:
 
       - name: Install uniffi-bindgen
         if: steps.cache-uniffi.outputs.cache-hit != 'true'
-        run: cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked
+        run: cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked --force
 
       # Generates all three languages; only the Python file is uploaded here.
       # Going through the shared script keeps the released wheel's bindings

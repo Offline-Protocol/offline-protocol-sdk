@@ -122,7 +122,7 @@ jobs:
       - name: Install cargo-about
         run: |
           if ! cargo about --version 2>/dev/null | grep -qFx "cargo-about ${{ steps.pin.outputs.version }}"; then
-            cargo install cargo-about --version "${{ steps.pin.outputs.version }}" --features cli --locked
+            cargo install cargo-about --version "${{ steps.pin.outputs.version }}" --features cli --locked --force
           fi
 
       - name: Regenerate third-party notices
@@ -479,7 +479,7 @@ jobs:
         shell: bash
         run: |
           if ! cbindgen --version 2>/dev/null | grep -qFx "cbindgen ${{ steps.pin.outputs.version }}"; then
-            cargo install cbindgen --version "${{ steps.pin.outputs.version }}" --locked
+            cargo install cbindgen --version "${{ steps.pin.outputs.version }}" --locked --force
           fi
 
       - name: Header is current
@@ -566,8 +566,13 @@ jobs:
 
       # Keep in sync with the `uniffi` pin in crates/offline-protocol-uniffi/Cargo.toml;
       # scripts/generate-bindings.sh fails the build if the two disagree.
+      # --force: a uniffi-bindgen from before the pin moved can already be in
+      # ~/.cargo/bin (a cache restores it), and `cargo install` refuses to
+      # overwrite a binary it does not know it installed. That failed the
+      # macOS and Windows wheel jobs on the move to 0.32, and the pin moving
+      # is exactly when this step must work.
       - name: Install uniffi-bindgen
-        run: cargo install uniffi --version 0.32.2 --features cli --locked
+        run: cargo install uniffi --version 0.32.2 --features cli --locked --force
 
       # Delete the generated files first, so the drift gate below proves they
       # were *written* and not merely unchanged. `git diff --exit-code` on a
@@ -694,9 +699,14 @@ jobs:
           path: ~/.cargo/bin/uniffi-bindgen*
           key: uniffi-bindgen-${{ runner.os }}-0.32.2
 
+      # --force: a uniffi-bindgen from before the pin moved can already be in
+      # ~/.cargo/bin (a cache restores it), and `cargo install` refuses to
+      # overwrite a binary it does not know it installed. That failed the
+      # macOS and Windows wheel jobs on the move to 0.32, and the pin moving
+      # is exactly when this step must work.
       - name: Install uniffi-bindgen
         if: steps.cache-uniffi.outputs.cache-hit != 'true'
-        run: cargo install uniffi --version 0.32.2 --features cli --locked
+        run: cargo install uniffi --version 0.32.2 --features cli --locked --force
 
       - name: Build the desktop library and the bindings
         shell: bash
