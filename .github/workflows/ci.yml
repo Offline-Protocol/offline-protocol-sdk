@@ -122,7 +122,7 @@ jobs:
       - name: Install cargo-about
         run: |
           if ! cargo about --version 2>/dev/null | grep -qFx "cargo-about ${{ steps.pin.outputs.version }}"; then
-            cargo install cargo-about --version "${{ steps.pin.outputs.version }}" --features cli --locked --force
+            cargo install cargo-about --version "${{ steps.pin.outputs.version }}" --features cli --locked
           fi
 
       - name: Regenerate third-party notices
@@ -200,8 +200,11 @@ jobs:
         with:
           shared-key: ci-msrv
 
+      # Without the UniFFI crate, which declares its own, higher rust-version:
+      # its bindgen build dependencies need 1.91 (see its Cargo.toml). It is
+      # built on stable by every other job here.
       - name: Check workspace on MSRV
-        run: cargo check --workspace --all-targets --locked
+        run: cargo check --workspace --exclude offline-protocol-uniffi --all-targets --locked
 
   embedded-core:
     name: Embedded core (bare metal)
@@ -476,7 +479,7 @@ jobs:
         shell: bash
         run: |
           if ! cbindgen --version 2>/dev/null | grep -qFx "cbindgen ${{ steps.pin.outputs.version }}"; then
-            cargo install cbindgen --version "${{ steps.pin.outputs.version }}" --locked --force
+            cargo install cbindgen --version "${{ steps.pin.outputs.version }}" --locked
           fi
 
       - name: Header is current

@@ -12,7 +12,11 @@ license.workspace = true
 # it lands in the .crate archive. scripts/check-license-consistency.sh asserts
 # the copies never drift.
 repository.workspace = true
-rust-version.workspace = true
+# Not the workspace's 1.87: UniFFI 0.32's bindgen (a build dependency, through
+# uniffi_build) needs askama 0.16, which requires 1.88, and cargo-platform 0.3,
+# which requires 1.91. Nothing else depends on this crate, so the library
+# crates keep the workspace promise and the MSRV job checks them without it.
+rust-version = "1.91"
 description = "UniFFI bindings for the Offline Protocol SDK"
 
 [lints]
