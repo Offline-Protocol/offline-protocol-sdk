@@ -16,6 +16,7 @@ import io.flutter.plugin.common.MethodChannel.Result
 import uniffi.offline_protocol.EventCallback
 import uniffi.offline_protocol.OfflineProtocol
 import uniffi.offline_protocol.ProtocolConfig
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
@@ -27,6 +28,10 @@ import java.util.concurrent.atomic.AtomicBoolean
  * All UniFFI calls run on a dedicated engine thread ([engineExecutor]); results
  * are delivered on the main looper ([mainHandler]). See bridge contract K2.
  *
+ * The same plugin instance may be detached and attached again (for example when
+ * the [FlutterEngine] is recreated). [onDetachedFromEngine] shuts down the
+ * executor; [onAttachedToEngine] allocates a fresh one when needed.
+ *
  * Transport managers (ADR 0025) are wired in a follow-up PR.
  */
 class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler {
@@ -35,13 +40,14 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler {
     private var protocol: OfflineProtocol? = null
     private var currentConfig: ProtocolConfig? = null
 
-    private val engineExecutor = Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "OfflineProtocolEngine").apply { isDaemon = true }
-    }
+    private var engineExecutor: ExecutorService = newEngineExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val attached = AtomicBoolean(false)
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        if (engineExecutor.isShutdown) {
+            engineExecutor = newEngineExecutor()
+        }
         applicationContext = binding.applicationContext
         attached.set(true)
         channel = MethodChannel(binding.binaryMessenger, CHANNEL_NAME)
@@ -49,18 +55,27 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler {
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-        channel.setMethodCallHandler(null)
-        attached.set(false)
+        if (!attached.getAndSet(false)) {
+            return
+        }
+        if (::channel.isInitialized) {
+            channel.setMethodCallHandler(null)
+        }
+        val executor = engineExecutor
         try {
-            engineExecutor.submit {
-                tearDownProtocol()
-                applicationContext = null
-            }.get(TEARDOWN_TIMEOUT_SEC, TimeUnit.SECONDS)
+            if (!executor.isShutdown) {
+                executor.submit {
+                    tearDownProtocol()
+                    applicationContext = null
+                }.get(TEARDOWN_TIMEOUT_SEC, TimeUnit.SECONDS)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "Engine teardown timed out or failed during detach", e)
             applicationContext = null
         } finally {
-            engineExecutor.shutdown()
+            if (!executor.isShutdown) {
+                executor.shutdown()
+            }
         }
     }
 
@@ -69,8 +84,13 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler {
             postDetachedError(result)
             return
         }
+        val executor = engineExecutor
+        if (executor.isShutdown) {
+            postDetachedError(result)
+            return
+        }
         try {
-            engineExecutor.execute {
+            executor.execute {
                 try {
                     val payload: Any? = when (call.method) {
                         "create" -> {
@@ -173,5 +193,10 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler {
         private const val TAG = "OfflineProtocolPlugin"
         private const val CHANNEL_NAME = "com.offlineprotocol/offline_protocol"
         private const val TEARDOWN_TIMEOUT_SEC = 10L
+
+        private fun newEngineExecutor(): ExecutorService =
+            Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "OfflineProtocolEngine").apply { isDaemon = true }
+            }
     }
 }

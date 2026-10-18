@@ -4,7 +4,13 @@ import UIKit
 /// Flutter host for the Offline Protocol engine (core lifecycle only in PR1).
 ///
 /// UniFFI calls run on `engineQueue`; Flutter `result` callbacks run on the main queue (bridge K2).
+///
+/// The plugin is published with the registrar so `detachFromEngineForRegistrar` runs when the
+/// `FlutterEngine` is torn down. The same instance may attach to a new engine after detach;
+/// `register(with:)` runs again on a fresh instance per engine registration in generated code,
+/// while detach clears handlers and tears down native state before the messenger goes away.
 public class OfflineProtocolPlugin: NSObject, FlutterPlugin {
+    private var channel: FlutterMethodChannel?
     private var protocolInstance: OfflineProtocol?
     private var currentConfig: ProtocolConfig?
 
@@ -12,14 +18,36 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin {
         label: "com.offlineprotocol.flutter.engine",
         qos: .userInitiated
     )
+    private let attachmentLock = NSLock()
+    private var isPluginAttached = false
 
     public static func register(with registrar: FlutterPluginRegistrar) {
+        let instance = OfflineProtocolPlugin()
         let channel = FlutterMethodChannel(
             name: "com.offlineprotocol/offline_protocol",
             binaryMessenger: registrar.messenger()
         )
-        let instance = OfflineProtocolPlugin()
+        instance.channel = channel
         registrar.addMethodCallDelegate(instance, channel: channel)
+        registrar.publish(instance)
+        instance.setAttached(true)
+    }
+
+    /// Called when the `FlutterEngine` removes this plugin (engine deallocated or reset).
+    @objc
+    public func detachFromEngineForRegistrar(_ registrar: FlutterPluginRegistrar) {
+        attachmentLock.lock()
+        guard isPluginAttached else {
+            attachmentLock.unlock()
+            return
+        }
+        isPluginAttached = false
+        attachmentLock.unlock()
+
+        channel?.setMethodCallHandler(nil)
+        engineQueue.sync {
+            tearDownProtocol()
+        }
     }
 
     deinit {
@@ -29,7 +57,15 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin {
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        guard isAttached() else {
+            postDetachedError(to: result)
+            return
+        }
         engineQueue.async { [self] in
+            guard self.isAttached() else {
+                self.postDetachedError(to: result)
+                return
+            }
             do {
                 switch call.method {
                 case "create":
@@ -58,6 +94,24 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin {
                     result(FlutterError(code: "ERROR", message: error.localizedDescription, details: nil))
                 }
             }
+        }
+    }
+
+    private func isAttached() -> Bool {
+        attachmentLock.lock()
+        defer { attachmentLock.unlock() }
+        return isPluginAttached
+    }
+
+    private func setAttached(_ attached: Bool) {
+        attachmentLock.lock()
+        isPluginAttached = attached
+        attachmentLock.unlock()
+    }
+
+    private func postDetachedError(to result: @escaping FlutterResult) {
+        DispatchQueue.main.async {
+            result(FlutterError(code: "ERROR", message: "Plugin detached", details: nil))
         }
     }
 
