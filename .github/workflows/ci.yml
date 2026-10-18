@@ -206,6 +206,14 @@ jobs:
       - name: Check workspace on MSRV
         run: cargo check --workspace --exclude offline-protocol-uniffi --all-targets --locked
 
+      # The UniFFI crate on its own declared floor. Every other job builds it
+      # on stable, so without this step its `rust-version` could fall behind
+      # what its locked graph needs and nothing would say so.
+      - name: Check the UniFFI crate on its rust-version (1.91)
+        run: |
+          rustup toolchain install 1.91.0 --profile minimal
+          cargo +1.91.0 check -p offline-protocol-uniffi --all-targets --locked
+
   embedded-core:
     name: Embedded core (bare metal)
     runs-on: ubuntu-latest
@@ -746,11 +754,7 @@ jobs:
           path: ~/.cargo/bin/uniffi-bindgen*
           key: uniffi-bindgen-${{ runner.os }}-0.32.2
 
-      # --force: a uniffi-bindgen from before the pin moved can already be in
-      # ~/.cargo/bin (a cache restores it), and `cargo install` refuses to
-      # overwrite a binary it does not know it installed. That failed the
-      # macOS and Windows wheel jobs on the move to 0.32, and the pin moving
-      # is exactly when this step must work.
+      # --force: see the Python Bindings job's install step.
       - name: Install uniffi-bindgen
         if: steps.cache-uniffi.outputs.cache-hit != 'true'
         run: cargo install uniffi --version 0.32.2 --features cli --locked --force

@@ -31,6 +31,9 @@ env:
   # a uniffi bump still means editing several files that name the version
   # prescriptively (this, ci.yml, README, CLAUDE.md, CONTRIBUTING.md and the
   # install hints the scripts print).
+  # Every install below passes --force: a uniffi-bindgen from before the pin
+  # moved can already be in ~/.cargo/bin, and `cargo install` refuses to
+  # overwrite a binary it does not know it installed (see ci.yml).
   UNIFFI_VERSION: "0.32.2"
 
 # ---------------------------------------------------------------------------
