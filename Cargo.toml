@@ -177,13 +177,19 @@ lto = true
 codegen-units = 1
 strip = true
 
-[profile.minisize]
+# The iOS and Android libraries (ADR 0029). Optimised for size at "s", not
+# "z": "z" takes another quarter off the shared library but doubles the cost
+# of MLS sealing and opening and triples small-message serialization, where
+# "s" costs at most about 40%. And it unwinds on purpose: every panic seam in
+# the SDK (the event handler isolation, the telemetry sink dispatch, the
+# document import, UniFFI's own conversion of a panic into an exception the
+# app can catch) is a `catch_unwind`, and `panic = "abort"` turns each of
+# them into the end of the host application's process. The desktop libraries
+# and the wheels use `release`. `the_mobile_profile_optimises_for_size_and_unwinds`
+# and `the_mobile_libraries_are_built_with_the_mobile_profile` hold both halves.
+[profile.mobile]
 inherits = "release"
-opt-level = "z"
-lto = true
-codegen-units = 1
-strip = true
-panic = "abort"
+opt-level = "s"
 
 [profile.bench]
 inherits = "release"

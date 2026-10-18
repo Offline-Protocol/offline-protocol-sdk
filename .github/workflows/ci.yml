@@ -1154,9 +1154,9 @@ jobs:
           source bindings/react-native/scripts/shared/xcframework.sh
           IPHONEOS_DEPLOYMENT_TARGET="$(bash scripts/ios-deployment-target.sh)"
           export IPHONEOS_DEPLOYMENT_TARGET
-          cargo build --release --locked --target "$TARGET" \
+          cargo build --profile mobile --locked --target "$TARGET" \
             --package offline-protocol-uniffi
-          ARCHIVE="target/$TARGET/release/liboffline_protocol_uniffi.a"
+          ARCHIVE="target/$TARGET/mobile/liboffline_protocol_uniffi.a"
           CEILING="$IPHONEOS_DEPLOYMENT_TARGET"
           if [ "$TARGET" = aarch64-apple-ios-sim ]; then
             CEILING="$(arm64_simulator_ceiling "$IPHONEOS_DEPLOYMENT_TARGET")"
