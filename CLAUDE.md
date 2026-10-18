@@ -271,6 +271,14 @@ These fail silently if broken. Each is documented in full where it is linked.
   developer works. `only_one_file_names_the_counted_pointer` refuses it on the
   host and the `embedded-core` job on the targets
   ([ADR 0021](docs/adr/0021-a-leaf-node-speaks-mls.md#the-store-handle-follows-the-target)).
+- **`offline-protocol-uniffi` builds no Rust library.** Its crate types are
+  `cdylib` and `staticlib` only. Cargo runs link-time optimisation on a
+  library only when every listed crate type can take it, so adding `lib` or
+  `rlib` back turns it off for every shipped library with no warning, as it
+  was until 0.29.0. Rust code that needs the crate compiles its source under
+  its own package, as `tools/capi-fuzz` does, and mirrors its dependencies
+  (`the_ffi_crate_builds_no_rust_library`,
+  `the_fuzzer_compiles_the_ffi_crate_with_its_dependencies`).
 - **Never write a second envelope codec, address derivation, canonical signing
   payload, ratchet constant, 1:1 control-frame prefix literal, key package
   payload or identity assertion split.** Each exists once, in `offline-protocol-sealed`;
