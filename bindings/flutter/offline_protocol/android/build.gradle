@@ -1,0 +1,72 @@
+group 'com.offlineprotocol.flutter'
+version '0.29.0'
+
+buildscript {
+    ext.kotlin_version = '1.9.24'
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.3.2'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+// Bridge sources have one home (ADR 0025).
+def bridgeDir = file('../../react-native/android')
+def reactOnly = [
+    'OfflineProtocolModule.kt',
+    'OfflineProtocolPackage.kt',
+    'MeshHeadlessWakeService.kt',
+]
+
+android {
+    namespace 'com.offlineprotocol'
+    compileSdk 34
+
+    defaultConfig {
+        minSdkVersion 24
+        consumerProguardFiles bridgeDir.path + '/consumer-rules.pro'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    sourceSets {
+        main {
+            manifest.srcFile 'src/main/AndroidManifest.xml'
+            java.srcDirs bridgeDir.path + '/src/main/java', 'src/main/kotlin'
+            jniLibs.srcDirs bridgeDir.path + '/src/main/jniLibs'
+        }
+    }
+}
+
+dependencies {
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
+    implementation 'net.java.dev.jna:jna:5.19.1@aar'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'androidx.security:security-crypto:1.1.0'
+}
+
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+    reactOnly.each { name ->
+        exclude "**/$name"
+    }
+}

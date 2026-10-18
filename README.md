@@ -35,6 +35,7 @@ Every channel carries the version number of the release it came from.
 | Swift, iOS (preview) | [`offline-protocol-swift`](https://github.com/Offline-Protocol/offline-protocol-swift), product `OfflineProtocolSDK` | Swift Package Manager, see below |
 | Android, Kotlin (preview) | A download on each [GitHub release](https://github.com/Offline-Protocol/offline-protocol-sdk/releases); not on Maven Central yet | See below |
 | C, and any language that calls C | `offline_protocol.h` and the native library in each [GitHub release](https://github.com/Offline-Protocol/offline-protocol-sdk/releases)'s desktop archives | See [bindings/c](bindings/c/README.md) |
+| Flutter (iOS, Android, preview) | [`offline_protocol`](bindings/flutter/README.md) plugin in this repository | Path dependency; see [bindings/flutter](bindings/flutter/README.md) |
 
 **Python.** Wheels are published for Python 3.10 or later on macOS arm64
 (macOS 14 or later), Linux x86_64 and aarch64 (`manylinux_2_34`, so glibc
