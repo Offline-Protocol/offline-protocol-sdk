@@ -26,9 +26,11 @@ Two things make that more than theoretical:
 - The engine has open defects (loro #793, #1068) where a malformed or
   causally impossible import panics rather than returning an error, and #1068
   poisons the document's lock on the way out, so the retry panics too.
-- The mobile profile ships `panic = "abort"`. There is no unwinding, so the
-  `catch_unwind` that contains this at rest is not merely a second line
-  there, it is absent.
+- `catch_unwind` is a second line at best. The shipped libraries unwind
+  ([ADR 0029](0029-mobile-libraries-are-sized-not-aborting.md)), so it
+  catches the panic, but the document's lock is poisoned behind it and the
+  document is done for the process. A host or firmware built with
+  `panic = "abort"` has no second line at all.
 
 We reproduced the panic rather than taking the issue tracker's word for it. A
 change forked below a compacted replica's trim point panics in
@@ -137,8 +139,8 @@ crash, to solve a problem the anti-entropy exchange already solves.
 
 - The residual is real and worth stating plainly: an authenticated member of a
   space can, with a deliberately crafted blob whose metadata lies about its
-  contents, abort the process once per unique blob on a `panic = "abort"`
-  build. It is attributable, it is bounded by layer 4, and it requires
+  contents, make a document unusable for the process once per unique blob
+  (abort the process, on a build with `panic = "abort"`). It is attributable, it is bounded by layer 4, and it requires
   someone the user has already accepted into a shared document.
 - A process that dies mid-import for reasons of its own (the user force
   quits it, the system reclaims its memory) quarantines a blob that was never
@@ -182,9 +184,10 @@ crash, to solve a problem the anti-entropy exchange already solves.
 
 - **Trust MLS and import directly.** The whole subject of this ADR.
   Authentication is not validation.
-- **Rely on `catch_unwind`.** It does not exist under `panic = "abort"`,
-  which is the profile the mobile artifact ships. A defense that is absent
-  on the platform with the most users is not a defense.
+- **Rely on `catch_unwind`.** It leaves the document poisoned when it does
+  catch, and it does not exist under `panic = "abort"`, which a host or a
+  firmware build may choose. A defense that the embedder can switch off is
+  not a defense.
 - **Validate the blob ourselves before importing.** Re-implementing the
   engine's decoder to decide what the engine will accept means maintaining a
   second parser that has to agree with the first one forever, and the day it

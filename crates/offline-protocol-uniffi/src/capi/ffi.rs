@@ -5,9 +5,9 @@
 //! Every function catches a panic and answers `Internal`. That is not
 //! defensive habit: a panic that reaches an `extern "C"` boundary aborts the
 //! whole host process, which for a C host embedding the SDK is a crash in
-//! someone else's program. A build under `panic = "abort"` (the `minisize`
-//! profile) aborts before anything can be caught; the desktop libraries the
-//! release ships unwind.
+//! someone else's program. A build under `panic = "abort"` aborts before
+//! anything can be caught; every library the release ships unwinds
+//! (ADR 0029).
 
 use core::ffi::{c_char, c_void};
 use std::any::Any;

@@ -111,9 +111,10 @@ foregrounding with `notify_app_state`, and never call `disable_telemetry`,
 Every entry point catches a panic and answers
 `OfflineProtocolStatus_Internal`. A panic reaching an `extern "C"` boundary
 aborts the process, which for a library embedded in someone else's program
-is a crash in their program. A build under `panic = "abort"` (the `minisize`
-profile) aborts before anything can be caught; the desktop libraries the
-release ships use the unwinding `release` profile.
+is a crash in their program. A build under `panic = "abort"` aborts before
+anything can be caught. Every library the release ships unwinds: the desktop
+libraries use `release` and the iOS and Android libraries `mobile`
+([ADR 0029](../adr/0029-mobile-libraries-are-sized-not-aborting.md)).
 
 ## K5. What `offline_protocol_call` does not reach
 

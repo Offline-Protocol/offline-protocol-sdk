@@ -24,9 +24,9 @@ rustup target add x86_64-linux-android
 cd crates/offline-protocol-uniffi
 
 # Build for all Android architectures
-cargo build --release --target aarch64-linux-android
-cargo build --release --target armv7-linux-androideabi
-cargo build --release --target x86_64-linux-android
+cargo build --profile mobile --target aarch64-linux-android
+cargo build --profile mobile --target armv7-linux-androideabi
+cargo build --profile mobile --target x86_64-linux-android
 ```
 
 ### 3. Copy Native Libraries

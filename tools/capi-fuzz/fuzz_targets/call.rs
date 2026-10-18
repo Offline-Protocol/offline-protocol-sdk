@@ -3,9 +3,8 @@
 //! parameters; without a newline it is a name with no parameters.
 //!
 //! The property is the boundary's: every answer is a status. A panic is
-//! a crash here, as it would be in a host built with `panic = "abort"`
-//! (the `minisize` profile), where `catch_unwind` cannot turn it into
-//! `Internal`. So is `Internal` itself, the status a caught panic becomes,
+//! a crash here, as it would be in a host built with `panic = "abort"`,
+//! where `catch_unwind` cannot turn it into `Internal`. So is `Internal` itself, the status a caught panic becomes,
 //! and so is a success whose result is not JSON.
 #![no_main]
 

@@ -178,10 +178,10 @@ impl BlobMeta {
     ///
     /// A shallow snapshot trims history below a point, and the engine has an
     /// open defect where changes referring below that point panic instead of
-    /// erroring, poisoning the document's lock as they go. Under the
-    /// `minisize` profile the SDK ships with `panic = "abort"`, so there is
-    /// no unwinding to catch: the only defense is never handing such a blob
-    /// over.
+    /// erroring, poisoning the document's lock as they go. Caught, that
+    /// panic still leaves the document unusable for the process, and under
+    /// `panic = "abort"` there is nothing to catch: the only defense is
+    /// never handing such a blob over.
     ///
     /// It is asked of a whole document as well as of a run of changes, and
     /// the two are asked differently. A snapshot carries its own base, so
@@ -314,8 +314,9 @@ impl DataDoc {
     /// these are bytes this SDK wrote and nobody altered. That is the real
     /// containment for the engine's known import-panic classes, and the
     /// reason no code path may ever feed unverified bytes here: the
-    /// `catch_unwind` below is a second line, and under the `minisize`
-    /// profile (`panic = "abort"`) it does not exist at all.
+    /// `catch_unwind` below is a second line, which poisons this handle
+    /// when it catches, and under `panic = "abort"` it does not exist at
+    /// all.
     ///
     /// Returns whether the blob applied or is parked behind a missing
     /// predecessor. Callers that can destroy history (compaction, log

@@ -822,8 +822,8 @@ fn a_branch_forked_below_the_trim_point_never_reaches_the_engine() {
     // The shape loro #1068 names, and the reason this gate is structural
     // rather than defensive. Verified on 1.13.9 by removing the refusal:
     // the engine panics in `pending_changes.rs` and the retry panics again
-    // on the mutex that first panic poisoned. Under the `minisize` profile
-    // the SDK ships with `panic = "abort"`, so there is no catch to reach.
+    // on the mutex that first panic poisoned. Under `panic = "abort"`
+    // there is no catch to reach at all.
     let (_source, deltas) = source_with_commits(2);
 
     // A replica that saw only the first change, then edited concurrently.

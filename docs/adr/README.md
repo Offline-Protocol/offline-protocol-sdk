@@ -39,6 +39,7 @@ silently undo it. Decisions that follow from the obvious default do not need one
 | [0026](0026-the-backbone-is-a-gateway-property.md) | The backbone is a gateway property | Accepted |
 | [0027](0027-ios-peer-streams-ride-network-framework.md) | iOS peer streams ride Network framework and keep the lower-opened stream | Accepted |
 | [0028](0028-android-peer-streams-join-the-lan.md) | Android peer streams join the LAN and keep the lower-opened stream | Accepted |
+| [0029](0029-mobile-libraries-are-sized-not-aborting.md) | The mobile libraries are optimised for size and still unwind | Accepted |
 
 ## Format
 
