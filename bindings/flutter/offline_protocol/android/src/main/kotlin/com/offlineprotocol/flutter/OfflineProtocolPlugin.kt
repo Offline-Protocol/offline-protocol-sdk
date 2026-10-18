@@ -5,6 +5,7 @@ import android.os.Looper
 import android.util.Log
 import com.offlineprotocol.AppContainerProtocolStateStorage
 import com.offlineprotocol.MlsSecureStorage
+import com.offlineprotocol.InitialRuntimeConfigApplier
 import com.offlineprotocol.ProtocolConfigParser
 import com.offlineprotocol.StorageNamespace
 import io.flutter.embedding.engine.plugins.FlutterPlugin
@@ -45,11 +46,14 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler {
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel.setMethodCallHandler(null)
-        applicationContext = null
         try {
-            engineExecutor.submit { tearDownProtocol() }.get(TEARDOWN_TIMEOUT_SEC, TimeUnit.SECONDS)
+            engineExecutor.submit {
+                tearDownProtocol()
+                applicationContext = null
+            }.get(TEARDOWN_TIMEOUT_SEC, TimeUnit.SECONDS)
         } catch (e: Exception) {
             Log.w(TAG, "Engine teardown timed out or failed during detach", e)
+            applicationContext = null
         } finally {
             engineExecutor.shutdown()
         }
@@ -106,6 +110,7 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler {
                 // EventChannel wiring lands in PR2.
             }
         })
+        InitialRuntimeConfigApplier.apply(proto, parsed.rawJson)
         protocol = proto
         currentConfig = parsed.coreConfig
     }

@@ -22,6 +22,7 @@ Pod::Spec.new do |s|
   s.source_files = [
     "ios/OfflineProtocolModule.{m,swift}",
     "ios/ProtocolConfigParser.swift",
+    "ios/InitialRuntimeConfigApplier.swift",
     "ios/EncryptionConfigReader.swift",
     "ios/MeshRelayConfigReader.swift",
     "ios/CustodyConfigReader.swift",

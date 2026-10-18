@@ -29,8 +29,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin {
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-        engineQueue.async { [weak self] in
-            guard let self else { return }
+        engineQueue.async { [self] in
             do {
                 switch call.method {
                 case "create":
@@ -74,6 +73,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin {
         let parsed = try ProtocolConfigParser.parse(configJson)
         let proto = try OfflineProtocol(config: parsed.config)
         proto.setEventCallback(callback: FlutterEventCallback())
+        InitialRuntimeConfigApplier.apply(proto: proto, rawConfig: parsed.raw)
         protocolInstance = proto
         currentConfig = parsed.config
     }

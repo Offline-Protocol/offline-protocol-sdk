@@ -30,6 +30,9 @@ class OfflineProtocol {
   }
 
   /// Creates the Rust engine from a JSON config object (camelCase or snake_case).
+  ///
+  /// Optional top-level `dors` and `relay` sections are applied the same way as
+  /// on React Native after [ProtocolConfig] is constructed.
   static Future<void> createFromConfig(Map<String, dynamic> config) async {
     await _channel.invokeMethod<void>('create', jsonEncode(config));
   }

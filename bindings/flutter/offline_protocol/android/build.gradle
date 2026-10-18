@@ -32,6 +32,7 @@ def bridgeJava = bridgeDir.path + '/src/main/java'
 def pr1KotlinIncludes = [
     'uniffi/**/*.kt',
     'com/offlineprotocol/ProtocolConfigParser.kt',
+    'com/offlineprotocol/InitialRuntimeConfigApplier.kt',
     'com/offlineprotocol/JsonExtensions.kt',
     'com/offlineprotocol/MlsSecureStorage.kt',
     'com/offlineprotocol/ProtocolStateStorage.kt',

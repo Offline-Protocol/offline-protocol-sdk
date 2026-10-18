@@ -11,8 +11,12 @@ Engine lifecycle only: `create`, MLS initialization with platform secure storage
 `start`, `localAddress`, and `destroy`. Transport managers and event streaming
 ship in follow-up PRs.
 
-PR1 compiles a **minimal** native source set (UniFFI, config parser, secure storage).
-Transport Swift/Kotlin is added when those managers are wired up.
+PR1 compiles a **minimal** native source set (UniFFI, config parser, secure storage,
+initial DORS/relay applier). Transport Swift/Kotlin is added when those managers
+are wired up.
+
+`createFromConfig` accepts the same optional `dors` and `relay` JSON sections as
+the React Native bridge (applied via shared `InitialRuntimeConfigApplier` sources).
 
 UniFFI calls run on a dedicated engine thread; Flutter method-channel results are
 posted on the main queue (see [Kotlin bridge K2](../../docs/bridges/kotlin.md#k2-nothing-blocking-on-the-main-looper)).

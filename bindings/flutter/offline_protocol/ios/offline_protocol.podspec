@@ -6,6 +6,7 @@ react_native_ios = File.expand_path('../../../react-native/ios', __dir__)
 # (keep in sync with android/build.gradle `pr1KotlinIncludes`).
 pr1_bridge_swift = [
   'ProtocolConfigParser.swift',
+  'InitialRuntimeConfigApplier.swift',
   'EncryptionConfigReader.swift',
   'MeshRelayConfigReader.swift',
   'CustodyConfigReader.swift',
