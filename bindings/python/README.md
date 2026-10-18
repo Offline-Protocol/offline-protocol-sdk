@@ -120,7 +120,7 @@ FFI bindings. It regenerates Swift and Kotlin alongside Python by delegating to
 the repo-root `scripts/generate-bindings.sh`: the three are one artifact set
 off one UDL, so they are never refreshed apart.
 
-**Prerequisites:** Rust toolchain, `uniffi-bindgen` (`cargo install uniffi --version 0.30.0 --features cli --locked`).
+**Prerequisites:** Rust toolchain, `uniffi-bindgen` (`cargo install uniffi --version 0.32.2 --features cli --locked`).
 
 ### A Linux wheel from a checkout, on another host
 

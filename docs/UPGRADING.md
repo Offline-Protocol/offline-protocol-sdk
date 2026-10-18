@@ -1286,7 +1286,9 @@ cd bindings/react-native
 npm run build:uniffi:all         # or :ios / :android
 ```
 
-Requires `uniffi` CLI `0.30.0` matching the workspace pin.
+Requires the `uniffi` CLI at the version the workspace pinned at the time
+(`0.30.0` for this release; see `crates/offline-protocol-uniffi/Cargo.toml`
+for the current pin).
 
 **React Native native rebuild required** — new source files are compiled in:
 

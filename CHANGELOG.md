@@ -68,6 +68,27 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   is how 0.29.0 is published. It never pushes `X.Y.Z` a second time unless
   told to, for an image that failed its checks.
 
+### Changed
+
+- **UniFFI is now 0.32** (was 0.30). The Swift, Kotlin and Python bindings are
+  regenerated together from the unchanged interface definition, and the
+  `uniffi-bindgen` the build scripts and CI install is `0.32.2`. No API a
+  binding exposes changes. A checkout that regenerates bindings needs
+  `cargo install uniffi --version 0.32.2 --features cli --locked --force`,
+  and a React Native app rebuilds its native code to pick up the new
+  generated files. Three floors move with it:
+  - Building `offline-protocol-uniffi` (every binding, and the C library
+    from source) and installing `uniffi-bindgen` need Rust 1.91, because
+    UniFFI 0.32's build dependencies do. The library crates still build on
+    Rust 1.87.
+  - The generated Swift uses `nonisolated(unsafe)`, so the iOS bridge needs
+    Swift 5.10 (Xcode 15.3) or newer.
+  - On iOS, `ProtocolError` and `MlsStorageError` now conform to
+    `LocalizedError`. An error the bridge does not map to a code reaches
+    JavaScript, and the bridge's diagnostics, as the error's own case and
+    message (`ProtocolError.SendFailed(message: ...)`) instead of the
+    generic Foundation description.
+
 ### Fixed
 
 - **Python: a Linux box that could no longer advertise recovers on its own.**

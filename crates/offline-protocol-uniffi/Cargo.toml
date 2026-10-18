@@ -12,7 +12,11 @@ license.workspace = true
 # it lands in the .crate archive. scripts/check-license-consistency.sh asserts
 # the copies never drift.
 repository.workspace = true
-rust-version.workspace = true
+# Not the workspace's 1.87: UniFFI 0.32's bindgen (a build dependency, through
+# uniffi_build) needs askama 0.16, which requires 1.88, and cargo-platform 0.3,
+# which requires 1.91. Nothing else depends on this crate, so the library
+# crates keep the workspace promise and the MSRV job checks them without it.
+rust-version = "1.91"
 description = "UniFFI bindings for the Offline Protocol SDK"
 
 [lints]
@@ -37,7 +41,7 @@ zeroize = { workspace = true }
 # logger in `host_log.rs`; see that module for why.
 tracing = { workspace = true, features = ["log"] }
 log = "0.4"
-uniffi = "0.30"
+uniffi = "0.32"
 
 # The platform loggers the host logger writes to. Only the one for the
 # target being built is compiled; a desktop build writes to stderr instead.
@@ -60,7 +64,7 @@ offline-protocol-telemetry-wire = { workspace = true }
 offline-protocol-sealed = { workspace = true }
 
 [build-dependencies]
-uniffi = { version = "0.30", features = ["build"] }
+uniffi = { version = "0.32", features = ["build"] }
 
 [lib]
 crate-type = ["cdylib", "staticlib", "lib"]

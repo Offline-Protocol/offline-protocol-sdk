@@ -200,8 +200,19 @@ jobs:
         with:
           shared-key: ci-msrv
 
+      # Without the UniFFI crate, which declares its own, higher rust-version:
+      # its bindgen build dependencies need 1.91 (see its Cargo.toml). It is
+      # built on stable by every other job here.
       - name: Check workspace on MSRV
-        run: cargo check --workspace --all-targets --locked
+        run: cargo check --workspace --exclude offline-protocol-uniffi --all-targets --locked
+
+      # The UniFFI crate on its own declared floor. Every other job builds it
+      # on stable, so without this step its `rust-version` could fall behind
+      # what its locked graph needs and nothing would say so.
+      - name: Check the UniFFI crate on its rust-version (1.91)
+        run: |
+          rustup toolchain install 1.91.0 --profile minimal
+          cargo +1.91.0 check -p offline-protocol-uniffi --all-targets --locked
 
   embedded-core:
     name: Embedded core (bare metal)
@@ -610,8 +621,13 @@ jobs:
 
       # Keep in sync with the `uniffi` pin in crates/offline-protocol-uniffi/Cargo.toml;
       # scripts/generate-bindings.sh fails the build if the two disagree.
+      # --force: a uniffi-bindgen from before the pin moved can already be in
+      # ~/.cargo/bin (a cache restores it), and `cargo install` refuses to
+      # overwrite a binary it does not know it installed. That failed the
+      # macOS and Windows wheel jobs on the move to 0.32, and the pin moving
+      # is exactly when this step must work.
       - name: Install uniffi-bindgen
-        run: cargo install uniffi --version 0.30.0 --features cli --locked
+        run: cargo install uniffi --version 0.32.2 --features cli --locked --force
 
       # Delete the generated files first, so the drift gate below proves they
       # were *written* and not merely unchanged. `git diff --exit-code` on a
@@ -736,11 +752,12 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/uniffi-bindgen*
-          key: uniffi-bindgen-${{ runner.os }}-0.30.0
+          key: uniffi-bindgen-${{ runner.os }}-0.32.2
 
+      # --force: see the Python Bindings job's install step.
       - name: Install uniffi-bindgen
         if: steps.cache-uniffi.outputs.cache-hit != 'true'
-        run: cargo install uniffi --version 0.30.0 --features cli --locked
+        run: cargo install uniffi --version 0.32.2 --features cli --locked --force
 
       - name: Build the desktop library and the bindings
         shell: bash

@@ -24,7 +24,7 @@ Minimal React Native app demonstrating the Nostr relay transport for the Offline
 #    the native libraries, so it needs uniffi-bindgen at the crate's pinned
 #    version (it refuses to run on a mismatch rather than emit bindings whose
 #    checksums fail at the app's first call).
-cargo install uniffi --version 0.30.0 --features cli --locked
+cargo install uniffi --version 0.32.2 --features cli --locked
 
 # 1. Build the SDK's native libraries first (required before the first run —
 #    the app cannot load the native module otherwise).

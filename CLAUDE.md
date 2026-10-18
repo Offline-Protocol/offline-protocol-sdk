@@ -114,8 +114,8 @@ npm run build:uniffi:android      # Android only
 npm run generate:bindings         # wrapper for ../../scripts/generate-bindings.sh
 ```
 
-Prerequisites: `cargo install uniffi --version 0.30.0 --features cli --locked`
-(must match the workspace `uniffi = "0.30"` pin), Android NDK
+Prerequisites: `cargo install uniffi --version 0.32.2 --features cli --locked`
+(must match the workspace `uniffi = "0.32"` pin), Android NDK
 (`ANDROID_NDK_HOME`), Xcode.
 
 ### The C API

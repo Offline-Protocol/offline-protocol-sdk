@@ -84,7 +84,7 @@ if ! command -v uniffi-bindgen &>/dev/null; then
     echo "Error: uniffi-bindgen not found — the build would compile the library" >&2
     echo "and then fail at binding generation. Install it first:" >&2
     echo "" >&2
-    echo "  cargo install uniffi --version 0.30.0 --features cli --locked" >&2
+    echo "  cargo install uniffi --version 0.32.2 --features cli --locked" >&2
     exit 1
 fi
 

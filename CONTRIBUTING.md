@@ -6,9 +6,9 @@ Thank you for your interest in contributing! This document provides guidelines f
 
 ### Prerequisites
 
-- Rust 1.87+ (`rustup default stable`)
+- Rust 1.87+ for the library crates, and Rust 1.91+ to build `offline-protocol-uniffi` (every binding, and the C library from source) or to install `uniffi-bindgen`, whose build dependencies need it (`rustup default stable` covers both)
 - For mobile bindings: Android NDK, Xcode
-- For regenerating UniFFI bindings: `cargo install uniffi --version 0.30.0 --features cli --locked` (the CLI version must match the workspace `uniffi = "0.30"` pin; CI uses this exact command)
+- For regenerating UniFFI bindings: `cargo install uniffi --version 0.32.2 --features cli --locked` (the CLI version must match the workspace `uniffi = "0.32"` pin; CI runs this command with `--force`, and so should you when replacing an older install)
 
 ### Clone and Build
 
