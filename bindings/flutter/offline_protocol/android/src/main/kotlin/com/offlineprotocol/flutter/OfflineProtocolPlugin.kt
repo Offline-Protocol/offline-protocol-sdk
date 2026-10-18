@@ -1,5 +1,7 @@
 package com.offlineprotocol.flutter
 
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import com.offlineprotocol.AppContainerProtocolStateStorage
 import com.offlineprotocol.MlsSecureStorage
@@ -13,18 +15,27 @@ import io.flutter.plugin.common.MethodChannel.Result
 import uniffi.offline_protocol.EventCallback
 import uniffi.offline_protocol.OfflineProtocol
 import uniffi.offline_protocol.ProtocolConfig
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * Flutter host for the Offline Protocol engine.
  *
- * Bridge transport managers live under bindings/react-native/android (ADR 0025)
- * and are wired in a follow-up PR. This plugin runs the core only.
+ * All UniFFI calls run on a dedicated engine thread ([engineExecutor]); results
+ * are delivered on the main looper ([mainHandler]). See bridge contract K2.
+ *
+ * Transport managers (ADR 0025) are wired in a follow-up PR.
  */
 class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler {
     private lateinit var channel: MethodChannel
     private var applicationContext: android.content.Context? = null
     private var protocol: OfflineProtocol? = null
     private var currentConfig: ProtocolConfig? = null
+
+    private val engineExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "OfflineProtocolEngine").apply { isDaemon = true }
+    }
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         applicationContext = binding.applicationContext
@@ -35,27 +46,56 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler {
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel.setMethodCallHandler(null)
         applicationContext = null
-        tearDownProtocol()
-    }
-
-    override fun onMethodCall(call: MethodCall, result: Result) {
         try {
-            when (call.method) {
-                "create" -> create(call.arguments, result)
-                "initializeMlsWithSecureStorage" -> initializeMls(result)
-                "start" -> start(result)
-                "stop" -> stop(result)
-                "destroy" -> destroy(result)
-                "localAddress" -> localAddress(result)
-                else -> result.notImplemented()
-            }
+            engineExecutor.submit { tearDownProtocol() }.get(TEARDOWN_TIMEOUT_SEC, TimeUnit.SECONDS)
         } catch (e: Exception) {
-            Log.e(TAG, "${call.method} failed", e)
-            result.error("ERROR", e.message, null)
+            Log.w(TAG, "Engine teardown timed out or failed during detach", e)
+        } finally {
+            engineExecutor.shutdown()
         }
     }
 
-    private fun create(arguments: Any?, result: Result) {
+    override fun onMethodCall(call: MethodCall, result: Result) {
+        engineExecutor.execute {
+            try {
+                val payload: Any? = when (call.method) {
+                    "create" -> {
+                        createOnEngine(call.arguments)
+                        null
+                    }
+                    "initializeMlsWithSecureStorage" -> {
+                        initializeMlsOnEngine()
+                        null
+                    }
+                    "start" -> {
+                        startOnEngine()
+                        null
+                    }
+                    "stop" -> {
+                        stopOnEngine()
+                        null
+                    }
+                    "destroy" -> {
+                        tearDownProtocol()
+                        null
+                    }
+                    "localAddress" -> protocol?.localAddress()
+                    else -> {
+                        mainHandler.post { result.notImplemented() }
+                        return@execute
+                    }
+                }
+                mainHandler.post { result.success(payload) }
+            } catch (e: Exception) {
+                Log.e(TAG, "${call.method} failed", e)
+                mainHandler.post {
+                    result.error("ERROR", e.message, null)
+                }
+            }
+        }
+    }
+
+    private fun createOnEngine(arguments: Any?) {
         val configJson = arguments as? String
             ?: throw IllegalArgumentException("create expects a JSON string")
         tearDownProtocol()
@@ -68,10 +108,9 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler {
         })
         protocol = proto
         currentConfig = parsed.coreConfig
-        result.success(null)
     }
 
-    private fun initializeMls(result: Result) {
+    private fun initializeMlsOnEngine() {
         val ctx = applicationContext
             ?: throw IllegalStateException("Plugin not attached")
         val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
@@ -80,31 +119,14 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler {
         val secureStorage = MlsSecureStorage(ctx, accountNamespace)
         val protocolStateStorage = AppContainerProtocolStateStorage(ctx, accountNamespace)
         proto.initializeMls(secureStorage, protocolStateStorage)
-        result.success(null)
     }
 
-    private fun start(result: Result) {
+    private fun startOnEngine() {
         protocol?.start() ?: throw IllegalStateException("Protocol not initialized")
-        result.success(null)
     }
 
-    private fun stop(result: Result) {
+    private fun stopOnEngine() {
         protocol?.stop()
-        result.success(null)
-    }
-
-    private fun destroy(result: Result) {
-        tearDownProtocol()
-        result.success(null)
-    }
-
-    private fun localAddress(result: Result) {
-        val proto = protocol
-        if (proto == null) {
-            result.success(null)
-            return
-        }
-        result.success(proto.localAddress())
     }
 
     private fun tearDownProtocol() {
@@ -125,5 +147,6 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler {
     companion object {
         private const val TAG = "OfflineProtocolPlugin"
         private const val CHANNEL_NAME = "com.offlineprotocol/offline_protocol"
+        private const val TEARDOWN_TIMEOUT_SEC = 10L
     }
 }

@@ -23,12 +23,20 @@ rootProject.allprojects {
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
 
-// Bridge sources have one home (ADR 0025).
+// Bridge sources have one home (ADR 0025). PR1 compiles only engine lifecycle
+// pieces; transport managers are added when wired in a follow-up PR.
 def bridgeDir = file('../../react-native/android')
-def reactOnly = [
-    'OfflineProtocolModule.kt',
-    'OfflineProtocolPackage.kt',
-    'MeshHeadlessWakeService.kt',
+def bridgeJava = bridgeDir.path + '/src/main/java'
+
+// Keep in sync with ios/offline_protocol.podspec `pr1_bridge_swift`.
+def pr1KotlinIncludes = [
+    'uniffi/**/*.kt',
+    'com/offlineprotocol/ProtocolConfigParser.kt',
+    'com/offlineprotocol/JsonExtensions.kt',
+    'com/offlineprotocol/MlsSecureStorage.kt',
+    'com/offlineprotocol/ProtocolStateStorage.kt',
+    'com/offlineprotocol/StorageNamespace.kt',
+    'com/offlineprotocol/LegacyStoreAdoption.kt',
 ]
 
 android {
@@ -52,7 +60,10 @@ android {
     sourceSets {
         main {
             manifest.srcFile 'src/main/AndroidManifest.xml'
-            java.srcDirs bridgeDir.path + '/src/main/java', 'src/main/kotlin'
+            java {
+                srcDirs bridgeJava, 'src/main/kotlin'
+                pr1KotlinIncludes.each { include it }
+            }
             jniLibs.srcDirs bridgeDir.path + '/src/main/jniLibs'
         }
     }
@@ -61,12 +72,5 @@ android {
 dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
     implementation 'net.java.dev.jna:jna:5.19.1@aar'
-    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
     implementation 'androidx.security:security-crypto:1.1.0'
-}
-
-tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
-    reactOnly.each { name ->
-        exclude "**/$name"
-    }
 }

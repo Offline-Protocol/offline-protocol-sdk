@@ -2,12 +2,18 @@ require 'json'
 
 react_native_ios = File.expand_path('../../../react-native/ios', __dir__)
 
-bridge_swift = Dir.glob("#{react_native_ios}/**/*.swift").reject do |path|
-  rel = path.delete_prefix("#{react_native_ios}/")
-  rel == 'OfflineProtocolModule.swift' ||
-    rel.start_with?('tests/') ||
-    rel == 'Package.swift'
-end
+# PR1 engine lifecycle only. Expand this list when transport managers wire up
+# (keep in sync with android/build.gradle `pr1KotlinIncludes`).
+pr1_bridge_swift = [
+  'ProtocolConfigParser.swift',
+  'EncryptionConfigReader.swift',
+  'MeshRelayConfigReader.swift',
+  'CustodyConfigReader.swift',
+  'MlsSecureStorage.swift',
+  'ProtocolStateStorage.swift',
+  'StorageNamespace.swift',
+  'LegacyStoreAdoption.swift',
+].map { |name| File.join(react_native_ios, name) }
 
 Pod::Spec.new do |s|
   s.name             = 'offline_protocol'
@@ -21,22 +27,25 @@ Pod::Spec.new do |s|
   s.platform         = :ios, '13.0'
   s.swift_version    = '5.5'
 
-  s.source_files = ['Classes/**/*.swift'] + bridge_swift + [
-    "#{react_native_ios}/Generated/*.h",
+  s.source_files = [
+    'Classes/**/*.swift',
+    File.join(react_native_ios, 'Generated/offline_protocol.swift'),
+  ] + pr1_bridge_swift + [
+    File.join(react_native_ios, 'Generated/*.h'),
   ]
 
   s.resource_bundles = {
-    'OfflineProtocolPrivacy' => ["#{react_native_ios}/PrivacyInfo.xcprivacy"],
+    'OfflineProtocolPrivacy' => [File.join(react_native_ios, 'PrivacyInfo.xcprivacy')],
   }
 
   s.preserve_paths = [
-    "#{react_native_ios}/Generated/offline_protocolFFI.modulemap",
+    File.join(react_native_ios, 'Generated/offline_protocolFFI.modulemap'),
   ]
 
-  s.vendored_frameworks = "#{react_native_ios}/libs/offline_protocol_uniffi.xcframework"
+  s.vendored_frameworks = File.join(react_native_ios, 'libs/offline_protocol_uniffi.xcframework')
 
   s.public_header_files = [
-    "#{react_native_ios}/Generated/offline_protocolFFI.h",
+    File.join(react_native_ios, 'Generated/offline_protocolFFI.h'),
   ]
 
   s.pod_target_xcconfig = {
@@ -45,6 +54,6 @@ Pod::Spec.new do |s|
     'HEADER_SEARCH_PATHS' => "$(inherited) $(PODS_TARGET_SRCROOT)/../../../react-native/ios/Generated",
   }
 
-  s.frameworks = 'Foundation', 'CoreBluetooth', 'Network'
+  s.frameworks = 'Foundation', 'Security'
   s.dependency 'Flutter'
 end

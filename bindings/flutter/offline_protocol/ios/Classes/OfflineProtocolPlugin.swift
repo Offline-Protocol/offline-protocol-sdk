@@ -2,9 +2,16 @@ import Flutter
 import UIKit
 
 /// Flutter host for the Offline Protocol engine (core lifecycle only in PR1).
+///
+/// UniFFI calls run on `engineQueue`; Flutter `result` callbacks run on the main queue (bridge K2).
 public class OfflineProtocolPlugin: NSObject, FlutterPlugin {
     private var protocolInstance: OfflineProtocol?
     private var currentConfig: ProtocolConfig?
+
+    private let engineQueue = DispatchQueue(
+        label: "com.offlineprotocol.flutter.engine",
+        qos: .userInitiated
+    )
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(
@@ -15,30 +22,47 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin {
         registrar.addMethodCallDelegate(instance, channel: channel)
     }
 
-    public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-        do {
-            switch call.method {
-            case "create":
-                try create(call.arguments, result: result)
-            case "initializeMlsWithSecureStorage":
-                try initializeMls(result: result)
-            case "start":
-                try start(result: result)
-            case "stop":
-                stop(result: result)
-            case "destroy":
-                destroy(result: result)
-            case "localAddress":
-                localAddress(result: result)
-            default:
-                result(FlutterMethodNotImplemented)
-            }
-        } catch {
-            result(FlutterError(code: "ERROR", message: error.localizedDescription, details: nil))
+    deinit {
+        engineQueue.sync {
+            tearDownProtocol()
         }
     }
 
-    private func create(_ arguments: Any?, result: @escaping FlutterResult) throws {
+    public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        engineQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                switch call.method {
+                case "create":
+                    try self.createOnEngine(call.arguments)
+                    DispatchQueue.main.async { result(nil) }
+                case "initializeMlsWithSecureStorage":
+                    try self.initializeMlsOnEngine()
+                    DispatchQueue.main.async { result(nil) }
+                case "start":
+                    try self.startOnEngine()
+                    DispatchQueue.main.async { result(nil) }
+                case "stop":
+                    self.stopOnEngine()
+                    DispatchQueue.main.async { result(nil) }
+                case "destroy":
+                    self.tearDownProtocol()
+                    DispatchQueue.main.async { result(nil) }
+                case "localAddress":
+                    let address = self.protocolInstance?.localAddress()
+                    DispatchQueue.main.async { result(address) }
+                default:
+                    DispatchQueue.main.async { result(FlutterMethodNotImplemented) }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    result(FlutterError(code: "ERROR", message: error.localizedDescription, details: nil))
+                }
+            }
+        }
+    }
+
+    private func createOnEngine(_ arguments: Any?) throws {
         guard let configJson = arguments as? String else {
             throw NSError(
                 domain: "OfflineProtocol",
@@ -52,10 +76,9 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin {
         proto.setEventCallback(callback: FlutterEventCallback())
         protocolInstance = proto
         currentConfig = parsed.config
-        result(nil)
     }
 
-    private func initializeMls(result: @escaping FlutterResult) throws {
+    private func initializeMlsOnEngine() throws {
         guard let proto = protocolInstance else {
             throw NSError(
                 domain: "OfflineProtocol",
@@ -82,10 +105,9 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin {
             secureStorage: secureStorage,
             protocolStateStorage: protocolStateStorage
         )
-        result(nil)
     }
 
-    private func start(result: @escaping FlutterResult) throws {
+    private func startOnEngine() throws {
         guard let proto = protocolInstance else {
             throw NSError(
                 domain: "OfflineProtocol",
@@ -94,21 +116,10 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin {
             )
         }
         try proto.start()
-        result(nil)
     }
 
-    private func stop(result: @escaping FlutterResult) {
+    private func stopOnEngine() {
         try? protocolInstance?.stop()
-        result(nil)
-    }
-
-    private func destroy(result: @escaping FlutterResult) {
-        tearDownProtocol()
-        result(nil)
-    }
-
-    private func localAddress(result: @escaping FlutterResult) {
-        result(protocolInstance?.localAddress())
     }
 
     private func tearDownProtocol() {
@@ -119,7 +130,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin {
     }
 }
 
-private final class FlutterEventCallback: EventCallback {
+private final class FlutterEventCallback: EventCallback, @unchecked Sendable {
     func onEvent(eventJson: String) {
         // EventChannel wiring lands in PR2.
     }

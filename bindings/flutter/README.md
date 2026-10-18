@@ -11,6 +11,17 @@ Engine lifecycle only: `create`, MLS initialization with platform secure storage
 `start`, `localAddress`, and `destroy`. Transport managers and event streaming
 ship in follow-up PRs.
 
+PR1 compiles a **minimal** native source set (UniFFI, config parser, secure storage).
+Transport Swift/Kotlin is added when those managers are wired up.
+
+UniFFI calls run on a dedicated engine thread; Flutter method-channel results are
+posted on the main queue (see [Kotlin bridge K2](../../docs/bridges/kotlin.md#k2-nothing-blocking-on-the-main-looper)).
+
+## CI
+
+A Flutter CI job is planned (PR4 in the Flutter binding rollout). Merging this
+plugin does not yet gate on `flutter build` in GitHub Actions.
+
 ## Prerequisites
 
 1. Rust toolchain (see root `README.md`).
@@ -32,11 +43,23 @@ This produces:
 
 ## Run the example
 
+**Android** (platform files are in the repository):
+
 ```bash
 cd bindings/flutter/offline_protocol/example
 flutter pub get
-flutter run
+flutter run -d android
 ```
+
+**iOS** (generate Runner once):
+
+```bash
+bindings/flutter/scripts/bootstrap-example-platforms.sh
+cd bindings/flutter/offline_protocol/example
+flutter run -d ios
+```
+
+See [example/README.md](offline_protocol/example/README.md) for details.
 
 The example boots the engine with all transports disabled and prints this
 device's `off1…` address.
