@@ -941,3 +941,213 @@ def test_bless_dispatches_gatt_calls_synchronously():
         # pass for a coroutine too.
         dispatched = getattr(BlueZGattCharacteristic, name).__dict__["__DBUS_METHOD"]
         assert not inspect.iscoroutinefunction(dispatched.fn), name
+
+
+# ---------------------------------------------------------------------------
+# A failed start releases what it built
+# ---------------------------------------------------------------------------
+
+
+def _bluez_like_server(stop_raises: bool) -> MagicMock:
+    """A bless BlueZ server as far as release is concerned."""
+    server = MagicMock()
+    server.setup_task.done.return_value = True
+    server.stop = AsyncMock(side_effect=IndexError("pop from empty list") if stop_raises else None)
+    server.app.unregister = AsyncMock()
+    return server
+
+
+class TestAFailedStartReleasesTheServer:
+    """Once the state is STOPPED a stop returns at once, so a server a failed
+    start left in place outlived it, and a start tried again (the bluetoothd
+    restart handling does) registered a second copy of the mesh service."""
+
+    @pytest.mark.asyncio
+    async def test_a_start_refused_at_advertising_releases_the_server(self, peripheral, monkeypatch):
+        server = _bluez_like_server(stop_raises=False)
+        server.start = AsyncMock(side_effect=RuntimeError("org.bluez.Error.Failed"))
+        monkeypatch.setattr(peripheral, "_build_server", AsyncMock(return_value=server))
+        monkeypatch.setattr(peripheral, "_setup_gatt_server", AsyncMock())
+        monkeypatch.setattr(peripheral, "_install_attribution", MagicMock())
+        with patch.object(BlePeripheral, "is_available", return_value=True), patch(
+            "offline_protocol_sdk.ble_peripheral._bluetooth_authorization_refusal", return_value=None
+        ):
+            with pytest.raises(TransportError, match="start failed"):
+                await peripheral._start_advertising()
+
+        server.stop.assert_awaited_once()
+        assert peripheral._server is None
+        assert peripheral.state == TransportState.STOPPED
+
+    @pytest.mark.asyncio
+    async def test_on_bluez_the_application_is_unregistered_when_bless_stop_raises(self, monkeypatch):
+        """bless's stop removes the advertisement first and raises when there
+        is none, which skips unregistering the application."""
+        from offline_protocol_sdk import ble_peripheral as module
+
+        monkeypatch.setattr(module.sys, "platform", "linux")
+        server = _bluez_like_server(stop_raises=True)
+        await module._release_server(server)
+
+        server.app.unregister.assert_awaited_once_with(server.adapter)
+        server.bus.unexport.assert_called_once_with(server.app.path, server.app)
+        server.bus.disconnect.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_on_bluez_every_release_closes_the_bus(self, monkeypatch):
+        """Each start opens its own system-bus connection; a recovery after
+        every bluetoothd restart would otherwise leak one."""
+        from offline_protocol_sdk import ble_peripheral as module
+
+        monkeypatch.setattr(module.sys, "platform", "linux")
+        server = _bluez_like_server(stop_raises=False)
+        await module._release_server(server)
+
+        server.app.unregister.assert_not_awaited()
+        server.bus.disconnect.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_a_server_still_setting_up_is_cancelled(self, monkeypatch):
+        from offline_protocol_sdk import ble_peripheral as module
+
+        monkeypatch.setattr(module.sys, "platform", "linux")
+        server = _bluez_like_server(stop_raises=True)
+        server.setup_task.done.return_value = False
+        del server.adapter  # setup never located the adapter
+        await module._release_server(server)
+
+        server.setup_task.cancel.assert_called_once()
+        server.app.unregister.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# A controller left advertising behind the kernel's back refuses every new
+# advertisement until it is reset. The start resets the adapter once for
+# that refusal, and only that one.
+# ---------------------------------------------------------------------------
+
+REFUSED = TransportError("BLE peripheral start failed: Failed to register advertisement")
+
+
+class TestWedgedControllerReset:
+    def started(self, mock_protocol, monkeypatch, outcomes, reset=True, platform="linux"):
+        from offline_protocol_sdk import ble_peripheral as module
+
+        monkeypatch.setattr(module.sys, "platform", platform)
+        resets = AsyncMock(return_value=reset)
+        monkeypatch.setattr(module, "_reset_wedged_advertising", resets)
+        peripheral = BlePeripheral(mock_protocol, device_id="coordinator")
+        peripheral._start_advertising = AsyncMock(side_effect=outcomes)
+        return peripheral, resets
+
+    @pytest.mark.asyncio
+    async def test_the_refusal_resets_the_adapter_and_starts_again(self, mock_protocol, monkeypatch):
+        peripheral, resets = self.started(mock_protocol, monkeypatch, [REFUSED, None])
+        await peripheral._bring_up()
+        resets.assert_awaited_once()
+        assert peripheral._start_advertising.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_that_survives_the_reset_is_raised(self, mock_protocol, monkeypatch):
+        """Once: a second reset would only drop every link on the adapter again."""
+        peripheral, resets = self.started(mock_protocol, monkeypatch, [REFUSED, REFUSED])
+        with pytest.raises(TransportError, match="Failed to register advertisement"):
+            await peripheral._bring_up()
+        resets.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_reset_no_second_start(self, mock_protocol, monkeypatch):
+        peripheral, _ = self.started(mock_protocol, monkeypatch, [REFUSED], reset=False)
+        with pytest.raises(TransportError, match="Failed to register advertisement"):
+            await peripheral._bring_up()
+        peripheral._start_advertising.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("error, platform", [
+        (TransportError("BLE peripheral start failed: Maximum advertisements reached"), "linux"),
+        (TransportError("BLE peripheral start failed: org.bluez.Error.NotReady"), "linux"),
+        (TransportError("BLE peripheral start failed: Failed to parse advertisement."), "linux"),
+        (REFUSED, "darwin"),
+    ])
+    async def test_any_other_failure_is_raised_untouched(self, mock_protocol, monkeypatch, error, platform):
+        peripheral, resets = self.started(mock_protocol, monkeypatch, [error], platform=platform)
+        with pytest.raises(TransportError) as raised:
+            await peripheral._bring_up()
+        assert raised.value is error
+        resets.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_start_goes_through_the_reset(self, mock_protocol, monkeypatch):
+        """The registration drives _bring_up, not _start_advertising: a start
+        and a recovery after a bluetoothd restart both get the reset."""
+        peripheral, resets = self.started(mock_protocol, monkeypatch, [REFUSED, None])
+        monkeypatch.setattr(peripheral._registration, "_watch", MagicMock(start=AsyncMock(), watching=False))
+        await peripheral.start()
+        resets.assert_awaited_once()
+
+
+class _AdapterBus:
+    """A system bus holding one adapter, recording what is set on it."""
+
+    def __init__(self, free_slots, set_fails=False):
+        self.free_slots = free_slots
+        self.set_fails = set_fails
+        self.powered: list[bool] = []
+        self.disconnected = False
+
+    async def connect(self):
+        return self
+
+    async def call(self, message):
+        from dbus_next import MessageType, Variant
+
+        if message.member == "GetManagedObjects":
+            return SimpleNamespace(message_type=MessageType.METHOD_RETURN, body=[{
+                "/org/bluez": {"org.bluez.AgentManager1": {}},
+                "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF": {"org.bluez.Device1": {}},
+                "/org/bluez/hci0": {
+                    "org.bluez.Adapter1": {},
+                    "org.bluez.LEAdvertisingManager1": {
+                        "SupportedInstances": Variant("y", self.free_slots),
+                    },
+                },
+            }])
+        assert message.path == "/org/bluez/hci0"
+        assert message.body[:2] == ["org.bluez.Adapter1", "Powered"]
+        if self.set_fails:
+            return SimpleNamespace(message_type=MessageType.ERROR, error_name="org.bluez.Error.Failed")
+        self.powered.append(message.body[2].value)
+        return SimpleNamespace(message_type=MessageType.METHOD_RETURN, body=[])
+
+    def disconnect(self):
+        self.disconnected = True
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="dbus_next is the BlueZ backend's dependency")
+class TestResetWedgedAdvertising:
+    async def reset(self, monkeypatch, bus):
+        pytest.importorskip("dbus_next")
+        from offline_protocol_sdk import ble_peripheral as module
+
+        monkeypatch.setattr("dbus_next.aio.MessageBus", lambda bus_type: bus)
+        monkeypatch.setattr(module, "_ADAPTER_RESET_SETTLE", 0)
+        return await module._reset_wedged_advertising()
+
+    @pytest.mark.asyncio
+    async def test_powers_the_adapter_off_then_on(self, monkeypatch):
+        bus = _AdapterBus(free_slots=5)
+        assert await self.reset(monkeypatch, bus) is True
+        assert bus.powered == [False, True]
+        assert bus.disconnected
+
+    @pytest.mark.asyncio
+    async def test_no_free_slot_means_the_slots_refused_and_nothing_is_reset(self, monkeypatch):
+        bus = _AdapterBus(free_slots=0)
+        assert await self.reset(monkeypatch, bus) is False
+        assert bus.powered == []
+        assert bus.disconnected
+
+    @pytest.mark.asyncio
+    async def test_a_refused_power_change_is_no_reset(self, monkeypatch):
+        bus = _AdapterBus(free_slots=5, set_fails=True)
+        assert await self.reset(monkeypatch, bus) is False

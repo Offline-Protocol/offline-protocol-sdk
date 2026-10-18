@@ -474,6 +474,41 @@ jobs:
           path: desktop-libs/
           retention-days: 1
 
+  # The C binding as a reader of a desktop archive meets it: the library the
+  # archive will carry, the header beside app.c, the quick start from
+  # bindings/c/README.md, the archive README's own link line
+  # (scripts/c-link-line.sh), and the program run from elsewhere after its
+  # directory has moved. CI never sees these bytes: it checks debug builds,
+  # and the macOS install name and the Windows import library are made here.
+  test-c-library:
+    name: Test C Library (${{ matrix.platform }})
+    needs: [build-desktop-macos, build-desktop-linux, build-desktop-windows]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-arm64
+            runner: macos-14
+          - platform: linux-x86_64
+            runner: ubuntu-latest
+          - platform: windows-x86_64
+            runner: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: desktop-${{ matrix.platform }}
+          path: desktop-libs
+
+      - if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - name: Build and run the quick start against the shipped library
+        shell: bash
+        run: bash scripts/check-c-library.sh "${{ matrix.platform }}" "desktop-libs/${{ matrix.platform }}"
+
   # ---------------------------------------------------------------------------
   # Python bindings generation & testing
   # ---------------------------------------------------------------------------
@@ -1009,7 +1044,7 @@ jobs:
     # their tests: the GitHub release carries the wheels, the Swift package and
     # the archive it names, and Maven Central and PyPI publish only after this
     # job, so one that fails its tests stops everything before npm.
-    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, swift-package]
+    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, swift-package, test-c-library]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1500,7 +1535,7 @@ jobs:
     # artifacts; the shared `needs` list exists purely for that all-or-nothing
     # property, and sharing it with `release` is what keeps a version mismatch
     # from failing one registry while the other publishes regardless.
-    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, swift-package]
+    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, swift-package, test-c-library]
     runs-on: ubuntu-latest
     env:
       # The single gate on every step that uploads. Four conditions, each

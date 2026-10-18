@@ -58,6 +58,7 @@ from .ble_manager import (
     MESSAGE_CHAR_UUID,
     SERVICE_UUID,
 )
+from .bluez_restarts import StaysRegistered
 from .offline_protocol import verify_identity_assertion
 from .transport_manager import TransportError, TransportManager, TransportState
 
@@ -259,6 +260,156 @@ def _bluetooth_authorization_refusal() -> str | None:
 _BLUEZ_SERVICE = "org.bluez"
 _BLUEZ_DEVICE_IFACE = "org.bluez.Device1"
 _BLUEZ_CHAR_IFACE = "org.bluez.GattCharacteristic1"
+
+
+async def _release_server(server: Any) -> None:
+    """Give up everything a bless server holds, however far its start got.
+
+    Best effort, and never raises. On BlueZ, bless's own ``stop()`` is not
+    enough: it removes the advertisement first and raises when there is none
+    (a start refused at ``RegisterAdvertisement``, or one whose bluetoothd has
+    since restarted), which skips unregistering the GATT application, and it
+    never closes the bus connection the server opened. A start that is tried
+    again would then register a second copy of the mesh service, and every
+    retry or recovery would leak one system-bus connection.
+    """
+    task = getattr(server, "setup_task", None)
+    if task is not None and not task.done():
+        task.cancel()
+    try:
+        await server.stop()
+    except Exception:
+        logger.debug("bless server stop failed", exc_info=True)
+        if sys.platform == "linux":
+            await _unregister_bluez_application(server)
+    if sys.platform == "linux":
+        bus = getattr(server, "bus", None)
+        if bus is not None:
+            try:
+                bus.disconnect()
+            except Exception:
+                logger.debug("closing the bless bus failed", exc_info=True)
+
+
+async def _unregister_bluez_application(server: Any) -> None:
+    app = getattr(server, "app", None)
+    adapter = getattr(server, "adapter", None)
+    if app is None or adapter is None:
+        return
+    try:
+        await app.unregister(adapter)
+    except Exception:
+        logger.debug("unregistering the GATT application failed", exc_info=True)
+    try:
+        server.bus.unexport(app.path, app)
+    except Exception:
+        logger.debug("unexporting the GATT application failed", exc_info=True)
+
+
+# BlueZ's answer to a RegisterAdvertisement the kernel refused. A full set of
+# advertising slots is answered differently ("Maximum advertisements
+# reached"), before the kernel is asked.
+_ADVERTISEMENT_REFUSED = "Failed to register advertisement"
+_BLUEZ_ADAPTER_IFACE = "org.bluez.Adapter1"
+_BLUEZ_ADVERTISING_IFACE = "org.bluez.LEAdvertisingManager1"
+
+# Seconds to let a re-powered adapter settle before registering again.
+_ADAPTER_RESET_SETTLE = 1.0
+
+
+async def _reset_wedged_advertising() -> bool:
+    """Power-cycle an adapter whose controller refuses every advertisement.
+
+    Returns whether it did. Best effort, and never raises.
+
+    Linux loses track of the controller's advertising: the kernel clears its
+    "advertising" flag on every LE connection complete, assuming the
+    controller stopped advertising, which a controller only does for a link
+    in which it is the peripheral. When advertising is enabled while our
+    central's dial is pending (a discovery restart re-enables it), the dial
+    completes in the central role and the controller keeps advertising while
+    the kernel believes it stopped. From then on the kernel never disables it,
+    every LE Set Advertising Parameters is answered Command Disallowed, and
+    every new advertisement is refused with "Failed to register
+    advertisement", for this process and every later one, until the
+    controller is reset. Seen on Raspberry Pi 4s (Linux 6.18, BlueZ 5.87): a
+    replaced service could not advertise again, which looked like
+    advertisements left behind holding the slots, while BlueZ reported all of
+    them free.
+
+    Powering the adapter off and on re-initialises the controller with an
+    HCI Reset, which ends the stale advertising. It also drops every link the
+    adapter holds, for every process using it, which is why it runs only for
+    this refusal, and only when BlueZ reports a free slot: with none free the
+    refusal is about the slots, and a reset would not help.
+    """
+    try:
+        from dbus_next import BusType, Message, MessageType, Variant  # type: ignore[import-not-found]
+        from dbus_next.aio import MessageBus  # type: ignore[import-not-found]
+    except Exception:
+        return False
+    bus: Any = None
+    try:
+        bus = await MessageBus(bus_type=BusType.SYSTEM).connect()
+        reply = await bus.call(Message(
+            destination=_BLUEZ_SERVICE,
+            path="/",
+            interface="org.freedesktop.DBus.ObjectManager",
+            member="GetManagedObjects",
+        ))
+        if reply.message_type != MessageType.METHOD_RETURN:
+            return False
+        adapter = _advertising_adapter(reply.body[0])
+        if adapter is None:
+            return False
+        path, free_slots = adapter
+        if free_slots < 1:
+            return False
+        logger.warning(
+            "the controller refuses every advertisement while BlueZ has %d free; "
+            "power-cycling %s to reset it", free_slots, path,
+        )
+        for powered in (False, True):
+            reply = await bus.call(Message(
+                destination=_BLUEZ_SERVICE,
+                path=path,
+                interface="org.freedesktop.DBus.Properties",
+                member="Set",
+                signature="ssv",
+                body=[_BLUEZ_ADAPTER_IFACE, "Powered", Variant("b", powered)],
+            ))
+            if reply.message_type != MessageType.METHOD_RETURN:
+                logger.warning("powering %s %s failed: %s", path,
+                               "on" if powered else "off", reply.error_name)
+                return False
+        await asyncio.sleep(_ADAPTER_RESET_SETTLE)
+        return True
+    except Exception:
+        logger.debug("resetting the adapter failed", exc_info=True)
+        return False
+    finally:
+        if bus is not None:
+            try:
+                bus.disconnect()
+            except Exception:
+                logger.debug("closing the adapter reset bus failed", exc_info=True)
+
+
+def _advertising_adapter(objects: Any) -> tuple[str, int] | None:
+    """The first adapter that advertises, and its free advertising slots.
+
+    The first in path order, as bless picks it: ``hci0`` before ``hci1``.
+    """
+    for path in sorted(objects):
+        interfaces = objects[path]
+        if _BLUEZ_ADAPTER_IFACE not in interfaces:
+            continue
+        manager = interfaces.get(_BLUEZ_ADVERTISING_IFACE)
+        if manager is None:
+            continue
+        free = manager.get("SupportedInstances")
+        return path, int(getattr(free, "value", free) or 0)
+    return None
 
 
 def _central_id_from_device_path(path: Any) -> str | None:
@@ -486,6 +637,13 @@ class BlePeripheral(TransportManager):
         # _BlueZCentrals). None on CoreBluetooth, whose bless delegate
         # tracks them itself.
         self._bluez_centrals: _BlueZCentrals | None = None
+
+        # Registered again with bluetoothd whenever it restarts (Linux): a
+        # restart drops the GATT application and the advertisement, and
+        # nothing on the bus tells the process that registered them.
+        self._registration = StaysRegistered(
+            self._bring_up, self._stop_advertising, self._emit_diagnostic
+        )
         # Central id -> the address its hello proved. A link bound here feeds
         # its fragments to the core under that address, which is what lets a
         # key package from it through the core's transport-sender check.
@@ -547,6 +705,38 @@ class BlePeripheral(TransportManager):
 
     async def start(self) -> None:
         """Set up the GATT server, register characteristics, and advertise."""
+        # Refused here, before the registration: inside it, the refusal's
+        # cleanup would stop the running server's bluetoothd watch.
+        if self._state == TransportState.RUNNING:
+            raise TransportError("BLE peripheral is already running")
+        await self._registration.start()
+
+    async def stop(self) -> None:
+        """Stop advertising and disconnect all centrals."""
+        await self._registration.stop()
+
+    async def _bring_up(self) -> None:
+        """Start advertising, resetting a wedged controller once (Linux).
+
+        See :func:`_reset_wedged_advertising`. Once, not in a loop: a refusal
+        that survives a controller reset has another cause, and resetting
+        again would only drop every link on the adapter again.
+        """
+        try:
+            await self._start_advertising()
+        except TransportError as exc:
+            if sys.platform != "linux" or _ADVERTISEMENT_REFUSED not in str(exc):
+                raise
+            if not await _reset_wedged_advertising():
+                raise
+            self._emit_diagnostic(
+                "warning",
+                "the controller refused the advertisement; reset the adapter, starting again",
+                {"error": str(exc)},
+            )
+            await self._start_advertising()
+
+    async def _start_advertising(self) -> None:
         if self._state == TransportState.RUNNING:
             raise TransportError("BLE peripheral is already running")
 
@@ -586,6 +776,11 @@ class BlePeripheral(TransportManager):
             if sys.platform == "linux":
                 self._attach_bluez_centrals()
         except Exception as exc:
+            # Released here: once the state is STOPPED, _stop_advertising
+            # returns at once, so a half-built server left in place would
+            # outlive the failure, and a start tried again would register a
+            # second copy of the service next to it.
+            await self._release_partial_start()
             self._update_state(TransportState.STOPPED)
             raise TransportError(
                 f"BLE peripheral start failed: {exc}"
@@ -606,8 +801,16 @@ class BlePeripheral(TransportManager):
 
         self._emit_diagnostic("info", "BLE peripheral started — advertising")
 
-    async def stop(self) -> None:
-        """Stop advertising and disconnect all centrals."""
+    async def _release_partial_start(self) -> None:
+        if self._bluez_centrals is not None:
+            self._bluez_centrals.detach()
+            self._bluez_centrals = None
+        if self._server is not None:
+            await _release_server(self._server)
+            self._server = None
+        self._is_advertising = False
+
+    async def _stop_advertising(self) -> None:
         # STOPPING too: a stop() cancelled part-way (a shutdown deadline)
         # leaves the transport there, and a retry that returned at once would
         # leave it half torn down for good. Every step below is idempotent.
@@ -633,12 +836,11 @@ class BlePeripheral(TransportManager):
             self._bluez_centrals.detach()
             self._bluez_centrals = None
 
-        # Stop GATT server
+        # Stop GATT server, and close its bus: a recovery after a bluetoothd
+        # restart runs this, and each start opens a new connection. Dropped
+        # only once released, so a stop cancelled inside it can be finished.
         if self._server is not None:
-            try:
-                await self._server.stop()
-            except Exception:
-                pass
+            await _release_server(self._server)
             self._server = None
         self._is_advertising = False
 

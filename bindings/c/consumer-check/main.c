@@ -183,6 +183,19 @@ static void s_release(void *ctx, uint8_t *data, size_t len) {
   free(data);
 }
 
+/* Frees every entry. Run under LeakSanitizer (SANITIZE=1 on Linux), so the
+ * host's own memory is released as carefully as the library's. */
+static void store_clear(struct store *s) {
+  while (s->head != NULL) {
+    struct entry *gone = s->head;
+    s->head = gone->next;
+    free(gone->type);
+    free(gone->id);
+    free(gone->data);
+    free(gone);
+  }
+}
+
 static OfflineProtocolStorage provider(struct store *s) {
   OfflineProtocolStorage p;
   memset(&p, 0, sizeof p);
@@ -346,6 +359,8 @@ int main(void) {
   offline_protocol_free(h);
   remove_tree(mls_dir);
   remove_tree(state_dir);
+  store_clear(&secure);
+  store_clear(&state);
   pthread_mutex_destroy(&secure.lock);
   pthread_mutex_destroy(&state.lock);
 

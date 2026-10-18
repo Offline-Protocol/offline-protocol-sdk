@@ -516,6 +516,53 @@ jobs:
       - name: Compile and run the C consumer check
         run: make -C bindings/c/consumer-check NATIVE_STATIC_LIBS="${{ steps.lib.outputs.native_static_libs }}"
 
+      # The same programs under AddressSanitizer and UBSan, and LeakSanitizer
+      # on Linux. The library allocates with the system allocator, so a
+      # string freed twice, freed with the host's free or never freed is
+      # reported at the line that did it: the ownership rule (K1) checked
+      # rather than read. Same library build; only the C side is
+      # instrumented.
+      - name: Run the C programs under sanitizers
+        run: make -C bindings/c/consumer-check SANITIZE=1 NATIVE_STATIC_LIBS="${{ steps.lib.outputs.native_static_libs }}"
+
+  # Windows, where the release ships a DLL and its import library for MSVC
+  # and nothing else compiles C against them. The README's quick start is
+  # built with cl from the header and the import library, warnings as
+  # errors, and run; the header is compiled as C++ by cl too. main.c and
+  # exchange.c are POSIX programs (pthreads, mkdtemp) and run on the other
+  # two systems only.
+  c-binding-windows:
+    name: C Binding (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-c-binding-windows
+
+      - name: Build the library
+        run: cargo build --locked --package offline-protocol-uniffi
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      # MSYS would read cl's flags as paths and rewrite them.
+      - name: The header and the quick start compile under cl -W4 -WX
+        shell: bash
+        env:
+          MSYS2_ARG_CONV_EXCL: "*"
+        run: |
+          cl -nologo -W4 -WX -EHsc -Ibindings/c/include -c -TP bindings/c/consumer-check/header_check.cpp
+          bindings/c/consumer-check/quickstart.sh bindings/c/README.md "$RUNNER_TEMP/quickstart.c"
+          cl -nologo -W4 -WX -Ibindings/c/include -c "$RUNNER_TEMP/quickstart.c" -Fo"$RUNNER_TEMP/quickstart.obj"
+
+      # The archive README's link line, run as the release check runs it.
+      - name: The quick start links through the import library and runs
+        shell: bash
+        run: bash scripts/check-c-library.sh windows-x86_64 target/debug
+
   security:
     name: Dependency Audit
     runs-on: ubuntu-latest

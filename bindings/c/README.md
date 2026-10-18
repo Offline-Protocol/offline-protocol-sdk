@@ -156,13 +156,18 @@ back into it: copy the text and return.
 
 ## The consumer check
 
-[`consumer-check/`](consumer-check/) is a complete program, with a storage
-provider written in C, that CI compiles with `-std=c99 -Wpedantic -Werror`
-and runs against the shared and the static library:
+[`consumer-check/`](consumer-check/) holds two complete programs that CI
+compiles with `-std=c99 -Wpedantic -Werror` and runs: `main.c`, the
+contract, with a storage provider written in C, against the shared and the
+static library; and `exchange.c`, two engines with the host carrying
+frames between them, which is the transport work every host does. It also
+builds and runs the quick start above, as written, so this page cannot
+drift from the library.
 
 ```sh
 cargo build -p offline-protocol-uniffi
 make -C bindings/c/consumer-check
+make -C bindings/c/consumer-check SANITIZE=1   # AddressSanitizer and UBSan
 ```
 
 ## Other languages

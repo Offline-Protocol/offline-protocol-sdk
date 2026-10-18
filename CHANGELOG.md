@@ -35,7 +35,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   path, so a host linked against it finds it through its own rpath. Every
   callback and storage provider handed to the library has its `drop`
   called exactly once, a refused registration included, so a host never
-  frees its own context. The contract is `docs/bridges/c.md`.
+  frees its own context. Before anything publishes, the release builds
+  the quick start in `bindings/c/README.md` against each desktop library
+  with that archive's own link line and runs it, on macOS, Linux and
+  Windows. CI also runs two engines exchanging messages through a C host,
+  every C program under AddressSanitizer and UBSan, and the quick start
+  under MSVC, and a nightly job fuzzes the JSON boundary. The contract is
+  `docs/bridges/c.md`.
 - **Signing large payloads from React Native no longer boxes every byte.**
   `signDataBytes(Uint8Array)` and `verifySignatureBytes` sit beside
   `signData` and `verifySignature`, which are unchanged. They cross the bridge
@@ -74,6 +80,25 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **Python: a Linux box that could no longer advertise recovers on its own.**
+  Linux loses track of the controller's advertising when a central-role
+  connection completes while advertising is on: the controller keeps
+  advertising, the kernel believes it stopped, and every later advertisement
+  is refused with "Failed to register advertisement" until the controller is
+  reset, across service restarts. When BlueZ refuses an advertisement that
+  way while reporting free slots, the peripheral now powers the adapter off
+  and on once (which resets the controller) and starts again, and both roles
+  register again whenever an adapter powers back on.
+- **Python: Bluetooth LE no longer takes bluetoothd down, and survives it
+  restarting.** On BlueZ 5.87 bluetoothd exits the moment a
+  discovery filter naming a service UUID is set, and the central set one at
+  every start, so each start of the service ended the advertisement and the
+  scan within about half a second while both roles went on logging themselves
+  running. Two Linux boxes never formed a Bluetooth LE link, and a box dropped
+  off the air for a phone. On Linux the central now scans unfiltered and
+  filters on the mesh service UUID itself, and both roles watch for
+  bluetoothd restarting: a start cut short by bluetoothd exiting is retried,
+  and a running role registers again with the new bluetoothd.
 - **One lost inbound Bluetooth fragment no longer marks BLE as a failing
   link.** When a partial message idled out of the reassembly cache or was
   evicted at capacity, the BLE transport counted it as a failed send, and
