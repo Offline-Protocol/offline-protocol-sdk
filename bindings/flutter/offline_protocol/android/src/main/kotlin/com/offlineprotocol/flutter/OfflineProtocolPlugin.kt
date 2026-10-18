@@ -17,7 +17,9 @@ import uniffi.offline_protocol.EventCallback
 import uniffi.offline_protocol.OfflineProtocol
 import uniffi.offline_protocol.ProtocolConfig
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Flutter host for the Offline Protocol engine.
@@ -37,15 +39,18 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler {
         Thread(runnable, "OfflineProtocolEngine").apply { isDaemon = true }
     }
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val attached = AtomicBoolean(false)
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         applicationContext = binding.applicationContext
+        attached.set(true)
         channel = MethodChannel(binding.binaryMessenger, CHANNEL_NAME)
         channel.setMethodCallHandler(this)
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel.setMethodCallHandler(null)
+        attached.set(false)
         try {
             engineExecutor.submit {
                 tearDownProtocol()
@@ -60,42 +65,57 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler {
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
-        engineExecutor.execute {
-            try {
-                val payload: Any? = when (call.method) {
-                    "create" -> {
-                        createOnEngine(call.arguments)
-                        null
+        if (!attached.get()) {
+            postDetachedError(result)
+            return
+        }
+        try {
+            engineExecutor.execute {
+                try {
+                    val payload: Any? = when (call.method) {
+                        "create" -> {
+                            createOnEngine(call.arguments)
+                            null
+                        }
+                        "initializeMlsWithSecureStorage" -> {
+                            initializeMlsOnEngine()
+                            null
+                        }
+                        "start" -> {
+                            startOnEngine()
+                            null
+                        }
+                        "stop" -> {
+                            stopOnEngine()
+                            null
+                        }
+                        "destroy" -> {
+                            tearDownProtocol()
+                            null
+                        }
+                        "localAddress" -> protocol?.localAddress()
+                        else -> {
+                            mainHandler.post { result.notImplemented() }
+                            return@execute
+                        }
                     }
-                    "initializeMlsWithSecureStorage" -> {
-                        initializeMlsOnEngine()
-                        null
+                    mainHandler.post { result.success(payload) }
+                } catch (e: Exception) {
+                    Log.e(TAG, "${call.method} failed", e)
+                    mainHandler.post {
+                        result.error("ERROR", e.message, null)
                     }
-                    "start" -> {
-                        startOnEngine()
-                        null
-                    }
-                    "stop" -> {
-                        stopOnEngine()
-                        null
-                    }
-                    "destroy" -> {
-                        tearDownProtocol()
-                        null
-                    }
-                    "localAddress" -> protocol?.localAddress()
-                    else -> {
-                        mainHandler.post { result.notImplemented() }
-                        return@execute
-                    }
-                }
-                mainHandler.post { result.success(payload) }
-            } catch (e: Exception) {
-                Log.e(TAG, "${call.method} failed", e)
-                mainHandler.post {
-                    result.error("ERROR", e.message, null)
                 }
             }
+        } catch (e: RejectedExecutionException) {
+            Log.w(TAG, "Method call rejected: engine executor shut down", e)
+            postDetachedError(result)
+        }
+    }
+
+    private fun postDetachedError(result: Result) {
+        mainHandler.post {
+            result.error("ERROR", "Plugin detached", null)
         }
     }
 
