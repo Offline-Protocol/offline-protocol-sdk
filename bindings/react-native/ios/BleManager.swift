@@ -280,11 +280,17 @@ public class BleManager: NSObject, TransportManager {
     private let PENDING_FRAGMENT_TIMEOUT: TimeInterval = 15.0
     private let PENDING_OUTBOUND_FRAGMENT_TIMEOUT: TimeInterval = 30.0 // For outbound fragments that failed to send
     private let MAX_PENDING_FRAGMENTS_PER_PEER = 100
+    // The outbound queues' cap. Not the inbound one above: that buffer only
+    // holds fragments while a central's device id resolves, but an outbound
+    // queue must hold a whole maximum-size message below its mark (see the
+    // overflow note on OutboundFragmentQueue). At 100, one 16 KB message
+    // overran it.
+    private let MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER = OutboundFragmentQueue.defaultMaxPerPeer
     // Outbound fragments that could not be sent immediately — same contract as
     // `inboundFragments` above.
     private lazy var outboundFragments = OutboundFragmentQueue(
         queueCheck: { [weak self] in self?.assertOnFragmentQueue() },
-        maxPerPeer: MAX_PENDING_FRAGMENTS_PER_PEER,
+        maxPerPeer: MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER,
         timeout: PENDING_OUTBOUND_FRAGMENT_TIMEOUT,
         onDropped: { [weak self] recipientId, reason, count in
             guard let self = self else { return }
@@ -297,7 +303,7 @@ public class BleManager: NSObject, TransportManager {
             } else {
                 self.emitDiagnostic("warning", "Pending outbound fragment queue capped, discarding queue",
                                     context: ["recipientId": recipientId, "dropped": count,
-                                              "max": self.MAX_PENDING_FRAGMENTS_PER_PEER])
+                                              "max": self.MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER])
             }
         }
     )
@@ -319,7 +325,7 @@ public class BleManager: NSObject, TransportManager {
     /// fragments from both: the drain would pull past the mark and the next
     /// `enqueue` would discard the lot. See `OutboundFragmentQueue`.
     private lazy var notifyFragments = OutboundFragmentQueue(
-        maxPerPeer: MAX_PENDING_FRAGMENTS_PER_PEER,
+        maxPerPeer: MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER,
         timeout: PENDING_OUTBOUND_FRAGMENT_TIMEOUT,
         onDropped: { [weak self] recipientId, reason, count in
             guard let self = self else { return }
@@ -331,7 +337,7 @@ public class BleManager: NSObject, TransportManager {
             } else {
                 self.emitDiagnostic("warning", "NOTIFY outbound queue capped, discarding queue",
                                     context: ["recipientId": recipientId, "dropped": count,
-                                              "max": self.MAX_PENDING_FRAGMENTS_PER_PEER])
+                                              "max": self.MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER])
             }
         }
     )
@@ -1685,7 +1691,18 @@ public class BleManager: NSObject, TransportManager {
             // and the fragments waited for the expiry that tears them.
             var hitBackpressure = self.flushPendingOutboundFragments()
 
-            while let fragment = self.protocolInstance.bleGetNextFragment() {
+            while true {
+                // Stop before the pop, not after it. The pop is destructive and
+                // shared by every peer, so a fragment pulled while some queue
+                // is past its mark has nowhere to go but further past it, and
+                // the post-enqueue checks below only see that once it has
+                // happened. Both egress queues count: either one discarding
+                // tears a message.
+                if self.outboundFragments.anyBackedUp() || self.notifyFragments.anyBackedUp() {
+                    hitBackpressure = true
+                    break
+                }
+                guard let fragment = self.protocolInstance.bleGetNextFragment() else { break }
                 let recipientId = fragment.recipientId
                 let data = Data(fragment.data)
 
@@ -1741,7 +1758,7 @@ public class BleManager: NSObject, TransportManager {
                     // destructive pop) into the bounded per-peer queue. The
                     // write buffer drains far slower than this loop can pull;
                     // without this stop the loop spins the whole backlog into
-                    // the queue, overflows MAX_PENDING_FRAGMENTS_PER_PEER, and
+                    // the queue, overflows MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER, and
                     // OutboundFragmentQueue.enqueue discards the in-flight
                     // message. Leaving the backlog in Rust keeps delivery
                     // lossless. Mirrors Android's drainAndSendFragments.
@@ -1760,18 +1777,13 @@ public class BleManager: NSObject, TransportManager {
                     // arms it too, so the floor is there before this queue
                     // reaches the mark.
                     //
-                    // The mark is checked after the enqueue because the pop is
-                    // destructive and nothing can hand a fragment back to Rust,
-                    // so each drain that meets a stalled peer at the head adds
-                    // one fragment past it. The headroom to the cap is a budget
-                    // of such drains, not a guarantee: a peer stalled while
-                    // other peers keep drains coming can still reach the cap,
-                    // and the whole-queue discard is then the intended outcome.
-                    // Those fragments were headed for the 30 s expiry anyway,
-                    // which drops them fragment by fragment and can tear a
-                    // message; the discard never does. Holding the fragment
-                    // back in Swift instead would trade that for every other
-                    // peer waiting behind a stalled one.
+                    // This check runs after the enqueue; the one at the top of
+                    // the loop is what stops the next pop. Together they keep
+                    // a stalled peer's queue at the mark plus at most one
+                    // fragment, far below the cap, however many drains other
+                    // peers trigger. The cost is that every peer waits while
+                    // one is backed up, because the pop is one FIFO; the
+                    // re-drain below is the floor that resumes it.
                     if self.outboundFragments.isBackedUp(recipientId) {
                         hitBackpressure = true
                         break

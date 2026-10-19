@@ -49,8 +49,19 @@ internal data class FlushResult(
  * unsafe: fragments are slices of a single application message and
  * evicting slice 0 of a five-slice message leaves four orphan slices that
  * would reassemble into garbage at the receiver. Dropping the whole
- * queue gives clean backpressure at message boundary granularity — we
- * lose messages that hadn't started delivery yet, but we never split one.
+ * queue avoids orphaning the slices behind a dropped one, but it is still
+ * a loss, and it tears the message whose first slices already went out.
+ *
+ * So the cap is a memory backstop and must stay unreachable in normal
+ * operation. Two things keep it there. The drain stops pulling from the
+ * Rust core while any recipient is past the [isBackedUp] mark ([anyBackedUp]),
+ * checked **before** each pop, because the pop is destructive and nothing
+ * can hand a fragment back. And the cap sits above the largest message the
+ * core will fragment (512 fragments), so the mark is reached before one
+ * message fills the queue. With the old cap of 100, a single sealed 16 KB
+ * message was already more than the queue could hold, and the 2026-10-19
+ * volume test never delivered a 16 KB or 30 KB message from Android.
+ * A Rust guard pins this value equal to the iOS queue's.
  */
 internal class OutboundFragmentQueue(
     private val bleThreadCheck: () -> Unit = DEFAULT_BLE_THREAD_CHECK,
@@ -99,6 +110,18 @@ internal class OutboundFragmentQueue(
         bleThreadCheck()
         val size = queues[recipientId]?.size ?: 0
         return size >= maxPerPeer * 3 / 4
+    }
+
+    /**
+     * True if any recipient is past the [isBackedUp] mark. The drain checks
+     * it before every pop from the Rust core: the pop is one FIFO across all
+     * peers and cannot be undone, so the only lossless moment to stop is
+     * before it. Safe only on the BLE thread, like every other read here.
+     */
+    fun anyBackedUp(): Boolean {
+        bleThreadCheck()
+        val mark = maxPerPeer * 3 / 4
+        return queues.values.any { it.size >= mark }
     }
 
     /**
@@ -219,7 +242,8 @@ internal class OutboundFragmentQueue(
     }
 
     companion object {
-        const val DEFAULT_MAX_PER_PEER: Int = 100
+        /** Above 4/3 of the core's 512-fragment message ceiling; see the class note. */
+        const val DEFAULT_MAX_PER_PEER: Int = 768
         const val DEFAULT_TIMEOUT_MS: Long = 30_000L
 
         val DEFAULT_BLE_THREAD_CHECK: () -> Unit = {

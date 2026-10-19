@@ -207,6 +207,28 @@ final class OutboundFragmentQueueTests: XCTestCase {
         XCTAssertFalse(queue.isBackedUp("bob"))
     }
 
+    /// The drain checks this before every destructive pop, so it has to see a
+    /// backed-up peer even when the fragment about to be popped is for someone
+    /// else: the pop is one FIFO across all of them.
+    func testAnyBackedUpTripsWhenAnyOneRecipientReachesTheMark() {
+        let queue = OutboundFragmentQueue(maxPerPeer: 8)
+        XCTAssertFalse(queue.anyBackedUp())
+        for i in 0..<5 { queue.enqueue("bob", bytes(UInt8(i))) }
+        queue.enqueue("carol", bytes(9))
+        XCTAssertFalse(queue.anyBackedUp())
+
+        queue.enqueue("bob", bytes(5))
+        XCTAssertTrue(queue.anyBackedUp())
+        XCTAssertFalse(queue.isBackedUp("carol"))
+    }
+
+    /// The core fragments a message into at most 512 pieces. Below that, one
+    /// large message overruns the queue on its own and the overflow discard
+    /// tears it, which is how 16 KB messages were lost.
+    func testTheDefaultCapHoldsAWholeMaximumSizeMessageBelowTheMark() {
+        XCTAssertGreaterThanOrEqual(OutboundFragmentQueue.defaultMaxPerPeer * 3 / 4, 512)
+    }
+
     /// The NOTIFY queue is enqueued by the drain while main flushes it. A
     /// flush that took the queue out to send it hid those fragments from
     /// `isBackedUp`, so the drain pulled on past the mark, and from the cap,

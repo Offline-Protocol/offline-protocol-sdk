@@ -3296,6 +3296,15 @@ class BleTransportFacade(
                 }
                 iterations++
 
+                // Stop before the pop, not after it. The pop is destructive and
+                // shared by every peer, so a fragment pulled for a peer whose
+                // queue is past the mark has nowhere to go but further past it;
+                // the checks further down run only once that has happened.
+                if (outboundQueue.anyBackedUp()) {
+                    hitBackpressure = true
+                    break
+                }
+
                 val fragment = try {
                     protocol.bleGetNextFragment()
                 } catch (e: Exception) {
@@ -3468,7 +3477,13 @@ class BleTransportFacade(
 
             // Still poll for new fragments even if there are unsent pending ones
             // This prevents deadlock where old fragments block new ones
-            // Poll for next fragment from protocol
+            // Poll for next fragment from protocol — but never while a peer's
+            // queue is past the mark. This floor used to pop with no check at
+            // all, so every 2 s it pushed one more fragment into a queue the
+            // drain had stopped feeding, until the cap discarded the lot.
+            if (outboundQueue.anyBackedUp()) {
+                return
+            }
             val fragment = try {
                 protocol.bleGetNextFragment()
             } catch (e: Exception) {

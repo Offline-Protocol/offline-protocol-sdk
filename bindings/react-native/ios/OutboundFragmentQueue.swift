@@ -57,8 +57,16 @@ import Foundation
 /// the sender's higher layer (ack-driven retry, data-sync anti-entropy)
 /// re-drives them.
 ///
-/// Overflow should be rare: `isBackedUp` is the drain loop's signal to stop
-/// pulling from the Rust core well before the cap is reached.
+/// The cap is a memory backstop and must stay unreachable in normal
+/// operation, because the discard is still a loss and it tears the message
+/// whose first slices already went out. Two things keep it there. The drain
+/// stops pulling from the Rust core while any recipient of either queue is
+/// past the `isBackedUp` mark (`anyBackedUp`), checked **before** each pop,
+/// since the pop is destructive and nothing can hand a fragment back. And the
+/// cap sits above the largest message the core will fragment (512
+/// fragments), so the mark is reached before one message fills the queue.
+/// With the old cap of 100, one sealed 16 KB message was more than the queue
+/// could hold. A Rust guard pins this value equal to Android's.
 final class OutboundFragmentQueue: @unchecked Sendable {
 
     enum DropReason {
@@ -138,6 +146,17 @@ final class OutboundFragmentQueue: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return (queues[recipientId]?.count ?? 0) >= maxPerPeer * 3 / 4
+    }
+
+    /// True if any recipient is past the `isBackedUp` mark. The drain checks
+    /// it before every pop from the Rust core: the pop is one FIFO across all
+    /// peers and cannot be undone, so the only lossless moment to stop is
+    /// before it. Mirrors Android's `anyBackedUp`. Safe from any thread.
+    func anyBackedUp() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let mark = maxPerPeer * 3 / 4
+        return queues.values.contains { $0.count >= mark }
     }
 
     // MARK: - Owning-queue mutations
@@ -258,6 +277,7 @@ final class OutboundFragmentQueue: @unchecked Sendable {
         return hasUnsent
     }
 
-    static let defaultMaxPerPeer = 100
+    /// Above 4/3 of the core's 512-fragment message ceiling; see the class note.
+    static let defaultMaxPerPeer = 768
     static let defaultTimeout: TimeInterval = 30.0
 }

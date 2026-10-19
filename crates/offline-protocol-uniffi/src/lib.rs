@@ -13795,6 +13795,55 @@ mod tests {
     ///    GATT read later, together; if a refactor separates them,
     ///    `fragment_fallback_count` starts ticking in production and nothing
     ///    fails at compile time.
+    /// The two outbound fragment queues share one cap, and it holds a whole
+    /// maximum-size message below the backed-up mark.
+    ///
+    /// Below that, one large message overruns the queue on its own and the
+    /// overflow discard tears it: with a cap of 100 the 2026-10-19 volume test
+    /// never delivered a 16 KB or 30 KB message from Android. The two values
+    /// are hand-mirrored (C5), so a drifted copy would leave one platform
+    /// tearing messages the other delivers. iOS also has to hand the constant
+    /// to both of its outbound queues, since it constructs them explicitly.
+    #[test]
+    fn the_outbound_fragment_queue_cap_holds_a_maximum_message_on_both_platforms() {
+        fn value_after(source: &str, marker: &str) -> usize {
+            let rest = &source[source
+                .find(marker)
+                .unwrap_or_else(|| panic!("`{marker}` is gone"))
+                + marker.len()..];
+            rest.trim_start()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap_or_else(|_| panic!("`{marker}` is not followed by a number"))
+        }
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/OutboundFragmentQueue.kt",
+        );
+        let swift = rn_source_code_only("ios/OutboundFragmentQueue.swift");
+        let manager = rn_source_code_only("ios/BleManager.swift");
+
+        let android = value_after(&kotlin, "const val DEFAULT_MAX_PER_PEER: Int =");
+        let ios = value_after(&swift, "static let defaultMaxPerPeer =");
+        assert_eq!(
+            android, ios,
+            "the two outbound fragment queue caps must match"
+        );
+        let largest = offline_protocol_transport::constants::BLE_MAX_FRAGMENT_COUNT;
+        assert!(
+            android * 3 / 4 >= largest,
+            "the backed-up mark ({}) must hold a whole {largest}-fragment message",
+            android * 3 / 4
+        );
+        assert!(
+            manager.contains(
+                "private let MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER = OutboundFragmentQueue.defaultMaxPerPeer"
+            ) && manager.matches("maxPerPeer: MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER,").count() == 2,
+            "both iOS outbound queues must be built with the shared outbound cap"
+        );
+    }
+
     #[test]
     fn react_native_ble_announces_only_cross_checked_addresses() {
         let swift = rn_source_code_only("ios/BleManager.swift");

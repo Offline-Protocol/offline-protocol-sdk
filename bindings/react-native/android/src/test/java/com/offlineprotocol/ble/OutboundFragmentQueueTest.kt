@@ -139,6 +139,30 @@ class OutboundFragmentQueueTest {
     }
 
     @Test
+    fun `anyBackedUp trips when any one recipient reaches the mark`() {
+        // The drain checks this before every destructive pop, so it has to see
+        // a backed-up peer even when the fragment about to be popped is for
+        // someone else: the pop is one FIFO across all of them.
+        val h = Harness(maxPerPeer = 8)
+        assertFalse(h.queue.anyBackedUp())
+        repeat(5) { h.queue.enqueue("alice", byteArrayOf(it.toByte())) }
+        h.queue.enqueue("bob", byteArrayOf(9))
+        assertFalse("5 of 8 is below the 3/4 mark", h.queue.anyBackedUp())
+        h.queue.enqueue("alice", byteArrayOf(6))
+        assertTrue(h.queue.anyBackedUp())
+        assertTrue(h.queue.isBackedUp("alice"))
+        assertFalse(h.queue.isBackedUp("bob"))
+    }
+
+    @Test
+    fun `the default cap holds a whole maximum-size message below the mark`() {
+        // The core fragments a message into at most 512 pieces. Below that,
+        // one large message overruns the queue on its own and the overflow
+        // discard tears it, which is how 16 KB messages were lost.
+        assertTrue(OutboundFragmentQueue.DEFAULT_MAX_PER_PEER * 3 / 4 >= 512)
+    }
+
+    @Test
     fun `per-peer cap overflow does not affect other recipients`() {
         val h = Harness(maxPerPeer = 2)
         h.queue.enqueue("alice", byteArrayOf(1))
