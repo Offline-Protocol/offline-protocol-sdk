@@ -4,7 +4,7 @@ react_native_ios = File.expand_path('../../../react-native/ios', __dir__)
 
 # PR2: engine lifecycle + Internet transport + shared relay helpers.
 # BLE / Wi‑Fi / Nostr / Reticulum land in PR3. Keep in sync with
-# android/build.gradle `flutterPr2ExcludedKotlin` / react-only list.
+# android/build.gradle `pr2KotlinIncludes` / KotlinCompile excludes.
 pr2_bridge_swift = [
   'ProtocolConfigParser.swift',
   'InitialRuntimeConfigApplier.swift',

@@ -41,8 +41,6 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
     private var applicationContext: android.content.Context? = null
     private var protocol: OfflineProtocol? = null
     private var currentConfig: ProtocolConfig? = null
-    private var rawConfigJson: JSONObject? = null
-    private var storedInternetConfig: InternetTransportBootstrap.StoredInternetConfig? = null
     private var internetManager: InternetManager? = null
 
     private var engineExecutor: ExecutorService = newEngineExecutor()
@@ -206,8 +204,6 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
             }
         })
         InitialRuntimeConfigApplier.apply(proto, parsed.rawJson)
-        rawConfigJson = parsed.rawJson
-        storedInternetConfig = InternetTransportBootstrap.readStoredConfig(parsed.rawJson)
         if (parsed.coreConfig.internetEnabled) {
             val ctx = applicationContext
                 ?: throw IllegalStateException("Plugin not attached")
@@ -248,15 +244,7 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
     private fun startOnEngine() {
         val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
         proto.start()
-        val manager = internetManager
-        val stored = storedInternetConfig
-        if (manager != null && stored != null) {
-            try {
-                InternetTransportBootstrap.startIfConfigured(manager, stored)
-            } catch (e: Exception) {
-                Log.w(TAG, "Internet transport failed to start (core is running)", e)
-            }
-        }
+        // Internet auto-enable runs in Dart after start() (same layer as React Native JS).
     }
 
     private fun stopOnEngine() {
@@ -317,8 +305,6 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
             Log.w(TAG, "internet stop during teardown", e)
         }
         internetManager = null
-        storedInternetConfig = null
-        rawConfigJson = null
         synchronized(eventSeqLock) {
             eventSeq = 0
         }

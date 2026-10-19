@@ -24,21 +24,15 @@ class OfflineProtocol {
 
   /// Core protocol events (`message_received`, diagnostics, Internet status, …).
   ///
+  /// Subscribe before [createFromConfig] / [start] if you need every event.
   /// Each event includes monotonic [OfflineProtocolNativeEvent.seq] when the
   /// native bridge supports gap detection (same contract as React Native).
   static Stream<OfflineProtocolNativeEvent> get events {
-    return _eventsChannel.receiveBroadcastStream().map((dynamic raw) {
-      if (raw is! Map) {
-        throw StateError('Unexpected event payload: $raw');
-      }
-      final eventJson = raw['eventJson'];
-      if (eventJson is! String) {
-        throw StateError('Event missing eventJson string');
-      }
-      final seqRaw = raw['seq'];
-      final int? seq = seqRaw is int ? seqRaw : (seqRaw as num?)?.toInt();
-      return OfflineProtocolNativeEvent(eventJson: eventJson, seq: seq);
-    });
+    return _eventsChannel
+        .receiveBroadcastStream()
+        .map(_parseNativeEvent)
+        .where((event) => event != null)
+        .cast<OfflineProtocolNativeEvent>();
   }
 
   /// Builds a [ProtocolConfig] map with all transports disabled for local
@@ -61,9 +55,8 @@ class OfflineProtocol {
   /// Creates the Rust engine from a JSON config object (camelCase or snake_case).
   ///
   /// Optional top-level `dors` and `relay` sections are applied the same way as
-  /// on React Native after [ProtocolConfig] is constructed. When
-  /// `transports.internet` is enabled with a `serverAddress`, [start] also
-  /// calls [enableInternetTransport] (matching the React Native JS layer).
+  /// on React Native after [ProtocolConfig] is constructed. When Internet is
+  /// configured, [start] calls [enableInternetTransport] (React Native JS layer).
   static Future<void> createFromConfig(Map<String, dynamic> config) async {
     _lastCreateConfig = Map<String, dynamic>.from(config);
     await _channel.invokeMethod<void>('create', jsonEncode(config));
@@ -139,32 +132,83 @@ class OfflineProtocol {
     return localAddress();
   }
 
+  static OfflineProtocolNativeEvent? _parseNativeEvent(dynamic raw) {
+    try {
+      if (raw is! Map) {
+        throw FormatException('Expected a Map, got ${raw.runtimeType}');
+      }
+      final eventJson = raw['eventJson'];
+      if (eventJson is! String) {
+        throw FormatException('Missing eventJson string');
+      }
+      final seqRaw = raw['seq'];
+      final int? seq = seqRaw is int ? seqRaw : (seqRaw as num?)?.toInt();
+      return OfflineProtocolNativeEvent(eventJson: eventJson, seq: seq);
+    } catch (e, st) {
+      debugPrint('[OfflineProtocol] Dropping malformed native event: $e\n$st');
+      return null;
+    }
+  }
+
+  /// Mirrors [InternetTransportBootstrap.readStoredConfig] key precedence and
+  /// React Native `start()` auto-enable (`transports.internet.enabled` + server).
+  /// Exposed for unit tests only.
+  @visibleForTesting
+  static Map<String, dynamic>? resolveInternetAutoEnableConfig(
+    Map<String, dynamic> root,
+  ) =>
+      _internetAutoEnableConfig(root);
+
+  static Map<String, dynamic>? _internetAutoEnableConfig(Map<String, dynamic> root) {
+    final transports = root['transports'];
+    Map<String, dynamic> internet = {};
+    final hasNestedInternet = transports is Map && transports['internet'] is Map;
+    if (hasNestedInternet) {
+      internet = Map<String, dynamic>.from(transports['internet'] as Map);
+    }
+
+    final serverRaw = internet['serverAddress'] ??
+        internet['server_address'] ??
+        root['internetServerAddress'] ??
+        root['internet_server_address'];
+    if (serverRaw is! String || serverRaw.trim().isEmpty) {
+      return null;
+    }
+
+    final nestedEnabled = hasNestedInternet && internet['enabled'] == true;
+    final topLevelEnabled = root['internetEnabled'] == true;
+    if (!nestedEnabled && !topLevelEnabled) {
+      return null;
+    }
+
+    final autoReconnect = internet['autoReconnect'] ??
+        internet['auto_reconnect'] ??
+        root['internetAutoReconnect'] ??
+        root['internet_auto_reconnect'] ??
+        true;
+
+    final enableConfig = <String, dynamic>{
+      ...internet,
+      'enabled': true,
+      'serverAddress': serverRaw.trim(),
+      'autoReconnect': autoReconnect,
+    };
+    final auth = internet['authToken'] ?? internet['auth_token'];
+    if (auth is String && auth.isNotEmpty) {
+      enableConfig['authToken'] = auth;
+    }
+    return enableConfig;
+  }
+
   static Future<void> _autoEnableInternetIfConfigured() async {
     final root = _lastCreateConfig;
     if (root == null) return;
 
-    final transports = root['transports'];
-    if (transports is! Map) return;
-
-    final internetRaw = transports['internet'];
-    if (internetRaw is! Map) return;
-
-    final internet = Map<String, dynamic>.from(internetRaw);
-    final enabled = internet['enabled'] == true || root['internetEnabled'] == true;
-    if (!enabled) return;
-
-    final serverAddress = internet['serverAddress'] ?? internet['server_address'];
-    if (serverAddress is! String || serverAddress.trim().isEmpty) {
-      return;
-    }
+    final enableConfig = _internetAutoEnableConfig(root);
+    if (enableConfig == null) return;
 
     try {
-      await enableInternetTransport({
-        ...internet,
-        'enabled': true,
-        'serverAddress': serverAddress,
-        'autoReconnect': internet['autoReconnect'] ?? internet['auto_reconnect'] ?? true,
-      });
+      await enableInternetTransport(enableConfig);
     } catch (e, st) {
       // Same non-fatal contract as React Native `start()` auto-enable.
       debugPrint('[OfflineProtocol] Failed to auto-enable internet transport: $e\n$st');

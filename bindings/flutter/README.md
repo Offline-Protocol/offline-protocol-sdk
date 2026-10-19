@@ -13,8 +13,9 @@ results are posted on the main queue (see [Kotlin bridge K2](../../docs/bridges/
 
 ## PR2 scope (events, messaging, Internet)
 
-- **Events:** subscribe with `OfflineProtocol.events`. Payloads use the same
-  `eventJson` (+ optional `seq`) shape as React Native `OfflineProtocol_Event`.
+- **Events:** subscribe with `OfflineProtocol.events` **before** `create` / `start`
+  if you need early diagnostics. Payloads use the same `eventJson` (+ optional
+  `seq`) shape as React Native `OfflineProtocol_Event`.
 - **Messaging:** `OfflineProtocol.sendMessage`.
 - **Internet:** `OfflineProtocol.enableInternetTransport`, plus auto-enable after
   `start()` when `transports.internet` is enabled with a `serverAddress` (same as

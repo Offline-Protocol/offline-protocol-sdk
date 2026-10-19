@@ -9,8 +9,6 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
     private var eventsChannel: FlutterEventChannel?
     private var protocolInstance: OfflineProtocol?
     private var currentConfig: ProtocolConfig?
-    private var rawConfig: [String: Any] = [:]
-    private var storedInternetConfig = InternetTransportBootstrap.StoredInternetConfig()
     private var internetManager: InternetManager?
 
     private let engineQueue = DispatchQueue(
@@ -174,8 +172,6 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
             self?.emitEventJson(json)
         }))
         InitialRuntimeConfigApplier.apply(proto: proto, rawConfig: parsed.raw)
-        rawConfig = parsed.raw
-        storedInternetConfig = InternetTransportBootstrap.readStoredConfig(raw: parsed.raw)
         if parsed.config.internetEnabled {
             let manager = InternetManager(
                 protocol: proto,
@@ -229,16 +225,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
             )
         }
         try proto.start()
-        if let manager = internetManager {
-            do {
-                try InternetTransportBootstrap.startIfConfigured(
-                    manager: manager,
-                    stored: storedInternetConfig
-                )
-            } catch {
-                NSLog("OfflineProtocolPlugin: Internet transport failed to start (core is running): \(error)")
-            }
-        }
+        // Internet auto-enable runs in Dart after start() (same layer as React Native JS).
     }
 
     private func stopOnEngine() {
@@ -337,8 +324,6 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
     private func tearDownProtocol() {
         try? internetManager?.stop()
         internetManager = nil
-        storedInternetConfig = InternetTransportBootstrap.StoredInternetConfig()
-        rawConfig = [:]
         eventSeqLock.lock()
         eventSeq = 0
         eventSeqLock.unlock()

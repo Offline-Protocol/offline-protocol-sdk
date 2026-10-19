@@ -31,5 +31,10 @@ flutter run -d ios
 
 ## What it does
 
-Boots the engine with all transports disabled, initializes MLS with platform secure
-storage, starts the core, and prints this device's `off1…` address.
+Boots the engine with all transports disabled, subscribes to core events,
+initializes MLS with platform secure storage, starts the core, and prints this
+device's `off1…` address.
+
+Generated plugin registrant files and `.flutter-plugins-dependencies` are not
+committed; run `flutter pub get` (and `bootstrap-example-platforms.sh` for iOS)
+locally after clone.
