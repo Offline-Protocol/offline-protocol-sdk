@@ -1287,6 +1287,7 @@ jobs:
           # paths-filter compares the PR diff to the base branch.
           fetch-depth: 0
 
+      # flutter_native includes Cargo.lock and engine crates in the UniFFI cdylib closure.
       - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
         id: flutter_paths
         with:
@@ -1301,12 +1302,24 @@ jobs:
               - 'bindings/flutter/scripts/**'
               - 'bindings/react-native/android/**'
               - 'scripts/generate-bindings.sh'
+              - 'Cargo.lock'
+              - 'Cargo.toml'
               - 'crates/offline-protocol-uniffi/Cargo.toml'
               - 'crates/offline-protocol-uniffi/build.rs'
               - 'crates/offline-protocol-uniffi/src/lib.rs'
               - 'crates/offline-protocol-uniffi/src/offline_protocol.udl'
               - 'crates/offline-protocol-uniffi/src/capi/**'
               - 'crates/offline-protocol-uniffi/src/host_log.rs'
+              - 'crates/offline-protocol/**'
+              - 'crates/offline-protocol-core/**'
+              - 'crates/offline-protocol-sealed/**'
+              - 'crates/offline-protocol-router/**'
+              - 'crates/offline-protocol-transport/**'
+              - 'crates/offline-protocol-reliability/**'
+              - 'crates/offline-protocol-mls/**'
+              - 'crates/offline-protocol-data/**'
+              - 'crates/offline-protocol-services/**'
+              - 'crates/offline-protocol-telemetry-wire/**'
 
       - name: Skip (no Flutter-related changes on this PR)
         if: >-

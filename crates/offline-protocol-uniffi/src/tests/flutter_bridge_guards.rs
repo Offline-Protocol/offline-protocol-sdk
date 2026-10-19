@@ -181,6 +181,8 @@ fn flutter_binding_ci_job_is_wired_in_workflow() {
         "measure-plugin-aar-size.sh --check",
         "bindings/flutter/offline_protocol",
         "bindings/react-native/android/**",
+        "Cargo.lock",
+        "crates/offline-protocol/**",
         "dorny/paths-filter@",
         "flutter-version:",
     ] {
