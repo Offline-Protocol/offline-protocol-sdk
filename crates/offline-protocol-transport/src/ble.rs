@@ -1057,6 +1057,16 @@ impl Transport for BleTransport {
         Ok(())
     }
 
+    /// A message leaves this list when the bridge pulls its first fragment:
+    /// from then on it is being written, and a timeout means what it says.
+    fn queued_message_ids(&self) -> Vec<String> {
+        self.send_queue
+            .lock_or_recover()
+            .iter()
+            .map(|(_, message)| message.id.as_str())
+            .collect()
+    }
+
     /// Queues `message` for a specific connected peer.
     ///
     /// Identical to [`Transport::send`] except that the queue key — which is
@@ -1567,6 +1577,22 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
+    }
+
+    /// A message counts as queued until the bridge pulls its first fragment.
+    /// The sender reads this to tell "not sent yet" from "unanswered" when an
+    /// acknowledgement times out.
+    #[test]
+    fn queued_message_ids_lists_a_message_until_its_first_fragment_is_pulled() {
+        let transport = BleTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+        transport.on_peer_discovered(peer_device("bob"));
+        let message = small_message();
+        transport.send(&message).unwrap();
+
+        assert_eq!(transport.queued_message_ids(), vec![message.id.as_str()]);
+        assert!(transport.get_next_fragment().unwrap().is_some());
+        assert!(transport.queued_message_ids().is_empty());
     }
 
     #[test]

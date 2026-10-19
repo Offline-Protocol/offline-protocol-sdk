@@ -41690,8 +41690,9 @@ fn a_confirmation_probe_is_withdrawn_when_nothing_could_supersede_it() {
     assert!(!alice.confirmation_probe_outstanding.contains_key(&bob));
     assert!(!alice.confirmation_probe_superseded.contains_key(&bob));
 
-    // A full ACK tracker fails the send after the probe entered the outbox,
-    // so no id comes back to supersede next time. The failed send clears it.
+    // A full ACK tracker holds the probe for the retry queue instead of
+    // failing its send, so its id still comes back and the next probe can
+    // supersede it: exactly one probe stays queued, and it is the tracked one.
     for _ in 0..100_000 {
         if alice
             .ack_manager
@@ -41703,14 +41704,16 @@ fn a_confirmation_probe_is_withdrawn_when_nothing_could_supersede_it() {
     }
     alice.send_session_confirmation_probe(&bob, "test");
     alice.send_session_confirmation_probe(&bob, "test");
+    let queued: Vec<MessageId> = alice
+        .outbox
+        .values()
+        .filter(|e| OfflineProtocol::is_confirmation_probe(&e.message))
+        .map(|e| e.message.id.clone())
+        .collect();
     assert_eq!(
-        alice
-            .outbox
-            .values()
-            .filter(|e| OfflineProtocol::is_confirmation_probe(&e.message))
-            .count(),
-        0,
-        "a probe whose send failed is not left queued"
+        queued,
+        vec![alice.confirmation_probe_outstanding[&bob].clone()],
+        "a probe held at the ACK ceiling stays tracked, so it never lingers unsuperseded"
     );
 }
 
@@ -42575,4 +42578,358 @@ fn test_unrouted_ack_hold_is_bounded() {
     protocol.flush_outbox_all();
     assert!(protocol.unrouted_acks.is_empty());
     assert!(internet.sent_messages().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// The pending-ACK ceiling (2026-10-19 volume test)
+// ---------------------------------------------------------------------------
+
+/// A protocol whose pending-ACK table holds `max_pending_acks` entries, on a
+/// carrier that accepts every frame and never acknowledges one.
+fn protocol_with_ack_ceiling(
+    max_pending_acks: usize,
+    ack_timeout_ms: u64,
+) -> (
+    OfflineProtocol,
+    Arc<Mutex<Vec<Message>>>,
+    Arc<Mutex<Vec<Event>>>,
+) {
+    let mut config = create_test_config();
+    config.reliability.ack.max_pending_acks = max_pending_acks;
+    config.reliability.ack.default_timeout_ms = ack_timeout_ms;
+    config.reliability.retry.initial_delay_ms = 1;
+    config.reliability.retry.max_delay_ms = 1;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+
+    let carrier = FlakyTransport::fail_first(TransportType::BLE, 0);
+    let sent = Arc::clone(&carrier.sent_messages);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(carrier));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| events_handle.lock().unwrap().push(event));
+    (protocol, sent, events)
+}
+
+fn sent_ids(sent: &Arc<Mutex<Vec<Message>>>) -> Vec<String> {
+    sent.lock().unwrap().iter().map(|m| m.id.as_str()).collect()
+}
+
+/// A full table holds the send back instead of failing it. The volume test
+/// saw `sendMessage` throw for messages that were already on the wire: the
+/// receiver got 4,626 from a sender whose API had accepted 2,748.
+#[test]
+fn test_ack_ceiling_defers_a_send_instead_of_failing_it() {
+    let (mut protocol, sent, events) = protocol_with_ack_ceiling(3, 60_000);
+
+    let ids: Vec<MessageId> = (0..5)
+        .map(|i| {
+            protocol
+                .send_message(
+                    "bob",
+                    format!("m{i}"),
+                    None::<MessagePriority>,
+                    None::<String>,
+                )
+                .expect("a full ACK table must never fail a send")
+        })
+        .collect();
+
+    assert_eq!(
+        sent_ids(&sent),
+        ids[..3].iter().map(MessageId::as_str).collect::<Vec<_>>(),
+        "only messages with a slot to track them are transmitted"
+    );
+    let deferred: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageDeferred {
+                message_id, reason, ..
+            } if reason == "ack_capacity" => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deferred,
+        ids[3..].iter().map(MessageId::as_str).collect::<Vec<_>>()
+    );
+    assert!(events
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|e| !matches!(e, Event::MessageFailed { .. })));
+
+    // Held, not sent, on every tick while the table stays full.
+    for _ in 0..3 {
+        thread::sleep(Duration::from_millis(3));
+        protocol
+            .process()
+            .expect("a full table must not fail the tick");
+    }
+    assert_eq!(sent.lock().unwrap().len(), 3);
+
+    // An acknowledgement frees a slot and the next held message goes out.
+    protocol.ack_manager.remove_ack(&ids[0]);
+    thread::sleep(Duration::from_millis(3));
+    protocol.process().unwrap();
+    assert_eq!(sent.lock().unwrap().len(), 4);
+    assert_eq!(sent_ids(&sent)[3], ids[3].as_str());
+}
+
+/// The wedge itself. A retry with no slot used to propagate the capacity
+/// error out of `process_retry_queue`, so `process()` returned before
+/// `process_timed_out_acks` on every tick, the step that frees slots never
+/// ran, and the engine never recovered.
+#[test]
+fn test_a_retry_without_a_slot_does_not_starve_the_timeout_sweep() {
+    let (mut protocol, sent, events) = protocol_with_ack_ceiling(3, 1);
+
+    for i in 0..3 {
+        protocol
+            .send_message(
+                "bob",
+                format!("m{i}"),
+                None::<MessagePriority>,
+                None::<String>,
+            )
+            .unwrap();
+    }
+    // A fourth message already in the retry queue and holding no slot: the
+    // shape a pruned slot left behind in the field.
+    let orphan = protocol.create_message("bob", "held", None, None).unwrap();
+    protocol.ensure_outbox_entry(&orphan);
+    protocol.retry_queue.enqueue(orphan.clone(), 0);
+
+    thread::sleep(Duration::from_millis(5));
+    protocol
+        .process()
+        .expect("a retry with no slot must not fail the tick");
+
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, Event::MessageRetrying { .. })),
+        "the timeout sweep must still run on the tick that met a full table"
+    );
+    assert!(
+        !sent_ids(&sent).contains(&orphan.id.as_str()),
+        "a message with no slot to track it is never transmitted"
+    );
+    assert!(
+        protocol.retry_queue.contains(&orphan.id.as_str()),
+        "a held retry stays queued instead of being dropped"
+    );
+}
+
+/// The prune must outlive the retry ladder's longest wait. A fixed five
+/// minutes equalled the default cap, so the ninth retry's slot was gone just
+/// before its resend fired, and that resend met a full table.
+#[test]
+fn test_timed_out_ack_retention_outlives_the_longest_retry_wait() {
+    let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let reliability = &protocol.config.reliability;
+    let longest_gap =
+        Duration::from_millis(reliability.ack.default_timeout_ms + reliability.retry.max_delay_ms);
+    assert!(protocol.timed_out_ack_retention() > longest_gap);
+}
+
+/// A receiver that falls more than the forward window behind its sender used
+/// to stay broken for good: every frame failed as an ordinary decryption
+/// error, which waits for a re-sealed resend, and every resend was further
+/// ahead still. It now re-keys, and the pair recovers. The 2026-10-19 volume
+/// test lost its whole iPhone-to-Android direction to the old behaviour.
+#[test]
+fn test_a_receiver_past_the_forward_window_rekeys_and_recovers() {
+    let (mut alice, alice_h) = make_encrypted_protocol("alice");
+    let (mut bob, bob_h) = make_encrypted_protocol("bob");
+
+    let bob_rx: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let alice_rx: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let bob_warnings: Arc<Mutex<Vec<SecurityWarningCode>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let rx = Arc::clone(&bob_rx);
+        let warnings = Arc::clone(&bob_warnings);
+        bob.on_event(move |e| match e {
+            Event::MessageReceived { content, .. } => rx.lock().unwrap().push(content),
+            Event::SecurityWarning { reason_code, .. } => {
+                warnings.lock().unwrap().push(reason_code)
+            }
+            _ => {}
+        });
+        let rx = Arc::clone(&alice_rx);
+        alice.on_event(move |e| {
+            if let Event::MessageReceived { content, .. } = e {
+                rx.lock().unwrap().push(content);
+            }
+        });
+    }
+    alice.start().unwrap();
+    bob.start().unwrap();
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+
+    // Alice spends more generations than bob's window covers, none of which
+    // reach him: the shape a stream of re-sealed resends leaves behind when
+    // the receiver drops each as a duplicate.
+    {
+        let m = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        for _ in 0..=offline_protocol_mls::group::SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE {
+            m.encrypt_for_user(&id("bob"), b"never delivered").unwrap();
+        }
+    }
+    alice
+        .send_message(&id("bob"), "past-the-window", None, None::<String>)
+        .unwrap();
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+
+    assert!(
+        bob_warnings
+            .lock()
+            .unwrap()
+            .contains(&SecurityWarningCode::SessionRekeyTriggered),
+        "a receiver past the window must re-key (warnings {:?})",
+        bob_warnings.lock().unwrap()
+    );
+
+    alice
+        .send_message(&id("bob"), "after-rekey-a2b", None, None::<String>)
+        .unwrap();
+    bob.send_message(&id("alice"), "after-rekey-b2a", None, None::<String>)
+        .unwrap();
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+
+    assert!(
+        bob_rx
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c == "after-rekey-a2b"),
+        "bob must decrypt alice again once the pair re-keys (got {:?})",
+        bob_rx.lock().unwrap()
+    );
+    assert!(
+        alice_rx
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c == "after-rekey-b2a"),
+        "alice must decrypt bob after the re-key (got {:?})",
+        alice_rx.lock().unwrap()
+    );
+}
+
+/// A carrier that accepts every frame and reports it as still waiting in its
+/// local queue until `drained` is set, like a BLE link carrying less than it
+/// is offered.
+#[derive(Clone)]
+struct BackloggedTransport {
+    sent: Arc<Mutex<Vec<Message>>>,
+    drained: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Transport for BackloggedTransport {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn transport_type(&self) -> TransportType {
+        TransportType::BLE
+    }
+    fn status(&self) -> TransportStatus {
+        TransportStatus::Available
+    }
+    fn metrics(&self) -> TransportMetrics {
+        TransportMetrics::default()
+    }
+    fn send(&self, message: &Message) -> offline_protocol_transport::Result<()> {
+        self.sent.lock().unwrap().push(message.clone());
+        Ok(())
+    }
+    fn receive(&self) -> offline_protocol_transport::Result<Option<Message>> {
+        Ok(None)
+    }
+    fn start(&self) -> offline_protocol_transport::Result<()> {
+        Ok(())
+    }
+    fn stop(&self) -> offline_protocol_transport::Result<()> {
+        Ok(())
+    }
+    fn on_status_changed(&self, _status: TransportStatus) {}
+    fn queued_message_ids(&self) -> Vec<String> {
+        if self.drained.load(std::sync::atomic::Ordering::SeqCst) {
+            return Vec::new();
+        }
+        self.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect()
+    }
+}
+
+/// A frame that times out while still in the local queue is not retried: a
+/// retry would append a second, re-sealed copy behind the first. Once the
+/// frame has left the queue, its timeout means what it says again.
+#[test]
+fn test_a_frame_still_in_the_local_queue_is_not_retried() {
+    let mut config = create_test_config();
+    config.reliability.ack.default_timeout_ms = 1;
+    config.reliability.retry.initial_delay_ms = 1;
+    config.reliability.retry.max_delay_ms = 1;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let carrier = BackloggedTransport {
+        sent: Arc::new(Mutex::new(Vec::new())),
+        drained: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(carrier.clone()));
+    protocol.start().unwrap();
+    let retries = Arc::new(Mutex::new(0usize));
+    let handle = Arc::clone(&retries);
+    protocol.on_event(move |e| {
+        if matches!(e, Event::MessageRetrying { .. }) {
+            *handle.lock().unwrap() += 1;
+        }
+    });
+
+    protocol
+        .send_message(
+            "bob",
+            "waiting its turn",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+    for _ in 0..5 {
+        thread::sleep(Duration::from_millis(3));
+        protocol.process().unwrap();
+    }
+    assert_eq!(
+        *retries.lock().unwrap(),
+        0,
+        "a queued frame must not be retried"
+    );
+    assert_eq!(
+        carrier.sent.lock().unwrap().len(),
+        1,
+        "and must not be queued twice"
+    );
+
+    carrier
+        .drained
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    thread::sleep(Duration::from_millis(3));
+    protocol.process().unwrap();
+    assert_eq!(
+        *retries.lock().unwrap(),
+        1,
+        "a frame that has left the queue times out as before"
+    );
 }

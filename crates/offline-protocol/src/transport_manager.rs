@@ -1202,6 +1202,15 @@ impl TransportManager {
         })
     }
 
+    /// Ids of messages some carrier has accepted but not yet started writing
+    /// (see [`Transport::queued_message_ids`]).
+    pub fn queued_message_ids(&self) -> std::collections::HashSet<String> {
+        self.transports
+            .values()
+            .flat_map(|transport| transport.queued_message_ids())
+            .collect()
+    }
+
     /// Whether a mesh carrier holds a live link straight to `peer_id`.
     ///
     /// The peer-specific half of [`Self::can_reach_without_carrying`], split out

@@ -387,6 +387,20 @@ pub(crate) fn classify_transport_send_error(raw: &str) -> &'static str {
     }
 }
 
+/// The pending-ACK table was full, so the frame was held back instead of
+/// transmitted. Not a transport fault: the retry queue sends it as soon as an
+/// acknowledgement frees a slot. A link carrying less than the app offers
+/// produces this steadily, and it is the signal to slow down.
+pub(crate) const SEND_DEFER_REASON_ACK_CAPACITY: &str = "ack_capacity";
+
+/// The longest an acknowledgement timeout is postponed for a frame that is
+/// still waiting in a local transport queue, measured from the attempt.
+///
+/// Bounded so a queue that never drains (a link that died without telling
+/// the transport) still reaches the retry ladder, and through it the other
+/// carriers and the mesh, within a minute.
+pub(crate) const QUEUED_ACK_GRACE_MAX: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Classifies a locally raised send failure for an event field.
 ///
 /// The sibling of [`classify_transport_send_error`] for errors this device

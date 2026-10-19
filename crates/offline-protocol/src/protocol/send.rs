@@ -12,9 +12,10 @@ use super::{
     MAX_PENDING_EXPIRIES_PER_PASS, MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER,
     MAX_PENDING_MESSAGE_BYTES_GLOBAL, MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS,
     MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL,
-    RICH_PAYLOAD_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, SEND_FAIL_REASON_RELAY_PUSHED,
-    SEND_FAIL_REASON_RELAY_PUSHED_STORED, SEND_FAIL_REASON_RELAY_STORED,
-    SEND_FAIL_REASON_TRANSPORT, WELCOME_NO_CARRIER_RETRY_SECS, WELCOME_UNREACHABLE_RETRY_CAP_SECS,
+    RICH_PAYLOAD_V1, SEND_DEFER_REASON_ACK_CAPACITY, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
+    SEND_FAIL_REASON_RELAY_PUSHED, SEND_FAIL_REASON_RELAY_PUSHED_STORED,
+    SEND_FAIL_REASON_RELAY_STORED, SEND_FAIL_REASON_TRANSPORT, WELCOME_NO_CARRIER_RETRY_SECS,
+    WELCOME_UNREACHABLE_RETRY_CAP_SECS,
 };
 use super::{classify_transport_send_error, send_failure_token};
 use crate::constants::{
@@ -384,6 +385,10 @@ impl OfflineProtocol {
 
         self.deduplicator.mark_seen_local(message_id.clone());
 
+        if self.defer_app_message_for_ack_capacity(&message) {
+            return Ok(message_id);
+        }
+
         let previous_transport = self.transport_manager.current_transport();
 
         // A recipient this device holds a live mesh link to is reached over
@@ -473,6 +478,10 @@ impl OfflineProtocol {
         }
 
         self.deduplicator.mark_seen_local(message_id.clone());
+
+        if self.defer_app_message_for_ack_capacity(&message) {
+            return Ok(message_id);
+        }
 
         let previous_transport = self.transport_manager.current_transport();
         let send_result = self
@@ -598,6 +607,11 @@ impl OfflineProtocol {
         }
 
         self.deduplicator.mark_seen_local(message_id.clone());
+
+        // Internal frames owe the app no event: the retry queue sends it.
+        if self.defer_for_ack_capacity(&message).is_some() {
+            return Ok(message_id);
+        }
 
         let previous_transport = self.transport_manager.current_transport();
         let send_result = self.transport_manager.send(&message);
@@ -750,6 +764,10 @@ impl OfflineProtocol {
             return;
         }
         self.deduplicator.mark_seen_local(message.id.clone());
+
+        if self.defer_for_ack_capacity(&message).is_some() {
+            return;
+        }
 
         let previous_transport = self.transport_manager.current_transport();
         match self.transport_manager.send(&message) {
@@ -3004,17 +3022,25 @@ impl OfflineProtocol {
                 .insert(message.id.clone(), (file_id.to_string(), chunk_index));
 
             let previous_transport = self.transport_manager.current_transport();
-            let send_result = self
-                .transport_manager
-                .send_via_transport(&message, pinned_transport);
+            // A chunk held for a slot is sent by the retry queue, pinned to
+            // the same carrier; the transfer's window counts it as in flight.
+            let send_result = if self.defer_for_ack_capacity(&message).is_some() {
+                None
+            } else {
+                Some(
+                    self.transport_manager
+                        .send_via_transport(&message, pinned_transport),
+                )
+            };
             let current_transport = Some(pinned_transport);
 
             match send_result {
-                Ok(()) => {
+                None => {}
+                Some(Ok(())) => {
                     self.handle_send_success(&message, current_transport)?;
                     self.emit_transport_switch_event(previous_transport, current_transport)?;
                 }
-                Err(err) => {
+                Some(Err(err)) => {
                     let _ = self
                         .handle_send_failure(&message, current_transport.or(previous_transport))?;
                     // send_via_transport does not record retry failures internally.
@@ -3697,13 +3723,67 @@ impl OfflineProtocol {
         infrastructure_reaches_peer || self.transport_manager.mesh_can_address(peer_id)
     }
 
+    /// Holds `message` back when the pending-ACK table has no slot for it,
+    /// returning when the retry queue will try it again; `None` means it has a
+    /// slot and the caller transmits as usual.
+    ///
+    /// The check runs **before** the transmit, because nothing honest is left
+    /// to do after it. A frame sent without a slot is either untracked (its
+    /// loss is never noticed) or reported to the app as a failed send while it
+    /// is on the wire, which is what the 2026-10-19 volume test saw: the
+    /// receiver got 4,626 messages from a sender whose API had accepted 2,748,
+    /// and the retry path's copy of the same error aborted every later
+    /// `process()` tick, so the step that frees slots never ran again.
+    ///
+    /// A held message goes to the outbox and the retry queue at its first
+    /// attempt, so holding it spends nothing from its retry budget, and it is
+    /// not offered to the mesh: it was not sent, so nothing failed.
+    pub(super) fn defer_for_ack_capacity(&mut self, message: &Message) -> Option<DateTime<Utc>> {
+        if !message.requires_ack || self.ack_manager.has_capacity_for(&message.id) {
+            return None;
+        }
+        self.ensure_outbox_entry(message);
+        let next_retry_at = self
+            .retry_queue
+            .enqueue(message.clone(), 0)
+            .unwrap_or_else(Utc::now);
+        debug!(
+            message_id = %message.id,
+            pending_acks = self.ack_manager.pending_count(),
+            "Pending-ACK table full; message held for the retry queue"
+        );
+        Some(next_retry_at)
+    }
+
+    /// [`Self::defer_for_ack_capacity`] for a message the app sent, which is
+    /// owed a `message_deferred` so it does not read as stuck.
+    fn defer_app_message_for_ack_capacity(&mut self, message: &Message) -> bool {
+        let Some(next_retry_at) = self.defer_for_ack_capacity(message) else {
+            return false;
+        };
+        self.emit_event(Event::message_deferred(
+            message.id.clone(),
+            message.recipient.as_str().to_string(),
+            SEND_DEFER_REASON_ACK_CAPACITY,
+            0,
+            Some(next_retry_at.timestamp_millis()),
+        ));
+        true
+    }
+
     pub(super) fn handle_send_success(
         &mut self,
         message: &Message,
         transport: Option<TransportType>,
     ) -> Result<()> {
         self.mark_message_sent(message, transport, Some(1));
-        self.ensure_ack_registration(message)?;
+        // Never `?`: the frame is already on the wire, so an error here would
+        // report a transmitted message as failed. Every transmit path asks
+        // `defer_for_ack_capacity` first, so this is only reachable through a
+        // priority eviction race, and a warning is the honest outcome.
+        if let Err(err) = self.ensure_ack_registration(message) {
+            warn!(message_id = %message.id, error = %err, "ACK registration failed after transmit");
+        }
 
         // A transport reporting success is not always evidence the frame can
         // arrive. The internet transport and Reticulum accept any recipient

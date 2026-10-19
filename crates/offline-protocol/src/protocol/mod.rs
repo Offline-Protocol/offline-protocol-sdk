@@ -2836,6 +2836,13 @@ impl OfflineProtocol {
         attempt_count: u32,
         transport_override: Option<TransportType>,
     ) -> Option<TransportType> {
+        // No slot to track it: leave the send to the retry queue, which waits
+        // for one, instead of transmitting a frame nobody tracks.
+        if message.requires_ack && !self.ack_manager.has_capacity_for(&message.id) {
+            self.ensure_outbox_entry(&message);
+            let _ = self.retry_queue.enqueue(message, attempt_count);
+            return None;
+        }
         self.ensure_outbox_entry(&message);
         // Tier 2: re-seal against the peer's current session before flushing, so
         // a post-re-key epoch change no longer leaves the bytes undecryptable.
@@ -3621,11 +3628,23 @@ impl OfflineProtocol {
         // end. Throttled inside; hours-long holds need no per-tick walk.
         self.sweep_custody();
 
-        self.process_retry_queue()?;
-        self.process_welcome_retry_queue()?;
+        // One step's failure never starves another. Every fallible step runs
+        // on every tick and the first error is reported once they all have.
+        // The steps are coupled: the retry queue fills the pending-ACK table
+        // and the timeout sweep is what empties it, so a retry error that
+        // returned early used to stop the sweep for good.
+        let mut first_error: Option<crate::Error> = None;
+        let mut note = |step: &'static str, result: Result<()>| {
+            if let Err(err) = result {
+                warn!(step, error = %err, "process() step failed; continuing the tick");
+                first_error.get_or_insert(err);
+            }
+        };
+        note("retry_queue", self.process_retry_queue());
+        note("welcome_retry_queue", self.process_welcome_retry_queue());
         self.process_relay_register_retries();
         self.process_relay_broadcast_report_timeouts();
-        self.process_timed_out_acks()?;
+        note("timed_out_acks", self.process_timed_out_acks());
 
         // Throttle session reconciliation to avoid expensive storage I/O
         // (list_sessions → Keychain/Keystore) on every tick. Only run when
@@ -3649,7 +3668,10 @@ impl OfflineProtocol {
         self.evaluate_relay_role();
         self.tick_telemetry_categories();
 
-        Ok(())
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     /// Reports this device's condition to the forwarding governor and announces
@@ -3893,6 +3915,23 @@ impl OfflineProtocol {
             };
 
             processed += 1;
+
+            // No slot to track this resend: put it back unchanged and try
+            // again shortly. Checked before the re-seal, so a held resend
+            // burns no ratchet generation, and before the send, so nothing
+            // goes out that cannot be tracked. The retry count is not
+            // advanced: being held is not an attempt, so the wait is the
+            // ladder's first rung rather than this entry's next one.
+            if entry.message.requires_ack && !self.ack_manager.has_capacity_for(&entry.message.id) {
+                let recheck_ms = self.config.reliability.retry.initial_delay_ms;
+                let _ = self.retry_queue.enqueue_with_delay(
+                    entry.message,
+                    entry.retry_count,
+                    recheck_ms,
+                );
+                continue;
+            }
+
             let previous_transport = self.transport_manager.current_transport();
             // Normally finds the entry already there: a retry entry outlives
             // its outbox entry only if a give-up path skipped
@@ -3917,7 +3956,23 @@ impl OfflineProtocol {
 
             match send_result {
                 Ok(()) => {
-                    let ack_registered_now = self.ensure_ack_registration(&entry.message)?;
+                    // Never `?`. This propagated once, and `process()` then
+                    // returned before `process_timed_out_acks` on every tick:
+                    // the step that frees slots never ran again, so the table
+                    // stayed full and the engine never recovered. The capacity
+                    // check above makes a failure here a priority-eviction
+                    // race at most.
+                    let ack_registered_now = match self.ensure_ack_registration(&entry.message) {
+                        Ok(registered) => registered,
+                        Err(err) => {
+                            warn!(
+                                message_id = %entry.message.id,
+                                error = %err,
+                                "ACK registration failed after a retry send"
+                            );
+                            false
+                        }
+                    };
 
                     if ack_registered_now {
                         // The resend registered a brand-new ACK (the prior one
@@ -4002,8 +4057,25 @@ impl OfflineProtocol {
     /// Processes timed out ACKs and handles retry or failure.
     fn process_timed_out_acks(&mut self) -> Result<()> {
         let timed_out = self.ack_manager.drain_timed_out();
+        if timed_out.is_empty() {
+            return Ok(());
+        }
+        // A frame still waiting in a local queue has not been answered because
+        // it has not been sent. Retrying it would queue a second, re-sealed
+        // copy behind the first: on a congested link that is what grew the
+        // queue, the round trip and the receiver's ratchet gap together in the
+        // 2026-10-19 volume test. It gets a bounded extension instead.
+        let queued = self.transport_manager.queued_message_ids();
         for pending in timed_out {
             let message_id = pending.message_id.clone();
+
+            if queued.contains(&message_id.as_str())
+                && self
+                    .ack_manager
+                    .extend_while_queued(&message_id, QUEUED_ACK_GRACE_MAX)
+            {
+                continue;
+            }
 
             if pending.retry_count >= self.config.reliability.retry.max_retries {
                 self.handle_max_retries_exceeded(&message_id, pending.retry_count)?;
