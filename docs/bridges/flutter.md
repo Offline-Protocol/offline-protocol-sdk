@@ -106,11 +106,12 @@ after compile-surface or UniFFI artifact changes.
 
 ## What CI runs
 
-The `Flutter Binding` job in `.github/workflows/ci.yml`:
+The `Flutter Binding` job in `.github/workflows/ci.yml` (path-filtered on pull
+requests; full run on pushes to `main`):
 
 - `flutter test` and `flutter analyze` on `bindings/flutter/offline_protocol`
-- `:offline_protocol:compileDebugKotlin` on the example Android project
-- `measure-plugin-aar-size.sh --check` after building arm64 UniFFI for jniLibs
+- `:offline_protocol:assembleRelease` via `measure-plugin-aar-size.sh --check`
+  after building arm64 UniFFI into jniLibs (one Gradle invocation)
 
 iOS pod compilation is not gated yet (requires XCFramework assembly like the
 Swift Package job); add when a macOS Flutter job is worth the runner cost.

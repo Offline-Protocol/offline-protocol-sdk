@@ -643,8 +643,11 @@ for one type, still builds in React Native and breaks the native packages and
 the Flutter plugin for every application that uses them.
 
 The check is the package build, on every pull request: the `Swift Package`
-job builds the package and runs it on a simulator, and the `Android Library`
-job compiles the library and its suite. Each list of what to leave out is
+job builds the package and runs it on a simulator, the `Android Library`
+job compiles the library and its suite, and the `Flutter Binding` job runs
+Dart tests, assembles the plugin release AAR (shared Kotlin + jniLibs), and
+checks the committed footprint baseline when Flutter-related paths change.
+Each list of what to leave out is
 checked the other way too. A name on it that matches no file is a rename
 nobody carried over, and both builds refuse it, because the renamed file
 would otherwise be taken.

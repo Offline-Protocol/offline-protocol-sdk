@@ -81,9 +81,13 @@ Flutter; the React Native module keeps its existing paths until a later refactor
 GitHub Actions job **`Flutter Binding`** (`.github/workflows/ci.yml`) runs on every
 pull request:
 
-- `flutter test` and `flutter analyze` on this package
-- `:offline_protocol:compileDebugKotlin` (example Android project)
-- `measure-plugin-aar-size.sh --check` after building arm64 UniFFI into jniLibs
+- `flutter test` and `flutter analyze` on this package (Flutter **3.27.4** in CI)
+- `measure-plugin-aar-size.sh --check` (`:offline_protocol:assembleRelease` plus
+  AAR footprint gate) after building arm64 UniFFI into jniLibs
+
+On pull requests the job runs only when Flutter-related paths change (plugin,
+shared bridge sources, UniFFI crate, baselines, or this workflow). Pushes to
+`main` always run it.
 
 Bridge contract: [docs/bridges/flutter.md](../../docs/bridges/flutter.md).
 

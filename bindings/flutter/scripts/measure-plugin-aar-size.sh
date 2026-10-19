@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Measures the Flutter plugin release AAR (PR3 native surface + jniLibs).
-# Used for PR4 CI footprint visibility and local regression checks.
+# CI uses this single Gradle invocation (:offline_protocol:assembleRelease) to
+# compile shared Kotlin and gate footprint; no separate compileDebugKotlin step.
 #
 #   bindings/flutter/scripts/measure-plugin-aar-size.sh           # print size
 #   bindings/flutter/scripts/measure-plugin-aar-size.sh --check   # fail if over baseline + tolerance

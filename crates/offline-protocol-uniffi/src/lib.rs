@@ -16318,6 +16318,8 @@ mod tests {
             "bindings/flutter/scripts/ci-build-android-jni-arm64.sh",
             "measure-plugin-aar-size.sh --check",
             "bindings/flutter/offline_protocol",
+            "dorny/paths-filter@",
+            "flutter-version:",
         ] {
             assert!(
                 ci.contains(needle),

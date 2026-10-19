@@ -1283,13 +1283,36 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+        with:
+          # paths-filter compares the PR diff to the base branch.
+          fetch-depth: 0
+
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        id: flutter_paths
+        with:
+          filters: |
+            flutter:
+              - 'bindings/flutter/**'
+              - 'docs/bridges/flutter.md'
+              - 'docs/bridges/README.md'
+              - '.github/workflows/ci.yml'
+              - 'crates/offline-protocol-uniffi/**'
+              - 'bindings/react-native/android/src/main/java/**'
+              - 'bindings/react-native/android/src/main/jniLibs/**'
+              - 'scripts/generate-bindings.sh'
+
+      - name: Skip (no Flutter-related changes on this PR)
+        if: github.event_name == 'pull_request' && steps.flutter_paths.outputs.flutter != 'true'
+        run: echo "No matching paths; Flutter Binding checks skipped for this PR."
 
       - uses: actions/setup-java@v6
+        if: github.event_name == 'push' || steps.flutter_paths.outputs.flutter == 'true'
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Setup Android NDK
+        if: github.event_name == 'push' || steps.flutter_paths.outputs.flutter == 'true'
         uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
         id: setup-ndk
         with:
@@ -1297,35 +1320,38 @@ jobs:
           add-to-path: true
 
       - uses: dtolnay/rust-toolchain@stable
+        if: github.event_name == 'push' || steps.flutter_paths.outputs.flutter == 'true'
         with:
           targets: aarch64-linux-android
 
       - uses: Swatinem/rust-cache@v2
+        if: github.event_name == 'push' || steps.flutter_paths.outputs.flutter == 'true'
         with:
           shared-key: ci-flutter-binding
 
       - name: Build arm64 UniFFI for Flutter Android
+        if: github.event_name == 'push' || steps.flutter_paths.outputs.flutter == 'true'
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: bash bindings/flutter/scripts/ci-build-android-jni-arm64.sh
 
-      - uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        if: github.event_name == 'push' || steps.flutter_paths.outputs.flutter == 'true'
         with:
           channel: stable
+          flutter-version: "3.27.4"
           cache: true
 
       - name: Dart unit tests and analyzer
+        if: github.event_name == 'push' || steps.flutter_paths.outputs.flutter == 'true'
         working-directory: bindings/flutter/offline_protocol
         run: |
           flutter pub get
           flutter test
           flutter analyze
 
-      - name: Compile Flutter plugin Kotlin (shared bridge surface)
-        working-directory: bindings/flutter/offline_protocol/example/android
-        run: ./gradlew :offline_protocol:compileDebugKotlin --no-daemon --stacktrace
-
-      - name: Check plugin release AAR size baseline
+      - name: Assemble release AAR and check size baseline
+        if: github.event_name == 'push' || steps.flutter_paths.outputs.flutter == 'true'
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: bindings/flutter/scripts/measure-plugin-aar-size.sh --check
