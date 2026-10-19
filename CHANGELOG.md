@@ -115,6 +115,28 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A link carrying less than it is offered no longer collapses.** Two phones
+  sending 5 messages a second each way over Bluetooth LE delivered 70.5%: the
+  Android phone's indication path carried 12 to 16 frames a second against 15
+  offered, acknowledgements queued behind data until every message timed out,
+  each resend cost the receiver one more acknowledgement on the saturated
+  link, and both phones retried 50,000 times and failed 6,000 messages as
+  "Outbox capacity exceeded". Four changes:
+  - A sender keeps at most 16 frames awaiting acknowledgement in flight to
+    one peer over a mesh link. Further messages wait in the outbox, are
+    reported as `message_deferred` with reason `peer_window`, and go out
+    oldest first as acknowledgements return. The relay is not windowed.
+  - The Bluetooth LE carrier queues an acknowledgement ahead of data.
+  - Delivery acknowledgements to a peer that advertises `ack_versions` entry 2
+    are coalesced, up to five per frame within 500 ms, in a new `ack_more`
+    metadata key. Older peers get one acknowledgement per frame.
+  - On Android, the indication path sends the next fragment as soon as the
+    peer confirms the last, instead of 20 ms later.
+- **A resend the receiver can no longer decrypt is re-sealed.** Past the
+  re-seal budget a resend went out verbatim, and a verbatim copy sealed more
+  than 32 generations before the newest was refused by the receiver,
+  unanswered on a mesh link, until its retries ran out. It is now re-sealed,
+  up to half the forward window.
 - **A full acknowledgement table no longer stops the engine.** Once 1,000
   messages were waiting for acknowledgements, a retry with no slot returned
   an error out of `process()` before the step that frees slots, on every

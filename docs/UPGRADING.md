@@ -2657,6 +2657,17 @@ builds the library from source with its own command and copies it from
 `target/<triple>/mobile/`; the SDK's build scripts already do
 ([ADR 0029](adr/0029-mobile-libraries-are-sized-not-aborting.md)).
 
+**A burst of direct messages to a nearby peer is sent sixteen at a time.**
+Over Bluetooth LE or Wi-Fi Direct, at most 16 messages to one peer wait for
+its acknowledgement at once. The 17th onward return their id as usual, emit
+`message_deferred` with reason `peer_window` instead of `message_sent`, and
+go out in order as acknowledgements return; `message_delivered` follows as
+before. An app that shows a message as "sent" only on `message_sent` should
+show a `peer_window` deferral as queued, not failed. Messages through the
+relay are not affected. The burst used to be handed to the radio all at
+once, which on a slow link ended in mass retries and "Outbox capacity
+exceeded" failures.
+
 ---
 
 ## Appendix A: limits reference
