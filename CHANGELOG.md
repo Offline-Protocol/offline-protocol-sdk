@@ -26,7 +26,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `ProtocolException` subclass per engine refusal. The generated records have
   no defaults, so a `ProtocolConfig` is spelled out in full. CI regenerates
   and diffs the Java with the rest, and builds and tests it against the
-  library on Linux and macOS. The generator is versioned apart from UniFFI, so
+  library on Linux, macOS and Windows. The generator is versioned apart from UniFFI, so
   the script refuses any series but 0.5. The contract is
   `docs/bridges/java.md`.
 - **A C API.** `bindings/c/include/offline_protocol.h` declares about a

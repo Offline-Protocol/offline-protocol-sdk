@@ -28,7 +28,7 @@ that is not on Android uses this one.
 | [C2](README.md#c2-the-error-enum-is-append-only) | The generated `ProtocolException` and `MlsStorageException` decode by positional discriminant, like every other binding. Append-only keeps them correct |
 | [C3](README.md#c3-events-cross-as-opaque-json) | `EventCallback` and `pollEvent` deliver the engine's JSON. An event's fields appear in no Java type, and a field added to an event is invisible here until the host reads it |
 | [C6](README.md#c6-config-parsers-must-not-default-to-literals) | Does not apply as a parser rule: there is none. See J2 for what it costs |
-| [C9](README.md#c9-bridge-behaviour-is-not-covered-by-the-rust-test-suite) | `cargo test` proves nothing about this binding. `gradle build` in `bindings/java` runs `ConsumerCheckTest` against the real library, and CI runs it on Linux and macOS |
+| [C9](README.md#c9-bridge-behaviour-is-not-covered-by-the-rust-test-suite) | `cargo test` proves nothing about this binding. `gradle build` in `bindings/java` runs `ConsumerCheckTest` against the real library, and CI runs it on Linux, macOS and Windows |
 | [C11](README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified) | A `ProtocolStateStorageProvider` is an adapter like any other: `OfflineProtocolLib.runStorageConformance` is the bar |
 | [C12](README.md#c12-telemetry-is-callback-free-and-the-binding-fills-the-platform) | The exception. See J3 |
 
