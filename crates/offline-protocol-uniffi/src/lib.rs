@@ -8298,7 +8298,7 @@ mod tests {
              false for every app that omits the section"
         );
 
-        let swift = read(rn.join("ios/OfflineProtocolModule.swift"));
+        let swift = read(rn.join("ios/ProtocolConfigParser.swift"));
         assert!(
             swift.contains("raw[\"data\"]") && swift.contains("config.dataEnabled = dataEnabled"),
             "the Swift parser must read the data section AND apply it to the \
@@ -8374,7 +8374,7 @@ mod tests {
              high often enough to be worth honouring"
         );
 
-        let swift = read(rn.join("ios/OfflineProtocolModule.swift"));
+        let swift = read(rn.join("ios/ProtocolConfigParser.swift"));
         assert!(
             swift.contains("raw[\"security\"]")
                 && swift.contains("config.controlFreshnessEnforced = controlFreshnessEnforced"),
@@ -11710,7 +11710,7 @@ mod tests {
         };
         let udl = read(manifest.join("src/offline_protocol.udl"));
         let swift_reader = read(rn.join("ios/EncryptionConfigReader.swift"));
-        let swift_module = read(rn.join("ios/OfflineProtocolModule.swift"));
+        let swift_parser = read(rn.join("ios/ProtocolConfigParser.swift"));
         let kotlin_parser =
             read(rn.join("android/src/main/java/com/offlineprotocol/ProtocolConfigParser.kt"));
         let index = read(rn.join("src/index.ts"));
@@ -11747,8 +11747,8 @@ mod tests {
                 );
             }
             assert!(
-                swift_module.contains(&format!("encryption.{camel}")),
-                "OfflineProtocolModule.swift does not pass {camel} to the ProtocolConfig"
+                swift_parser.contains(&format!("encryption.{camel}")),
+                "ProtocolConfigParser.swift does not pass {camel} to the ProtocolConfig"
             );
             assert!(
                 kotlin_parser.contains(&format!("{camel} = {camel}")),
@@ -16747,7 +16747,18 @@ mod tests {
     /// and by that guard clause, not by this test.
     #[test]
     fn react_native_ios_bridge_bounds_every_byte_it_builds_from_javascript() {
-        let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        // Config parsing moved out of OfflineProtocolModule.swift (ADR 0025);
+        // every file that still narrows JavaScript numbers must stay bounded.
+        const SWIFT_JS_NUMERIC_SOURCES: &[&str] = &[
+            "ios/OfflineProtocolModule.swift",
+            "ios/ProtocolConfigParser.swift",
+            "ios/InitialRuntimeConfigApplier.swift",
+        ];
+        let swift = SWIFT_JS_NUMERIC_SOURCES
+            .iter()
+            .map(|rel| rn_source_code_only(rel))
+            .collect::<Vec<_>>()
+            .join(" ");
 
         /// Markers that bound a conversion at the point it is written.
         const BOUNDED: &[&str] = &[
@@ -16793,7 +16804,7 @@ mod tests {
 
         assert!(
             found >= 8,
-            "only found {found} UInt8 conversions in OfflineProtocolModule.swift; \
+            "only found {found} UInt8 conversions in {SWIFT_JS_NUMERIC_SOURCES:?}; \
              the scanner is broken, not the bridge"
         );
         assert!(
