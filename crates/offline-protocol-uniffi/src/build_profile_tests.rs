@@ -91,6 +91,16 @@ fn the_mobile_profile_optimises_for_size_and_unwinds() {
         release.iter().any(|(k, v)| k == "lto" && v == "true"),
         "`mobile` inherits its link-time optimisation from `release`"
     );
+    // `mobile` names no `panic` of its own, so it takes `release`'s: an abort
+    // written there passes the check above and still ships on every phone,
+    // and on every desktop library the C binding's K4 needs unwinding in.
+    assert!(
+        release
+            .iter()
+            .all(|(k, v)| k != "panic" || v == "\"unwind\""),
+        "`mobile` inherits `panic` from `release`, and the desktop libraries use \
+         `release` itself: an abort there ends the host's process on any panic"
+    );
     assert!(
         section(&manifest, "profile.minisize").is_none(),
         "`minisize` was never used by a build, and its `panic = \"abort\"` is what the \
@@ -150,4 +160,40 @@ fn the_mobile_libraries_are_built_with_the_mobile_profile() {
         build.contains("--profile mobile"),
         "CI builds the iOS library the release ships: {build}"
     );
+}
+
+#[test]
+fn the_documented_mobile_builds_use_the_mobile_profile() {
+    // The commands a person copies. Nothing builds from them, so nothing
+    // fails when one goes back to `--release`; the library it produces is the
+    // opt-level 3 one, a third larger than the one the release ships.
+    let mobile_triple = |s: &str| s.contains("-apple-ios") || s.contains("-android");
+    for path in [
+        "QUICKSTART.md",
+        "CLAUDE.md",
+        "docs/ios-integration.md",
+        "docs/android-integration.md",
+        "bindings/swift/README.md",
+    ] {
+        let text = read(path);
+        assert!(
+            text.contains("--profile mobile"),
+            "{path} no longer documents a mobile build; drop it from this list"
+        );
+        for build in commands(&text)
+            .into_iter()
+            .filter(|c| c.contains("cargo build") && mobile_triple(c))
+        {
+            assert!(
+                build.contains("--profile mobile"),
+                "{path}: a documented iOS or Android build uses `--profile mobile`: {build}"
+            );
+        }
+        for line in text.lines().filter(|l| mobile_triple(l)) {
+            assert!(
+                !line.contains("/release/"),
+                "{path}: an iOS or Android library is under `target/<triple>/mobile/`: {line}"
+            );
+        }
+    }
 }

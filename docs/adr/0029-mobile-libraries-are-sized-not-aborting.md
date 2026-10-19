@@ -79,7 +79,9 @@ each of these becomes a SIGABRT attributed to the host application.
 5. `the_mobile_libraries_are_built_with_the_mobile_profile` and
    `the_mobile_profile_optimises_for_size_and_unwinds` hold the four build
    sites, the desktop builds' `--release`, the profile's opt-level and the
-   absence of `panic = "abort"`.
+   absence of `panic = "abort"` in `mobile` and in the `release` it
+   inherits from. `the_documented_mobile_builds_use_the_mobile_profile`
+   holds the commands the guides give a person to copy.
 
 ## Consequences
 
