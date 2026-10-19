@@ -7,6 +7,7 @@ use crate::provider::MlsProvider;
 use crate::storage::{MlsStorage, StorageError};
 use crate::types::{GroupId, GroupInfo, GroupMetadata, GroupRole, StorageKeyType};
 
+use openmls::framing::errors::{MessageDecryptionError, SecretTreeError};
 use openmls::prelude::*;
 use openmls_traits::signatures::Signer;
 use openmls_traits::OpenMlsProvider;
@@ -396,11 +397,30 @@ impl GroupManager {
                 // `test_forged_frame_reaches_session_desync_without_any_key_material`).
                 // `SessionDesync` is an unauthenticated hint by construction;
                 // the mitigation lives in what the protocol layer hangs off it.
+                //
+                // A frame more than `SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE`
+                // generations ahead of this receiver's ratchet is the third
+                // member of the family, and the one that is never transient:
+                // the sender's every later frame (and every re-sealed resend)
+                // is further ahead still, so without a re-key the session
+                // never decrypts from that sender again. The 2026-10-19 volume
+                // test lost its whole second half to exactly that, as 3,915
+                // per-frame failures with nothing ever healing them.
+                //
+                // Unlike the epoch checks, this one IS authenticated: OpenMLS
+                // decrypts the sender data under AEAD before it reads the
+                // generation from it, so only a holder of this epoch's
+                // sender-data secret can produce a frame that fails here.
+                // `TooDistantInThePast` stays `Decryption`: the session is
+                // healthy, and the sender's re-sealed resend recovers it.
                 match &e {
                     ProcessMessageError::ValidationError(ValidationError::WrongEpoch)
-                    | ProcessMessageError::ValidationError(ValidationError::NoPastEpochData) => {
-                        MlsError::SessionDesync(e.to_string())
-                    }
+                    | ProcessMessageError::ValidationError(ValidationError::NoPastEpochData)
+                    | ProcessMessageError::ValidationError(ValidationError::UnableToDecrypt(
+                        MessageDecryptionError::SecretTreeError(
+                            SecretTreeError::TooDistantInTheFuture,
+                        ),
+                    )) => MlsError::SessionDesync(e.to_string()),
                     _ => MlsError::Decryption(e.to_string()),
                 }
             })?;

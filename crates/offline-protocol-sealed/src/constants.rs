@@ -43,8 +43,23 @@ pub const ACK_FOR_KEY: &str = "ack_for";
 pub const SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE: u32 = 32;
 
 /// How far ahead of the highest seen generation a sender ratchet may be
-/// fast-forwarded when messages are lost (OpenMLS default).
-pub const SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE: u32 = 1000;
+/// fast-forwarded when messages are lost.
+///
+/// A receiver more than this far behind cannot decrypt anything from that
+/// sender again until the pair re-keys, so the window has to sit well above
+/// the gap a congested link can open. The engine keeps up to
+/// `DEFAULT_MAX_PENDING_ACKS` (1000) messages in flight and re-seals each
+/// resend, which spends a fresh generation every time; a receiver that drops
+/// a resend as a duplicate of a message it already has skips that generation.
+/// The OpenMLS default of 1000 was therefore reachable, and the 2026-10-19
+/// volume test reached it: the sender logged 12,152 retries against 2,434
+/// messages the receiver decrypted. 8192 keeps more than four in-flight
+/// ceilings of headroom (pinned in `offline-protocol`), and the cost of using
+/// it is one fast-forward of up to 8192 key derivations when a gap opens.
+///
+/// It is receiver-local policy: nothing on the wire carries it, and a peer
+/// configured with a different value still interoperates.
+pub const SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE: u32 = 8192;
 
 /// How long a leaf node's key package claims to be valid.
 ///

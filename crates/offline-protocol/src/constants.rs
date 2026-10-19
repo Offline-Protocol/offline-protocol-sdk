@@ -121,6 +121,21 @@ pub const MAX_MEDIA_DESCRIPTORS: usize = 16;
 /// tolerance and permanently stall its transfer.
 pub const MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER: usize = 2;
 
+/// The receiver's forward window has to sit well above the number of
+/// messages this engine keeps in flight to one peer.
+///
+/// Every resend is re-sealed under a fresh ratchet generation, and a receiver
+/// that drops a resend as a duplicate of a message it already holds skips
+/// that generation. A congested link can therefore open a gap of several
+/// in-flight ceilings, and a receiver more than the window behind decrypts
+/// nothing from that sender until the pair re-keys. The 2026-10-19 volume
+/// test hit the old window of 1000 at exactly the in-flight ceiling of 1000.
+/// Stated to the compiler so raising the ceiling past it fails the build.
+const _: () = assert!(
+    offline_protocol_mls::group::SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE as usize
+        >= 4 * offline_protocol_reliability::constants::DEFAULT_MAX_PENDING_ACKS
+);
+
 /// How many of a peer's transfer slots the SDK's own document-layer traffic
 /// may occupy at once.
 ///
