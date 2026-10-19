@@ -23,21 +23,47 @@ rootProject.allprojects {
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
 
-// Bridge sources have one home (ADR 0025). PR1 compiles only engine lifecycle
-// pieces; transport managers are added when wired in a follow-up PR.
-def bridgeDir = file('../../react-native/android')
+// Bridge sources have one home (ADR 0025). PR2 adds Internet transport + shared
+// relay helpers; BLE / Wi‑Fi / Nostr / Reticulum stay out until PR3.
+def bridgeDir = file('../../../react-native/android')
 def bridgeJava = bridgeDir.path + '/src/main/java'
 
-// Keep in sync with ios/offline_protocol.podspec `pr1_bridge_swift`.
-def pr1KotlinIncludes = [
+// PR2 compile surface: keep `pr2KotlinIncludes`, the KotlinCompile `exclude`
+// block below, and ios/offline_protocol.podspec `pr2_bridge_swift` aligned
+// (Flutter PR4 may add a Rust guard). InternetManager needs PresenceWatchPolicy.
+def pr2KotlinIncludes = [
     'uniffi/**/*.kt',
     'com/offlineprotocol/ProtocolConfigParser.kt',
     'com/offlineprotocol/InitialRuntimeConfigApplier.kt',
     'com/offlineprotocol/JsonExtensions.kt',
+    'com/offlineprotocol/InternetTransportBootstrap.kt',
+    'com/offlineprotocol/EncryptionConfigReader.kt',
+    'com/offlineprotocol/MeshRelayConfigReader.kt',
+    'com/offlineprotocol/CustodyConfigReader.kt',
     'com/offlineprotocol/MlsSecureStorage.kt',
     'com/offlineprotocol/ProtocolStateStorage.kt',
     'com/offlineprotocol/StorageNamespace.kt',
     'com/offlineprotocol/LegacyStoreAdoption.kt',
+    'com/offlineprotocol/TransportManager.kt',
+    'com/offlineprotocol/InternetManager.kt',
+    'com/offlineprotocol/RelayControlOpTranslator.kt',
+    'com/offlineprotocol/RelayAnswerPrefixes.kt',
+    'com/offlineprotocol/RelayGroupSnapshotBridge.kt',
+    'com/offlineprotocol/RelayRateLimiter.kt',
+    'com/offlineprotocol/RelayTimestamps.kt',
+    'com/offlineprotocol/LegacyRelayMessage.kt',
+    'com/offlineprotocol/AddressDeclarationPolicy.kt',
+    'com/offlineprotocol/ForcedPresenceCheckQueue.kt',
+    'com/offlineprotocol/RecipientInFlightTracker.kt',
+    'com/offlineprotocol/SupersededLatchPolicy.kt',
+    'com/offlineprotocol/GatewayAttachPolicy.kt',
+    'com/offlineprotocol/GatewayVerdictTracker.kt',
+    'com/offlineprotocol/PeerIdentityBinding.kt',
+    'com/offlineprotocol/MonotonicClock.kt',
+    'com/offlineprotocol/SocketGenerationTracker.kt',
+    'com/offlineprotocol/WriteStallWatchdog.kt',
+    'com/offlineprotocol/ProtocolErrorBridge.kt',
+    'com/offlineprotocol/PresenceWatchPolicy.kt',
 ]
 
 android {
@@ -63,15 +89,49 @@ android {
             manifest.srcFile 'src/main/AndroidManifest.xml'
             java {
                 srcDirs bridgeJava, 'src/main/kotlin'
-                pr1KotlinIncludes.each { include it }
+                pr2KotlinIncludes.each { include it }
             }
             jniLibs.srcDirs bridgeDir.path + '/src/main/jniLibs'
         }
     }
 }
 
+// The Kotlin plugin compiles every `.kt` under [bridgeJava] unless excluded here.
+// PR2 must not pull in React Native–only sources (OfflineProtocolModule, …).
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+    exclude('com/offlineprotocol/OfflineProtocolModule.kt')
+    exclude('com/offlineprotocol/OfflineProtocolPackage.kt')
+    exclude('com/offlineprotocol/MeshHeadlessWakeService.kt')
+    exclude('com/offlineprotocol/MeshForegroundService.kt')
+    exclude('com/offlineprotocol/ble/**')
+    exclude('com/offlineprotocol/mesh/**')
+    exclude('com/offlineprotocol/WifiDirectManager.kt')
+    exclude('com/offlineprotocol/WifiDirectGroupFormation.kt')
+    exclude('com/offlineprotocol/ReticulumManager.kt')
+    exclude('com/offlineprotocol/NostrManager.kt')
+    exclude('com/offlineprotocol/NostrQueryTracker.kt')
+    exclude('com/offlineprotocol/LanPeerDiscovery.kt')
+    exclude('com/offlineprotocol/LanPeerState.kt')
+    exclude('com/offlineprotocol/PeerStreamFraming.kt')
+    exclude('com/offlineprotocol/PeerStreamSockets.kt')
+    exclude('com/offlineprotocol/PeerStreamDialPolicy.kt')
+    exclude('com/offlineprotocol/BleAppTag.kt')
+    exclude('com/offlineprotocol/BleDensityPolicy.kt')
+    exclude('com/offlineprotocol/BleDiscoveryBootstrapPolicy.kt')
+    exclude('com/offlineprotocol/BleHelloPolicy.kt')
+    exclude('com/offlineprotocol/BleMessageNotificationPolicy.kt')
+    exclude('com/offlineprotocol/BleServiceInstanceSelection.kt')
+    exclude('com/offlineprotocol/StickyEventBuffer.kt')
+    exclude('com/offlineprotocol/StickyEventDispatcher.kt')
+    exclude('com/offlineprotocol/EventReplayRing.kt')
+    exclude('com/offlineprotocol/MeshWakePolicy.kt')
+    exclude('com/offlineprotocol/TeardownSequence.kt')
+    exclude('com/offlineprotocol/ForegroundReconnectPolicy.kt')
+}
+
 dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
     implementation 'net.java.dev.jna:jna:5.19.1@aar'
     implementation 'androidx.security:security-crypto:1.1.0'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
 }

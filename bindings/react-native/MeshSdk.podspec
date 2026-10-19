@@ -30,6 +30,7 @@ Pod::Spec.new do |s|
     "ios/TransportManager.swift",
     "ios/BleManager.swift",
     "ios/InternetManager.swift",
+    "ios/InternetTransportBootstrap.swift",
     "ios/ForcedPresenceCheckQueue.swift",
     "ios/EventReplayRing.swift",
     "ios/InboundEventBuffer.swift",

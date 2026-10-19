@@ -16145,6 +16145,108 @@ mod tests {
         );
     }
 
+    // Flutter PR2 Android include list and iOS podspec must both ship the
+    // Internet stack (including PresenceWatchPolicy, which InternetManager uses).
+    #[test]
+    fn flutter_pr2_compile_lists_include_internet_stack() {
+        let flutter = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bindings/flutter/offline_protocol");
+        let gradle = std::fs::read_to_string(flutter.join("android/build.gradle"))
+            .unwrap_or_else(|e| panic!("cannot read flutter android/build.gradle: {e}"));
+        let podspec = std::fs::read_to_string(flutter.join("ios/offline_protocol.podspec"))
+            .unwrap_or_else(|e| panic!("cannot read offline_protocol.podspec: {e}"));
+        for name in [
+            "InternetTransportBootstrap",
+            "InternetManager",
+            "PresenceWatchPolicy",
+        ] {
+            assert!(
+                gradle.contains(name),
+                "bindings/flutter/offline_protocol/android/build.gradle must list `{name}`"
+            );
+            assert!(
+                podspec.contains(name),
+                "bindings/flutter/offline_protocol/ios/offline_protocol.podspec must list `{name}`"
+            );
+        }
+    }
+
+    const INTERNET_CONFIGURE_MARKERS: &[&str] = &[
+        "wss://",
+        "setAuthToken",
+        "autoReconnect",
+        "maxReconnectAttempts",
+        "manager.configure",
+    ];
+
+    // InternetTransportBootstrap is the shared home for Flutter; React Native
+    // still inlines configureAndStartInternet on Android. Until RN delegates,
+    // both must keep the same configure knobs.
+    #[test]
+    fn internet_transport_bootstrap_keeps_rn_configure_invariants() {
+        let rn =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let bootstrap = std::fs::read_to_string(
+            rn.join("android/src/main/java/com/offlineprotocol/InternetTransportBootstrap.kt"),
+        )
+        .unwrap_or_else(|e| panic!("cannot read InternetTransportBootstrap.kt: {e}"));
+        let rn_module = std::fs::read_to_string(
+            rn.join("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"),
+        )
+        .unwrap_or_else(|e| panic!("cannot read OfflineProtocolModule.kt: {e}"));
+        let rn_fn = rn_module
+            .split("private fun configureAndStartInternet")
+            .nth(1)
+            .and_then(|tail| tail.split("\n    private fun ").next())
+            .unwrap_or("");
+        assert!(
+            !rn_fn.is_empty(),
+            "OfflineProtocolModule.configureAndStartInternet not found — guard needs a stable anchor"
+        );
+        for marker in INTERNET_CONFIGURE_MARKERS {
+            assert!(
+                bootstrap.contains(marker),
+                "InternetTransportBootstrap.kt missing `{marker}`"
+            );
+            assert!(
+                rn_fn.contains(marker),
+                "OfflineProtocolModule.configureAndStartInternet missing `{marker}` — \
+                 update InternetTransportBootstrap.kt or restore RN parity"
+            );
+        }
+    }
+
+    // Same parity pin for the Swift bootstrap and RN iOS module.
+    #[test]
+    fn internet_transport_bootstrap_swift_keeps_rn_configure_invariants() {
+        let rn =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let bootstrap = std::fs::read_to_string(rn.join("ios/InternetTransportBootstrap.swift"))
+            .unwrap_or_else(|e| panic!("cannot read InternetTransportBootstrap.swift: {e}"));
+        let rn_module = std::fs::read_to_string(rn.join("ios/OfflineProtocolModule.swift"))
+            .unwrap_or_else(|e| panic!("cannot read OfflineProtocolModule.swift: {e}"));
+        let rn_fn = rn_module
+            .split("private func configureAndStartInternet")
+            .nth(1)
+            .and_then(|tail| tail.split("\n    private func configureAndStartReticulum").next())
+            .unwrap_or("");
+        assert!(
+            !rn_fn.is_empty(),
+            "OfflineProtocolModule.configureAndStartInternet (Swift) not found — guard needs a stable anchor"
+        );
+        for marker in INTERNET_CONFIGURE_MARKERS {
+            assert!(
+                bootstrap.contains(marker),
+                "InternetTransportBootstrap.swift missing `{marker}`"
+            );
+            assert!(
+                rn_fn.contains(marker),
+                "OfflineProtocolModule.configureAndStartInternet (Swift) missing `{marker}` — \
+                 update InternetTransportBootstrap.swift or restore RN parity"
+            );
+        }
+    }
+
     /// Every method React Native can reach on iOS is spelled the same way in
     /// both halves of the hand-written bridge, and hands over each argument
     /// the same way.

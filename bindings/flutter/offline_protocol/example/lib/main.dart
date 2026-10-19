@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:offline_protocol/offline_protocol.dart';
 
@@ -31,11 +33,38 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   String _status = 'Tap Start to boot the engine.';
   bool _busy = false;
+  StreamSubscription<OfflineProtocolNativeEvent>? _eventSub;
+  int _eventCount = 0;
+  String? _lastEventType;
+
+  @override
+  void initState() {
+    super.initState();
+    _eventSub = OfflineProtocol.events.listen((event) {
+      if (!mounted) return;
+      setState(() {
+        _eventCount += 1;
+        try {
+          _lastEventType = event.decodeEvent()['type']?.toString();
+        } catch (_) {
+          _lastEventType = '(unparsed)';
+        }
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _eventSub?.cancel();
+    super.dispose();
+  }
 
   Future<void> _boot() async {
     setState(() {
       _busy = true;
       _status = 'Creating engine…';
+      _eventCount = 0;
+      _lastEventType = null;
     });
     try {
       final address = await OfflineProtocol.bootstrapSmokeTest(
@@ -46,7 +75,8 @@ class _HomePageState extends State<HomePage> {
       setState(() {
         _status = address == null
             ? 'Engine started but local address is not ready yet.'
-            : 'This device: $address';
+            : 'This device: $address\nEvents received: $_eventCount'
+                '${_lastEventType != null ? ' (last: $_lastEventType)' : ''}';
       });
     } catch (e) {
       if (!mounted) return;
