@@ -35,6 +35,7 @@ pr2_bridge_swift = [
   'SocketGenerationTracker.swift',
   'WriteStallWatchdog.swift',
   'ProtocolErrorBridge.swift',
+  'PresenceWatchPolicy.swift',
 ].map { |name| File.join(react_native_ios, name) }
 
 Pod::Spec.new do |s|
