@@ -88,8 +88,30 @@ archived by series under [docs/changelog/](docs/changelog/); see the
     JavaScript, and the bridge's diagnostics, as the error's own case and
     message (`ProtocolError.SendFailed(message: ...)`) instead of the
     generic Foundation description.
+- **`offline-protocol-uniffi` no longer builds a Rust library.** Its crate
+  types are `cdylib` and `staticlib`, the two the bindings and the C API
+  ship, so the crate can no longer be named as a dependency from Rust. Nothing
+  in the workspace or on crates.io did. The C binding's fuzzer compiles the
+  crate's source under its own package instead, which also lets it run on
+  macOS.
 
 ### Fixed
+
+- **Link-time optimisation reaches the libraries the release ships.** The
+  release profile has always asked for it, but cargo runs it on a library
+  only when every crate type in the library's list can take it, and the FFI
+  crate also listed `lib`, which cannot. So every native library from the
+  UniFFI migration to 0.29.0 (the iOS framework, the Android libraries, the
+  desktop libraries and the Python wheels) was built without it, and no
+  build said so. Measured on the macOS arm64 build: the static library the
+  iOS framework is made from falls from 137,949,536 to 23,393,288 bytes, the
+  shared library from 11,534,416 to 10,932,208, with the same 482 exported
+  functions. The npm package carries the iOS static libraries, so it should
+  lose most of its size; the iOS and Android numbers are measured on the
+  first release artifacts built this way. A release build of the crate takes about a
+  minute longer and peaks near 2.1 GB of memory.
+  `the_ffi_crate_builds_no_rust_library` refuses a crate type that would
+  turn it off again.
 
 - **Python: a Linux box that could no longer advertise recovers on its own.**
   Linux loses track of the controller's advertising when a central-role
