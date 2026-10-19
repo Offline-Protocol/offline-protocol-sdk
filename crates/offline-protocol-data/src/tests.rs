@@ -628,8 +628,8 @@ fn a_redelivered_delta_never_reaches_a_compacted_document() {
     // The ladder promises at-least-once, so this redelivery is ordinary
     // traffic and not an attack. It is also the exact shape that refers to
     // history the compaction trimmed away, which the engine answers with a
-    // panic rather than an error (loro #1068) and which `panic = "abort"`
-    // turns into a dead process on mobile.
+    // panic rather than an error (loro #1068) and which a host built with
+    // `panic = "abort"` turns into a dead process.
     let meta = replica.inspect(&deltas[1]).expect("inspect");
     assert!(
         meta.already_applied(),

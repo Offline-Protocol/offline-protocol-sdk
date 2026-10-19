@@ -83,8 +83,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   ADR 0019, threat model R11, the C guide and CLAUDE.md, which said the
   mobile library shipped with its `panic = "abort"`, now say what ships: every
   library unwinds, so a panic still reaches Swift and Kotlin as an exception
-  and a document whose import panics is marked unusable rather than ending the
-  app ([ADR 0029](docs/adr/0029-mobile-libraries-are-sized-not-aborting.md)).
+  and a document whose import panics in the engine's apply step is marked
+  unusable rather than ending the app. A panic in the decode before it is not
+  caught there and unwinds out of the frame's handling; the in-flight marker
+  quarantines that blob
+  ([ADR 0029](docs/adr/0029-mobile-libraries-are-sized-not-aborting.md)).
 - **UniFFI is now 0.32** (was 0.30). The Swift, Kotlin and Python bindings are
   regenerated together from the unchanged interface definition, and the
   `uniffi-bindgen` the build scripts and CI install is `0.32.2`. No API a

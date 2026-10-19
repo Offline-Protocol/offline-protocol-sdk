@@ -2648,7 +2648,8 @@ are now built with the workspace's `mobile` profile, opt-level "s" with
 link-time optimisation, where every earlier release used opt-level 3 with
 none. They are smaller, and CPU-bound work in the SDK is slower: on the
 benches, MLS sealing and opening take about 40% longer and most other paths
-under a third longer, a fraction of a millisecond per message. A panic in the
+under a third longer, a fraction of a millisecond per message. Replicated
+documents have no bench, so their cost is unmeasured. A panic in the
 SDK still reaches the app as an exception, as it always did; the documents
 that said the mobile library aborted on a panic were wrong. An app that
 builds the library from source with its own command and copies it from

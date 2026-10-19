@@ -51,8 +51,10 @@ crates.
 changes is every panic seam the SDK has. Event handlers run under
 `catch_unwind`, so a panicking application handler is counted and the
 engine's shared state is not poisoned. The telemetry sink dispatch does the
-same. A document import that panics inside the CRDT engine is caught and the
-document marked unusable instead of the process ending. UniFFI wraps every
+same. A document import that panics in the CRDT engine's apply step is
+caught and the document marked unusable instead of the process ending; a
+panic in the decode before it unwinds out of the frame's handling, and the
+in-flight marker keeps the blob from being tried again. UniFFI wraps every
 foreign call in `catch_unwind` and hands a panic to Swift and Kotlin as an
 exception the application can catch and report. Under `panic = "abort"`
 each of these becomes a SIGABRT attributed to the host application.
@@ -84,7 +86,8 @@ each of these becomes a SIGABRT attributed to the host application.
 - The containment arguments in ADR 0018 and ADR 0019 still hold, and for the
   reason they gave first: every blob the engine imports came out of a sealed
   record. What changes is the residual. A crafted blob from a space member
-  now leaves one document unusable for the process instead of ending it.
+  now leaves one document unusable for the process, or raises a panic out
+  of its frame's handling, instead of ending the process.
 - The size `panic = "abort"` would save is left on the table on purpose. A
   host that wants it builds the library with `panic = "abort"` itself, and
   loses each seam above in exchange.

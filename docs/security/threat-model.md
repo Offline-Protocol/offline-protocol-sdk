@@ -576,20 +576,28 @@ Replicated documents merge changes that arrive from peers, and merging means
 handing bytes to a CRDT engine. The engine has open defects where a malformed
 or causally impossible change panics rather than returning an error, and one of
 them poisons the document's lock so the retry panics too. The shipped
-libraries unwind, so the import's `catch_unwind` turns the panic into an
-error and the document is marked unusable for the process; a host built with
-`panic = "abort"` loses the process instead.
+libraries unwind, and what a panic does depends on where it happens. The
+engine decodes a peer's blob before applying it, to judge it, and that
+decode runs outside any catch: a panic there unwinds out of the frame's
+handling, the document is untouched, and the in-flight marker left behind
+quarantines the blob, so the next frame for the space or the next launch
+refuses it. A panic in the apply step is caught by the import's
+`catch_unwind`, which turns it into an error and marks the document unusable
+for the process. A host built with `panic = "abort"` loses the process in
+either case.
 
 MLS does not help here, and the reason is worth being precise about:
 authentication establishes who sent the bytes, and the question the engine is
 about to ask is what shape they are. A peer can be exactly who they claim and
 still send a blob that ends the process.
 
-**Impact:** a member of a space can make a shared document unusable for the
-rest of the process on a device it replicates with, and abort the
-application where the host is built with `panic = "abort"`. Not silent, not remote-code-execution, and not available to
-anyone outside the space: it requires someone the user has already accepted
-into a shared document, and it is attributable to them.
+**Impact:** a member of a space can, on a device it replicates with, make a
+shared document unusable for the rest of the process, or raise a panic out
+of the handling of its frame, once per unique blob; and abort the
+application where the host is built with `panic = "abort"`. Not silent, not
+remote-code-execution, and not available to anyone outside the space: it
+requires someone the user has already accepted into a shared document, and
+it is attributable to them.
 
 **Group spaces widen who this is, not what it does.** A 1:1 space has exactly
 one other member; a group space has as many as the roster, and every one of

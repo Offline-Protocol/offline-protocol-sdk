@@ -54,10 +54,12 @@ The engine has open upstream issues where a malformed or semantically
 inconsistent import blob panics rather than returning an error, and one of
 them poisons the document's lock, making the document unrecoverable for the
 process. The libraries the SDK ships unwind, so a `catch_unwind` around the
-import catches the panic, but the document is unusable for the rest of the
-process once its lock is poisoned, and a host built with `panic = "abort"`
-catches nothing at all ([ADR 0029](0029-mobile-libraries-are-sized-not-aborting.md)).
-So `catch_unwind` is not the defense.
+engine's apply step catches a panic there, but the document is unusable for
+the rest of the process once its lock is poisoned. The decode that runs
+before the apply is outside that catch, and a host built with
+`panic = "abort"` catches nothing at all
+([ADR 0029](0029-mobile-libraries-are-sized-not-aborting.md)). So
+`catch_unwind` is not the defense.
 
 The containment is therefore structural, not defensive: every blob the
 engine imports has come back out of a protocol-state record whose AEAD tag
