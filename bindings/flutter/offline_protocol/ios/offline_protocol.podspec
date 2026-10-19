@@ -2,11 +2,13 @@ require 'json'
 
 react_native_ios = File.expand_path('../../../react-native/ios', __dir__)
 
-# PR1 engine lifecycle only. Expand this list when transport managers wire up
-# (keep in sync with android/build.gradle `pr1KotlinIncludes`).
-pr1_bridge_swift = [
+# PR2: engine lifecycle + Internet transport + shared relay helpers.
+# BLE / Wi‑Fi / Nostr / Reticulum land in PR3. Keep in sync with
+# android/build.gradle `flutterPr2ExcludedKotlin` / react-only list.
+pr2_bridge_swift = [
   'ProtocolConfigParser.swift',
   'InitialRuntimeConfigApplier.swift',
+  'InternetTransportBootstrap.swift',
   'EncryptionConfigReader.swift',
   'MeshRelayConfigReader.swift',
   'CustodyConfigReader.swift',
@@ -14,6 +16,25 @@ pr1_bridge_swift = [
   'ProtocolStateStorage.swift',
   'StorageNamespace.swift',
   'LegacyStoreAdoption.swift',
+  'TransportManager.swift',
+  'InternetManager.swift',
+  'RelayControlOpTranslator.swift',
+  'RelayAnswerPrefixes.swift',
+  'RelayGroupSnapshotBridge.swift',
+  'RelayRateLimiter.swift',
+  'RelayTimestamps.swift',
+  'LegacyRelayMessage.swift',
+  'AddressDeclarationPolicy.swift',
+  'ForcedPresenceCheckQueue.swift',
+  'RecipientInFlightTracker.swift',
+  'SupersededLatchPolicy.swift',
+  'GatewayAttachPolicy.swift',
+  'GatewayVerdictTracker.swift',
+  'PeerIdentityBinding.swift',
+  'MonotonicClock.swift',
+  'SocketGenerationTracker.swift',
+  'WriteStallWatchdog.swift',
+  'ProtocolErrorBridge.swift',
 ].map { |name| File.join(react_native_ios, name) }
 
 Pod::Spec.new do |s|
@@ -31,7 +52,7 @@ Pod::Spec.new do |s|
   s.source_files = [
     'Classes/**/*.swift',
     File.join(react_native_ios, 'Generated/offline_protocol.swift'),
-  ] + pr1_bridge_swift + [
+  ] + pr2_bridge_swift + [
     File.join(react_native_ios, 'Generated/*.h'),
   ]
 
@@ -55,6 +76,6 @@ Pod::Spec.new do |s|
     'HEADER_SEARCH_PATHS' => "$(inherited) $(PODS_TARGET_SRCROOT)/../../../react-native/ios/Generated",
   }
 
-  s.frameworks = 'Foundation', 'Security'
+  s.frameworks = 'Foundation', 'Security', 'Network'
   s.dependency 'Flutter'
 end

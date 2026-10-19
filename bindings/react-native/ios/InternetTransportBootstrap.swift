@@ -1,0 +1,110 @@
+import Foundation
+
+/// Shared Internet transport wiring for host wrappers (Flutter). ADR 0025.
+enum InternetTransportBootstrap {
+    struct StoredInternetConfig {
+        var serverAddress: String?
+        var autoReconnect: Bool = true
+    }
+
+    static func readStoredConfig(raw: [String: Any]) -> StoredInternetConfig {
+        var stored = StoredInternetConfig()
+        if let transports = raw["transports"] as? [String: Any],
+           let internet = transports["internet"] as? [String: Any] {
+            stored.serverAddress = (internet["serverAddress"] as? String)
+                ?? (internet["server_address"] as? String)
+            if let auto = internet["autoReconnect"] as? Bool {
+                stored.autoReconnect = auto
+            } else if let auto = internet["auto_reconnect"] as? Bool {
+                stored.autoReconnect = auto
+            }
+        }
+        if stored.serverAddress == nil {
+            stored.serverAddress = raw["internetServerAddress"] as? String
+                ?? raw["internet_server_address"] as? String
+        }
+        return stored
+    }
+
+    static func attachEmitters(
+        manager: InternetManager,
+        emitEventJson: @escaping (String) -> Void
+    ) {
+        manager.serverMessageEmitter = { rawJson in
+            let payload: [String: Any] = [
+                "type": "internet_server_message",
+                "json": rawJson,
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: payload),
+               let json = String(data: data, encoding: .utf8) {
+                emitEventJson(json)
+            }
+        }
+        manager.connectionStatusEmitter = { connected, authenticated in
+            let payload: [String: Any] = [
+                "type": "internet_status_changed",
+                "connected": connected,
+                "authenticated": authenticated,
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: payload),
+               let json = String(data: data, encoding: .utf8) {
+                emitEventJson(json)
+            }
+        }
+        manager.supersededEmitter = { reason in
+            emitEventJson(SupersededLatchPolicy.eventJson(reason: reason))
+        }
+    }
+
+    static func configureAndStart(manager: InternetManager, config: [String: Any]) throws {
+        guard let serverAddress = (config["serverAddress"] as? String)
+            ?? (config["server_address"] as? String)
+            ?? (config["server_url"] as? String),
+            !serverAddress.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NSError(
+                domain: "OfflineProtocol",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Internet transport requires a serverAddress"]
+            )
+        }
+
+        var wsUrl = serverAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !wsUrl.hasPrefix("ws://") && !wsUrl.hasPrefix("wss://") {
+            wsUrl = "wss://\(wsUrl)"
+        }
+
+        if let port = config["port"] as? NSNumber ?? config["serverPort"] as? NSNumber,
+           port.intValue > 0,
+           let url = URL(string: wsUrl),
+           url.port == nil {
+            wsUrl = "\(wsUrl):\(port.intValue)"
+        }
+
+        let autoReconnect = (config["autoReconnect"] as? Bool)
+            ?? (config["auto_reconnect"] as? Bool)
+            ?? true
+        let maxRetries = (config["maxReconnectAttempts"] as? NSNumber)?.intValue ?? 0
+
+        if let token = config["authToken"] as? String ?? config["auth_token"] as? String {
+            manager.setAuthToken(token)
+        }
+
+        if manager.state == .running || manager.state == .starting {
+            manager.stop()
+        }
+
+        try manager.configure(serverUrl: wsUrl, autoReconnect: autoReconnect, maxReconnectAttempts: maxRetries)
+        try manager.start()
+    }
+
+    static func startIfConfigured(manager: InternetManager, stored: StoredInternetConfig) throws {
+        guard let url = stored.serverAddress, !url.isEmpty else { return }
+        try configureAndStart(
+            manager: manager,
+            config: [
+                "serverAddress": url,
+                "autoReconnect": stored.autoReconnect,
+            ]
+        )
+    }
+}
