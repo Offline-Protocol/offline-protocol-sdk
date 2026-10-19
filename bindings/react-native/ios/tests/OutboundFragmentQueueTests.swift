@@ -222,11 +222,27 @@ final class OutboundFragmentQueueTests: XCTestCase {
         XCTAssertFalse(queue.isBackedUp("carol"))
     }
 
-    /// The core fragments a message into at most 512 pieces. Below that, one
-    /// large message overruns the queue on its own and the overflow discard
-    /// tears it, which is how 16 KB messages were lost.
-    func testTheDefaultCapHoldsAWholeMaximumSizeMessageBelowTheMark() {
-        XCTAssertGreaterThanOrEqual(OutboundFragmentQueue.defaultMaxPerPeer * 3 / 4, 512)
+    /// The core fragments a message into at most 512 pieces, and the drain
+    /// stops pulling at the mark, so the overflow discard that tore 16 KB
+    /// messages stays out of reach only while the mark is below the cap.
+    func testTheDefaultCapHoldsAWholeMaximumSizeMessageAndTheMarkSitsBelowIt() {
+        XCTAssertGreaterThanOrEqual(OutboundFragmentQueue.defaultMaxPerPeer, 512)
+        XCTAssertLessThan(OutboundFragmentQueue.defaultBackpressureMark, OutboundFragmentQueue.defaultMaxPerPeer)
+    }
+
+    /// The core counts a message as queued, and defers its retry, only until
+    /// its first fragment is pulled. A mark at 3/4 of the cap let the drain
+    /// pull 576 fragments ahead of the link, so the core resent everything
+    /// behind them.
+    func testTheDefaultQueueBacksUpAfterAFewSecondsOfLinkTime() {
+        let queue = OutboundFragmentQueue()
+        for i in 0..<(OutboundFragmentQueue.defaultBackpressureMark - 1) {
+            queue.enqueue("bob", bytes(UInt8(truncatingIfNeeded: i)))
+        }
+        XCTAssertFalse(queue.anyBackedUp())
+        queue.enqueue("bob", bytes(0))
+        XCTAssertTrue(queue.isBackedUp("bob"))
+        XCTAssertTrue(queue.anyBackedUp())
     }
 
     /// The NOTIFY queue is enqueued by the drain while main flushes it. A

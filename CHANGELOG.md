@@ -174,6 +174,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   connected link, verifying a peer retires its other disconnected
   identifiers, and the connection monitor stops dialling a peripheral it
   never identified once it stops advertising.
+- **The BLE bridges stop pulling far ahead of the link.** Both outbound
+  fragment queues pulled from the core until a peer held 576 fragments, so
+  the core saw nothing queued, could not extend the acknowledgement timeout
+  of what was still waiting, and resent it: 19,404 resends from one Android
+  phone on an indication-paced link. They now stop at 32 fragments, a few
+  seconds of link time, and the rest waits in the core where the extension
+  sees it. The 768 cap is unchanged.
 
 - **Link-time optimisation reaches the libraries the release ships.** The
   release profile has always asked for it, but cargo runs it on a library

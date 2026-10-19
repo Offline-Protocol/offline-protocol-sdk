@@ -13795,15 +13795,18 @@ mod tests {
     ///    GATT read later, together; if a refactor separates them,
     ///    `fragment_fallback_count` starts ticking in production and nothing
     ///    fails at compile time.
-    /// The two outbound fragment queues share one cap, and it holds a whole
-    /// maximum-size message below the backed-up mark.
+    /// The two outbound fragment queues share one cap and one backed-up mark,
+    /// the cap holds a whole maximum-size message, and the mark sits below it.
     ///
-    /// Below that, one large message overruns the queue on its own and the
-    /// overflow discard tears it: with a cap of 100 the 2026-10-19 volume test
-    /// never delivered a 16 KB or 30 KB message from Android. The two values
-    /// are hand-mirrored (C5), so a drifted copy would leave one platform
-    /// tearing messages the other delivers. iOS also has to hand the constant
-    /// to both of its outbound queues, since it constructs them explicitly.
+    /// The drain checks the mark before every pop, so a peer never holds more
+    /// than the mark and the overflow discard stays unreachable. With a cap of
+    /// 100 the 2026-10-19 volume test never delivered a 16 KB or 30 KB message
+    /// from Android. The mark is small because the core sees only what it
+    /// still holds: at 3/4 of the cap the bridge pulled 576 fragments ahead of
+    /// the link and the core resent everything behind them. The values are
+    /// hand-mirrored (C5), so a drifted copy would leave one platform tearing
+    /// or resending what the other delivers. iOS also has to hand the cap to
+    /// both of its outbound queues, since it constructs them explicitly.
     #[test]
     fn the_outbound_fragment_queue_cap_holds_a_maximum_message_on_both_platforms() {
         fn value_after(source: &str, marker: &str) -> usize {
@@ -13832,9 +13835,18 @@ mod tests {
         );
         let largest = offline_protocol_transport::constants::BLE_MAX_FRAGMENT_COUNT;
         assert!(
-            android * 3 / 4 >= largest,
-            "the backed-up mark ({}) must hold a whole {largest}-fragment message",
-            android * 3 / 4
+            android >= largest,
+            "the cap ({android}) must hold a whole {largest}-fragment message"
+        );
+        let android_mark = value_after(&kotlin, "const val DEFAULT_BACKPRESSURE_MARK: Int =");
+        let ios_mark = value_after(&swift, "static let defaultBackpressureMark =");
+        assert_eq!(
+            android_mark, ios_mark,
+            "the two outbound fragment queue marks must match"
+        );
+        assert!(
+            0 < android_mark && android_mark < android,
+            "the backed-up mark ({android_mark}) must sit below the cap ({android})"
         );
         assert!(
             manager.contains(

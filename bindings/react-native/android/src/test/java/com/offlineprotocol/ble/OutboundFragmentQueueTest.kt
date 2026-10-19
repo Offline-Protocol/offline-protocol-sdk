@@ -155,11 +155,28 @@ class OutboundFragmentQueueTest {
     }
 
     @Test
-    fun `the default cap holds a whole maximum-size message below the mark`() {
-        // The core fragments a message into at most 512 pieces. Below that,
-        // one large message overruns the queue on its own and the overflow
-        // discard tears it, which is how 16 KB messages were lost.
-        assertTrue(OutboundFragmentQueue.DEFAULT_MAX_PER_PEER * 3 / 4 >= 512)
+    fun `the default cap holds a whole maximum-size message and the mark sits below it`() {
+        // The core fragments a message into at most 512 pieces, and the drain
+        // stops pulling at the mark, so the overflow discard that tore 16 KB
+        // messages stays out of reach only while the mark is below the cap.
+        assertTrue(OutboundFragmentQueue.DEFAULT_MAX_PER_PEER >= 512)
+        assertTrue(OutboundFragmentQueue.DEFAULT_BACKPRESSURE_MARK < OutboundFragmentQueue.DEFAULT_MAX_PER_PEER)
+    }
+
+    @Test
+    fun `the default queue backs up after a few seconds of link time, not three quarters of the cap`() {
+        // The core counts a message as queued, and defers its retry, only
+        // until its first fragment is pulled. A mark at 3/4 of the cap let the
+        // drain pull 576 fragments ahead of the link, so the core resent
+        // everything behind them.
+        val h = Harness(maxPerPeer = OutboundFragmentQueue.DEFAULT_MAX_PER_PEER)
+        repeat(OutboundFragmentQueue.DEFAULT_BACKPRESSURE_MARK - 1) {
+            h.queue.enqueue("alice", byteArrayOf(it.toByte()))
+        }
+        assertFalse(h.queue.anyBackedUp())
+        h.queue.enqueue("alice", byteArrayOf(0))
+        assertTrue(h.queue.isBackedUp("alice"))
+        assertTrue(h.queue.anyBackedUp())
     }
 
     @Test

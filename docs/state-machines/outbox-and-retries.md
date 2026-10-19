@@ -146,7 +146,9 @@ so the cost is wasted work rather than loss, but the effect is real past roughly
 **A frame still in a local transport queue gets a bounded extension instead
 of a retry.** When an acknowledgement times out, the sender asks its carriers
 which frames they have accepted but not started writing (only BLE knows today:
-a message counts as queued until the bridge pulls its first fragment). Such a
+a message counts as queued until the bridge pulls its first fragment, which is
+why each bridge stops pulling once a peer holds 32 fragments; at 576 the
+extension saw almost nothing). Such a
 frame gets one more full timeout, repeatedly, until a minute has passed since
 the attempt, and only then falls through to the ladder. The bound is what keeps
 a link that died without telling the transport from pinning a message to it.

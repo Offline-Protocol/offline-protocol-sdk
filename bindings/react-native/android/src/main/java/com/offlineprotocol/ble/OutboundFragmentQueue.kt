@@ -53,20 +53,37 @@ internal data class FlushResult(
  * a loss, and it tears the message whose first slices already went out.
  *
  * So the cap is a memory backstop and must stay unreachable in normal
- * operation. Two things keep it there. The drain stops pulling from the
- * Rust core while any recipient is past the [isBackedUp] mark ([anyBackedUp]),
- * checked **before** each pop, because the pop is destructive and nothing
- * can hand a fragment back. And the cap sits above the largest message the
- * core will fragment (512 fragments), so the mark is reached before one
- * message fills the queue. With the old cap of 100, a single sealed 16 KB
- * message was already more than the queue could hold, and the 2026-10-19
- * volume test never delivered a 16 KB or 30 KB message from Android.
- * A Rust guard pins this value equal to the iOS queue's.
+ * operation. The drain stops pulling from the Rust core while any recipient
+ * is past the [isBackedUp] mark ([anyBackedUp]), checked **before** each pop,
+ * because the pop is destructive and nothing can hand a fragment back. Every
+ * fragment in this queue arrived through one such pop, so a recipient never
+ * holds more than the mark, and the mark sits below the cap. The cap also
+ * sits above the largest message the core will fragment (512 fragments).
+ * With the old cap of 100, and a poll path that popped without the check,
+ * the 2026-10-19 volume test never delivered a 16 KB or 30 KB message from
+ * Android.
+ *
+ * ### The mark is small on purpose
+ *
+ * [DEFAULT_BACKPRESSURE_MARK] is a few seconds of link time, not a fraction of
+ * the cap, because the Rust core can see only what it still holds. A message
+ * counts as queued, and its acknowledgement timer is extended instead of
+ * retried, until its first fragment is pulled. With the mark at 3/4 of the cap
+ * the drain pulled 576 fragments ahead of an indication-paced link, the core
+ * saw nothing queued, and every message behind the first few seconds was
+ * resent: 19,404 resends from Android in the third volume run, each one more
+ * load on the link that was already the bottleneck. A fragment left in Rust
+ * costs nothing; one pulled early only waits here, expires after [timeoutMs],
+ * and tears its message.
+ *
+ * Rust guards pin the cap and the mark equal to the iOS queue's.
  */
 internal class OutboundFragmentQueue(
     private val bleThreadCheck: () -> Unit = DEFAULT_BLE_THREAD_CHECK,
     private val maxPerPeer: Int = DEFAULT_MAX_PER_PEER,
     private val timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+    /** Below [maxPerPeer]; see the class note. Smaller caps keep the old 3/4. */
+    private val backpressureMark: Int = minOf(DEFAULT_BACKPRESSURE_MARK, maxPerPeer * 3 / 4),
     private val clock: () -> Long = System::currentTimeMillis,
     private val onDropped: (recipientId: String, reason: DropReason, count: Int) -> Unit =
         { _, _, _ -> },
@@ -95,8 +112,8 @@ internal class OutboundFragmentQueue(
     }
 
     /**
-     * True once [recipientId]'s queue has filled past a high-water mark
-     * (3/4 of [maxPerPeer]). The drain loop uses this as a backpressure
+     * True once [recipientId]'s queue has filled to [backpressureMark]. The
+     * drain loop uses this as a backpressure
      * signal to STOP pulling more fragments out of the Rust core — which is
      * a destructive pop — into this bounded queue. Without it, when the BLE
      * write gate paces sends slower than the loop can pull, the loop spins
@@ -109,7 +126,7 @@ internal class OutboundFragmentQueue(
     fun isBackedUp(recipientId: String): Boolean {
         bleThreadCheck()
         val size = queues[recipientId]?.size ?: 0
-        return size >= maxPerPeer * 3 / 4
+        return size >= backpressureMark
     }
 
     /**
@@ -120,8 +137,7 @@ internal class OutboundFragmentQueue(
      */
     fun anyBackedUp(): Boolean {
         bleThreadCheck()
-        val mark = maxPerPeer * 3 / 4
-        return queues.values.any { it.size >= mark }
+        return queues.values.any { it.size >= backpressureMark }
     }
 
     /**
@@ -244,6 +260,8 @@ internal class OutboundFragmentQueue(
     companion object {
         /** Above 4/3 of the core's 512-fragment message ceiling; see the class note. */
         const val DEFAULT_MAX_PER_PEER: Int = 768
+        /** About 2.5 s of an indication-paced link; see the class note. */
+        const val DEFAULT_BACKPRESSURE_MARK: Int = 32
         const val DEFAULT_TIMEOUT_MS: Long = 30_000L
 
         val DEFAULT_BLE_THREAD_CHECK: () -> Unit = {
