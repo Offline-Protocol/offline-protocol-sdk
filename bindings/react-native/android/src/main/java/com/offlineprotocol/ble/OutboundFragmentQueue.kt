@@ -54,10 +54,12 @@ internal data class FlushResult(
  *
  * So the cap is a memory backstop and must stay unreachable in normal
  * operation. The drain stops pulling from the Rust core while any recipient
- * is past the [isBackedUp] mark ([anyBackedUp]), checked **before** each pop,
- * because the pop is destructive and nothing can hand a fragment back. Every
- * fragment in this queue arrived through one such pop, so a recipient never
- * holds more than the mark, and the mark sits below the cap. The cap also
+ * with a link to drain into is past the [isBackedUp] mark ([anyBackedUp]),
+ * checked **before** each pop, because the pop is destructive and nothing can
+ * hand a fragment back. Every fragment in this queue arrived through one such
+ * pop, so a linked recipient never holds more than the mark, and the mark sits
+ * below the cap. A recipient with no link is left out of the stop (see
+ * [anyBackedUp]), so only its undeliverable queue can reach the cap. The cap also
  * sits above the largest message the core will fragment (512 fragments).
  * With the old cap of 100, and a poll path that popped without the check,
  * the 2026-10-19 volume test never delivered a 16 KB or 30 KB message from
@@ -82,8 +84,13 @@ internal class OutboundFragmentQueue(
     private val bleThreadCheck: () -> Unit = DEFAULT_BLE_THREAD_CHECK,
     private val maxPerPeer: Int = DEFAULT_MAX_PER_PEER,
     private val timeoutMs: Long = DEFAULT_TIMEOUT_MS,
-    /** Below [maxPerPeer]; see the class note. Smaller caps keep the old 3/4. */
-    private val backpressureMark: Int = minOf(DEFAULT_BACKPRESSURE_MARK, maxPerPeer * 3 / 4),
+    /**
+     * Below [maxPerPeer]; see the class note. Smaller caps keep the old 3/4,
+     * and never less than one: a mark of zero (a cap of 1) read every created
+     * queue, even an empty one, as backed up.
+     */
+    private val backpressureMark: Int =
+        minOf(DEFAULT_BACKPRESSURE_MARK, maxPerPeer * 3 / 4).coerceAtLeast(1),
     private val clock: () -> Long = System::currentTimeMillis,
     private val onDropped: (recipientId: String, reason: DropReason, count: Int) -> Unit =
         { _, _, _ -> },
@@ -130,14 +137,26 @@ internal class OutboundFragmentQueue(
     }
 
     /**
-     * True if any recipient is past the [isBackedUp] mark. The drain checks
-     * it before every pop from the Rust core: the pop is one FIFO across all
-     * peers and cannot be undone, so the only lossless moment to stop is
-     * before it. Safe only on the BLE thread, like every other read here.
+     * True if any recipient that [deliverable] accepts is past the
+     * [isBackedUp] mark. The drain checks it before every pop from the Rust
+     * core: the pop is one FIFO across all peers and cannot be undone, so the
+     * only lossless moment to stop is before it. Safe only on the BLE thread,
+     * like every other read here.
+     *
+     * Only a recipient with a link to drain into may stop the pull. One with
+     * none (a peer whose link closed, in the grace before it is reported
+     * lost) keeps the fragments the core still hands out for it until they
+     * expire, and counting it stopped every other peer's egress until then,
+     * in 30-second rounds, for as long as the core held its backlog. Such a
+     * recipient's queue can pass the mark and, at worst, reach the cap: its
+     * fragments cannot be delivered either way, and the core's
+     * acknowledgement timeout resends them once a link returns.
      */
-    fun anyBackedUp(): Boolean {
+    fun anyBackedUp(deliverable: (String) -> Boolean = { true }): Boolean {
         bleThreadCheck()
-        return queues.values.any { it.size >= backpressureMark }
+        return queues.entries.any { (recipientId, queue) ->
+            queue.size >= backpressureMark && deliverable(recipientId)
+        }
     }
 
     /**

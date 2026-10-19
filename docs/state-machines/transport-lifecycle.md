@@ -191,7 +191,8 @@ reached only through our server indefinitely.
 
 **A Bluetooth LE peer with a live link is never reported lost.** On iOS a link
 or a dial that drops while the peer is connected and verified on another
-identifier, or subscribed to our server from one, retires the identifier that
+identifier, or subscribed to our server from one and heard from in the last
+minute, retires the identifier that
 dropped instead of reporting the peer lost or redialling it, and an identifier
 of a peer linked elsewhere is not dialled. CoreBluetooth reports a cancelled
 connect, including the one the connect timeout cancels, as a disconnect, so

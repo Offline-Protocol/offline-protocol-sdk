@@ -125,7 +125,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   peer lost while another link to it is up, and skips dials to a peer it is
   linked to; Android closes a client link to a peer already subscribed to its
   server, and restarts its advertisement (which gives it a new address) on its
-  two-minute refresh only while no link is up. See ADR 0030.
+  two-minute refresh only while no identified peer is linked, or when the
+  advertisement has stopped. Evicting a peer on iOS now drops every
+  identifier it maps from, so a second link no longer survives a peer the
+  core was told is lost. See ADR 0030.
 - **A full outbox refuses the newest message instead of failing the oldest.**
   At 500 entries the outbox failed its least recently sent entry to admit any
   new one, so the same outage failed about 2,500 queued messages per phone,
@@ -191,8 +194,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   filled, and they could fill: Android's periodic poll pulled fragments from
   the core with no backpressure check, and both drains checked only after a
   fragment had been pulled. With a cap of 100, one 16 KB message was enough.
-  Both drains now stop before pulling while any peer is backed up, and the
-  cap is 768, above the largest message the core fragments.
+  Both drains now stop before pulling while any peer with a link is backed
+  up, and the cap is 768, above the largest message the core fragments. A
+  peer with no link does not stop the pull, so its undeliverable fragments
+  no longer hold back every other peer's.
 - **Resends stop burning encryption keys while nothing is acknowledged.**
   Each resend used to be re-sealed under a fresh ratchet generation, so a
   link that stopped carrying acknowledgements walked the receiver past its

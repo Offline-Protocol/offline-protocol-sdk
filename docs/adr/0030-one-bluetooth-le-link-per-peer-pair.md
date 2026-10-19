@@ -39,11 +39,21 @@ One usable link per peer pair, and no peer is lost while it has one.
 - Android closes a client link that verifies as a peer it already holds a
   usable link to: a client link of its own, or the peer's link to its server
   with notifications subscribed. Before, only a second client link counted.
-- Android's periodic refresh restarts the advertisement only while no link is
-  up. Membership changes and disconnects still restart it.
+- Android's periodic refresh restarts the advertisement only while no
+  identified peer is linked, or when the advertiser reports it stopped.
+  Membership changes and disconnects still restart it.
+- An Android server link counts only once its peer has written a Hello that
+  maps its address. A subscribed central that writes none (a Mac, a leaf, a
+  service without it) is invisible to the refusal, so the second client link
+  beside it is kept.
 - iOS never reports a peer lost, and never redials, when the identifier that
   dropped belongs to a peer connected and verified on another identifier or
-  subscribed to its server from one. The dropped identifier is retired.
+  subscribed to its server from one and heard from in the last 60 seconds.
+  The dropped identifier is retired. A subscription counts only while it is
+  heard from because it ends only when `didUnsubscribeFrom` arrives: one that
+  never arrived would otherwise keep a departed peer a neighbour for good.
+- iOS evicts every identifier a peer maps from, not one, before reporting it
+  lost.
 
 ## Consequences
 
@@ -61,6 +71,13 @@ The write-buffer stall itself is not explained. It has been seen only while
 two links existed (runs 2, 3 and 5; never in run 4, which had one); the stall
 teardown logs the peer's other live links so the next run can confirm or
 refute that.
+
+The refresh trade: while an identified peer is linked, Android's advertisement
+is restarted only if the advertiser reports it stopped. One the stack stopped
+without telling the advertiser stays stopped until the next membership change,
+disconnect or peer loss, so a third device may not find this phone until then.
+The alternative, restarting on the timer while linked, rotates the address
+every two minutes, which is what made the second link form.
 
 ## What would undo this
 

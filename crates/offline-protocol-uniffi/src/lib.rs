@@ -13856,6 +13856,173 @@ mod tests {
         );
     }
 
+    /// The bridge wiring the 2026-10-19 volume-test fixes depend on, which CI
+    /// only type-checks. Each line below names the failure its absence
+    /// brought back:
+    ///
+    /// - Both drains stop before the destructive pop only for a recipient with
+    ///   a link. Counting every recipient stopped every peer's egress behind
+    ///   one whose link had closed; checking after the pop overflowed the cap.
+    /// - The iOS connect timeout cancels only the attempt that armed it.
+    ///   Capturing only the peripheral cancelled a healthy redial armed after
+    ///   a failed dial, and the cancel was reported as the peer lost.
+    /// - iOS forgets a link's write stall on connect and disconnect, so a
+    ///   reconnected link is not torn down by the clock of the dead one.
+    /// - iOS retires a dropped identifier, instead of reporting the peer lost,
+    ///   on both connect-failure callbacks while the peer is linked elsewhere,
+    ///   and only a write the link took ends a stall.
+    /// - Android's forced refresh restarts the advertisement only through the
+    ///   policy that keeps a linked peer's address pair stable (ADR 0030).
+    #[test]
+    fn the_ble_bridges_keep_the_volume_test_wiring() {
+        fn swift_body<'a>(source: &'a str, signature: &str) -> &'a str {
+            let start = source
+                .find(signature)
+                .unwrap_or_else(|| panic!("BleManager.swift lost `{signature}`"));
+            let rest = &source[start + signature.len()..];
+            let end = [" func ", " private func ", " public func "]
+                .iter()
+                .filter_map(|marker| rest.find(marker))
+                .min()
+                .unwrap_or(rest.len());
+            &rest[..end]
+        }
+        let swift = rn_source_code_only("ios/BleManager.swift");
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+
+        // Stop before the pop, for linked recipients only.
+        let pop = swift
+            .find("self.protocolInstance.bleGetNextFragment()")
+            .expect("the iOS drain pops from the core");
+        let stop = swift
+            .find("self.outboundFragments.anyBackedUp(deliverable: deliverable) || self.notifyFragments.anyBackedUp(deliverable: deliverable)")
+            .expect("the iOS drain must stop on backed-up recipients that have a link, in both queues");
+        assert!(
+            stop < pop,
+            "the iOS drain must stop before the pop, not after it"
+        );
+        assert_eq!(swift.matches("bleGetNextFragment()").count(), 1);
+        assert!(
+            !swift.contains("anyBackedUp() ||"),
+            "an unfiltered anyBackedUp() is back in the iOS drain"
+        );
+
+        let kotlin_pops: Vec<usize> = kotlin
+            .match_indices("protocol.bleGetNextFragment()")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            kotlin_pops.len(),
+            2,
+            "the Android drain and the poll floor are the two pops"
+        );
+        let kotlin_stops: Vec<usize> = kotlin
+            .match_indices("outboundQueue.anyBackedUp { hasDeliverableLink(it) }")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            kotlin_stops.len(),
+            2,
+            "each Android pop needs its own linked-only stop"
+        );
+        for (stop, pop) in kotlin_stops.iter().zip(&kotlin_pops) {
+            assert!(stop < pop, "an Android pop runs before its backed-up stop");
+        }
+        assert!(
+            !kotlin.contains("anyBackedUp()"),
+            "an unfiltered anyBackedUp() is back on Android"
+        );
+
+        // The connect timeout belongs to its attempt.
+        let attempt = swift_body(&swift, "private func performConnectionAttempt(");
+        assert!(
+            attempt.contains("connectTimeoutTokens[peripheral.identifier] = attempt")
+                && attempt.contains("self.connectTimeoutTokens[peripheral.identifier] == attempt,"),
+            "the iOS connect timeout must be bound to the attempt that armed it"
+        );
+
+        // The stall clock and the timeout token do not outlive a link.
+        let did_connect = swift_body(&swift, "func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {");
+        let did_fail = swift_body(&swift, "func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {");
+        let did_disconnect = swift_body(&swift, "func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {");
+        for (name, body) in [
+            ("didConnect", did_connect),
+            ("didDisconnectPeripheral", did_disconnect),
+        ] {
+            assert!(
+                body.contains("writeStallPolicy.forget(peripheral.identifier)"),
+                "{name} must forget the link's write stall"
+            );
+            assert!(
+                body.contains("connectTimeoutTokens.removeValue(forKey: peripheral.identifier)"),
+                "{name} must drop the link's connect timeout"
+            );
+        }
+        assert!(
+            did_fail.contains("connectTimeoutTokens.removeValue(forKey: peripheral.identifier)")
+        );
+
+        // A peer linked elsewhere is retired, not lost, on both callbacks, and
+        // the check runs before anything reports or redials.
+        for (name, body, before) in [
+            (
+                "didFailToConnect",
+                did_fail,
+                "guard retryCount <= MAX_CONNECTION_RETRIES",
+            ),
+            (
+                "didDisconnectPeripheral",
+                did_disconnect,
+                "if wasConnected {",
+            ),
+        ] {
+            let retire = body
+                .find("if retireIfLinkedElsewhere(peripheral.identifier, wasConnected:")
+                .unwrap_or_else(|| {
+                    panic!("{name} must retire an identifier of a peer linked elsewhere")
+                });
+            let next = body
+                .find(before)
+                .unwrap_or_else(|| panic!("{name} lost `{before}`"));
+            assert!(
+                retire < next,
+                "{name} must retire before it reports or redials"
+            );
+        }
+        // A dial that never connected unmaps the identifier, so the monitor
+        // does not redial a departed peer forever.
+        assert!(
+            did_disconnect
+                .contains("connections.removePeripheralDeviceId(for: peripheral.identifier)"),
+            "the never-connected branch must unmap the identifier"
+        );
+
+        // Only a write the link took, or a ready callback, ends a stall.
+        let ready = swift_body(
+            &swift,
+            "public func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {",
+        );
+        assert!(ready.contains("writeStallPolicy.noteWritable(peripheral.identifier)"));
+        assert!(swift.contains(
+            "peripheral.writeValue(data, for: characteristic, type: .withoutResponse) writeStallPolicy.noteWritable(peripheral.identifier)"
+        ));
+        assert_eq!(swift.matches("writeStallPolicy.noteRefused(").count(), 1);
+        assert!(
+            swift.contains("writeStallPolicy.reset()"),
+            "stop must reset every link's stall"
+        );
+
+        // Android's forced refresh goes through the policy.
+        assert!(
+            kotlin.contains(
+                "if (AdvertisingRefreshPolicy.restartsAdvertising(identifiedLinks, leAdvertiser.isAdvertising)) { refreshAdvertising(\"forced_refresh\")"
+            ),
+            "the forced refresh must restart the advertisement only through AdvertisingRefreshPolicy"
+        );
+    }
+
     #[test]
     fn react_native_ble_announces_only_cross_checked_addresses() {
         let swift = rn_source_code_only("ios/BleManager.swift");
@@ -15078,8 +15245,19 @@ mod tests {
         let drain = &facade[drain_start..];
         let drain = &drain[..rn_kotlin_body_end(drain)];
         assert!(
-            drain.contains(
-                "val hasConnection = address?.let { connections.getGatt(it) } != null || \
+            drain.contains("if (!hasDeliverableLink(recipientId, address)) {"),
+            "the drain must decide a peer is linked through hasDeliverableLink"
+        );
+        let link_decl = "private fun hasDeliverableLink(";
+        let link_start = facade
+            .find(link_decl)
+            .expect("the facade decides deliverability in one place")
+            + link_decl.len();
+        let link = &facade[link_start..];
+        let link = &link[..rn_kotlin_body_end(link)];
+        assert!(
+            link.contains(
+                "address?.let { connections.getGatt(it) } != null || \
                  subscribedNotifyAddressFor(recipientId) != null"
             ),
             "the drain must treat a notify-subscribed peer as connected"

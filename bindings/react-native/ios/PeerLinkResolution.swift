@@ -26,7 +26,8 @@
 //   still advertising. One that was identified is retired by the rule above
 //   instead, so the monitor still reconnects a known peer that went quiet.
 // - A peer with another live link is never reported lost when one of its
-//   identifiers drops, and an identifier of such a peer is never dialled.
+//   identifiers drops, and an identifier of such a peer is never dialled. A
+//   subscribed central is a live link only while it is heard from.
 //
 // Pure functions over snapshots, so the rules are testable without
 // CoreBluetooth.
@@ -86,9 +87,34 @@ enum PeerLinkResolution {
         return now.timeIntervalSince(seen) < window
     }
 
+    /// How recently a subscribed central must have been heard from (its
+    /// subscription, or a write to our server) to count as a live link in
+    /// `otherLiveLinks`. A connected peripheral is known live from
+    /// CoreBluetooth's own state; a subscription is not: it ends only when
+    /// `didUnsubscribeFrom` arrives. One that never arrived would otherwise
+    /// keep a departed peer a neighbour for good, since the gate then retires
+    /// its real identifiers, refuses every dial and reports nothing lost. A
+    /// quiet but live central that misses the window costs only the older
+    /// behaviour: the peer is reported lost and re-announced on its next
+    /// verified frame. Under load the peer's acknowledgements arrive several
+    /// times a second, so a working link never misses it.
+    static let subscribedCentralLivenessWindow: TimeInterval = 60
+
+    /// Whether a subscribed central last heard from at `lastHeardAt` counts
+    /// as a live link at `now`.
+    static func subscriptionIsLive(
+        lastHeardAt: Date?,
+        now: Date,
+        window: TimeInterval = PeerLinkResolution.subscribedCentralLivenessWindow
+    ) -> Bool {
+        guard let heard = lastHeardAt else { return false }
+        return now.timeIntervalSince(heard) < window
+    }
+
     /// The identifiers, other than `excluding`, on which `deviceId` holds a
     /// link the bridge can use right now: a connected peripheral it verified,
-    /// or a verified central subscribed to our server (the notify path).
+    /// or a verified central subscribed to our server (the notify path) and
+    /// heard from recently (`subscriptionIsLive`).
     ///
     /// A non-empty answer means the peer is not lost when `excluding` goes,
     /// and that dialling `excluding` again cannot succeed: two devices hold

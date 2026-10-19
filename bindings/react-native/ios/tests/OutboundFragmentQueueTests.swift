@@ -222,6 +222,64 @@ final class OutboundFragmentQueueTests: XCTestCase {
         XCTAssertFalse(queue.isBackedUp("carol"))
     }
 
+    /// A recipient with no link cannot drain, so it must not stop the pull
+    /// for everyone else. Counting it parked every other peer's fragments in
+    /// the core until the linkless queue expired.
+    func testARecipientWithNoLinkDoesNotStopThePullForOthers() {
+        let queue = OutboundFragmentQueue(maxPerPeer: 8)
+        for i in 0..<6 { queue.enqueue("gone", bytes(UInt8(i))) }
+        XCTAssertTrue(queue.anyBackedUp())
+        XCTAssertFalse(queue.anyBackedUp(deliverable: { $0 != "gone" }))
+        for i in 0..<6 { queue.enqueue("bob", bytes(UInt8(i))) }
+        XCTAssertTrue(queue.anyBackedUp(deliverable: { $0 != "gone" }))
+    }
+
+    /// The pull resumes once the backed-up recipient drains below the mark,
+    /// or is removed.
+    func testThePullResumesAfterAFlushOrARemoval() {
+        let queue = OutboundFragmentQueue(maxPerPeer: 8)
+        let sender = Sender()
+        for i in 0..<6 { queue.enqueue("bob", bytes(UInt8(i))) }
+        XCTAssertTrue(queue.anyBackedUp())
+        _ = queue.flush(send: sender.send)
+        XCTAssertFalse(queue.anyBackedUp())
+        for i in 0..<6 { queue.enqueue("bob", bytes(UInt8(i))) }
+        XCTAssertTrue(queue.anyBackedUp())
+        _ = queue.removeAll("bob")
+        XCTAssertFalse(queue.anyBackedUp())
+    }
+
+    /// A cap of one never yields a mark of zero, which read an empty queue as
+    /// backed up.
+    func testATinyCapStillHasAMarkOfAtLeastOne() {
+        let queue = OutboundFragmentQueue(maxPerPeer: 1)
+        queue.enqueue("bob", bytes(0))
+        _ = queue.flush(send: Sender().send)
+        XCTAssertFalse(queue.anyBackedUp())
+    }
+
+    /// A cap between the default mark and the default cap takes the default
+    /// mark, not three quarters of the cap.
+    func testAMidSizedCapTakesTheDefaultMark() {
+        let queue = OutboundFragmentQueue(maxPerPeer: 100)
+        for i in 0..<(OutboundFragmentQueue.defaultBackpressureMark - 1) {
+            queue.enqueue("bob", bytes(UInt8(truncatingIfNeeded: i)))
+        }
+        XCTAssertFalse(queue.isBackedUp("bob"))
+        queue.enqueue("bob", bytes(0))
+        XCTAssertTrue(queue.isBackedUp("bob"))
+    }
+
+    /// A whole maximum-size message fits under the default cap with nothing
+    /// discarded.
+    func testTheDefaultCapTakesAWholeMaximumSizeMessageWithoutADiscard() {
+        var drops = 0
+        let queue = OutboundFragmentQueue(onDropped: { _, _, n in drops += n })
+        for i in 0..<512 { queue.enqueue("bob", bytes(UInt8(truncatingIfNeeded: i))) }
+        XCTAssertEqual(drops, 0)
+        XCTAssertEqual(queue.totalCount(), 512)
+    }
+
     /// The core fragments a message into at most 512 pieces, and the drain
     /// stops pulling at the mark, so the overflow discard that tore 16 KB
     /// messages stays out of reach only while the mark is below the cap.

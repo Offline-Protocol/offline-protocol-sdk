@@ -39,8 +39,8 @@ final class BleWriteStallPolicy {
         self.stallSeconds = stallSeconds
     }
 
-    /// Records a refused write on `peripheral`. Returns true when the link
-    /// has refused everything for longer than the threshold: the caller tears
+    /// Records a refused write on `peripheral`. Returns true once the link
+    /// has refused everything for the threshold or longer: the caller tears
     /// it down. The stall is forgotten when this returns true, so one dead
     /// link produces one teardown.
     func noteRefused(_ peripheral: UUID, now: Date = Date()) -> Bool {
@@ -62,8 +62,22 @@ final class BleWriteStallPolicy {
         lock.unlock()
     }
 
-    /// The link is gone; a reconnect starts from a clean slate.
+    /// The link is gone, or has just connected: a reconnect starts from a
+    /// clean slate. Called from `didConnect` and `didDisconnectPeripheral`.
+    ///
+    /// Without it the clock outlived the teardown. The cancel that ends a
+    /// stalled link is an asynchronous hop to main, and the redrain floor can
+    /// refuse another write in between, re-arming the clock for an identifier
+    /// CoreBluetooth keeps across the reconnect. The fresh link then met one
+    /// refusal before its first accepted write and was torn down at once.
     func forget(_ peripheral: UUID) {
         noteWritable(peripheral)
+    }
+
+    /// Forgets every link: the bridge stopped, or the radio went away.
+    func reset() {
+        lock.lock()
+        blockedSince.removeAll()
+        lock.unlock()
     }
 }

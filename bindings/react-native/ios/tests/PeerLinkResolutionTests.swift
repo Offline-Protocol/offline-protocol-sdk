@@ -143,4 +143,37 @@ final class PeerLinkResolutionTests: XCTestCase {
             "a central that unsubscribed carries nothing"
         )
     }
+
+    /// A subscribed central counts only while it is heard from. One whose
+    /// `didUnsubscribeFrom` never arrived would otherwise hold a departed
+    /// peer as a neighbour for good.
+    func testASubscriptionCountsOnlyWhileItsCentralIsHeardFrom() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        XCTAssertTrue(PeerLinkResolution.subscriptionIsLive(lastHeardAt: now.addingTimeInterval(-59), now: now))
+        XCTAssertFalse(PeerLinkResolution.subscriptionIsLive(lastHeardAt: now.addingTimeInterval(-60), now: now))
+        XCTAssertFalse(PeerLinkResolution.subscriptionIsLive(lastHeardAt: nil, now: now))
+    }
+
+    /// The monitor's window is exclusive at its edge, like the liveness one.
+    func testTheMonitorStopsDiallingAnUnidentifiedPeripheralExactlyAtTheWindow() {
+        let now = Date(timeIntervalSince1970: 10_000)
+        let window = PeerLinkResolution.unidentifiedRedialWindow
+        XCTAssertTrue(PeerLinkResolution.monitorShouldRedial(
+            identified: false, lastAdvertisedAt: now.addingTimeInterval(-window + 1), now: now))
+        XCTAssertFalse(PeerLinkResolution.monitorShouldRedial(
+            identified: false, lastAdvertisedAt: now.addingTimeInterval(-window), now: now))
+    }
+
+    /// The disconnect path retires on the kept link even when that link is a
+    /// subscribed central with no peripheral-role mapping of its own.
+    func testRetiringOnACentralOnlyLinkRetiresEveryDisconnectedPeripheral() {
+        let retired = PeerLinkResolution.superseded(
+            by: other,
+            deviceId: peer,
+            peripheralDeviceIds: [stale: peer, fresh: peer],
+            isConnected: { _ in false }
+        )
+        XCTAssertEqual(retired, [stale, fresh])
+    }
 }
+

@@ -155,6 +155,49 @@ class OutboundFragmentQueueTest {
     }
 
     @Test
+    fun `a recipient with no link does not stop the pull for others`() {
+        // Counting a linkless recipient parked every other peer's fragments
+        // in the core until its queue expired.
+        val h = Harness(maxPerPeer = 8)
+        repeat(6) { h.queue.enqueue("gone", byteArrayOf(it.toByte())) }
+        assertTrue(h.queue.anyBackedUp())
+        assertFalse(h.queue.anyBackedUp { it != "gone" })
+        repeat(6) { h.queue.enqueue("bob", byteArrayOf(it.toByte())) }
+        assertTrue(h.queue.anyBackedUp { it != "gone" })
+    }
+
+    @Test
+    fun `the pull resumes after a flush or a removal`() {
+        val h = Harness(maxPerPeer = 8)
+        repeat(6) { h.queue.enqueue("bob", byteArrayOf(it.toByte())) }
+        assertTrue(h.queue.anyBackedUp())
+        h.queue.flush { _, _ -> true }
+        assertFalse(h.queue.anyBackedUp())
+        repeat(6) { h.queue.enqueue("bob", byteArrayOf(it.toByte())) }
+        assertTrue(h.queue.anyBackedUp())
+        h.queue.removeAll("bob")
+        assertFalse(h.queue.anyBackedUp())
+    }
+
+    @Test
+    fun `a cap of one still has a mark of at least one`() {
+        // A mark of zero read every created queue, even an empty one, as
+        // backed up.
+        val h = Harness(maxPerPeer = 1)
+        h.queue.enqueue("bob", byteArrayOf(0))
+        h.queue.flush { _, _ -> true }
+        assertFalse(h.queue.anyBackedUp())
+    }
+
+    @Test
+    fun `a whole maximum-size message fits under the default cap with nothing discarded`() {
+        val h = Harness(maxPerPeer = OutboundFragmentQueue.DEFAULT_MAX_PER_PEER)
+        repeat(512) { h.queue.enqueue("bob", byteArrayOf(it.toByte())) }
+        assertTrue(h.drops.isEmpty())
+        assertEquals(512, h.queue.totalCount())
+    }
+
+    @Test
     fun `the default cap holds a whole maximum-size message and the mark sits below it`() {
         // The core fragments a message into at most 512 pieces, and the drain
         // stops pulling at the mark, so the overflow discard that tore 16 KB

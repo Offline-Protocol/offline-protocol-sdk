@@ -44,4 +44,30 @@ final class BleWriteStallPolicyTests: XCTestCase {
         XCTAssertTrue(policy.noteRefused(link, now: start.addingTimeInterval(16)))
         XCTAssertFalse(policy.noteRefused(other, now: start.addingTimeInterval(16)))
     }
+
+    /// A link that disconnects and reconnects under the same identifier
+    /// starts clean, even if a refusal re-armed the clock after the teardown
+    /// verdict and before the disconnect landed.
+    func testForgetClearsAClockReArmedBetweenTheVerdictAndTheDisconnect() {
+        let policy = BleWriteStallPolicy(stallSeconds: 15)
+        XCTAssertFalse(policy.noteRefused(link, now: start))
+        XCTAssertTrue(policy.noteRefused(link, now: start.addingTimeInterval(15)))
+        // The redrain refuses again before the cancel reaches main.
+        XCTAssertFalse(policy.noteRefused(link, now: start.addingTimeInterval(16)))
+        policy.forget(link)
+        // The reconnected link's first refusal starts a new clock.
+        XCTAssertFalse(policy.noteRefused(link, now: start.addingTimeInterval(40)))
+        XCTAssertFalse(policy.noteRefused(link, now: start.addingTimeInterval(54)))
+    }
+
+    /// Stopping the bridge forgets every link.
+    func testResetForgetsEveryLink() {
+        let policy = BleWriteStallPolicy(stallSeconds: 15)
+        let other = UUID()
+        XCTAssertFalse(policy.noteRefused(link, now: start))
+        XCTAssertFalse(policy.noteRefused(other, now: start))
+        policy.reset()
+        XCTAssertFalse(policy.noteRefused(link, now: start.addingTimeInterval(20)))
+        XCTAssertFalse(policy.noteRefused(other, now: start.addingTimeInterval(20)))
+    }
 }

@@ -60,11 +60,13 @@ import Foundation
 /// The cap is a memory backstop and must stay unreachable in normal
 /// operation, because the discard is still a loss and it tears the message
 /// whose first slices already went out. The drain stops pulling from the Rust
-/// core while any recipient of either queue is past the `isBackedUp` mark
-/// (`anyBackedUp`), checked **before** each pop, since the pop is destructive
-/// and nothing can hand a fragment back. Every fragment here arrived through
-/// one such pop, so a recipient never holds more than the mark, and the mark
-/// sits below the cap. The cap also sits above the largest message the core
+/// core while any recipient of either queue with a link to drain into is past
+/// the `isBackedUp` mark (`anyBackedUp`), checked **before** each pop, since
+/// the pop is destructive and nothing can hand a fragment back. Every fragment
+/// here arrived through one such pop, so a linked recipient never holds more
+/// than the mark, and the mark sits below the cap. A recipient with no link is
+/// left out of the stop (see `anyBackedUp`), so only its undeliverable queue
+/// can reach the cap. The cap also sits above the largest message the core
 /// will fragment (512 fragments). With the old cap of 100, one sealed 16 KB
 /// message was more than the queue could hold.
 ///
@@ -120,8 +122,10 @@ final class OutboundFragmentQueue: @unchecked Sendable {
     ) {
         self.queueCheck = queueCheck
         self.maxPerPeer = maxPerPeer
-        self.backpressureMark = backpressureMark
-            ?? min(OutboundFragmentQueue.defaultBackpressureMark, maxPerPeer * 3 / 4)
+        // At least one: a mark of zero (a cap of 1) reads every created queue,
+        // even an empty one, as backed up.
+        self.backpressureMark = max(1, backpressureMark
+            ?? min(OutboundFragmentQueue.defaultBackpressureMark, maxPerPeer * 3 / 4))
         self.timeout = timeout
         self.clock = clock
         self.onDropped = onDropped
@@ -168,14 +172,26 @@ final class OutboundFragmentQueue: @unchecked Sendable {
         return (queues[recipientId]?.count ?? 0) >= backpressureMark
     }
 
-    /// True if any recipient is past the `isBackedUp` mark. The drain checks
-    /// it before every pop from the Rust core: the pop is one FIFO across all
-    /// peers and cannot be undone, so the only lossless moment to stop is
-    /// before it. Mirrors Android's `anyBackedUp`. Safe from any thread.
-    func anyBackedUp() -> Bool {
+    /// True if any recipient that `deliverable` accepts is past the
+    /// `isBackedUp` mark. The drain checks it before every pop from the Rust
+    /// core: the pop is one FIFO across all peers and cannot be undone, so
+    /// the only lossless moment to stop is before it. Mirrors Android's
+    /// `anyBackedUp`. Safe from any thread.
+    ///
+    /// Only a recipient with a link to drain into may stop the pull. One with
+    /// none (a peer whose link closed, in the grace before it is reported
+    /// lost) keeps the fragments the core still hands out for it until they
+    /// expire, and counting it stopped every other peer's egress until then,
+    /// in 30-second rounds, for as long as the core held its backlog. Such a
+    /// recipient's queue can pass the mark and, at worst, reach the cap: its
+    /// fragments cannot be delivered either way, and the core's acknowledgement
+    /// timeout resends them once a link returns. `deliverable` is called
+    /// outside this queue's lock.
+    func anyBackedUp(deliverable: (String) -> Bool = { _ in true }) -> Bool {
         lock.lock()
-        defer { lock.unlock() }
-        return queues.values.contains { $0.count >= backpressureMark }
+        let full = queues.compactMap { $0.value.count >= backpressureMark ? $0.key : nil }
+        lock.unlock()
+        return full.contains(where: deliverable)
     }
 
     // MARK: - Owning-queue mutations

@@ -2755,19 +2755,19 @@ class BleTransportFacade(
                     "discoveredPeers" to connections.discoveredPeerCount()
                 ))
             }
-            // Restart scanning always; advertising only with no link up. Each
-            // advertising restart starts a new advertising set, and the stack
-            // gives every set a new random address, so a linked peer saw a
-            // new device every two minutes, dialled it, and waited out its
-            // connect timeout: the Link Layer does not complete a second
-            // connection between two devices that already have one. Membership
-            // changes and disconnects still refresh the advertisement.
-            val linked = connections.establishedLinkCount() > 0
+            // Restart scanning always; the advertisement only as
+            // [AdvertisingRefreshPolicy] allows: not while an identified peer
+            // is linked (each restart gives the advertisement a new random
+            // address, and a linked peer then dials an address pair the Link
+            // Layer will never connect, ADR 0030), unless the advertiser says
+            // it is not running. Membership changes and disconnects still
+            // refresh it.
+            val identifiedLinks = connections.identifiedLinkCount()
             stopScanning("forced_refresh")
-            if (!linked) {
+            if (AdvertisingRefreshPolicy.restartsAdvertising(identifiedLinks, leAdvertiser.isAdvertising)) {
                 refreshAdvertising("forced_refresh")
             } else if (logThrottler.shouldLog("forced_refresh_keeps_advertising", intervalMs = FORCED_BLE_REFRESH_MS)) {
-                Log.i(TAG, "Forced refresh keeps the advertisement: ${connections.establishedLinkCount()} link(s) up")
+                Log.i(TAG, "Forced refresh keeps the advertisement: $identifiedLinks identified link(s) up")
             }
             bleHandler.postDelayed({
                 if (state == TransportState.RUNNING) {
@@ -3318,7 +3318,10 @@ class BleTransportFacade(
                 // shared by every peer, so a fragment pulled for a peer whose
                 // queue is past the mark has nowhere to go but further past it;
                 // the checks further down run only once that has happened.
-                if (outboundQueue.anyBackedUp()) {
+                // Only a recipient with a link counts: one with none cannot
+                // drain, so counting it stopped every other peer until its
+                // fragments expired ([OutboundFragmentQueue.anyBackedUp]).
+                if (outboundQueue.anyBackedUp { hasDeliverableLink(it) }) {
                     hitBackpressure = true
                     break
                 }
@@ -3334,14 +3337,7 @@ class BleTransportFacade(
                 val data = fragment.data.map { it.toByte() }.toByteArray()
 
                 val address = resolveTargetAddress(recipientId)
-                // A peer that subscribed on the link it opened to our server is
-                // reachable by notify, which [sendFragmentData] prefers. A hello
-                // maps such a peer at its central-role address, where we hold no
-                // client link; requiring one here would queue every fragment and
-                // dial that address, the dial the hello exists to remove (#512).
-                val hasConnection = address?.let { connections.getGatt(it) } != null ||
-                    subscribedNotifyAddressFor(recipientId) != null
-                if (!hasConnection) {
+                if (!hasDeliverableLink(recipientId, address)) {
                     outboundQueue.enqueue(recipientId, data)
                     // Proactively attempt reconnection if we know the address (once per peer per drain).
                     // Never toward a central connected to our server: that address need not
@@ -3367,22 +3363,10 @@ class BleTransportFacade(
                 // Maintain FIFO ordering: if this recipient already has
                 // fragments waiting, enqueue instead of sending directly.
                 if (outboundQueue.enqueueIfBlocked(recipientId, data)) {
-                    // Backpressure against the write gate: once this peer's
-                    // queue is backed up, stop pulling more fragments out of
-                    // the Rust core (bleGetNextFragment is a destructive pop)
-                    // into the bounded per-peer queue. The write gate paces
-                    // sends to ~1 fragment / WRITE_GATE_WATCHDOG_MS when the
-                    // completion callback is absent, which is far slower than
-                    // this loop can pull; without this stop the loop spins the
-                    // whole backlog into the queue, overflows maxPerPeer, and
-                    // OutboundFragmentQueue.enqueue discards the in-flight
-                    // message. Leaving the backlog in Rust keeps delivery
-                    // lossless — the scheduled re-drain below resumes once
-                    // flush() has drained the queue back down.
-                    if (outboundQueue.isBackedUp(recipientId)) {
-                        hitBackpressure = true
-                        break
-                    }
+                    // Queued behind this peer's earlier fragments, so its
+                    // stream stays in order. The check at the top of the loop
+                    // stops the next pop once this queue reaches the mark;
+                    // the scheduled re-drain resumes once flush() drains it.
                     continue
                 }
 
@@ -3512,7 +3496,7 @@ class BleTransportFacade(
             // queue is past the mark. This floor used to pop with no check at
             // all, so every 2 s it pushed one more fragment into a queue the
             // drain had stopped feeding, until the cap discarded the lot.
-            if (outboundQueue.anyBackedUp()) {
+            if (outboundQueue.anyBackedUp { hasDeliverableLink(it) }) {
                 return
             }
             val fragment = try {
@@ -3573,6 +3557,22 @@ class BleTransportFacade(
             emitDiagnostic("error", "Error sending BLE fragment", mapOf("exception" to e.javaClass.simpleName, "message" to (e.message ?: "unknown")))
         }
     }
+
+    /**
+     * Whether [recipientId] has a link its fragments can leave on now: a
+     * client link at its resolved address, or its subscription on the link it
+     * opened to our server. A peer that subscribed is reachable by notify,
+     * which [sendFragmentData] prefers. A hello maps such a peer at its
+     * central-role address, where we hold no client link; requiring one would
+     * queue every fragment and dial that address, the dial the hello exists
+     * to remove (#512). BLE thread only.
+     */
+    private fun hasDeliverableLink(
+        recipientId: String,
+        address: String? = resolveTargetAddress(recipientId),
+    ): Boolean =
+        address?.let { connections.getGatt(it) } != null ||
+            subscribedNotifyAddressFor(recipientId) != null
 
     private fun resolveTargetAddress(recipientId: String): String? {
         if (recipientId == deviceId) {
@@ -4361,9 +4361,22 @@ class BleTransportFacade(
             // (status 0 = GATT_SUCCESS). If "Replying via notify" appears but this
             // never does, the notify is stuck in the stack queue / not going OTA.
             Log.i(TAG, "Notification flushed to $address status=$status")
+            // A failed indication lost its fragment: the queue already gave it
+            // up, so its message reassembles torn and the core's resend is
+            // the recovery. Say so, so a tearing link is attributable, and
+            // pace the next one instead of draining at once into a link that
+            // is refusing.
+            val confirmed = status == BluetoothGatt.GATT_SUCCESS
+            if (!confirmed && logThrottler.shouldLog("notify_failed_$address", intervalMs = 5_000)) {
+                Log.w(TAG, "Indication to $address failed with status=$status; its fragment is lost")
+                emitDiagnostic("warning", "BLE indication failed; fragment lost", mapOf(
+                    "address" to address,
+                    "status" to status
+                ))
+            }
             bleHandler.post {
                 if (shuttingDown) return@post
-                onWriteCompleted(address, peerConfirmed = true)
+                onWriteCompleted(address, peerConfirmed = confirmed)
             }
         }
 
