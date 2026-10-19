@@ -29,7 +29,11 @@ class OfflineProtocol {
 
   /// Core protocol events (`message_received`, diagnostics, Internet status, …).
   ///
-  /// Subscribe before [createFromConfig] / [start] if you need every event.
+  /// Subscribe **before** [createFromConfig] if you need every event and gap
+  /// recovery: native code only assigns `seq` and fills the replay ring for
+  /// events delivered while a listener is attached (same contract as React
+  /// Native). Events emitted before you listen are not replayable.
+  ///
   /// Delivery uses the same `seq` / gap recovery contract as React Native
   /// (`admitNativeEvent` + native `replayEvents`).
   static Stream<OfflineProtocolNativeEvent> get events {
@@ -59,10 +63,13 @@ class OfflineProtocol {
   /// Optional top-level `dors` and `relay` sections are applied the same way as
   /// on React Native after [ProtocolConfig] is constructed. When Internet or
   /// Wi‑Fi Direct are configured, [start] auto-enables them (React Native JS layer).
+  ///
+  /// Resets Dart `seq` tracking to match the native session (native [create]
+  /// tears down the previous engine and restarts event numbering from zero).
   static Future<void> createFromConfig(Map<String, dynamic> config) async {
     _lastCreateConfig = Map<String, dynamic>.from(config);
     _ensureEventPipeline();
-    _eventPipeline?.reset();
+    _eventPipeline!.reset();
     await _channel.invokeMethod<void>('create', jsonEncode(config));
   }
 
@@ -78,16 +85,40 @@ class OfflineProtocol {
   }
 
   /// Stops the protocol core and active transports.
+  ///
+  /// Resets Dart `seq` tracking so a later [start] on the same engine instance
+  /// stays aligned with native numbering (native does not rewind `seq` on stop).
   static Future<void> stop() async {
     await _channel.invokeMethod<void>('stop');
+    _ensureEventPipeline();
+    _eventPipeline!.reset();
   }
 
   /// Releases native resources. Safe to call more than once.
+  ///
+  /// Clears Dart event state and drops the EventChannel subscription; the next
+  /// [createFromConfig] or access to [events] reattaches it. Your existing
+  /// [StreamSubscription] on [events] remains valid (same broadcast stream).
   static Future<void> destroy() async {
     _lastCreateConfig = null;
     await _channel.invokeMethod<void>('destroy');
-    _resetEventPipeline();
+    _detachNativeEventSubscription(resetPipeline: true);
   }
+
+  /// Method-channel entry points implemented by the Flutter plugin (pinned in tests).
+  @visibleForTesting
+  static const List<String> nativeMethodChannelMethods = [
+    'create',
+    'initializeMlsWithSecureStorage',
+    'start',
+    'stop',
+    'destroy',
+    'localAddress',
+    'sendMessage',
+    'enableInternetTransport',
+    'enableTransport',
+    'replayEvents',
+  ];
 
   /// This device's `off1…` address, or null before MLS is initialized.
   static Future<String?> localAddress() async {
@@ -148,21 +179,23 @@ class OfflineProtocol {
   }
 
   static void _ensureEventPipeline() {
-    if (_eventPipeline != null) return;
-    _eventPipeline = NativeEventPipeline(
+    _eventPipeline ??= NativeEventPipeline(
       replayEvents: _replayEventsFromNative,
     );
-    _nativeEventSubscription ??=
+    if (_nativeEventSubscription != null) return;
+    _nativeEventSubscription =
         _eventsChannel.receiveBroadcastStream().listen((raw) {
       _eventPipeline?.admitRaw(raw);
     });
   }
 
-  static void _resetEventPipeline() {
+  /// Cancels the EventChannel listener and optionally clears pipeline seq state.
+  static void _detachNativeEventSubscription({required bool resetPipeline}) {
     _nativeEventSubscription?.cancel();
     _nativeEventSubscription = null;
-    _eventPipeline?.close();
-    _eventPipeline = null;
+    if (resetPipeline) {
+      _eventPipeline?.reset();
+    }
   }
 
   static Future<List<Map<String, dynamic>>> _replayEventsFromNative(
@@ -174,17 +207,21 @@ class OfflineProtocol {
       'toSeq': toSeq,
     });
     if (result == null) return const [];
-    return result.map((entry) {
-      if (entry is! Map) {
-        throw StateError('replayEvents returned a non-map entry');
-      }
+    final out = <Map<String, dynamic>>[];
+    for (final entry in result) {
+      if (entry is! Map) continue;
       final seqRaw = entry['seq'];
       final json = entry['eventJson'];
-      if (seqRaw is! int || json is! String) {
-        throw StateError('replayEvents entry missing seq or eventJson');
-      }
-      return {'seq': seqRaw, 'eventJson': json};
-    }).toList();
+      if (json is! String) continue;
+      final int? seq = seqRaw is int
+          ? seqRaw
+          : seqRaw is num
+              ? seqRaw.toInt()
+              : null;
+      if (seq == null) continue;
+      out.add({'seq': seq, 'eventJson': json});
+    }
+    return out;
   }
 
   /// Mirrors [InternetTransportBootstrap.readStoredConfig] key precedence and

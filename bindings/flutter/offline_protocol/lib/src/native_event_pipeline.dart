@@ -177,6 +177,8 @@ class NativeEventPipeline {
       }
     }
 
+    // Linear in the seq span being flushed (same bound as React Native). Capped
+    // in practice by [maxDeferredNativeEvents] and [nativeEventReplayCapacity].
     int? missingFrom;
     for (var seq = first; seq <= last; seq++) {
       final eventJson = present[seq];

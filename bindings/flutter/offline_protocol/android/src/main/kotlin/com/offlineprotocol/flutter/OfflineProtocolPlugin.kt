@@ -450,7 +450,7 @@ class OfflineProtocolPlugin :
                 }
                 InternetTransportBootstrap.configureAndStart(manager, json)
             }
-            "wifidirect", "wifi_direct", "wifiDirect" -> {
+            "wifidirect", "wifi_direct" -> {
                 if (wifiDirectManager == null) {
                     wifiDirectManager = WifiDirectManager(
                         ctx,

@@ -65,6 +65,17 @@ void main() {
     expect(config['autoAccept'], isTrue);
   });
 
+  test('nativeMethodChannelMethods includes PR3 replay and enableTransport', () {
+    expect(
+      OfflineProtocol.nativeMethodChannelMethods,
+      containsAll(['replayEvents', 'enableTransport', 'enableInternetTransport']),
+    );
+    expect(OfflineProtocol.nativeMethodChannelMethods, isNotEmpty);
+    expect(OfflineProtocol.nativeMethodChannelMethods.toSet().length,
+        OfflineProtocol.nativeMethodChannelMethods.length,
+        reason: 'method names must be unique');
+  });
+
   test('resolveInternetAutoEnableConfig requires enabled flag', () {
     expect(
       OfflineProtocol.resolveInternetAutoEnableConfig({

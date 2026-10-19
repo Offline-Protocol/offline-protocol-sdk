@@ -13,10 +13,11 @@ results are posted on the main queue (see [Kotlin bridge K2](../../docs/bridges/
 
 ## PR2 scope (events, messaging, Internet)
 
-- **Events:** subscribe with `OfflineProtocol.events` **before** `create` / `start`
-  if you need early diagnostics (native events are not buffered while unsubscribed).
-  Payloads use the same `eventJson` (+ optional `seq`) shape as React Native
-  `OfflineProtocol_Event`.
+- **Events:** subscribe with `OfflineProtocol.events` **before** `createFromConfig`
+  if you need every event, including gap recovery via `replayEvents`. Native code
+  only numbers and records events while a listener is attached; anything emitted
+  before you subscribe is not recoverable. Payloads use the same `eventJson`
+  (+ optional `seq`) shape as React Native `OfflineProtocol_Event`.
 - **Messaging:** `OfflineProtocol.sendMessage`.
 - **Internet:** `OfflineProtocol.enableInternetTransport`, plus auto-enable after
   `start()` when `transports.internet` is enabled with a `serverAddress` (same as
@@ -26,6 +27,10 @@ results are posted on the main queue (see [Kotlin bridge K2](../../docs/bridges/
 
 - **Event replay:** native `EventReplayRing` + method-channel `replayEvents`; Dart
   `NativeEventPipeline` implements the React Native `admitNativeEvent` gap contract.
+- **Session / `seq`:** `createFromConfig` and `stop` reset Dart seq tracking; native
+  event numbering restarts from zero only on `createFromConfig` (or `destroy`).
+  Call `destroy` before tearing down the plugin; your `events` subscription can
+  stay open across destroy → create.
 - **BLE:** created when `bleEnabled` is true; started on `start()`; also via
   `OfflineProtocol.enableTransport('ble', …)`.
 - **Wi‑Fi Direct / peer stream:** `enableTransport('wifiDirect', …)` and auto-enable
@@ -39,6 +44,11 @@ results are posted on the main queue (see [Kotlin bridge K2](../../docs/bridges/
 PR3 compiles UniFFI, config, secure storage, Internet, relay helpers, BLE, peer
 stream, event replay, and teardown helpers. React Native–only services (foreground
 mesh service, sticky event dispatcher, full RN module) stay excluded.
+
+**Binary size / build time:** PR3 links the shared BLE and mesh bridge sources into
+the Flutter AAR and CocoaPod (same code React Native apps already ship). Expect
+longer native compiles and a modest APK/IPA increase versus PR2-only; PR4 may add
+CI size notes. Transports stay opt-in via config flags.
 
 `createFromConfig` accepts the same optional `dors` and `relay` JSON sections as
 the React Native bridge (applied via shared `InitialRuntimeConfigApplier` sources).
@@ -105,6 +115,7 @@ dependencies:
 ```dart
 import 'package:offline_protocol/offline_protocol.dart';
 
+// Before create — required for early events and seq / replay recovery.
 final sub = OfflineProtocol.events.listen((e) {
   final type = e.decodeEvent()['type'];
   // handle message_received, diagnostics, …
