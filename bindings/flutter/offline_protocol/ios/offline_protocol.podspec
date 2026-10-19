@@ -3,10 +3,10 @@ require 'json'
 react_native_ios = File.expand_path('../../../react-native/ios', __dir__)
 
 # PR3: PR2 Internet stack + BLE, peer-stream (Wi‑Fi Direct slot), event replay,
-# foreground reconnect. Nostr / Reticulum stay on React Native until PR4 expands
-# the compile surface.
+# foreground reconnect. Nostr / Reticulum stay on React Native until a later PR
+# expands the compile surface.
 # Keep `pr3_bridge_swift` aligned with android/build.gradle `pr3KotlinIncludes`
-# and KotlinCompile excludes.
+# and KotlinCompile excludes (Rust guards pin both).
 pr3_bridge_swift = [
   'ProtocolConfigParser.swift',
   'InitialRuntimeConfigApplier.swift',

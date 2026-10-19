@@ -39,7 +39,7 @@ results are posted on the main queue (see [Kotlin bridge K2](../../docs/bridges/
 - **Foreground Internet heal:** shared `ForegroundReconnectPolicy` on Android
   (`Activity` lifecycle) and iOS (`UIApplication` notifications).
 - **Nostr / Reticulum:** not in the Flutter compile surface yet; use React Native
-  or wait for PR4.
+  until a later binding PR adds them.
 
 PR3 compiles UniFFI, config, secure storage, Internet, relay helpers, BLE, peer
 stream, event replay, and teardown helpers. React Native–only services (foreground
@@ -59,8 +59,15 @@ bindings/flutter/scripts/measure-plugin-aar-size.sh --check  # CI-style gate
 ```
 
 Baseline: [baselines/offline-protocol-release-aar.json](baselines/offline-protocol-release-aar.json)
-(see [baselines/README.md](baselines/README.md)). PR4 Flutter CI should run
-`--check` after `:offline_protocol:assembleRelease`.
+(see [baselines/README.md](baselines/README.md)).
+
+## PR4 scope (CI and bridge contract)
+
+- **Docs:** [docs/bridges/flutter.md](../../docs/bridges/flutter.md) (F1–F9) linked from
+  [docs/bridges/README.md](../../docs/bridges/README.md).
+- **CI:** GitHub Actions `Flutter Binding` job (Dart tests, Kotlin compile, AAR size gate).
+- **Scripts:** `bindings/flutter/scripts/ci-build-android-jni-arm64.sh` builds arm64 UniFFI
+  into React Native `jniLibs` for fast PR checks (full ABI builds remain app/release responsibility).
 
 `createFromConfig` accepts the same optional `dors` and `relay` JSON sections as
 the React Native bridge (applied via shared `InitialRuntimeConfigApplier` sources).
@@ -71,19 +78,28 @@ Flutter; the React Native module keeps its existing paths until a later refactor
 
 ## CI
 
-A Flutter CI job is planned (PR4 in the Flutter binding rollout). Merging this
-plugin does not yet gate on `flutter build` in GitHub Actions.
+GitHub Actions job **`Flutter Binding`** (`.github/workflows/ci.yml`) runs on every
+pull request:
 
-PR4 is expected to add, at minimum:
+- `flutter test` and `flutter analyze` on this package (Flutter **3.27.4** in CI)
+- `measure-plugin-aar-size.sh --check` (`:offline_protocol:assembleRelease` plus
+  AAR footprint gate) after building arm64 UniFFI into jniLibs
 
-- `flutter test` / `flutter analyze` on `bindings/flutter/offline_protocol`
-- Example Android `:offline_protocol:compileDebugKotlin` (and iOS pod build smoke)
-- Rust guards already in `offline-protocol-uniffi` for PR3 compile lists and
-  **method-channel parity** (`flutter_pr3_method_channel_methods_match_native_plugins`)
-- `bindings/flutter/scripts/measure-plugin-aar-size.sh --check` (committed
-  baseline under `bindings/flutter/baselines/`)
-- Optional later: full example release APK / iOS archive sizes (app + engine,
-  not just the plugin AAR)
+On pull requests the job is split by path: **Dart tests** run for plugin or
+Flutter-doc changes (and when the slow path runs); **NDK + release AAR + size
+gate** run for native paths (shared `bindings/react-native/android/**`,
+UniFFI UDL/C API/build inputs, baselines, Flutter scripts), or for `Cargo.lock` /
+root `Cargo.toml` changes. Engine-only PRs skip the slow path; `main` always
+runs it. Flutter guards live in `crates/offline-protocol-uniffi/src/tests/flutter_bridge_guards.rs`
+so guard-only PRs run Dart/`cargo test flutter_` without NDK; production UniFFI
+edits in `lib.rs` always run the native gate. Pushes to `main` always run the
+full job.
+
+Bridge contract: [docs/bridges/flutter.md](../../docs/bridges/flutter.md).
+
+Rust guards in `offline-protocol-uniffi` pin compile lists, method-channel
+parity, and the AAR baseline JSON. Optional later: macOS job for iOS pod smoke
+and full example APK/IPA size tracking.
 
 ## Prerequisites
 

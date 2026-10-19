@@ -29,7 +29,7 @@ def bridgeDir = file('../../../react-native/android')
 def bridgeJava = bridgeDir.path + '/src/main/java'
 
 // Keep `pr3KotlinIncludes`, KotlinCompile excludes, and ios/offline_protocol.podspec
-// `pr3_bridge_swift` aligned (Flutter PR4 may add a Rust guard).
+// `pr3_bridge_swift` aligned (Rust guards pin both lists and docs/bridges/flutter.md).
 def pr3KotlinIncludes = [
     'uniffi/**/*.kt',
     'com/offlineprotocol/ProtocolConfigParser.kt',
