@@ -23,15 +23,14 @@ rootProject.allprojects {
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
 
-// Bridge sources have one home (ADR 0025). PR2 adds Internet transport + shared
-// relay helpers; BLE / Wi‑Fi / Nostr / Reticulum stay out until PR3.
+// Bridge sources have one home (ADR 0025). PR3 adds BLE, Wi‑Fi Direct, event
+// replay, foreground reconnect, and teardown helpers.
 def bridgeDir = file('../../../react-native/android')
 def bridgeJava = bridgeDir.path + '/src/main/java'
 
-// PR2 compile surface: keep `pr2KotlinIncludes`, the KotlinCompile `exclude`
-// block below, and ios/offline_protocol.podspec `pr2_bridge_swift` aligned
-// (Flutter PR4 may add a Rust guard). InternetManager needs PresenceWatchPolicy.
-def pr2KotlinIncludes = [
+// Keep `pr3KotlinIncludes`, KotlinCompile excludes, and ios/offline_protocol.podspec
+// `pr3_bridge_swift` aligned (Flutter PR4 may add a Rust guard).
+def pr3KotlinIncludes = [
     'uniffi/**/*.kt',
     'com/offlineprotocol/ProtocolConfigParser.kt',
     'com/offlineprotocol/InitialRuntimeConfigApplier.kt',
@@ -64,6 +63,24 @@ def pr2KotlinIncludes = [
     'com/offlineprotocol/WriteStallWatchdog.kt',
     'com/offlineprotocol/ProtocolErrorBridge.kt',
     'com/offlineprotocol/PresenceWatchPolicy.kt',
+    'com/offlineprotocol/EventReplayRing.kt',
+    'com/offlineprotocol/ForegroundReconnectPolicy.kt',
+    'com/offlineprotocol/TeardownSequence.kt',
+    'com/offlineprotocol/WifiDirectManager.kt',
+    'com/offlineprotocol/WifiDirectGroupFormation.kt',
+    'com/offlineprotocol/LanPeerDiscovery.kt',
+    'com/offlineprotocol/LanPeerState.kt',
+    'com/offlineprotocol/PeerStreamFraming.kt',
+    'com/offlineprotocol/PeerStreamSockets.kt',
+    'com/offlineprotocol/PeerStreamDialPolicy.kt',
+    'com/offlineprotocol/BleAppTag.kt',
+    'com/offlineprotocol/BleDensityPolicy.kt',
+    'com/offlineprotocol/BleDiscoveryBootstrapPolicy.kt',
+    'com/offlineprotocol/BleHelloPolicy.kt',
+    'com/offlineprotocol/BleMessageNotificationPolicy.kt',
+    'com/offlineprotocol/BleServiceInstanceSelection.kt',
+    'com/offlineprotocol/ble/**/*.kt',
+    'com/offlineprotocol/mesh/**/*.kt',
 ]
 
 android {
@@ -89,7 +106,7 @@ android {
             manifest.srcFile 'src/main/AndroidManifest.xml'
             java {
                 srcDirs bridgeJava, 'src/main/kotlin'
-                pr2KotlinIncludes.each { include it }
+                pr3KotlinIncludes.each { include it }
             }
             jniLibs.srcDirs bridgeDir.path + '/src/main/jniLibs'
         }
@@ -97,36 +114,17 @@ android {
 }
 
 // The Kotlin plugin compiles every `.kt` under [bridgeJava] unless excluded here.
-// PR2 must not pull in React Native–only sources (OfflineProtocolModule, …).
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
     exclude('com/offlineprotocol/OfflineProtocolModule.kt')
     exclude('com/offlineprotocol/OfflineProtocolPackage.kt')
     exclude('com/offlineprotocol/MeshHeadlessWakeService.kt')
     exclude('com/offlineprotocol/MeshForegroundService.kt')
-    exclude('com/offlineprotocol/ble/**')
-    exclude('com/offlineprotocol/mesh/**')
-    exclude('com/offlineprotocol/WifiDirectManager.kt')
-    exclude('com/offlineprotocol/WifiDirectGroupFormation.kt')
     exclude('com/offlineprotocol/ReticulumManager.kt')
     exclude('com/offlineprotocol/NostrManager.kt')
     exclude('com/offlineprotocol/NostrQueryTracker.kt')
-    exclude('com/offlineprotocol/LanPeerDiscovery.kt')
-    exclude('com/offlineprotocol/LanPeerState.kt')
-    exclude('com/offlineprotocol/PeerStreamFraming.kt')
-    exclude('com/offlineprotocol/PeerStreamSockets.kt')
-    exclude('com/offlineprotocol/PeerStreamDialPolicy.kt')
-    exclude('com/offlineprotocol/BleAppTag.kt')
-    exclude('com/offlineprotocol/BleDensityPolicy.kt')
-    exclude('com/offlineprotocol/BleDiscoveryBootstrapPolicy.kt')
-    exclude('com/offlineprotocol/BleHelloPolicy.kt')
-    exclude('com/offlineprotocol/BleMessageNotificationPolicy.kt')
-    exclude('com/offlineprotocol/BleServiceInstanceSelection.kt')
     exclude('com/offlineprotocol/StickyEventBuffer.kt')
     exclude('com/offlineprotocol/StickyEventDispatcher.kt')
-    exclude('com/offlineprotocol/EventReplayRing.kt')
     exclude('com/offlineprotocol/MeshWakePolicy.kt')
-    exclude('com/offlineprotocol/TeardownSequence.kt')
-    exclude('com/offlineprotocol/ForegroundReconnectPolicy.kt')
 }
 
 dependencies {
@@ -134,4 +132,6 @@ dependencies {
     implementation 'net.java.dev.jna:jna:5.19.1@aar'
     implementation 'androidx.security:security-crypto:1.1.0'
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'androidx.lifecycle:lifecycle-common:2.8.7'
+    implementation 'androidx.lifecycle:lifecycle-runtime:2.8.7'
 }

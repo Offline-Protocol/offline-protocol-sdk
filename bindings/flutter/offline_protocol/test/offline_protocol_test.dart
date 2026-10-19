@@ -51,6 +51,20 @@ void main() {
     expect(config!['authToken'], 'root-secret');
   });
 
+  test('resolveWifiDirectAutoEnableConfig nested transports.wifiDirect', () {
+    final config = OfflineProtocol.resolveWifiDirectAutoEnableConfig({
+      'transports': {
+        'wifiDirect': {
+          'enabled': true,
+          'autoAccept': true,
+        },
+      },
+    });
+    expect(config, isNotNull);
+    expect(config!['enabled'], isTrue);
+    expect(config['autoAccept'], isTrue);
+  });
+
   test('resolveInternetAutoEnableConfig requires enabled flag', () {
     expect(
       OfflineProtocol.resolveInternetAutoEnableConfig({

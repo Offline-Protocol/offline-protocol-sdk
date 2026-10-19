@@ -1,16 +1,19 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import 'native_event_pipeline.dart';
 import 'offline_protocol_event.dart';
 
+export 'native_event_constants.dart';
 export 'offline_protocol_event.dart';
 
 /// Host for the Offline Protocol engine on iOS and Android.
 ///
-/// PR2 adds core event streaming, [sendMessage], and Internet transport enablement.
-/// BLE, Wi‑Fi Direct, and lifecycle hardening ship in PR3.
+/// PR3 adds BLE and Wi‑Fi Direct enablement, native event replay with Dart
+/// gap recovery, and foreground Internet reconnect on both platforms.
 class OfflineProtocol {
   OfflineProtocol._();
 
@@ -21,18 +24,17 @@ class OfflineProtocol {
       EventChannel('com.offlineprotocol/offline_protocol_events');
 
   static Map<String, dynamic>? _lastCreateConfig;
+  static NativeEventPipeline? _eventPipeline;
+  static StreamSubscription<dynamic>? _nativeEventSubscription;
 
   /// Core protocol events (`message_received`, diagnostics, Internet status, …).
   ///
   /// Subscribe before [createFromConfig] / [start] if you need every event.
-  /// Each event includes monotonic [OfflineProtocolNativeEvent.seq] when the
-  /// native bridge supports gap detection (same contract as React Native).
+  /// Delivery uses the same `seq` / gap recovery contract as React Native
+  /// (`admitNativeEvent` + native `replayEvents`).
   static Stream<OfflineProtocolNativeEvent> get events {
-    return _eventsChannel
-        .receiveBroadcastStream()
-        .map(_parseNativeEvent)
-        .where((event) => event != null)
-        .cast<OfflineProtocolNativeEvent>();
+    _ensureEventPipeline();
+    return _eventPipeline!.stream;
   }
 
   /// Builds a [ProtocolConfig] map with all transports disabled for local
@@ -55,10 +57,12 @@ class OfflineProtocol {
   /// Creates the Rust engine from a JSON config object (camelCase or snake_case).
   ///
   /// Optional top-level `dors` and `relay` sections are applied the same way as
-  /// on React Native after [ProtocolConfig] is constructed. When Internet is
-  /// configured, [start] calls [enableInternetTransport] (React Native JS layer).
+  /// on React Native after [ProtocolConfig] is constructed. When Internet or
+  /// Wi‑Fi Direct are configured, [start] auto-enables them (React Native JS layer).
   static Future<void> createFromConfig(Map<String, dynamic> config) async {
     _lastCreateConfig = Map<String, dynamic>.from(config);
+    _ensureEventPipeline();
+    _eventPipeline?.reset();
     await _channel.invokeMethod<void>('create', jsonEncode(config));
   }
 
@@ -67,13 +71,13 @@ class OfflineProtocol {
     await _channel.invokeMethod<void>('initializeMlsWithSecureStorage');
   }
 
-  /// Starts the protocol core and auto-enables Internet when configured.
+  /// Starts the protocol core and auto-enables configured transports.
   static Future<void> start() async {
     await _channel.invokeMethod<void>('start');
-    await _autoEnableInternetIfConfigured();
+    await _autoEnableTransportsIfConfigured();
   }
 
-  /// Stops the protocol core.
+  /// Stops the protocol core and active transports.
   static Future<void> stop() async {
     await _channel.invokeMethod<void>('stop');
   }
@@ -82,6 +86,7 @@ class OfflineProtocol {
   static Future<void> destroy() async {
     _lastCreateConfig = null;
     await _channel.invokeMethod<void>('destroy');
+    _resetEventPipeline();
   }
 
   /// This device's `off1…` address, or null before MLS is initialized.
@@ -108,6 +113,19 @@ class OfflineProtocol {
     return id;
   }
 
+  /// Enables a transport by name (`internet`, `ble`, `wifiDirect`, …).
+  ///
+  /// [config] uses the same JSON shape as React Native `enableTransport`.
+  static Future<void> enableTransport(
+    String type,
+    Map<String, dynamic> config,
+  ) async {
+    await _channel.invokeMethod<void>('enableTransport', {
+      'type': type,
+      'config': jsonEncode(config),
+    });
+  }
+
   /// Configures and starts the Internet relay transport.
   ///
   /// [config] uses the same shape as React Native `enableTransport('internet', …)`:
@@ -115,10 +133,7 @@ class OfflineProtocol {
   static Future<void> enableInternetTransport(
     Map<String, dynamic> config,
   ) async {
-    await _channel.invokeMethod<void>(
-      'enableInternetTransport',
-      jsonEncode(config),
-    );
+    await enableTransport('internet', config);
   }
 
   /// Convenience: create (smoke config) → MLS → start → read address.
@@ -132,22 +147,44 @@ class OfflineProtocol {
     return localAddress();
   }
 
-  static OfflineProtocolNativeEvent? _parseNativeEvent(dynamic raw) {
-    try {
-      if (raw is! Map) {
-        throw FormatException('Expected a Map, got ${raw.runtimeType}');
+  static void _ensureEventPipeline() {
+    if (_eventPipeline != null) return;
+    _eventPipeline = NativeEventPipeline(
+      replayEvents: _replayEventsFromNative,
+    );
+    _nativeEventSubscription ??=
+        _eventsChannel.receiveBroadcastStream().listen((raw) {
+      _eventPipeline?.admitRaw(raw);
+    });
+  }
+
+  static void _resetEventPipeline() {
+    _nativeEventSubscription?.cancel();
+    _nativeEventSubscription = null;
+    _eventPipeline?.close();
+    _eventPipeline = null;
+  }
+
+  static Future<List<Map<String, dynamic>>> _replayEventsFromNative(
+    int fromSeq,
+    int toSeq,
+  ) async {
+    final result = await _channel.invokeMethod<List<dynamic>>('replayEvents', {
+      'fromSeq': fromSeq,
+      'toSeq': toSeq,
+    });
+    if (result == null) return const [];
+    return result.map((entry) {
+      if (entry is! Map) {
+        throw StateError('replayEvents returned a non-map entry');
       }
-      final eventJson = raw['eventJson'];
-      if (eventJson is! String) {
-        throw FormatException('Missing eventJson string');
+      final seqRaw = entry['seq'];
+      final json = entry['eventJson'];
+      if (seqRaw is! int || json is! String) {
+        throw StateError('replayEvents entry missing seq or eventJson');
       }
-      final seqRaw = raw['seq'];
-      final int? seq = seqRaw is int ? seqRaw : (seqRaw as num?)?.toInt();
-      return OfflineProtocolNativeEvent(eventJson: eventJson, seq: seq);
-    } catch (e, st) {
-      debugPrint('[OfflineProtocol] Dropping malformed native event: $e\n$st');
-      return null;
-    }
+      return {'seq': seqRaw, 'eventJson': json};
+    }).toList();
   }
 
   /// Mirrors [InternetTransportBootstrap.readStoredConfig] key precedence and
@@ -158,6 +195,13 @@ class OfflineProtocol {
     Map<String, dynamic> root,
   ) =>
       _internetAutoEnableConfig(root);
+
+  /// Wi‑Fi Direct / peer-stream auto-enable after [start]. Exposed for tests.
+  @visibleForTesting
+  static Map<String, dynamic>? resolveWifiDirectAutoEnableConfig(
+    Map<String, dynamic> root,
+  ) =>
+      _wifiDirectAutoEnableConfig(root);
 
   static Map<String, dynamic>? _internetAutoEnableConfig(Map<String, dynamic> root) {
     final transports = root['transports'];
@@ -203,18 +247,47 @@ class OfflineProtocol {
     return enableConfig;
   }
 
-  static Future<void> _autoEnableInternetIfConfigured() async {
+  static Map<String, dynamic>? _wifiDirectAutoEnableConfig(
+    Map<String, dynamic> root,
+  ) {
+    final transports = root['transports'];
+    if (transports is! Map || transports['wifiDirect'] is! Map) {
+      if (root['wifiDirectEnabled'] != true) {
+        return null;
+      }
+      return <String, dynamic>{'enabled': true};
+    }
+    final wifi = Map<String, dynamic>.from(transports['wifiDirect'] as Map);
+    if (wifi['enabled'] != true && root['wifiDirectEnabled'] != true) {
+      return null;
+    }
+    return {...wifi, 'enabled': true};
+  }
+
+  static Future<void> _autoEnableTransportsIfConfigured() async {
     final root = _lastCreateConfig;
     if (root == null) return;
 
-    final enableConfig = _internetAutoEnableConfig(root);
-    if (enableConfig == null) return;
+    final internetConfig = _internetAutoEnableConfig(root);
+    if (internetConfig != null) {
+      try {
+        await enableInternetTransport(internetConfig);
+      } catch (e, st) {
+        debugPrint(
+          '[OfflineProtocol] Failed to auto-enable internet transport: $e\n$st',
+        );
+      }
+    }
 
-    try {
-      await enableInternetTransport(enableConfig);
-    } catch (e, st) {
-      // Same non-fatal contract as React Native `start()` auto-enable.
-      debugPrint('[OfflineProtocol] Failed to auto-enable internet transport: $e\n$st');
+    final wifiConfig = _wifiDirectAutoEnableConfig(root);
+    if (wifiConfig != null) {
+      try {
+        await enableTransport('wifiDirect', wifiConfig);
+      } catch (e, st) {
+        debugPrint(
+          '[OfflineProtocol] Failed to auto-enable Wi-Fi Direct transport: $e\n$st',
+        );
+      }
     }
   }
 }

@@ -22,9 +22,23 @@ results are posted on the main queue (see [Kotlin bridge K2](../../docs/bridges/
   `start()` when `transports.internet` is enabled with a `serverAddress` (same as
   the React Native JS layer).
 
-PR2 compiles a **narrow** native source set: UniFFI, config parser, secure storage,
-Internet transport, and shared relay helpers. BLE, Wi‑Fi Direct, Nostr, and Reticulum
-ship in PR3.
+## PR3 scope (transports, replay, lifecycle)
+
+- **Event replay:** native `EventReplayRing` + method-channel `replayEvents`; Dart
+  `NativeEventPipeline` implements the React Native `admitNativeEvent` gap contract.
+- **BLE:** created when `bleEnabled` is true; started on `start()`; also via
+  `OfflineProtocol.enableTransport('ble', …)`.
+- **Wi‑Fi Direct / peer stream:** `enableTransport('wifiDirect', …)` and auto-enable
+  after `start()` when `transports.wifiDirect.enabled` is true (Android Wi‑Fi Direct,
+  iOS Network framework peer stream).
+- **Foreground Internet heal:** shared `ForegroundReconnectPolicy` on Android
+  (`Activity` lifecycle) and iOS (`UIApplication` notifications).
+- **Nostr / Reticulum:** not in the Flutter compile surface yet; use React Native
+  or wait for PR4.
+
+PR3 compiles UniFFI, config, secure storage, Internet, relay helpers, BLE, peer
+stream, event replay, and teardown helpers. React Native–only services (foreground
+mesh service, sticky event dispatcher, full RN module) stay excluded.
 
 `createFromConfig` accepts the same optional `dors` and `relay` JSON sections as
 the React Native bridge (applied via shared `InitialRuntimeConfigApplier` sources).
@@ -32,13 +46,6 @@ the React Native bridge (applied via shared `InitialRuntimeConfigApplier` source
 Shared Internet wiring lives in `InternetTransportBootstrap` (Kotlin/Swift) for
 Flutter; the React Native module keeps its existing paths until a later refactor
 (CI pins shared configure invariants via `internet_transport_bootstrap_keeps_rn_configure_invariants`).
-
-## PR3 scope (planned, stacked PR)
-
-- BLE, Wi‑Fi Direct, Nostr, Reticulum, and sticky event replay.
-- **Event `seq` / gap recovery:** PR2 emits monotonic `seq` like React Native, but
-  Dart does not yet implement `admitNativeEvent` / `replayEvents` parity; PR3
-  adds that before apps rely on gap detection.
 
 ## CI
 
@@ -106,12 +113,14 @@ final sub = OfflineProtocol.events.listen((e) {
 await OfflineProtocol.createFromConfig({
   'appId': 'com.example.app',
   'profile': 'default',
+  'bleEnabled': true,
   'internetEnabled': true,
   'transports': {
     'internet': {
       'enabled': true,
       'serverAddress': 'wss://relay.example.com',
     },
+    'wifiDirect': {'enabled': true},
   },
 });
 await OfflineProtocol.initializeMlsWithSecureStorage();
@@ -122,7 +131,3 @@ final id = await OfflineProtocol.sendMessage(
   content: 'Hello',
 );
 ```
-
-## License
-
-AGPL-3.0-only, or commercial license. See repository root `LICENSE`.

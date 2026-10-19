@@ -16171,6 +16171,41 @@ mod tests {
         }
     }
 
+    // Flutter PR3 Android include list and iOS podspec must ship replay + transports.
+    #[test]
+    fn flutter_pr3_compile_lists_include_replay_and_transports() {
+        let flutter = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bindings/flutter/offline_protocol");
+        let gradle = std::fs::read_to_string(flutter.join("android/build.gradle"))
+            .unwrap_or_else(|e| panic!("cannot read flutter android/build.gradle: {e}"));
+        let podspec = std::fs::read_to_string(flutter.join("ios/offline_protocol.podspec"))
+            .unwrap_or_else(|e| panic!("cannot read offline_protocol.podspec: {e}"));
+        assert!(
+            gradle.contains("pr3KotlinIncludes"),
+            "flutter android/build.gradle must define pr3KotlinIncludes"
+        );
+        assert!(
+            podspec.contains("pr3_bridge_swift"),
+            "flutter offline_protocol.podspec must define pr3_bridge_swift"
+        );
+        for name in [
+            "EventReplayRing",
+            "ForegroundReconnectPolicy",
+            "BleTransportFacade",
+            "WifiDirectManager",
+            "BleManager",
+        ] {
+            assert!(
+                gradle.contains(name) || gradle.contains("ble/**/*.kt"),
+                "bindings/flutter/offline_protocol/android/build.gradle must list PR3 transport `{name}`"
+            );
+            assert!(
+                podspec.contains(name) || podspec.contains("ble/**/*.swift"),
+                "bindings/flutter/offline_protocol/ios/offline_protocol.podspec must list PR3 transport `{name}`"
+            );
+        }
+    }
+
     const INTERNET_CONFIGURE_MARKERS: &[&str] = &[
         "wss://",
         "setAuthToken",

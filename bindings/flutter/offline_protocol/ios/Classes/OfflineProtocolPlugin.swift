@@ -1,7 +1,7 @@
 import Flutter
 import UIKit
 
-/// Flutter host for the Offline Protocol engine (lifecycle, events, Internet, send).
+/// Flutter host for the Offline Protocol engine (lifecycle, events, transports).
 ///
 /// UniFFI calls run on `engineQueue`; Flutter callbacks run on the main queue (bridge K2).
 public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
@@ -10,6 +10,8 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
     private var protocolInstance: OfflineProtocol?
     private var currentConfig: ProtocolConfig?
     private var internetManager: InternetManager?
+    private var bleManager: BleManager?
+    private var wifiDirectManager: WifiDirectManager?
 
     private let engineQueue = DispatchQueue(
         label: "com.offlineprotocol.flutter.engine",
@@ -20,7 +22,12 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
 
     private let eventSeqLock = NSLock()
     private var eventSeq = 0
+    private let eventReplay = EventReplayRing()
     private var eventSink: FlutterEventSink?
+
+    private let foregroundReconnectPolicy = ForegroundReconnectPolicy()
+    private var foregroundObserver: NSObjectProtocol?
+    private var backgroundObserver: NSObjectProtocol?
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let instance = OfflineProtocolPlugin()
@@ -38,6 +45,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         events.setStreamHandler(instance)
         registrar.publish(instance)
         instance.setAttached(true)
+        instance.installForegroundObserver()
     }
 
     @objc
@@ -50,6 +58,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         isPluginAttached = false
         attachmentLock.unlock()
 
+        removeForegroundObserver()
         eventsChannel?.setStreamHandler(nil)
         eventSink = nil
         channel?.setMethodCallHandler(nil)
@@ -59,8 +68,51 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
     }
 
     deinit {
+        removeForegroundObserver()
         engineQueue.sync {
             tearDownProtocol()
+        }
+    }
+
+    private func installForegroundObserver() {
+        let center = NotificationCenter.default
+        backgroundObserver = center.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.engineQueue.async {
+                self?.foregroundReconnectPolicy.didEnterBackground(
+                    nowMs: MonotonicClock.nowMs()
+                )
+            }
+        }
+        foregroundObserver = center.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.engineQueue.async {
+                self?.handleAppBecameActive()
+            }
+        }
+    }
+
+    private func removeForegroundObserver() {
+        let center = NotificationCenter.default
+        if let token = foregroundObserver {
+            center.removeObserver(token)
+            foregroundObserver = nil
+        }
+        if let token = backgroundObserver {
+            center.removeObserver(token)
+            backgroundObserver = nil
+        }
+    }
+
+    private func handleAppBecameActive() {
+        if foregroundReconnectPolicy.shouldReconnectOnForeground(nowMs: MonotonicClock.nowMs()) {
+            try? internetManager?.forceReconnect()
         }
     }
 
@@ -108,8 +160,35 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
                     let messageId = try self.sendMessageOnEngine(call.arguments)
                     DispatchQueue.main.async { result(messageId) }
                 case "enableInternetTransport":
-                    try self.enableInternetTransportOnEngine(call.arguments)
+                    try self.enableTransportOnEngine(type: "internet", configJson: call.arguments as? String)
                     DispatchQueue.main.async { result(nil) }
+                case "enableTransport":
+                    guard let map = call.arguments as? [String: Any],
+                          let type = map["type"] as? String else {
+                        throw NSError(
+                            domain: "OfflineProtocol",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "enableTransport expects type and config"]
+                        )
+                    }
+                    let configJson = map["config"] as? String
+                    try self.enableTransportOnEngine(type: type, configJson: configJson)
+                    DispatchQueue.main.async { result(nil) }
+                case "replayEvents":
+                    guard let map = call.arguments as? [String: Any],
+                          let fromSeq = (map["fromSeq"] as? NSNumber)?.intValue,
+                          let toSeq = (map["toSeq"] as? NSNumber)?.intValue else {
+                        throw NSError(
+                            domain: "OfflineProtocol",
+                            code: -1,
+                            userInfo: [NSLocalizedDescriptionKey: "replayEvents expects fromSeq and toSeq"]
+                        )
+                    }
+                    let replayed = self.eventReplay.replay(fromSeq: fromSeq, toSeq: toSeq)
+                    let payload = replayed.map {
+                        ["seq": $0.seq, "eventJson": $0.eventJson] as [String: Any]
+                    }
+                    DispatchQueue.main.async { result(payload) }
                 default:
                     DispatchQueue.main.async { result(FlutterMethodNotImplemented) }
                 }
@@ -147,6 +226,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         guard let sink = eventSink else { return }
         eventSeqLock.lock()
         let seq = eventSeq
+        eventReplay.record(seq: seq, eventJson: eventJson)
         eventSeq += 1
         eventSeqLock.unlock()
         DispatchQueue.main.async {
@@ -174,6 +254,24 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         InitialRuntimeConfigApplier.apply(proto: proto, rawConfig: parsed.raw)
         protocolInstance = proto
         currentConfig = parsed.config
+
+        if parsed.config.bleEnabled {
+            let manager = BleManager(
+                protocol: proto,
+                deviceId: parsed.config.profile,
+                appId: parsed.config.appId
+            )
+            bleManager = manager
+            proto.setBleTransportCallback(callback: FlutterBleTransportCallback(bleManager: manager))
+        }
+        wireWifiDirectCallbackIfNeeded(proto: proto)
+    }
+
+    private func wireWifiDirectCallbackIfNeeded(proto: OfflineProtocol) {
+        guard currentConfig?.wifiDirectEnabled == true else { return }
+        proto.setWifiDirectTransportCallback(
+            callback: FlutterWifiDirectTransportCallback(wifiDirectManager: wifiDirectManager)
+        )
     }
 
     private func initializeMlsOnEngine() throws {
@@ -214,24 +312,19 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
             )
         }
         try proto.start()
-        // Internet auto-enable runs in Dart after start() (same layer as React Native JS).
+        if let manager = bleManager, manager.state != .running {
+            try manager.start()
+        }
     }
 
     private func stopOnEngine() {
+        try? bleManager?.stop()
         try? internetManager?.stop()
+        try? wifiDirectManager?.stop()
         try? protocolInstance?.stop()
     }
 
-    private func enableInternetTransportOnEngine(_ arguments: Any?) throws {
-        guard let configJson = arguments as? String,
-              let data = configJson.data(using: .utf8),
-              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw NSError(
-                domain: "OfflineProtocol",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "enableInternetTransport expects a JSON string"]
-            )
-        }
+    private func enableTransportOnEngine(type: String, configJson: String?) throws {
         guard let proto = protocolInstance else {
             throw NSError(
                 domain: "OfflineProtocol",
@@ -246,8 +339,75 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
                 userInfo: [NSLocalizedDescriptionKey: "Protocol config not initialized"]
             )
         }
-        let manager = try ensureInternetManager(proto: proto, config: config)
-        try InternetTransportBootstrap.configureAndStart(manager: manager, config: object)
+        let normalized = type.lowercased()
+        switch normalized {
+        case "internet":
+            var object: [String: Any] = [:]
+            if let configJson,
+               let data = configJson.data(using: .utf8),
+               let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                object = parsed
+            }
+            let manager = try ensureInternetManager(proto: proto, config: config)
+            if manager.state == .running || manager.state == .starting {
+                manager.stop()
+            }
+            try InternetTransportBootstrap.configureAndStart(manager: manager, config: object)
+        case "wifidirect", "wifi_direct":
+            if wifiDirectManager == nil {
+                let manager = WifiDirectManager(protocol: proto, deviceId: config.profile)
+                wifiDirectManager = manager
+                proto.setWifiDirectTransportCallback(
+                    callback: FlutterWifiDirectTransportCallback(wifiDirectManager: manager)
+                )
+            }
+            guard let manager = wifiDirectManager else {
+                throw NSError(
+                    domain: "OfflineProtocol",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "Failed to create Wi-Fi Direct manager"]
+                )
+            }
+            if manager.state == .running || manager.state == .starting {
+                manager.stop()
+            }
+            try manager.start()
+        case "ble":
+            if bleManager == nil {
+                let manager = BleManager(
+                    protocol: proto,
+                    deviceId: config.profile,
+                    appId: config.appId
+                )
+                bleManager = manager
+                proto.setBleTransportCallback(callback: FlutterBleTransportCallback(bleManager: manager))
+            }
+            guard let manager = bleManager else {
+                throw NSError(
+                    domain: "OfflineProtocol",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "Failed to create BLE manager"]
+                )
+            }
+            if manager.state != .running {
+                try manager.start()
+            }
+        case "reticulum", "nostr":
+            throw NSError(
+                domain: "OfflineProtocol",
+                code: -1,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "Transport \(type) is not compiled into the Flutter plugin yet",
+                ]
+            )
+        default:
+            throw NSError(
+                domain: "OfflineProtocol",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Unsupported transport type: \(type)"]
+            )
+        }
     }
 
     private func ensureInternetManager(
@@ -317,15 +477,20 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
     }
 
     private func tearDownProtocol() {
+        try? bleManager?.stop()
+        bleManager = nil
         try? internetManager?.stop()
         internetManager = nil
-        eventSeqLock.lock()
-        eventSeq = 0
-        eventSeqLock.unlock()
+        try? wifiDirectManager?.stop()
+        wifiDirectManager = nil
         try? protocolInstance?.stop()
         protocolInstance?.destroy()
         protocolInstance = nil
         currentConfig = nil
+        eventSeqLock.lock()
+        eventSeq = 0
+        eventReplay.clear()
+        eventSeqLock.unlock()
     }
 }
 

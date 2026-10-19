@@ -2,11 +2,12 @@ require 'json'
 
 react_native_ios = File.expand_path('../../../react-native/ios', __dir__)
 
-# PR2: engine lifecycle + Internet transport + shared relay helpers.
-# BLE / Wi‑Fi / Nostr / Reticulum land in PR3.
-# Keep `pr2_bridge_swift` aligned with android/build.gradle `pr2KotlinIncludes`
-# and KotlinCompile excludes (Flutter PR4 may add a Rust guard).
-pr2_bridge_swift = [
+# PR3: PR2 Internet stack + BLE, peer-stream (Wi‑Fi Direct slot), event replay,
+# foreground reconnect. Nostr / Reticulum stay on React Native until PR4 expands
+# the compile surface.
+# Keep `pr3_bridge_swift` aligned with android/build.gradle `pr3KotlinIncludes`
+# and KotlinCompile excludes.
+pr3_bridge_swift = [
   'ProtocolConfigParser.swift',
   'InitialRuntimeConfigApplier.swift',
   'InternetTransportBootstrap.swift',
@@ -37,7 +38,24 @@ pr2_bridge_swift = [
   'WriteStallWatchdog.swift',
   'ProtocolErrorBridge.swift',
   'PresenceWatchPolicy.swift',
-].map { |name| File.join(react_native_ios, name) }
+  'EventReplayRing.swift',
+  'ForegroundReconnectPolicy.swift',
+  'BleManager.swift',
+  'WifiDirectManager.swift',
+  'BleAppTag.swift',
+  'BleDensityPolicy.swift',
+  'BleHelloPolicy.swift',
+  'BleMessageNotificationPolicy.swift',
+  'BleServiceInstanceSelection.swift',
+  'InboundFragmentBuffer.swift',
+  'OutboundFragmentQueue.swift',
+  'PeerStreamFraming.swift',
+  'PeerStreamSession.swift',
+  'PeripheralRestorationAgeOutPolicy.swift',
+].map { |name| File.join(react_native_ios, name) } + [
+  File.join(react_native_ios, 'ble/**/*.swift'),
+  File.join(react_native_ios, 'mesh/**/*.swift'),
+]
 
 Pod::Spec.new do |s|
   s.name             = 'offline_protocol'
@@ -54,7 +72,7 @@ Pod::Spec.new do |s|
   s.source_files = [
     'Classes/**/*.swift',
     File.join(react_native_ios, 'Generated/offline_protocol.swift'),
-  ] + pr2_bridge_swift + [
+  ] + pr3_bridge_swift + [
     File.join(react_native_ios, 'Generated/*.h'),
   ]
 
@@ -78,6 +96,6 @@ Pod::Spec.new do |s|
     'HEADER_SEARCH_PATHS' => "$(inherited) $(PODS_TARGET_SRCROOT)/../../../react-native/ios/Generated",
   }
 
-  s.frameworks = 'Foundation', 'Security', 'Network'
+  s.frameworks = 'Foundation', 'Security', 'Network', 'CoreBluetooth'
   s.dependency 'Flutter'
 end
