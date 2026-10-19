@@ -607,10 +607,12 @@ jobs:
         run: cargo build --locked --package offline-protocol-uniffi
 
       # Compiles the committed generated sources, runs the consumer check
-      # against the library built above, and builds the Javadoc and sources jars.
+      # against the library built above, and builds the Javadoc and sources jars,
+      # then writes the Maven repository the release signs, so a POM or
+      # publication error shows on the pull request and not on a tag.
       - name: Build and test the Java binding
         working-directory: bindings/java
-        run: gradle --no-daemon --stacktrace build
+        run: gradle --no-daemon --stacktrace build publishAllPublicationsToStagingRepository
 
   security:
     name: Dependency Audit
