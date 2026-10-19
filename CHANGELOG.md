@@ -166,6 +166,14 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 - **A message sent while its sender was blocked is never delivered.** Its id
   is now remembered, so a retry arriving after an unblock is answered rather
   than delivered.
+- **An iOS phone keeps talking to a peer that changed its Bluetooth
+  address.** The peer reappears under a new identifier, and the old one still
+  mapped to it, so the send path could pick the old, disconnected one and
+  report "no connected peripheral" indefinitely while the verified link to
+  the same peer sat idle: 25 minutes in one test. Sends now go to the
+  connected link, verifying a peer retires its other disconnected
+  identifiers, and the connection monitor stops dialling a peripheral it
+  never identified once it stops advertising.
 
 - **Link-time optimisation reaches the libraries the release ships.** The
   release profile has always asked for it, but cargo runs it on a library

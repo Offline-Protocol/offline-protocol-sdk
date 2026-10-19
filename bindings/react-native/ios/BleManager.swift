@@ -104,6 +104,10 @@ public class BleManager: NSObject, TransportManager {
         return centralManager?.state ?? .unknown
     }
     private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
+    /// When each peripheral last passed the mesh filter in a scan. The
+    /// connection monitor reads it to stop dialling a peripheral it never
+    /// identified once it stops advertising (`PeerLinkResolution`). Main only.
+    private var lastAdvertisedAt: [UUID: Date] = [:]
     private var peripheralRSSI: [UUID: Int16] = [:]
     
     // Peripheral (advertiser/server) components
@@ -807,6 +811,7 @@ public class BleManager: NSObject, TransportManager {
         // The mesh counts the same links; without this it stays full.
         meshController.registerAllDisconnected()
         discoveredPeripherals.removeAll()
+        lastAdvertisedAt.removeAll()
         peripheralRSSI.removeAll()
         inboundFragments.clear()
         outboundFragments.clear()
@@ -1132,9 +1137,17 @@ public class BleManager: NSObject, TransportManager {
             guard let self = self else { return }
             let now = Date()
             for peripheral in self.discoveredPeripherals.values {
-                if self.connections.connectedPeripheral(for: peripheral.identifier) == nil {
-                    self.attemptConnection(to: peripheral, reason: "monitor")
-                }
+                guard self.connections.connectedPeripheral(for: peripheral.identifier) == nil else { continue }
+                // Not every peripheral it ever saw: one never identified that
+                // stopped advertising is an address a peer has left, and a
+                // pending connect to it only crowds out the one to where the
+                // peer went (`PeerLinkResolution`).
+                guard PeerLinkResolution.monitorShouldRedial(
+                    identified: self.connections.hasAnyDevice(for: peripheral.identifier),
+                    lastAdvertisedAt: self.lastAdvertisedAt[peripheral.identifier],
+                    now: now
+                ) else { continue }
+                self.attemptConnection(to: peripheral, reason: "monitor")
             }
             let pendingKeys: [UUID] = self.inboundFragments.pendingIds()
             for centralId in pendingKeys {
@@ -1265,6 +1278,29 @@ public class BleManager: NSObject, TransportManager {
                 context["rssi"] = rssi
             }
             emitDiagnostic("info", "Connecting to BLE peripheral", context: context)
+        }
+    }
+
+    /// The peer just proved its id on `verified`. Any other identifier it
+    /// mapped from and is not connected on is an address it rotated away
+    /// from: forget it, so neither the send path nor the monitor dials it
+    /// again, and cancel a connect still pending to it. Main only.
+    private func retireSupersededPeripherals(of deviceId: String, verifiedOn verified: UUID) {
+        for identifier in connections.retirePeripheralIdentifiers(supersededBy: verified, deviceId: deviceId) {
+            let peripheral = discoveredPeripherals.removeValue(forKey: identifier)
+            lastAdvertisedAt.removeValue(forKey: identifier)
+            connectionAttemptTimestamps.removeValue(forKey: identifier)
+            connectionRetryCount.removeValue(forKey: identifier)
+            peripheralRSSI.removeValue(forKey: identifier)
+            if let peripheral, peripheral.state == .connecting {
+                centralManager?.cancelPeripheralConnection(peripheral)
+            }
+            print("[BleManager] Retired \(identifier) for \(deviceId): verified on \(verified)")
+            emitDiagnostic("info", "Retired a superseded peripheral identifier", context: [
+                "identifier": identifier.uuidString,
+                "verifiedOn": verified.uuidString,
+                "deviceId": deviceId
+            ])
         }
     }
 
@@ -3117,6 +3153,7 @@ extension BleManager: CBCentralManagerDelegate {
         // unknown-bootstrap path below it is rate limited. Recording above it
         // would spend the 200-entry cap on passing headphones.
         peripheralRestorationPolicy.recordSeen(uuid: peripheral.identifier, at: now, source: .advertisement)
+        lastAdvertisedAt[peripheral.identifier] = now
 
         // Mesh density is counted here too, for the same reasons: after the
         // gate, so it counts mesh candidates and not every Bluetooth device in
@@ -3715,6 +3752,7 @@ extension BleManager: CBPeripheralDelegate {
         connections.setPeripheralDeviceId(peerId, for: peripheral.identifier)
         connections.setCentralDeviceId(peerId, for: peripheral.identifier)
         connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
+        retireSupersededPeripherals(of: peerId, verifiedOn: peripheral.identifier)
 
         // ORDERING INVARIANT — DO NOT REORDER.
         //

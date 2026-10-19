@@ -75,13 +75,40 @@ final class MeshConnectionRegistry: @unchecked Sendable {
         return removed
     }
 
+    /// The identifier to send `deviceId`'s fragments on. A peer that rotated
+    /// its address maps from more than one, and the connected one must win:
+    /// see `PeerLinkResolution`.
     func peripheralIdentifier(for deviceId: String) -> UUID? {
         lock.lock()
-        let match =
-            peripheralDeviceIds.first(where: { $0.value == deviceId })?.key
-            ?? centralDeviceIds.first(where: { $0.value == deviceId })?.key
+        let connected = connectedPeripherals
+        let match = PeerLinkResolution.preferredIdentifier(
+            for: deviceId,
+            peripheralDeviceIds: peripheralDeviceIds,
+            centralDeviceIds: centralDeviceIds,
+            isConnected: { connected[$0] != nil }
+        )
         lock.unlock()
         return match
+    }
+
+    /// Unmaps every other disconnected peripheral identifier of `deviceId`,
+    /// now verified on `verified`, and returns them so the caller can stop
+    /// dialling them. Central-role mappings are left alone: they key inbound
+    /// fragments from a link the peer opened, which this says nothing about.
+    func retirePeripheralIdentifiers(supersededBy verified: UUID, deviceId: String) -> [UUID] {
+        lock.lock()
+        let connected = connectedPeripherals
+        let retired = PeerLinkResolution.superseded(
+            by: verified,
+            deviceId: deviceId,
+            peripheralDeviceIds: peripheralDeviceIds,
+            isConnected: { connected[$0] != nil }
+        )
+        for identifier in retired {
+            peripheralDeviceIds.removeValue(forKey: identifier)
+        }
+        lock.unlock()
+        return retired
     }
 
     func setCentralDeviceId(_ deviceId: String, for identifier: UUID) {

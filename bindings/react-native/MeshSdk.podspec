@@ -41,6 +41,7 @@ Pod::Spec.new do |s|
     "ios/BleMessageNotificationPolicy.swift",
     "ios/BleServiceInstanceSelection.swift",
     "ios/PeerIdentityBinding.swift",
+    "ios/PeerLinkResolution.swift",
     "ios/RelayAnswerPrefixes.swift",
     "ios/RelayControlOpTranslator.swift",
     "ios/RelayGroupSnapshotBridge.swift",
