@@ -62,6 +62,15 @@ Flutter; the React Native module keeps its existing paths until a later refactor
 A Flutter CI job is planned (PR4 in the Flutter binding rollout). Merging this
 plugin does not yet gate on `flutter build` in GitHub Actions.
 
+PR4 is expected to add, at minimum:
+
+- `flutter test` / `flutter analyze` on `bindings/flutter/offline_protocol`
+- Example Android `:offline_protocol:compileDebugKotlin` (and iOS pod build smoke)
+- Rust guards already in `offline-protocol-uniffi` for PR3 compile lists and
+  **method-channel parity** (`flutter_pr3_method_channel_methods_match_native_plugins`)
+- Optional: record release APK/IPA size for the example app (with transports
+  disabled vs BLE-enabled) so PR3 binary footprint stays visible in CI history
+
 ## Prerequisites
 
 1. Rust toolchain (see root `README.md`).

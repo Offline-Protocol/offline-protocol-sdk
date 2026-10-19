@@ -49,4 +49,45 @@ void main() {
       ['first', 'middle', 'third'],
     );
   });
+
+  test('reset after pause accepts contiguous seq without false gap', () async {
+    var replayCalls = 0;
+    final pipeline = NativeEventPipeline(
+      replayEvents: (_, __) async {
+        replayCalls += 1;
+        return [];
+      },
+    );
+    addTearDown(pipeline.close);
+
+    final messages = <String>[];
+    final sub = pipeline.stream.listen((event) {
+      try {
+        final map = event.decodeEvent();
+        if (map['type'] == 'diagnostic') {
+          messages.add(map['message'] as String? ?? '');
+        } else {
+          messages.add(map['type'] as String? ?? '');
+        }
+      } catch (_) {}
+    });
+
+    pipeline.admit(
+      OfflineProtocolNativeEvent(eventJson: '{"type":"before_stop"}', seq: 4),
+    );
+    pipeline.reset();
+    pipeline.admit(
+      OfflineProtocolNativeEvent(eventJson: '{"type":"after_start"}', seq: 5),
+    );
+    pipeline.admit(
+      OfflineProtocolNativeEvent(eventJson: '{"type":"after_start_2"}', seq: 6),
+    );
+
+    await Future<void>.delayed(Duration.zero);
+    await sub.cancel();
+
+    expect(replayCalls, 0);
+    expect(messages, contains('after_start'));
+    expect(messages, isNot(contains('native_event_gap')));
+  });
 }
