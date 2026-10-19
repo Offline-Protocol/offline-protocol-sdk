@@ -274,6 +274,24 @@ more than the out-of-order tolerance past it. The next acknowledgement re-opens
 the budget. New messages always seal; the budget leaves them the rest of the
 window.
 
+**One exception: a resend whose verbatim bytes can no longer decrypt is
+re-sealed past the budget, up to half the forward window.** A copy sealed more
+than the out-of-order tolerance (32) before the newest frame this device sealed
+is refused by a receiver that has decrypted anything since, and a mesh link
+carries no answer for it, so verbatim it was resent until its ladder ran out.
+Run 4 of the volume test lost 525 messages that way, 3,308 decrypt failures on
+the receiver. Re-sealing such a resend spends a generation, which is what the
+budget rations, so the exception stops at half the window: the receiver going
+deaf is the failure the budget exists for, a wasted resend is not.
+
+Without it, a link that stops carrying acknowledgements turns the retry ladder
+into a key-burner. In the 2026-10-19 rerun one phone re-sealed 20,919 resends
+during a 17-minute stall and left its peer past even the widened window. The
+count is in memory and per session incarnation, so a rebuilt session starts
+from nothing and an acknowledgement for a frame of the old one vouches for
+nothing. Acknowledgements are unauthenticated, so a forged one can give
+re-seals back, but never more than a sender had before the budget existed.
+
 ### Provenance handling
 
 Re-seal provenance holds **plaintext**, so it is memory-only and never

@@ -442,6 +442,21 @@ const _: () = assert!(
 pub(crate) const RESEAL_GAP_BUDGET: u64 =
     offline_protocol_mls::group::SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE as u64 / 4;
 
+/// Past [`RESEAL_GAP_BUDGET`], a resend whose bytes the receiver can no
+/// longer decrypt is still re-sealed, until the gap reaches this.
+///
+/// A verbatim copy sealed more than the out-of-order tolerance before the
+/// newest frame this device sealed is refused by a receiver that has
+/// decrypted anything since, and refused without an acknowledgement on a
+/// mesh link, so it was resent until its ladder ran out: in run 4 of the
+/// 2026-10-19 volume test, 525 such messages produced 3,308 decrypt
+/// failures and were never delivered. Re-sealing one spends a generation,
+/// which is what the budget rations, so the exception stops at half the
+/// forward window: the receiver going deaf is the failure the budget
+/// exists for, and a wasted resend is not.
+pub(crate) const RESEAL_HARD_LIMIT: u64 =
+    offline_protocol_mls::group::SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE as u64 / 2;
+
 /// The longest an acknowledgement timeout is postponed for a frame that is
 /// still waiting in a local transport queue, measured from the attempt.
 ///

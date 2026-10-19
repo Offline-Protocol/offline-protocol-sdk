@@ -12,7 +12,7 @@ use super::{
     MAX_PENDING_EXPIRIES_PER_PASS, MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER,
     MAX_PENDING_MESSAGE_BYTES_GLOBAL, MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS,
     MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PEER_SEND_WINDOW,
-    PENDING_CONNECTION_REQUEST_TTL, RESEAL_GAP_BUDGET, RICH_PAYLOAD_V1,
+    PENDING_CONNECTION_REQUEST_TTL, RESEAL_GAP_BUDGET, RESEAL_HARD_LIMIT, RICH_PAYLOAD_V1,
     SEND_DEFER_REASON_ACK_CAPACITY, SEND_DEFER_REASON_PEER_WINDOW,
     SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, SEND_FAIL_REASON_RELAY_PUSHED,
     SEND_FAIL_REASON_RELAY_PUSHED_STORED, SEND_FAIL_REASON_RELAY_STORED,
@@ -3394,7 +3394,25 @@ impl OfflineProtocol {
             .as_ref()
             .and_then(|mls| mls.read().ok())
             .map_or(0, |mls| mls.unacknowledged_seals(&recipient));
-        if unacknowledged >= RESEAL_GAP_BUDGET {
+        // A verbatim copy this far behind cannot decrypt any more, so past
+        // the budget it is still re-sealed, up to the hard limit (see
+        // `RESEAL_HARD_LIMIT`).
+        let verbatim_is_dead = match (reseal.seal_mark, self.last_seal_mark(&recipient)) {
+            (Some(sealed_at), Some(newest)) => {
+                sealed_at.incarnation == newest.incarnation
+                    && newest.index.saturating_sub(sealed_at.index)
+                        > u64::from(
+                            offline_protocol_mls::group::SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
+                        )
+            }
+            _ => false,
+        };
+        let budget_spent = if verbatim_is_dead {
+            unacknowledged >= RESEAL_HARD_LIMIT
+        } else {
+            unacknowledged >= RESEAL_GAP_BUDGET
+        };
+        if budget_spent {
             debug!(
                 message_id = %message.id,
                 recipient = %recipient,

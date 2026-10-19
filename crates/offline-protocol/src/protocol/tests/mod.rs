@@ -42991,6 +42991,56 @@ fn test_resends_stop_re_sealing_past_the_unacknowledged_budget() {
     );
 }
 
+/// Past the budget, a resend whose bytes the receiver can no longer decrypt
+/// is re-sealed anyway: verbatim it is refused (more than the out-of-order
+/// tolerance behind), unacknowledged on a mesh link, and resent until its
+/// ladder runs out. Run 4 of the 2026-10-19 volume test lost 525 messages
+/// that way. A resend whose verbatim bytes still decrypt stays verbatim.
+#[test]
+fn test_a_dead_verbatim_resend_is_re_sealed_past_the_budget() {
+    let (mut alice, alice_h) = make_encrypted_protocol("alice");
+    let (mut bob, _bob_h) = make_encrypted_protocol("bob");
+    alice.start().unwrap();
+    bob.start().unwrap();
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+
+    alice
+        .send_message(&id("bob"), "lost on the way", None, None::<String>)
+        .unwrap();
+    let mut old = alice_h.sent_messages().last().unwrap().clone();
+    alice
+        .send_message(&id("bob"), "resent through a stall", None, None::<String>)
+        .unwrap();
+    let mut recent = alice_h.sent_messages().last().unwrap().clone();
+    let unacknowledged = |p: &OfflineProtocol| {
+        p.mls_manager
+            .as_ref()
+            .unwrap()
+            .read()
+            .unwrap()
+            .unacknowledged_seals(&id("bob"))
+    };
+    while unacknowledged(&alice) < RESEAL_GAP_BUDGET {
+        alice.reseal_for_resend_in_place(&mut recent);
+        alice.outbox.get_mut(&recent.id).unwrap().message = recent.clone();
+    }
+
+    let before = recent.content.clone();
+    alice.reseal_for_resend_in_place(&mut recent);
+    assert_eq!(
+        recent.content, before,
+        "the newest seal still decrypts verbatim, so the budget holds it"
+    );
+
+    let before = old.content.clone();
+    alice.reseal_for_resend_in_place(&mut old);
+    assert_ne!(
+        old.content, before,
+        "a copy sealed thousands of generations back can never decrypt verbatim"
+    );
+    assert!(unacknowledged(&alice) < RESEAL_HARD_LIMIT);
+}
+
 // ============================================================================
 // Per-peer send window
 // ============================================================================
