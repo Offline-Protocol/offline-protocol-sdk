@@ -796,6 +796,70 @@ jobs:
           path: bindings/kotlin/offline-protocol-android/build/maven/
           retention-days: 1
 
+  # The Java binding a release publishes: the committed generated sources
+  # (their drift is gated in ci.yml), compiled and tested against the release
+  # profile's native library on the JDK the foreign function API needs.
+  # Credential-free: it writes an unsigned Maven repository, and
+  # `publish-maven-java` signs what this tested. The jar holds no native code.
+  java-library:
+    name: Build Java Library
+    needs: [version-gate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: stable
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      # Gradle 8.9 cannot run on JDK 25 (ci.yml's java-binding job).
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Build the native library the tests load
+        run: cargo build --release --locked --package offline-protocol-uniffi
+
+      - name: Test the library and write it out as a Maven repository
+        working-directory: bindings/java
+        env:
+          VERSION: ${{ needs.version-gate.outputs.VERSION }}
+        run: >
+          gradle --no-daemon --stacktrace -PVERSION_NAME="$VERSION"
+          -PnativeLibrary="$GITHUB_WORKSPACE/target/release/liboffline_protocol_uniffi.so"
+          build publishAllPublicationsToStagingRepository
+
+      # Central refuses a deployment missing any of these, and the bundle script
+      # refuses anything else; failing here names the file before a signing key
+      # is involved.
+      - name: Check what is in the repository
+        env:
+          VERSION: ${{ needs.version-gate.outputs.VERSION }}
+        run: |
+          set -euo pipefail
+          DIR="bindings/java/build/maven/com/offlineprotocol/offline-protocol-java/$VERSION"
+          for suffix in .jar .pom .module -sources.jar -javadoc.jar; do
+            [ -s "$DIR/offline-protocol-java-$VERSION$suffix" ] || {
+              echo "::error title=Java library incomplete::offline-protocol-java-$VERSION$suffix is missing or empty."
+              exit 1
+            }
+          done
+          unzip -l "$DIR/offline-protocol-java-$VERSION.jar" | grep -q 'META-INF/LICENSE$' || {
+            echo "::error title=Java library incomplete::the jar does not carry the license."
+            exit 1
+          }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: java-library-maven
+          path: bindings/java/build/maven/
+          retention-days: 1
+
   # The Swift package a release publishes, built from the release's own
   # libraries and tested on a simulator: its suites, the bridge's, and an
   # application that depends on it. Assembled here with the XCFramework in
@@ -1052,11 +1116,11 @@ jobs:
     # job alone, it splits the release across registries with no way back — see
     # the long note on that job.
     #
-    # The Swift package, the Android library and the wheels are in it too, and
+    # The Swift package, the Android and Java libraries and the wheels are in it too, and
     # their tests: the GitHub release carries the wheels, the Swift package and
     # the archive it names, and Maven Central and PyPI publish only after this
     # job, so one that fails its tests stops everything before npm.
-    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, swift-package, test-c-library]
+    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, java-library, swift-package, test-c-library]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1742,7 +1806,8 @@ jobs:
   # against the real Portal: the token, the signing key and every POM
   # requirement are exercised, and nothing is released.
   #
-  #   MAVEN_CENTRAL_PUBLISH  secrets: MAVEN_CENTRAL_USERNAME, MAVEN_CENTRAL_PASSWORD,
+  #   MAVEN_CENTRAL_PUBLISH  both the Android and the Java library;
+  #                          secrets: MAVEN_CENTRAL_USERNAME, MAVEN_CENTRAL_PASSWORD,
   #                                   MAVEN_SIGNING_KEY, MAVEN_SIGNING_KEY_PASSWORD
   #   PYPI_PUBLISH           no secret: trusted publishing, environment `pypi`
   #
@@ -1800,6 +1865,64 @@ jobs:
       # A dry run uploads too, as a deployment Central validates and this then
       # drops, so a wrong token, an unverified namespace or a key missing from
       # the keyservers fails before a tag is cut.
+      - name: Upload to Maven Central
+        if: vars.MAVEN_CENTRAL_PUBLISH == 'true'
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [ -n "$MAVEN_CENTRAL_USERNAME" ] && [ -n "$MAVEN_CENTRAL_PASSWORD" ] || {
+            echo "::error title=Missing Portal token::MAVEN_CENTRAL_PUBLISH is on, and MAVEN_CENTRAL_USERNAME or MAVEN_CENTRAL_PASSWORD is empty."
+            exit 1
+          }
+          MODE=rehearse
+          [ "$REAL_RELEASE" = true ] && MODE=publish
+          bash scripts/maven-central-upload.sh "$RUNNER_TEMP/central-bundle.zip" "$MODE" "$VERSION"
+
+  # com.offlineprotocol:offline-protocol-java, signed and uploaded as its own
+  # deployment, from the repository the `java-library` job built and tested,
+  # under the same switch as the Android library. Separate from `publish-maven`
+  # so that a refusal of one does not hold back the other; a version on Central
+  # is permanent, so a half-shipped release is re-run, not rolled back.
+  publish-maven-java:
+    name: Publish Java Library to Maven Central
+    needs: [version-gate, java-library, release]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.version-gate.outputs.VERSION }}
+      REAL_RELEASE: ${{ needs.version-gate.outputs.REAL_RELEASE }}
+      MAVEN_ARTIFACT_ID: offline-protocol-java
+      MAVEN_PACKAGING: jar
+    steps:
+      - name: Channel off
+        if: vars.MAVEN_CENTRAL_PUBLISH != 'true'
+        run: echo "::notice title=Java library not published::MAVEN_CENTRAL_PUBLISH is not 'true', so the library was built and tested and not uploaded."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: vars.MAVEN_CENTRAL_PUBLISH == 'true'
+
+      - name: Download the library
+        if: vars.MAVEN_CENTRAL_PUBLISH == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: java-library-maven
+          path: maven
+
+      - name: Sign and bundle
+        if: vars.MAVEN_CENTRAL_PUBLISH == 'true'
+        env:
+          SIGNING_KEY: ${{ secrets.MAVEN_SIGNING_KEY }}
+          SIGNING_KEY_PASSWORD: ${{ secrets.MAVEN_SIGNING_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [ -n "$SIGNING_KEY" ] || {
+            echo "::error title=Missing signing key::MAVEN_CENTRAL_PUBLISH is on, and the MAVEN_SIGNING_KEY secret is empty."
+            exit 1
+          }
+          bash scripts/maven-central-bundle.sh maven "$RUNNER_TEMP/central-bundle.zip" "$VERSION"
+
+      # A dry run rehearses, as for the Android library.
       - name: Upload to Maven Central
         if: vars.MAVEN_CENTRAL_PUBLISH == 'true'
         env:

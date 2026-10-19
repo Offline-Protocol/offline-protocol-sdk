@@ -104,6 +104,32 @@ The native library is found through `java.library.path`, or by an absolute
 path in `-Duniffi.component.offline_protocol.libraryOverride`. It is not
 bundled in the jar.
 
+## J6. The jar is published to Maven Central, and does not carry the library
+
+`com.offlineprotocol:offline-protocol-java` is the Java binding, published at
+the release's version beside the Android library (`offline-protocol-sdk`), by
+the same switch and the same signing, and as its own deployment. The two are
+different artifacts for different runtimes and never share a coordinate; an
+application on Android uses the AAR, and any other JVM uses this jar.
+
+The jar contains the generated Java and the license notices under `META-INF`.
+It contains no native code. The host supplies the native library for its
+platform, from the release's assets, and points the JVM at it (J5). Publishing
+a jar that appeared to work and failed at the first call on a platform it did
+not carry would be worse than a jar that says what it needs, so the POM
+description says so.
+
+The release does three things before anything is uploaded: it builds and tests
+the committed sources against the release profile's library, writes the Maven
+repository, and checks that the five files Central requires are all there. The
+signing key reaches only `scripts/maven-central-bundle.sh`, never a Gradle
+build. A version on Maven Central is permanent, so a dry run of the release
+rehearses the upload against the real Portal and drops it.
+
+`gradle publishAllPublicationsToStagingRepository` writes the same repository
+under `bindings/java/build/maven`, and the Java Binding job in CI runs it on
+every pull request, so a POM or publication error shows there and not on a tag.
+
 ## What the host owes
 
 The same things every binding owes, with nothing provided: the transports, two

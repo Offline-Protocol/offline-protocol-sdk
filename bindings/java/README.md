@@ -98,6 +98,22 @@ keystore) and `ProtocolStateStorageProvider`, and pass both to
 `OfflineProtocolLib.runStorageConformance`. Or use the built-in file stores, as
 above.
 
+## Installing
+
+```kotlin
+// build.gradle.kts
+dependencies {
+    implementation("com.offlineprotocol:offline-protocol-java:<version>")
+}
+```
+
+The jar holds the generated Java and no native code. Download the native
+library for your platform from the release's assets, and give the JVM its path:
+`-Djava.library.path=<directory>`, or
+`-Duniffi.component.offline_protocol.libraryOverride=<file>` for an absolute
+path. Run on JDK 22 or later with `--enable-native-access=ALL-UNNAMED`. On
+Android use the AAR (`com.offlineprotocol:offline-protocol-sdk`) instead.
+
 ## Telemetry
 
 Pass `TelemetryConfig.os` and `osMajor` as the platform you actually run on:
@@ -125,6 +141,8 @@ gradle build                              # -PnativeLibrary=/path/to/the/library
 
 `build` compiles the generated sources, runs the consumer check against the
 library, and writes the binary, sources and Javadoc jars to `build/libs`.
+`publishAllPublicationsToStagingRepository` writes the Maven repository the
+release signs and uploads, to `build/maven`.
 
 ## Licensing
 
