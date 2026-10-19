@@ -146,8 +146,8 @@ fn flutter_bridges_doc_is_linked_from_the_bridge_index() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/bridges/README.md"),
     )
     .unwrap_or_else(|e| panic!("cannot read docs/bridges/README.md: {e}"));
-    let flutter_doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/bridges/flutter.md");
+    let flutter_doc =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/bridges/flutter.md");
     assert!(
         flutter_doc.is_file(),
         "docs/bridges/flutter.md must exist — Flutter bridge contract (PR4)"
@@ -210,12 +210,17 @@ fn flutter_pr3_aar_baseline_json_is_well_formed() {
             "baseline missing `{key}` — see bindings/flutter/baselines/README.md"
         );
     }
-    let bytes = obj["bytes"].as_u64().expect("bytes must be a positive integer");
+    let bytes = obj["bytes"]
+        .as_u64()
+        .expect("bytes must be a positive integer");
     assert!(bytes > 0, "baseline bytes must be > 0");
     let tol = obj["tolerance_bytes"]
         .as_u64()
         .expect("tolerance_bytes must be a non-negative integer");
-    assert!(tol > 0, "tolerance_bytes must be > 0 for regression headroom");
+    assert!(
+        tol > 0,
+        "tolerance_bytes must be > 0 for regression headroom"
+    );
 }
 
 #[test]
@@ -225,9 +230,8 @@ fn flutter_pr3_method_channel_methods_match_native_plugins() {
     let dart = std::fs::read_to_string(flutter.join("lib/src/offline_protocol.dart"))
         .unwrap_or_else(|e| panic!("cannot read offline_protocol.dart: {e}"));
     let kt = std::fs::read_to_string(
-        flutter.join(
-            "android/src/main/kotlin/com/offlineprotocol/flutter/OfflineProtocolPlugin.kt",
-        ),
+        flutter
+            .join("android/src/main/kotlin/com/offlineprotocol/flutter/OfflineProtocolPlugin.kt"),
     )
     .unwrap_or_else(|e| panic!("cannot read OfflineProtocolPlugin.kt: {e}"));
     let swift = std::fs::read_to_string(flutter.join("ios/Classes/OfflineProtocolPlugin.swift"))

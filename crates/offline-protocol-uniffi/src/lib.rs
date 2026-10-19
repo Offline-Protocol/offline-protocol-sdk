@@ -16203,7 +16203,10 @@ mod tests {
         let rn_fn = rn_module
             .split("private func configureAndStartInternet")
             .nth(1)
-            .and_then(|tail| tail.split("\n    private func configureAndStartReticulum").next())
+            .and_then(|tail| {
+                tail.split("\n    private func configureAndStartReticulum")
+                    .next()
+            })
             .unwrap_or("");
         assert!(
             !rn_fn.is_empty(),
