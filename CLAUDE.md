@@ -140,9 +140,9 @@ cargo build -p offline-protocol-uniffi && make -C bindings/c/consumer-check
 # against it. `swift test` cannot do this: it builds for the Mac, where the
 # bridge does not compile. Under build/, not target/, which CI caches badly.
 IPHONEOS_DEPLOYMENT_TARGET="$(bash scripts/ios-deployment-target.sh)" \
-  cargo build --release --target aarch64-apple-ios-sim --package offline-protocol-uniffi
+  cargo build --profile mobile --target aarch64-apple-ios-sim --package offline-protocol-uniffi
 bash scripts/package-swiftpm-xcframework.sh build/swiftpm \
-  target/aarch64-apple-ios-sim/release/liboffline_protocol_uniffi.a
+  target/aarch64-apple-ios-sim/mobile/liboffline_protocol_uniffi.a
 rm -rf build/offline-protocol-swift
 bash scripts/assemble-swift-package.sh --output build/offline-protocol-swift \
   --version 0.0.0 --bridge-tests \
@@ -251,8 +251,10 @@ These fail silently if broken. Each is documented in full where it is linked.
   categories or tear a concurrent overwrite
   ([C11](docs/bridges/README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified)).
 - **Never hand the CRDT engine bytes that did not come out of a sealed
-  record.** Malformed imports can panic upstream, and `minisize` is
-  `panic = "abort"`, so the AEAD tag is the real containment
+  record.** Malformed imports can panic upstream. A caught panic still
+  leaves the document unusable for the process, and a host or firmware
+  built with `panic = "abort"` catches nothing, so the AEAD tag is the real
+  containment
   ([ADR 0018](docs/adr/0018-data-layer-engine-and-storage-seams.md)).
 - **`offline-protocol-core` must keep compiling without `std`.** Its seven
   locally-declared dependencies cannot go back to `{ workspace = true }`
@@ -324,7 +326,9 @@ These fail silently if broken. Each is documented in full where it is linked.
 
 - `dev`: debug, no optimization
 - `release`: opt-level 3, LTO, stripped
-- `minisize`: inherits release + opt-level "z", panic abort (mobile binary size)
+- `mobile`: inherits release + opt-level "s", and still unwinds. The iOS and
+  Android libraries; the desktop libraries and the wheels use `release`
+  ([ADR 0029](docs/adr/0029-mobile-libraries-are-sized-not-aborting.md))
 
 ## Commit convention
 

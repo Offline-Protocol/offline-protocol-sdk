@@ -70,6 +70,24 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Changed
 
+- **The iOS and Android libraries are built for size, and still unwind.** A
+  new `mobile` profile, `release` at opt-level "s", builds both, in the
+  release workflow, the React Native scripts and CI; the desktop libraries
+  and the wheels stay on `release`. On the macOS arm64 build, with the
+  link-time optimisation 0.30.0 also turns on, the shared library is
+  8,538,400 bytes at "s" against 10,932,208 at opt-level 3. The cost, on the
+  benches: MLS sealing and opening about 40% slower, other paths at most a
+  third. Opt-level "z" was measured too and rejected: a quarter smaller
+  again, but MLS twice as slow and small-message serialization three times.
+  The `minisize` profile is deleted. No build ever used it, and ADR 0018,
+  ADR 0019, threat model R11, the C guide and CLAUDE.md, which said the
+  mobile library shipped with its `panic = "abort"`, now say what ships: every
+  library unwinds, so a panic still reaches Swift and Kotlin as an exception
+  and a document whose import panics in the engine's apply step is marked
+  unusable rather than ending the app. A panic in the decode before it is not
+  caught there and unwinds out of the frame's handling; the in-flight marker
+  quarantines that blob
+  ([ADR 0029](docs/adr/0029-mobile-libraries-are-sized-not-aborting.md)).
 - **UniFFI is now 0.32** (was 0.30). The Swift, Kotlin and Python bindings are
   regenerated together from the unchanged interface definition, and the
   `uniffi-bindgen` the build scripts and CI install is `0.32.2`. No API a

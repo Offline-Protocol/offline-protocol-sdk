@@ -14,7 +14,9 @@ rustup component add llvm-tools-preview
 
 Firmware images are linked for `thumbv8m.main-none-eabihf` under the
 release profile (`opt-level = "z"`, LTO, `panic = "abort"`), which is the
-shape a shipping artifact has:
+shape a firmware image has. The phone libraries are built differently, with
+the workspace's `mobile` profile, and unwind
+([ADR 0029](../../docs/adr/0029-mobile-libraries-are-sized-not-aborting.md)):
 
 - `baseline` is the `cortex-m-rt` vector table, the allocator and the panic
   handler, with no protocol.

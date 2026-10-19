@@ -23,13 +23,13 @@ rustup target add aarch64-apple-ios-sim  # For M1 simulator
 cd crates/offline-protocol-uniffi
 
 # Build for iOS devices
-cargo build --release --target aarch64-apple-ios
+cargo build --profile mobile --target aarch64-apple-ios
 
 # Build for simulator
-cargo build --release --target aarch64-apple-ios-sim
+cargo build --profile mobile --target aarch64-apple-ios-sim
 ```
 
-Each build produces `liboffline_protocol_uniffi.a` under `target/<triple>/release/`
+Each build produces `liboffline_protocol_uniffi.a` under `target/<triple>/mobile/`
 (the crate's `[lib] name` is `offline_protocol_uniffi`).
 
 ### 3. Package the Library and Generate Bindings

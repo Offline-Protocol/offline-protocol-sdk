@@ -88,7 +88,7 @@ pub enum UsernameError {
 /// Hand-rolled rather than taken from a general-category crate on purpose. The
 /// alternative is a second Unicode table in the dependency graph, and this
 /// crate is already carrying `unicode-normalization` into a workspace with a
-/// binary-size profile (`minisize`) that cares. `Cf` is 21 ranges and it grows
+/// binary-size profile (`mobile`) that cares. `Cf` is 21 ranges and it grows
 /// by a handful per Unicode release.
 ///
 /// Snapshot of `Cf` as of **Unicode 16.0**, generated from the character

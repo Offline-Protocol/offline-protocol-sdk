@@ -67,8 +67,9 @@ name = "leaf"
 required-features = ["leaf-base"]
 
 [profile.release]
-# `minisize`'s settings, because that is the profile a mobile or embedded
-# artifact ships under and the number is meant to be quotable.
+# A firmware build's settings, because the number is meant to be quotable
+# for a device: size first, and `panic = "abort"`, since a bare-metal target
+# has no unwinding. The phone libraries unwind (`mobile`, ADR 0029).
 opt-level = "z"
 lto = true
 codegen-units = 1

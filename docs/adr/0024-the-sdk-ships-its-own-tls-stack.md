@@ -21,6 +21,10 @@ at 76b2e056 against the pipe branch:
 | iOS arm64 dylib, minisize | 4,465,760 | 5,707,976 | +1,242,216 |
 | Android arm64 `.so` | 9,177,936 | 11,203,328 | +2,025,392 |
 
+The `minisize` row was measured under a profile no build used, with
+`panic = "abort"` and, like every row, without link-time optimisation; see
+[ADR 0029](0029-mobile-libraries-are-sized-not-aborting.md) for what ships.
+
 Android arm64 landed on the line: 2,025,392 bytes, 1.93 MiB, 2.03 MB. Which
 side of the tripwire that falls on depends on which megabyte you mean, so it
 is recorded here rather than settled by arithmetic.

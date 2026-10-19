@@ -239,11 +239,11 @@ jobs:
 
           # Without the C binding: a cdylib exports every C symbol, so the
           # dispatcher behind them could not be stripped (the `capi` feature).
-          cargo build --release --locked --target ${{ matrix.target }} --package offline-protocol-uniffi \
+          cargo build --profile mobile --locked --target ${{ matrix.target }} --package offline-protocol-uniffi \
             --no-default-features
 
           mkdir -p jniLibs/${{ matrix.abi }}
-          SO_ROOT="target/${{ matrix.target }}/release"
+          SO_ROOT="target/${{ matrix.target }}/mobile"
           if [ -f "$SO_ROOT/liboffline_protocol_uniffi.so" ]; then
             cp "$SO_ROOT/liboffline_protocol_uniffi.so" "jniLibs/${{ matrix.abi }}/libuniffi_offline_protocol.so"
           elif [ -f "$SO_ROOT/deps/liboffline_protocol_uniffi.so" ]; then
