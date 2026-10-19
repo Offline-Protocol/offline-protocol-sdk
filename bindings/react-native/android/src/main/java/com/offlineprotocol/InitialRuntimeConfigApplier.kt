@@ -1,5 +1,7 @@
 package com.offlineprotocol
 
+import kotlin.math.max
+import kotlin.math.min
 import org.json.JSONObject
 import uniffi.offline_protocol.OfflineProtocol
 import uniffi.offline_protocol.RelayConfig
