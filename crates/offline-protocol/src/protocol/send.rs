@@ -3174,25 +3174,48 @@ impl OfflineProtocol {
 
     /// Whether a full outbox may give up `entry` to make room.
     ///
-    /// Never a message that is being delivered: one awaiting its
-    /// acknowledgement, or one the per-peer window holds for a recipient this
-    /// device has a live mesh link to. Evicting either fails a message that is
-    /// moving, and under load on a live link that turned every new send into
-    /// the failure of a frame already on the wire.
+    /// Never a message awaiting its acknowledgement: it is on the wire, and
+    /// under load on a live link evicting it turned every new send into the
+    /// failure of a frame already sent, whose acknowledgement then settled
+    /// nothing.
+    ///
+    /// A message the per-peer window holds has not been sent, so it may go,
+    /// but last in its recipient's line ([`Self::eviction_order_key`]). It was
+    /// once never evictable on a live link, and then one slow peer whose held
+    /// line filled the outbox made every send to every other recipient a
+    /// refusal.
     fn outbox_entry_evictable(&self, id: &MessageId, entry: &OutboxEntry) -> bool {
-        if entry.message.requires_ack && self.ack_manager.is_waiting_for_ack(id) {
-            return false;
+        !(entry.message.requires_ack && self.ack_manager.is_waiting_for_ack(id))
+    }
+
+    /// Each message the per-peer window holds for a recipient this device
+    /// has a live mesh link to, with its place in that recipient's line
+    /// (0 is the front, the next to be sent).
+    fn held_line_positions(&self) -> HashMap<MessageId, usize> {
+        self.window_held
+            .iter()
+            .filter(|(recipient, _)| {
+                self.transport_manager
+                    .mesh_transport_for(recipient)
+                    .is_some()
+            })
+            .flat_map(|(_, held)| held.iter().cloned().enumerate().map(|(at, id)| (id, at)))
+            .collect()
+    }
+
+    /// Orders the evictable entries of one recipient: lower goes first.
+    ///
+    /// Held messages for a live peer go first, from the back of the line,
+    /// so what survives is the front, the part about to be sent, and the
+    /// conversation stays contiguous. Their place in the line decides, not a
+    /// timestamp: a burst is held within one millisecond. Everything else
+    /// goes oldest first: a message to an unreachable peer that has waited
+    /// longest is the least likely to land.
+    fn eviction_order_key(held: &HashMap<MessageId, usize>, entry: &OutboxEntry) -> (u8, i64) {
+        match held.get(&entry.message.id) {
+            Some(&at) => (0, -(at as i64)),
+            None => (1, entry.first_sent_at.timestamp_millis()),
         }
-        let recipient = entry.message.recipient.as_str();
-        let held = self
-            .window_held
-            .get(recipient)
-            .is_some_and(|held| held.contains(id));
-        !(held
-            && self
-                .transport_manager
-                .mesh_transport_for(recipient)
-                .is_some())
     }
 
     /// Evicts one entry from a full outbox, choosing from the recipient with
@@ -3222,6 +3245,7 @@ impl OfflineProtocol {
                     .unwrap_or(0),
             )
         });
+        let held = self.held_line_positions();
         let victim = self
             .outbox
             .iter()
@@ -3246,7 +3270,10 @@ impl OfflineProtocol {
                     .unwrap_or(0);
                 right_backlog
                     .cmp(&left_backlog)
-                    .then(left.first_sent_at.cmp(&right.first_sent_at))
+                    .then_with(|| {
+                        Self::eviction_order_key(&held, left)
+                            .cmp(&Self::eviction_order_key(&held, right))
+                    })
                     .then_with(|| left.message.id.as_str().cmp(&right.message.id.as_str()))
             })
             .map(|(id, _)| id.clone());
@@ -3913,6 +3940,21 @@ impl OfflineProtocol {
         message.content_type == ContentType::FileChunk
     }
 
+    /// A frame that sets up or confirms a 1:1 session: a key package, a
+    /// Welcome, or a confirmation probe or its answer. Never windowed (see
+    /// [`Self::peer_window_governs`]).
+    pub(super) fn is_session_control_frame(message: &Message) -> bool {
+        let content = message.content.as_str();
+        [
+            internal_prefixes::KEY_PACKAGE,
+            internal_prefixes::WELCOME,
+            internal_prefixes::SESSION_CONFIRM_PROBE,
+            internal_prefixes::SESSION_CONFIRM_ACK,
+        ]
+        .iter()
+        .any(|prefix| content.starts_with(prefix))
+    }
+
     /// A session confirmation probe lives in memory only. It carries no user
     /// data, and a restarted process does not know which probe was the last,
     /// so a restored one could never be superseded; the next scan asks the
@@ -4033,10 +4075,18 @@ impl OfflineProtocol {
 
     /// Whether `message` is one the window governs: a frame that waits for an
     /// acknowledgement, is not a media chunk (transfers have their own
-    /// window), and goes to a peer this device holds a live mesh link to.
+    /// window), is not session control, and goes to a peer this device holds
+    /// a live mesh link to.
+    ///
+    /// Session control is exempt because it is what heals the session the
+    /// window's frames are sealed under. A key package or Welcome held behind
+    /// sixteen frames the peer cannot decrypt waits for acknowledgements that
+    /// never come, and the window then stays full of frames that are only
+    /// retried, never answered.
     fn peer_window_governs(&self, message: &Message) -> bool {
         message.requires_ack
             && !Self::is_media_outbox_message(message)
+            && !Self::is_session_control_frame(message)
             && self
                 .transport_manager
                 .mesh_transport_for(message.recipient.as_str())

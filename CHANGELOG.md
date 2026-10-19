@@ -132,8 +132,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   each to make room for a newer message to the same peer. Now a message to the
   recipient with the largest backlog is refused (`message_failed`, "Outbox
   capacity exceeded", no attempts, while `send` returns its id); a message to
-  a recipient with a smaller backlog evicts the largest one's oldest entry;
-  and a message awaiting its acknowledgement is never evicted.
+  a recipient with a smaller backlog evicts from the largest one (its newest
+  message held by the per-peer window, else its oldest entry); and a message
+  awaiting its acknowledgement is never evicted.
 - **A link carrying less than it is offered no longer collapses.** Two phones
   sending 5 messages a second each way over Bluetooth LE delivered 70.5%: the
   Android phone's indication path carried 12 to 16 frames a second against 15
@@ -144,7 +145,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   - A sender keeps at most 16 frames awaiting acknowledgement in flight to
     one peer over a mesh link. Further messages wait in the outbox, are
     reported as `message_deferred` with reason `peer_window`, and go out
-    oldest first as acknowledgements return. The relay is not windowed.
+    oldest first as acknowledgements return. The relay is not windowed, and
+    neither is session control (key packages, Welcomes, confirmation
+    probes), which heals the session the held frames are sealed under.
   - The Bluetooth LE carrier queues an acknowledgement ahead of data.
   - Delivery acknowledgements to a peer that advertises `ack_versions` entry 2
     are coalesced, up to five per frame within 500 ms, in a new `ack_more`

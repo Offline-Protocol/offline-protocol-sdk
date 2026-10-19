@@ -43425,11 +43425,14 @@ fn capacity_failures(events: &Mutex<Vec<Event>>) -> Vec<String> {
         .collect()
 }
 
-/// The outbox never fails a message that is being delivered: with a live
-/// link to bob, every entry is either awaiting its acknowledgement or held by
-/// the window, so a send to anyone is refused and nothing queued fails.
+/// The outbox never fails a message awaiting its acknowledgement, and one
+/// slow live peer cannot block sends to anyone else. With a live link to bob,
+/// sixteen of his messages are in flight and the rest are held by the window.
+/// Another send to bob is refused (his is the largest backlog). A send to
+/// carol evicts bob's newest held message, which was never sent, so the front
+/// of his line, the part about to go out, stays intact.
 #[test]
-fn a_full_outbox_of_messages_in_delivery_refuses_the_newcomer() {
+fn a_full_outbox_of_held_messages_admits_a_lighter_recipient() {
     let (mut protocol, _ble, events) = device_with_a_mesh_link_to_bob();
     let queued = send_dms_to_bob(&mut protocol, crate::constants::MAX_OUTBOX_ENTRIES);
     assert_eq!(
@@ -43449,16 +43452,94 @@ fn a_full_outbox_of_messages_in_delivery_refuses_the_newcomer() {
         )
         .unwrap();
 
+    let newest_held = queued.last().unwrap();
     assert_eq!(
         capacity_failures(&events),
-        vec![to_bob.as_str().to_string(), to_carol.as_str().to_string()]
+        vec![
+            to_bob.as_str().to_string(),
+            newest_held.as_str().to_string()
+        ]
     );
-    for id in &queued {
+    assert!(protocol.outbox.contains_key(&to_carol));
+    for id in &queued[..PEER_SEND_WINDOW] {
         assert!(
             protocol.outbox.contains_key(id),
-            "a queued message was failed"
+            "a message awaiting its acknowledgement was failed"
         );
     }
+    assert!(
+        protocol.outbox.contains_key(&queued[PEER_SEND_WINDOW]),
+        "the front of the held line survives"
+    );
+}
+
+/// When every entry awaits its acknowledgement, nothing may be evicted, and
+/// a send to anyone is refused.
+#[test]
+fn a_full_outbox_of_messages_awaiting_acks_refuses_the_newcomer() {
+    let (mut protocol, ble, events) = device_with_a_mesh_link_to_bob();
+    let queued = send_dms_to_bob(&mut protocol, PEER_SEND_WINDOW);
+    // Pin the rest of the outbox as in flight, as a peer that drains fast
+    // enough to keep its window open would.
+    ble.remove_connected_peer("bob");
+    let rest = send_dms_to_bob(
+        &mut protocol,
+        crate::constants::MAX_OUTBOX_ENTRIES - PEER_SEND_WINDOW,
+    );
+    for id in &rest {
+        assert!(protocol.ack_manager.is_waiting_for_ack(id));
+    }
+
+    let to_carol = protocol
+        .send_message(
+            "carol",
+            "elsewhere",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+    assert_eq!(
+        capacity_failures(&events),
+        vec![to_carol.as_str().to_string()]
+    );
+    for id in queued.iter().chain(&rest) {
+        assert!(protocol.outbox.contains_key(id));
+    }
+}
+
+/// Session control is never held by the window: it is what heals the
+/// session the window's frames are sealed under.
+#[test]
+fn session_control_frames_are_not_windowed() {
+    let (mut protocol, ble, _) = device_with_a_mesh_link_to_bob();
+    send_dms_to_bob(&mut protocol, PEER_SEND_WINDOW);
+    ble.clear_sent_messages();
+
+    for prefix in [
+        internal_prefixes::KEY_PACKAGE,
+        internal_prefixes::WELCOME,
+        internal_prefixes::SESSION_CONFIRM_PROBE,
+        internal_prefixes::SESSION_CONFIRM_ACK,
+    ] {
+        let frame = protocol
+            .create_message("bob", &format!("{prefix}payload"), None, None)
+            .unwrap();
+        assert!(
+            frame.requires_ack,
+            "precondition: {prefix} waits for an ACK"
+        );
+        assert!(
+            protocol.peer_window_admits(&frame),
+            "{prefix} must pass a full window"
+        );
+    }
+    let dm = protocol
+        .create_message("bob", "ordinary", None, None)
+        .unwrap();
+    assert!(
+        !protocol.peer_window_admits(&dm),
+        "precondition: the window is full"
+    );
 }
 
 /// With no carrier, a send to a recipient with a smaller backlog evicts the

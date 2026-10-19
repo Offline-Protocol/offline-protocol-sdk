@@ -36,7 +36,7 @@ oldest first, when an acknowledgement or a give-up frees a slot. See
 [The per-peer window](#the-per-peer-window).
 
 **S6. A full outbox refuses the newest message for the recipient with the
-largest backlog, and never fails a message that is being delivered.** See
+largest backlog, and never fails a message awaiting its acknowledgement.** See
 [At outbox capacity](#at-outbox-capacity).
 
 ## States
@@ -206,23 +206,30 @@ per-peer window below, a single mesh peer can no longer fill it.
 ## At outbox capacity
 
 **A full outbox refuses the newest message for the recipient holding the
-largest backlog, and never fails a message that is being delivered.** Three
-rules, applied when the application sends and the outbox already holds 500
-entries:
+largest backlog, and never fails a message awaiting its acknowledgement.**
+Three rules, applied when the application sends and the outbox already holds
+500 entries:
 
-1. A message that is being delivered is never evicted: one awaiting its
-   acknowledgement, or one the per-peer window holds for a recipient this
-   device has a live mesh link to.
+1. A message awaiting its acknowledgement is never evicted: it is on the wire,
+   and failing it leaves an acknowledgement that settles nothing.
 2. A message never displaces another to the same recipient. When the new
    message's recipient holds the largest backlog (ties included), the new
    message is refused: it gets no outbox entry, the application receives
    `message_failed` with reason "Outbox capacity exceeded" and no attempts,
    and `send` still returns its id.
-3. Otherwise the recipient with the largest backlog pays: its oldest entry
-   rule 1 allows is evicted, with the same terminal event. A week of messages
-   to one unreachable peer cannot block a message to a reachable one.
+3. Otherwise the recipient with the largest backlog pays, with the same
+   terminal event. A message the per-peer window holds for a live peer goes
+   newest first, so the front of that line, the part about to be sent, stays
+   and the conversation stays contiguous; any other entry goes oldest first.
+   A week of messages to one unreachable peer, or a long held line to one
+   slow peer, cannot block a message to anyone else.
 
-When nothing may be evicted, the new message is refused. Internal frames
+Held messages were once never evicted on a live link. Then one slow peer whose
+held line filled the outbox made every send to every other recipient a
+refusal: the outbox was full of messages that had never left the device.
+
+When nothing may be evicted (every entry awaits its acknowledgement), the new
+message is refused. Internal frames
 (key packages, Welcomes, receipts) are never refused: they evict by rules 1
 and 3 regardless of their own recipient, and when every entry is being
 delivered they are admitted over the cap, which the acknowledgement table
@@ -247,6 +254,11 @@ it goes to the outbox, the application receives `message_deferred` with reason
 oldest first as slots free, at most a flush batch per peer per tick. A new
 message never overtakes one already held. Holding is not an attempt: nothing is
 sealed and no retry is counted.
+
+Session control is never held: a key package, a Welcome, a confirmation probe
+or its answer. They heal the session the window's frames are sealed under, and
+held behind sixteen frames the peer cannot decrypt they would wait for
+acknowledgements that never come.
 
 The count is derived from the outbox, entries to that peer with at least one
 attempt whose last carrier was a mesh one, so a settle, give-up, expiry or
