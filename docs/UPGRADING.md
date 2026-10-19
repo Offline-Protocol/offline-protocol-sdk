@@ -2668,6 +2668,14 @@ relay are not affected. The burst used to be handed to the radio all at
 once, which on a slow link ended in mass retries and "Outbox capacity
 exceeded" failures.
 
+**A full outbox refuses the new message rather than failing an old one.** When
+500 messages are already queued, `send` for a recipient that holds the largest
+share of them still returns an id, but that id gets `message_failed` with
+reason "Outbox capacity exceeded" and a retry count of 0, usually before
+`send` returns. Treat it as "queue full, try later" for that conversation.
+Messages already queued are no longer failed to make room for it, and a
+message awaiting its acknowledgement is never failed for capacity.
+
 ---
 
 ## Appendix A: limits reference

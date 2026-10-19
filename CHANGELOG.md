@@ -115,6 +115,25 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A phone no longer loses a Bluetooth peer it is still linked to.** In the
+  2026-10-19 volume test an iPhone and an Android phone held two Bluetooth LE
+  links between them; the one that stalled was torn down, the iPhone's redial
+  of its address timed out and reported Android lost, and the core refused
+  every send to Android for ten minutes while the second link sat idle. No
+  reconnect could succeed, because the radios complete one connection between
+  two devices. Now iOS retires the dropped identifier instead of reporting the
+  peer lost while another link to it is up, and skips dials to a peer it is
+  linked to; Android closes a client link to a peer already subscribed to its
+  server, and restarts its advertisement (which gives it a new address) on its
+  two-minute refresh only while no link is up. See ADR 0030.
+- **A full outbox refuses the newest message instead of failing the oldest.**
+  At 500 entries the outbox failed its least recently sent entry to admit any
+  new one, so the same outage failed about 2,500 queued messages per phone,
+  each to make room for a newer message to the same peer. Now a message to the
+  recipient with the largest backlog is refused (`message_failed`, "Outbox
+  capacity exceeded", no attempts, while `send` returns its id); a message to
+  a recipient with a smaller backlog evicts the largest one's oldest entry;
+  and a message awaiting its acknowledgement is never evicted.
 - **A link carrying less than it is offered no longer collapses.** Two phones
   sending 5 messages a second each way over Bluetooth LE delivered 70.5%: the
   Android phone's indication path carried 12 to 16 frames a second against 15
