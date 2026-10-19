@@ -122,11 +122,11 @@ reports it delivered after it was reported failed.
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
-| Acknowledgement timeout | 10 s | Starts at **local enqueue**, not at wire write |
+| Acknowledgement timeout | 10 s | Starts at **local enqueue**; extended up to 60 s while the frame is still queued |
 | Maximum retries | 10 | |
 | Backoff multiplier | 2.0 | Exponential |
 | Maximum backoff delay | 300 s | Caps the exponential |
-| Maximum pending acknowledgements | 1000 | |
+| Maximum pending acknowledgements | 1000 | At the ceiling a send is held, not failed (see below) |
 | Outbox capacity | 500 entries | When full, the least recently sent entry fails |
 | Outbox lifetime | 7 days | Per entry, carrier-relative |
 | Absolute lifetime cap | 4 × lifetime (28 days) | Measured from first send, bounds restart refreshes |
@@ -142,6 +142,55 @@ limiter defers frames, a frame late in a large fan-out can time out and be
 retransmitted before it was ever written. Deduplication absorbs the duplicates,
 so the cost is wasted work rather than loss, but the effect is real past roughly
 118 members.
+
+**A frame still in a local transport queue gets a bounded extension instead
+of a retry.** When an acknowledgement times out, the sender asks its carriers
+which frames they have accepted but not started writing (only BLE knows today:
+a message counts as queued until the bridge pulls its first fragment). Such a
+frame gets one more full timeout, repeatedly, until a minute has passed since
+the attempt, and only then falls through to the ladder. The bound is what keeps
+a link that died without telling the transport from pinning a message to it.
+
+The failure this prevents is a feedback loop on a link carrying less than it
+is offered. Each retry appended a second copy behind the first, re-sealed under
+a fresh ratchet generation, so the queue grew, the round trip grew past the
+timeout, more frames were retried, and the receiver skipped one generation per
+copy it dropped as a duplicate. In the 2026-10-19 volume test the sender logged
+12,152 retries against 2,434 messages the receiver decrypted, and the receiver
+ended up past its forward window (see
+[Session lifecycle](session-lifecycle.md)). The extension restarts the deadline
+without touching the send time the round-trip estimate reads.
+
+## At the acknowledgement ceiling
+
+**A frame is never transmitted without a slot to track it, and a full table
+holds a send back rather than failing it.** Every transmit path asks the
+pending-acknowledgement table for a slot before it writes. With none free, the
+message goes to the outbox and the retry queue at its first attempt, the
+application receives `message_deferred` with reason `ack_capacity`, and the send
+returns its id as usual. The retry queue tries it again at the ladder's first
+rung, without spending an attempt and without re-sealing it, and sends it as
+soon as an acknowledgement frees a slot.
+
+Both halves exist because the other order failed. The check used to come after
+the transmit, as a registration error. The direct send path returned that error
+to the application for a message already on the wire, so in the volume test one
+phone's API accepted 2,748 messages while the other received 4,626. The retry
+path propagated the same error out of `process()`, which then returned before
+the timeout sweep on every tick: the one step that frees slots never ran again,
+and the engine never recovered. `process()` now runs every step on every tick
+and reports the first error at the end.
+
+Two more things kept the table from draining, and both are gone. A refused
+registration used to mark every timed-out entry and discard the list, and the
+sweep skips a marked entry, so those messages were never retried. And the
+prune of timed-out entries ran at a fixed five minutes, exactly the ladder's
+maximum delay, so the slot of a message on its ninth retry was gone just before
+that resend fired. The prune age is now twice the ACK timeout plus the maximum
+delay.
+
+`ack_capacity` is the signal to slow down. It appears when the application
+offers more than the link carries for long enough to fill the table.
 
 ## Retry re-sealing
 

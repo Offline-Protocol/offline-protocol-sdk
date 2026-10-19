@@ -83,7 +83,19 @@ appears.
 
 `Duplicate` is a receive-loop disposition rather than a decrypt outcome, and its
 acknowledgement is conditional: a duplicate is re-acknowledged only when the
-frame asked for an acknowledgement and the sender is not blocked. A duplicate of
+frame asked for an acknowledgement and the sender is not blocked.
+
+**A message sent during a block is never delivered, whenever the block ends.**
+A blocked sender's frame is dropped with no acknowledgement and no event, and
+its identifier is remembered. The block reveals nothing while it lasts, and
+once it is lifted a retry of that message meets the duplicate path, which
+answers it, so the sender stops retrying. The sender's application sees the
+message as delivered at that point; it never learns of the block. Before this,
+the identifier was deliberately left unmarked, so a sender whose retry ladder
+(about 15 minutes by default) was still running at unblock delivered everything
+it had sent during the block. That was the opposite of what a user who blocked
+someone expects, and of the post-unblock reset, which already drops our own
+queued messages to that peer. A duplicate of
 a group message that is **still pending** in the buffer resolves to `Deferred`
 instead, because the original has not been delivered either.
 
@@ -212,7 +224,8 @@ flowchart TD
 |-------|--------------|----------|--------|-----|
 | Session not ready | no | **yes** | no | It will become decryptable when the session arrives |
 | Session desync (epoch fork) | `undecryptable` | no | **yes** | Ciphertext is sealed to a dead epoch and can never drain |
-| Crypto failure (AEAD, corrupt, ratchet generation) | `undecryptable` | no | **no** | The attempt spent the generation; a queued copy could never drain |
+| Session desync (receiver past the forward window) | `undecryptable` | no | **yes** | Every later frame from that sender is further ahead, so only a re-key ends it; see [Session lifecycle](session-lifecycle.md#desync-and-heal) |
+| Crypto failure (AEAD, corrupt, generation behind the tolerance) | `undecryptable` | no | **no** | The attempt spent the generation; a queued copy could never drain |
 | Transport failure | `undecryptable` | no | no | Classified with crypto failures: the attempt may have spent the generation, so recovery is the sender's re-sealed resend |
 | Envelope parse failure | no | no | no | Unparseable now is unparseable forever; the resend is the fix |
 | Policy refusal (commit not authorized) | **yes** | no | no | Can never become decryptable, so retries are pure waste |

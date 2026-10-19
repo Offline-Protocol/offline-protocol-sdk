@@ -277,6 +277,13 @@ or signature check; and a 1:1 slot identifier is a public function of two public
 addresses. The MLS credential that would authenticate the sender exists only
 once decryption **succeeds**.
 
+The desync class has one member this does not apply to: a frame more than the
+forward window ahead of the receiver's ratchet. MLS decrypts the sender data
+under AEAD before it reads the generation from it, so reaching that check takes
+the epoch's sender-data secret, which only a group member holds. It was added
+so a receiver that fell that far behind re-keys instead of failing every later
+frame, and it leaves the unauthenticated surface exactly as described.
+
 **Why it is tolerable:** the mitigation is that acting on the trigger is
 **harmless**, not that the trigger is trusted.
 

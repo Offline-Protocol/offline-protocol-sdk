@@ -115,6 +115,44 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A full acknowledgement table no longer stops the engine.** Once 1,000
+  messages were waiting for acknowledgements, a retry with no slot returned
+  an error out of `process()` before the step that frees slots, on every
+  tick, and the engine never recovered: every later send failed and nothing
+  more was retried. A frame is now never transmitted without a slot to track
+  it. At the ceiling a send is held for the retry queue, reported as
+  `message_deferred` with reason `ack_capacity`, and sent once an
+  acknowledgement frees a slot; `process()` runs every step on every tick.
+  Two leaks that kept the table full are fixed with it: a refused
+  registration orphaned every timed-out entry so it was never retried, and
+  the prune of timed-out entries ran at exactly the retry ladder's maximum
+  delay, so a ninth retry found its slot gone.
+- **`sendMessage` no longer reports a failure for a message it sent.** The
+  capacity error used to surface after the frame was on the wire, so an
+  application showed messages as failed that the recipient had received.
+- **A receiver that falls far behind a sender re-keys instead of going
+  deaf.** A frame more than the forward window ahead of the receiver's
+  ratchet failed as an ordinary decryption error, and so did every later
+  frame and every resend from that sender, permanently. It now triggers the
+  same rate-limited re-key as an epoch desync. The trigger is authenticated:
+  it needs the epoch's sender-data secret. The window is also raised from
+  1,000 to 8,192 generations, pinned at four times the in-flight ceiling.
+- **A frame still waiting in the BLE queue is not retried.** Its
+  acknowledgement timeout is extended, for up to a minute, instead of
+  queueing a second re-sealed copy behind it. On a link carrying less than it
+  was offered, those copies grew the queue, the round trip and the
+  receiver's ratchet gap together.
+- **Large BLE messages are no longer torn under load.** The Android and iOS
+  outbound fragment queues discarded everything queued for a peer when they
+  filled, and they could fill: Android's periodic poll pulled fragments from
+  the core with no backpressure check, and both drains checked only after a
+  fragment had been pulled. With a cap of 100, one 16 KB message was enough.
+  Both drains now stop before pulling while any peer is backed up, and the
+  cap is 768, above the largest message the core fragments.
+- **A message sent while its sender was blocked is never delivered.** Its id
+  is now remembered, so a retry arriving after an unblock is answered rather
+  than delivered.
+
 - **Link-time optimisation reaches the libraries the release ships.** The
   release profile has always asked for it, but cargo runs it on a library
   only when every crate type in the library's list can take it, and the FFI
