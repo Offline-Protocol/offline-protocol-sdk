@@ -35,6 +35,10 @@ one peer over a mesh link.** The next one waits in the outbox and goes out,
 oldest first, when an acknowledgement or a give-up frees a slot. See
 [The per-peer window](#the-per-peer-window).
 
+**S6. A full outbox refuses the newest message for the recipient with the
+largest backlog, and never fails a message that is being delivered.** See
+[At outbox capacity](#at-outbox-capacity).
+
 ## States
 
 ```mermaid
@@ -54,9 +58,9 @@ stateDiagram-v2
     Parked --> Queued: probe succeeds / peer returns
     Parked --> Failed: lifetime expired
 
-    Queued --> Failed: evicted, outbox full
-    Pending --> Failed: evicted, outbox full
-    Parked --> Failed: evicted, outbox full
+    [*] --> Failed: refused, outbox full
+    Queued --> Failed: evicted for a lighter recipient
+    Parked --> Failed: evicted for a lighter recipient
 
     Delivered --> [*]
     Failed --> [*]
@@ -94,9 +98,8 @@ should be:
   accepted, which is why there is a pending acknowledgement for the park to
   remove.
 
-Eviction is the one edge that leaves every non-terminal state. When the outbox
-is full, the least recently sent entry fails to make room, whatever it was
-doing.
+A message awaiting its acknowledgement is never evicted, so the eviction edges
+leave `Queued` and `Parked` only. See [At outbox capacity](#at-outbox-capacity).
 
 ### Giving a message up
 
@@ -132,7 +135,7 @@ reports it delivered after it was reported failed.
 | Backoff multiplier | 2.0 | Exponential |
 | Maximum backoff delay | 300 s | Caps the exponential |
 | Maximum pending acknowledgements | 1000 | At the ceiling a send is held, not failed (see below) |
-| Outbox capacity | 500 entries | When full, the least recently sent entry fails |
+| Outbox capacity | 500 entries | When full, the newest message to the heaviest recipient is refused (see below) |
 | Outbox lifetime | 7 days | Per entry, carrier-relative |
 | Absolute lifetime cap | 4 × lifetime (28 days) | Measured from first send, bounds restart refreshes |
 
@@ -199,6 +202,41 @@ delay.
 `ack_capacity` is the signal to slow down. It appears when the application
 offers more than the link carries for long enough to fill the table. With the
 per-peer window below, a single mesh peer can no longer fill it.
+
+## At outbox capacity
+
+**A full outbox refuses the newest message for the recipient holding the
+largest backlog, and never fails a message that is being delivered.** Three
+rules, applied when the application sends and the outbox already holds 500
+entries:
+
+1. A message that is being delivered is never evicted: one awaiting its
+   acknowledgement, or one the per-peer window holds for a recipient this
+   device has a live mesh link to.
+2. A message never displaces another to the same recipient. When the new
+   message's recipient holds the largest backlog (ties included), the new
+   message is refused: it gets no outbox entry, the application receives
+   `message_failed` with reason "Outbox capacity exceeded" and no attempts,
+   and `send` still returns its id.
+3. Otherwise the recipient with the largest backlog pays: its oldest entry
+   rule 1 allows is evicted, with the same terminal event. A week of messages
+   to one unreachable peer cannot block a message to a reachable one.
+
+When nothing may be evicted, the new message is refused. Internal frames
+(key packages, Welcomes, receipts) are never refused: they evict by rules 1
+and 3 regardless of their own recipient, and when every entry is being
+delivered they are admitted over the cap, which the acknowledgement table
+bounds. Media chunks keep their own cap and their oldest-first eviction.
+
+The rule this replaces evicted the least recently sent entry to admit any new
+one, whatever either was doing. In run 5 of the 2026-10-19 volume test a
+ten-minute Bluetooth outage failed about 2,500 queued messages per phone that
+way, each so that a newer message to the same unreachable peer could take its
+slot, and the application learned of each failure minutes after it had shown
+the message as queued. Under load on a live link the same rule failed frames
+already on the wire, whose acknowledgements then settled nothing. Refusing the
+newest instead keeps a queued conversation contiguous and tells the
+application at the moment of sending.
 
 ## The per-peer window
 

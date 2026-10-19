@@ -38,7 +38,7 @@ use offline_protocol_core::{
 };
 use offline_protocol_mls::{EncryptedMessage, MlsManager};
 use offline_protocol_transport::TransportType;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration as StdDuration, Instant};
 use tracing::{debug, error, info, warn};
@@ -391,7 +391,8 @@ impl OfflineProtocol {
 
         self.deduplicator.mark_seen_local(message_id.clone());
 
-        if self.defer_app_message_for_ack_capacity(&message)
+        if self.refuse_app_message_at_capacity(&message)
+            || self.defer_app_message_for_ack_capacity(&message)
             || self.defer_app_message_for_peer_window(&message)
         {
             return Ok(message_id);
@@ -487,7 +488,8 @@ impl OfflineProtocol {
 
         self.deduplicator.mark_seen_local(message_id.clone());
 
-        if self.defer_app_message_for_ack_capacity(&message)
+        if self.refuse_app_message_at_capacity(&message)
+            || self.defer_app_message_for_ack_capacity(&message)
             || self.defer_app_message_for_peer_window(&message)
         {
             return Ok(message_id);
@@ -3170,6 +3172,168 @@ impl OfflineProtocol {
     // OUTBOX
     // ========================================================================
 
+    /// Whether a full outbox may give up `entry` to make room.
+    ///
+    /// Never a message that is being delivered: one awaiting its
+    /// acknowledgement, or one the per-peer window holds for a recipient this
+    /// device has a live mesh link to. Evicting either fails a message that is
+    /// moving, and under load on a live link that turned every new send into
+    /// the failure of a frame already on the wire.
+    fn outbox_entry_evictable(&self, id: &MessageId, entry: &OutboxEntry) -> bool {
+        if entry.message.requires_ack && self.ack_manager.is_waiting_for_ack(id) {
+            return false;
+        }
+        let recipient = entry.message.recipient.as_str();
+        let held = self
+            .window_held
+            .get(recipient)
+            .is_some_and(|held| held.contains(id));
+        !(held
+            && self
+                .transport_manager
+                .mesh_transport_for(recipient)
+                .is_some())
+    }
+
+    /// Evicts one entry from a full outbox, choosing from the recipient with
+    /// the largest backlog, oldest first, and only entries
+    /// [`Self::outbox_entry_evictable`] allows. With `newcomer` set, an
+    /// app send is asking: only a recipient with a strictly larger backlog
+    /// than the newcomer's own may pay, so a message never displaces another
+    /// to the same recipient and a tie refuses the newcomer. Returns whether
+    /// an entry was evicted.
+    ///
+    /// The failure this replaces: the outbox evicted the least recently sent
+    /// entry to admit any new one, whatever either was. In run 5 of the
+    /// 2026-10-19 volume test a ten-minute outage failed about 2,500 queued
+    /// messages per phone this way, each one so that a newer message to the
+    /// same unreachable peer could take its slot.
+    pub(super) fn make_outbox_room(&mut self, newcomer: Option<&Message>) -> bool {
+        let mut backlog: HashMap<&str, usize> = HashMap::new();
+        for entry in self.outbox.values() {
+            *backlog.entry(entry.message.recipient.as_str()).or_default() += 1;
+        }
+        let floor = newcomer.map(|message| {
+            (
+                message.recipient.as_str(),
+                backlog
+                    .get(message.recipient.as_str())
+                    .copied()
+                    .unwrap_or(0),
+            )
+        });
+        let victim = self
+            .outbox
+            .iter()
+            .filter(|(id, entry)| {
+                let recipient = entry.message.recipient.as_str();
+                let heavier = match floor {
+                    Some((own, own_count)) => {
+                        recipient != own && backlog.get(recipient).copied().unwrap_or(0) > own_count
+                    }
+                    None => true,
+                };
+                heavier && self.outbox_entry_evictable(id, entry)
+            })
+            .min_by(|(_, left), (_, right)| {
+                let left_backlog = backlog
+                    .get(left.message.recipient.as_str())
+                    .copied()
+                    .unwrap_or(0);
+                let right_backlog = backlog
+                    .get(right.message.recipient.as_str())
+                    .copied()
+                    .unwrap_or(0);
+                right_backlog
+                    .cmp(&left_backlog)
+                    .then(left.first_sent_at.cmp(&right.first_sent_at))
+                    .then_with(|| left.message.id.as_str().cmp(&right.message.id.as_str()))
+            })
+            .map(|(id, _)| id.clone());
+        let Some(victim) = victim else {
+            if newcomer.is_none() {
+                // Every entry is being delivered, so the outbox runs over
+                // its cap by internal frames until acknowledgements free
+                // room. Bounded by the pending-acknowledgement table.
+                warn!(
+                    entries = self.outbox.len(),
+                    "Outbox full of messages in delivery; admitting an internal frame over the cap"
+                );
+            }
+            return false;
+        };
+        // Retired, not just removed: the retry and flush paths re-create a
+        // missing entry before resending, so a retry entry left behind would
+        // bring the message back.
+        let attempt_count = self
+            .retire_undeliverable_message(&victim, "outbox eviction")
+            .map_or(0, |entry| entry.attempt_count);
+        self.emit_outbox_capacity_failure(&victim, attempt_count);
+        true
+    }
+
+    /// The terminal events a message dropped for outbox capacity owes the
+    /// app: `message_failed`, and for a connection request its typed
+    /// undeliverable event. Shared by eviction and by a refused send.
+    fn emit_outbox_capacity_failure(&mut self, message_id: &MessageId, attempt_count: u32) {
+        self.emit_event(Event::message_failed(
+            message_id.clone(),
+            "Outbox capacity exceeded",
+            attempt_count,
+        ));
+        if let Some(recipient) = self.take_undeliverable_connection_request(message_id) {
+            warn!(
+                recipient = %recipient,
+                message_id = %message_id,
+                "Connection request undeliverable: outbox capacity exceeded"
+            );
+            self.emit_event(Event::connection_request_undeliverable(
+                recipient,
+                message_id.as_str(),
+                "outbox_capacity_exceeded",
+            ));
+        }
+    }
+
+    /// Admission for a message the app sent, before anything is sealed again,
+    /// held or transmitted. Returns false when the outbox is full and the
+    /// message is refused; the caller then owes the app the terminal event
+    /// (`message_failed`, "Outbox capacity exceeded", no attempts).
+    ///
+    /// A full outbox refuses the newest message for the recipient with the
+    /// largest backlog rather than failing an older one, so a queued
+    /// conversation stays contiguous and the app hears at the moment of
+    /// sending. A message to a recipient with a smaller backlog is admitted by
+    /// evicting from the largest one, so a week of messages to one
+    /// unreachable peer cannot block a message to a reachable one.
+    pub(super) fn admit_app_message(&mut self, message: &Message) -> bool {
+        if !message.requires_ack
+            || Self::is_media_outbox_message(message)
+            || self.outbox.contains_key(&message.id)
+            || self.outbox.len() < MAX_OUTBOX_ENTRIES
+        {
+            return true;
+        }
+        self.make_outbox_room(Some(message))
+    }
+
+    /// [`Self::admit_app_message`] with the refusal settled: staged re-seal
+    /// provenance dropped (it holds plaintext) and the terminal event emitted.
+    /// Returns true when the caller should stop, having returned the id.
+    fn refuse_app_message_at_capacity(&mut self, message: &Message) -> bool {
+        if self.admit_app_message(message) {
+            return false;
+        }
+        self.pending_reseal.remove(&message.id);
+        warn!(
+            message_id = %message.id,
+            recipient = %message.recipient,
+            "Outbox full and this recipient holds the largest backlog; send refused"
+        );
+        self.emit_outbox_capacity_failure(&message.id, 0);
+        true
+    }
+
     pub(super) fn ensure_outbox_entry(&mut self, message: &Message) {
         if !message.requires_ack {
             return;
@@ -3184,42 +3348,27 @@ impl OfflineProtocol {
         };
 
         if !outbox.contains_key(&message.id) && outbox.len() >= capacity {
-            let oldest_id = outbox
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_sent_at)
-                .map(|(id, _)| id.clone());
-            if let Some(oldest_id) = oldest_id {
-                // Retired, not just removed: this function is also how the
-                // retry and flush paths re-create an entry before resending,
-                // so a retry entry left behind here would bring the message
-                // back and evict another in its place.
-                let attempt_count = self
-                    .retire_undeliverable_message(&oldest_id, "outbox eviction")
-                    .map_or(0, |entry| entry.attempt_count);
-                if !is_media {
-                    // Capacity eviction is as terminal as expiry: the entry
-                    // and its persisted copy are gone, so without an event
-                    // the app shows the message as pending forever. (Media
-                    // chunks surface through the transfer abort above.)
-                    self.emit_event(Event::message_failed(
-                        oldest_id.clone(),
-                        "Outbox capacity exceeded",
-                        attempt_count,
-                    ));
-                    if let Some(recipient) = self.take_undeliverable_connection_request(&oldest_id)
-                    {
-                        warn!(
-                            recipient = %recipient,
-                            message_id = %oldest_id,
-                            "Connection request undeliverable: outbox capacity exceeded"
-                        );
-                        self.emit_event(Event::connection_request_undeliverable(
-                            recipient,
-                            oldest_id.as_str(),
-                            "outbox_capacity_exceeded",
-                        ));
-                    }
+            if is_media {
+                // Media keeps its own cap and its oldest-first eviction: a
+                // transfer has its own window, and an evicted chunk surfaces
+                // through the transfer abort rather than a message event.
+                let oldest_id = outbox
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.last_sent_at)
+                    .map(|(id, _)| id.clone());
+                if let Some(oldest_id) = oldest_id {
+                    // Retired, not just removed: this function is also how the
+                    // retry and flush paths re-create an entry before resending,
+                    // so a retry entry left behind here would bring the message
+                    // back and evict another in its place.
+                    self.retire_undeliverable_message(&oldest_id, "outbox eviction");
                 }
+            } else {
+                // Reached only by frames that never passed app admission
+                // (internal frames, and the defensive re-creation on the
+                // resend paths): an app send made its room up front in
+                // `admit_app_message`, or was refused there.
+                self.make_outbox_room(None);
             }
         }
 
@@ -3265,6 +3414,16 @@ impl OfflineProtocol {
 
         let now = Utc::now();
         let is_media = Self::is_media_outbox_message(message);
+        // The success path creates the entry here, not in
+        // `ensure_outbox_entry`, so it honours the cap here too. An app send
+        // already made its room in `admit_app_message`; this is for internal
+        // frames, which are never refused.
+        if !is_media
+            && !self.outbox.contains_key(&message.id)
+            && self.outbox.len() >= MAX_OUTBOX_ENTRIES
+        {
+            self.make_outbox_room(None);
+        }
         // Consume the staged re-seal provenance only when first creating a
         // (non-media) outbox entry; on later attempts the entry already carries
         // it. Staging for media is never populated.

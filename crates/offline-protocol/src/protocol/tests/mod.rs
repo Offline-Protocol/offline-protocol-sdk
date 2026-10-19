@@ -26922,7 +26922,7 @@ fn test_cleanup_outbox_expiry_settles_pending_connection_request() {
 /// copy are gone, so it must emit `message_failed` rather than leave the
 /// app showing the message as pending forever.
 #[test]
-fn test_outbox_capacity_eviction_emits_message_failed() {
+fn test_outbox_capacity_refuses_the_newest_send_to_the_heaviest_recipient() {
     let mut config = create_test_config();
     config.reliability.retry.initial_delay_ms = 60_000;
     config.reliability.retry.max_delay_ms = 60_000;
@@ -26943,46 +26943,50 @@ fn test_outbox_capacity_eviction_emits_message_failed() {
     let first_id = protocol
         .send_message(
             "bob",
-            "oldest, will be evicted",
+            "oldest, must survive",
             None::<MessagePriority>,
             None::<String>,
         )
         .unwrap();
-    // Backdate so the eviction victim is deterministic regardless of
-    // timestamp resolution across the flood below.
-    protocol
-        .outbox
-        .get_mut(&first_id)
-        .expect("first message must be in the outbox")
-        .last_sent_at -= ChronoDuration::seconds(60);
 
+    let mut last_id = None;
     for i in 0..crate::constants::MAX_OUTBOX_ENTRIES {
-        let _ = protocol.send_message(
-            "bob",
-            &format!("filler-{i}"),
-            None::<MessagePriority>,
-            None::<String>,
+        last_id = Some(
+            protocol
+                .send_message(
+                    "bob",
+                    &format!("filler-{i}"),
+                    None::<MessagePriority>,
+                    None::<String>,
+                )
+                .unwrap(),
         );
     }
+    let last_id = last_id.unwrap();
 
     assert_eq!(
         protocol.outbox_entry_count(),
         crate::constants::MAX_OUTBOX_ENTRIES
     );
+    assert!(protocol.outbox.contains_key(&first_id));
+    assert!(!protocol.outbox.contains_key(&last_id));
     let captured = events.lock().unwrap();
-    let evicted: Vec<_> = captured
+    let failed: Vec<_> = captured
         .iter()
         .filter_map(|e| match e {
             Event::MessageFailed {
-                message_id, reason, ..
-            } if reason == "Outbox capacity exceeded" => Some(message_id.clone()),
+                message_id,
+                reason,
+                retry_count,
+            } if reason == "Outbox capacity exceeded" => Some((message_id.clone(), *retry_count)),
             _ => None,
         })
         .collect();
     assert_eq!(
-        evicted,
-        vec![first_id.as_str()],
-        "capacity eviction must emit exactly one terminal message_failed, for the oldest entry"
+        failed,
+        vec![(last_id.as_str().to_string(), 0)],
+        "a full outbox refuses the newest send to the recipient with the largest backlog, \
+         and fails nothing already queued"
     );
 }
 
@@ -27015,9 +27019,11 @@ fn test_outbox_capacity_eviction_settles_pending_connection_request() {
         .outbox
         .get_mut(&sent_id)
         .expect("connection request must be in the outbox")
-        .last_sent_at -= ChronoDuration::seconds(60);
+        .first_sent_at -= ChronoDuration::seconds(60);
 
-    for i in 0..crate::constants::MAX_OUTBOX_ENTRIES {
+    // Bob holds the whole outbox; a send to someone with a smaller backlog
+    // evicts bob's oldest entry, the connection request.
+    for i in 0..crate::constants::MAX_OUTBOX_ENTRIES - 1 {
         let _ = protocol.send_message(
             "bob",
             &format!("filler-{i}"),
@@ -27025,6 +27031,12 @@ fn test_outbox_capacity_eviction_settles_pending_connection_request() {
             None::<String>,
         );
     }
+    let _ = protocol.send_message(
+        "carol",
+        "to a lighter recipient",
+        None::<MessagePriority>,
+        None::<String>,
+    );
 
     let captured = events.lock().unwrap();
     let undeliverable = captured
@@ -27067,7 +27079,7 @@ fn captured_failures(events: &Mutex<Vec<Event>>) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Fills the outbox one past capacity through the real failing-send path, so
+/// Fills the outbox through the real failing-send path and then evicts, so
 /// every entry is also queued for retry, as on a device whose recipients are
 /// all unreachable. Returns the one message evicted: the first, backdated so it
 /// is deterministically the oldest.
@@ -27099,8 +27111,8 @@ fn overflow_outbox_through_failed_sends(
         .outbox
         .get_mut(&evicted)
         .expect("first message must be in the outbox")
-        .last_sent_at -= ChronoDuration::seconds(60);
-    for i in 0..crate::constants::MAX_OUTBOX_ENTRIES {
+        .first_sent_at -= ChronoDuration::seconds(60);
+    for i in 0..crate::constants::MAX_OUTBOX_ENTRIES - 1 {
         let _ = protocol.send_message(
             "bob",
             &format!("filler-{i}"),
@@ -27108,6 +27120,13 @@ fn overflow_outbox_through_failed_sends(
             None::<String>,
         );
     }
+    // A send to a recipient with a smaller backlog evicts bob's oldest.
+    let _ = protocol.send_message(
+        "carol",
+        "to a lighter recipient",
+        None::<MessagePriority>,
+        None::<String>,
+    );
     assert!(
         !protocol.outbox.contains_key(&evicted),
         "the backdated first message must be the one evicted"
@@ -27176,14 +27195,18 @@ fn test_outbox_capacity_eviction_is_not_resurrected_by_a_flush() {
     assert!(!protocol.is_tracked_for_delivery(&evicted));
 }
 
-/// A message evicted while its acknowledgement is pending must not be settled
-/// a second time. Left in the ACK tracker, its timeout found no outbox entry
-/// and reported it failed again ("Message missing from outbox"), and an ACK
-/// arriving first reported it delivered after it had been reported failed.
+/// A message awaiting its acknowledgement is never evicted for capacity.
+///
+/// It once was, and settling it took care: left in the ACK tracker, its
+/// timeout reported it failed a second time, and an acknowledgement arriving
+/// first reported it delivered after it had been reported failed. Under load
+/// on a live link the old least-recently-sent rule failed such frames on
+/// every new send. Now the outbox evicts only messages that are not moving,
+/// and this one is delivered when its acknowledgement arrives.
 #[test]
-fn test_outbox_capacity_eviction_while_awaiting_ack_settles_once() {
+fn test_outbox_capacity_never_evicts_a_message_awaiting_its_ack() {
     let mut config = create_test_config();
-    config.reliability.ack.default_timeout_ms = 10;
+    config.reliability.ack.default_timeout_ms = 60_000;
     config.reliability.retry.initial_delay_ms = 60_000;
     config.reliability.retry.max_delay_ms = 60_000;
     let mut protocol = OfflineProtocol::new(config).unwrap();
@@ -27215,10 +27238,10 @@ fn test_outbox_capacity_eviction_while_awaiting_ack_settles_once() {
         .outbox
         .get_mut(&in_flight)
         .expect("a sent message must be in the outbox")
-        .last_sent_at -= ChronoDuration::seconds(60);
+        .first_sent_at -= ChronoDuration::seconds(60);
 
     *failures.lock().unwrap() = u32::MAX;
-    for i in 0..crate::constants::MAX_OUTBOX_ENTRIES {
+    for i in 0..crate::constants::MAX_OUTBOX_ENTRIES - 1 {
         let _ = protocol.send_message(
             "bob",
             &format!("filler-{i}"),
@@ -27226,11 +27249,18 @@ fn test_outbox_capacity_eviction_while_awaiting_ack_settles_once() {
             None::<String>,
         );
     }
-    assert!(!protocol.outbox.contains_key(&in_flight));
+    let _ = protocol.send_message(
+        "carol",
+        "to a lighter recipient",
+        None::<MessagePriority>,
+        None::<String>,
+    );
+    assert!(
+        protocol.outbox.contains_key(&in_flight),
+        "the oldest entry is awaiting its ack, so a younger one pays"
+    );
+    assert_eq!(captured_failures(&events).len(), 1);
 
-    // Past the acknowledgement timeout, then a late acknowledgement.
-    thread::sleep(Duration::from_millis(20));
-    protocol.process().unwrap();
     let ack = Message::builder(
         UserId::new("bob").unwrap(),
         UserId::new("user123").unwrap(),
@@ -27241,20 +27271,15 @@ fn test_outbox_capacity_eviction_while_awaiting_ack_settles_once() {
     .build();
     protocol.handle_ack_message(&ack);
 
-    assert_eq!(
-        captured_failures(&events),
-        vec![(in_flight.as_str(), "Outbox capacity exceeded".to_string())],
-        "the ACK timeout must not settle an evicted message a second time"
-    );
     assert!(
-        !events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|e| matches!(e, Event::MessageDelivered { .. })),
-        "a message reported failed must not then be reported delivered"
+        events.lock().unwrap().iter().any(
+            |e| matches!(e, Event::MessageDelivered { message_id, .. } if *message_id == in_flight.as_str())
+        ),
+        "the message the outbox kept is delivered by its acknowledgement"
     );
-    assert!(!protocol.is_tracked_for_delivery(&in_flight));
+    assert!(!captured_failures(&events)
+        .iter()
+        .any(|(id, _)| *id == in_flight.as_str()));
 }
 
 /// The media outbox evicts through the same function and leaked its retry
@@ -43379,5 +43404,152 @@ fn ack_more_on_an_undecryptable_answer_settles_nothing_further() {
     assert!(
         protocol.outbox.contains_key(&ids[1]),
         "only a delivery may share a frame; an undecryptable answer names one id"
+    );
+}
+
+// ============================================================================
+// Outbox admission at capacity
+// ============================================================================
+
+fn capacity_failures(events: &Mutex<Vec<Event>>) -> Vec<String> {
+    events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageFailed {
+                message_id, reason, ..
+            } if reason == "Outbox capacity exceeded" => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The outbox never fails a message that is being delivered: with a live
+/// link to bob, every entry is either awaiting its acknowledgement or held by
+/// the window, so a send to anyone is refused and nothing queued fails.
+#[test]
+fn a_full_outbox_of_messages_in_delivery_refuses_the_newcomer() {
+    let (mut protocol, _ble, events) = device_with_a_mesh_link_to_bob();
+    let queued = send_dms_to_bob(&mut protocol, crate::constants::MAX_OUTBOX_ENTRIES);
+    assert_eq!(
+        protocol.outbox_entry_count(),
+        crate::constants::MAX_OUTBOX_ENTRIES
+    );
+
+    let to_bob = protocol
+        .send_message("bob", "one more", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let to_carol = protocol
+        .send_message(
+            "carol",
+            "elsewhere",
+            None::<MessagePriority>,
+            None::<String>,
+        )
+        .unwrap();
+
+    assert_eq!(
+        capacity_failures(&events),
+        vec![to_bob.as_str().to_string(), to_carol.as_str().to_string()]
+    );
+    for id in &queued {
+        assert!(
+            protocol.outbox.contains_key(id),
+            "a queued message was failed"
+        );
+    }
+}
+
+/// With no carrier, a send to a recipient with a smaller backlog evicts the
+/// oldest entry of the recipient holding the most, so one unreachable peer's
+/// week of messages cannot block a message to someone else.
+#[test]
+fn a_full_outbox_evicts_from_the_heaviest_recipient_for_a_lighter_one() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.transport_manager_mut().add_transport(
+        TransportType::BLE,
+        Box::new(FlakyTransport::fail_first(TransportType::BLE, u32::MAX)),
+    );
+    protocol.start().unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| events_handle.lock().unwrap().push(event));
+
+    let send = |protocol: &mut OfflineProtocol, to: &str, i: usize| {
+        protocol
+            .send_message(
+                to,
+                &format!("m-{i}"),
+                None::<MessagePriority>,
+                None::<String>,
+            )
+            .unwrap()
+    };
+    let bob_first = send(&mut protocol, "bob", 0);
+    protocol.outbox.get_mut(&bob_first).unwrap().first_sent_at -= ChronoDuration::seconds(60);
+    for i in 1..300 {
+        send(&mut protocol, "bob", i);
+    }
+    for i in 0..200 {
+        send(&mut protocol, "carol", i);
+    }
+
+    let dave = send(&mut protocol, "dave", 0);
+    assert_eq!(
+        capacity_failures(&events),
+        vec![bob_first.as_str().to_string()]
+    );
+    assert!(protocol.outbox.contains_key(&dave));
+
+    // Carol (200) is lighter than bob (299): bob pays again, carol keeps hers.
+    let carol_extra = send(&mut protocol, "carol", 200);
+    assert!(protocol.outbox.contains_key(&carol_extra));
+    assert_eq!(capacity_failures(&events).len(), 2);
+    assert_eq!(
+        protocol.outbox_entry_count(),
+        crate::constants::MAX_OUTBOX_ENTRIES
+    );
+}
+
+/// A tie refuses the newcomer: a message never displaces one to a recipient
+/// whose backlog is no larger than its own.
+#[test]
+fn a_full_outbox_refuses_on_a_tie() {
+    let mut config = create_test_config();
+    config.reliability.retry.initial_delay_ms = 60_000;
+    config.reliability.retry.max_delay_ms = 60_000;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    protocol.transport_manager_mut().add_transport(
+        TransportType::BLE,
+        Box::new(FlakyTransport::fail_first(TransportType::BLE, u32::MAX)),
+    );
+    protocol.start().unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| events_handle.lock().unwrap().push(event));
+
+    let half = crate::constants::MAX_OUTBOX_ENTRIES / 2;
+    for (to, n) in [("bob", half), ("carol", half)] {
+        for i in 0..n {
+            protocol
+                .send_message(
+                    to,
+                    &format!("m-{i}"),
+                    None::<MessagePriority>,
+                    None::<String>,
+                )
+                .unwrap();
+        }
+    }
+    let refused = protocol
+        .send_message("bob", "tie", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    assert_eq!(
+        capacity_failures(&events),
+        vec![refused.as_str().to_string()]
     );
 }
