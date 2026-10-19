@@ -159,7 +159,7 @@ java:bindings/java/src/main/java
 # purpose. That is the intended cost: the failure is loud, names the expected
 # and actual counts, and updating it is a deliberate one-line acknowledgement
 # that the guard's coverage changed.
-EXPECTED_ASSERTIONS=61
+EXPECTED_ASSERTIONS=63
 
 FAILURES=0
 ASSERTIONS=0
@@ -514,6 +514,24 @@ else
   else
     fail "$GENERATOR refused the mismatched Java bindgen only after $bad_java_calls call(s) — Swift, Kotlin or Python was already written"
   fi
+fi
+
+# The exact Java generator release is written down wherever someone is told to
+# install it, and only the series is checked at run time. A moved pin that misses
+# one place leaves an install that still passes the series gate but is not what
+# CI verified, so every literal is held to the script's JAVA_BINDGEN_VERSION.
+JAVA_VERSION="$(sed -n 's/^JAVA_BINDGEN_VERSION="\([0-9.]*\)"$/\1/p' "$GENERATOR" | head -1)"
+if [[ ! "$JAVA_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  fail "could not read JAVA_BINDGEN_VERSION from $GENERATOR — the pin-agreement checks would pass vacuously"
+else
+  java_pins="$(git grep -hoE 'uniffi-bindgen-java --version [0-9]+\.[0-9]+\.[0-9]+' -- . ':!scripts/tests' | awk '{print $3}' | sort -u)"
+  if [[ -z "$java_pins" ]]; then
+    fail "no document or workflow names a uniffi-bindgen-java version — the scan found nothing to compare"
+  else
+    assert_set_equals "every written uniffi-bindgen-java install" "$JAVA_VERSION" "$(printf '%s' "$java_pins" | tr '\n' ' ' | sed 's/ $//')"
+  fi
+  release_pin="$(sed -n 's/^  UNIFFI_BINDGEN_JAVA_VERSION: "\([0-9.]*\)"$/\1/p' .github/workflows/release.yml | head -1)"
+  assert_set_equals "the release workflow's Java generator version" "$JAVA_VERSION" "$release_pin"
 fi
 
 # ---------------------------------------------------------------------------

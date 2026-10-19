@@ -63,7 +63,10 @@ JAVA_CONFIG="$PROJECT_ROOT/bindings/java/uniffi.toml"
 # 0.5.x generates for UniFFI 0.32, and the FFI checks it emits would fail at the
 # first call against any other. A new series means a uniffi bump, so this moves
 # in the same change as the pin in crates/offline-protocol-uniffi/Cargo.toml.
-JAVA_BINDGEN_SERIES="0.5"
+# JAVA_BINDGEN_VERSION is the exact release every install names (CI, the
+# release workflow, the docs); test-generate-bindings.sh holds them to it.
+JAVA_BINDGEN_VERSION="0.5.2"
+JAVA_BINDGEN_SERIES="${JAVA_BINDGEN_VERSION%.*}"
 
 # The bindgen version is baked into the generated code as FFI checksums, so
 # generating with a bindgen that disagrees with the crate's `uniffi` compiles
@@ -104,7 +107,7 @@ fi
 if ! command -v uniffi-bindgen-java &>/dev/null; then
   echo "Error: uniffi-bindgen-java not found." >&2
   echo "" >&2
-  echo "  cargo install uniffi-bindgen-java --version ${JAVA_BINDGEN_SERIES}.2 --locked" >&2
+  echo "  cargo install uniffi-bindgen-java --version ${JAVA_BINDGEN_VERSION} --locked" >&2
   echo "" >&2
   exit 1
 fi
@@ -114,7 +117,7 @@ if [[ "$(printf '%s' "$INSTALLED_JAVA_VERSION" | cut -d. -f1,2)" != "$JAVA_BINDG
   echo "Error: uniffi-bindgen-java $INSTALLED_JAVA_VERSION is not in the ${JAVA_BINDGEN_SERIES}.x series that matches uniffi $REQUIRED_VERSION." >&2
   echo "Its generated Java checks the library's FFI contract and fails at the first call, not at build time." >&2
   echo "" >&2
-  echo "  cargo install uniffi-bindgen-java --version ${JAVA_BINDGEN_SERIES}.2 --locked --force" >&2
+  echo "  cargo install uniffi-bindgen-java --version ${JAVA_BINDGEN_VERSION} --locked --force" >&2
   echo "" >&2
   exit 1
 fi
