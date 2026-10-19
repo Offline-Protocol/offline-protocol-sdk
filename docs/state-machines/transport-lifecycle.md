@@ -189,6 +189,19 @@ connect timeout. Without the bound, links that closed cleanly kept the peer a
 neighbour until the reconnect backoff gave up, about two minutes, and a peer
 reached only through our server indefinitely.
 
+**A Bluetooth LE peer with a live link is never reported lost.** On iOS a link
+or a dial that drops while the peer is connected and verified on another
+identifier, or subscribed to our server from one, retires the identifier that
+dropped instead of reporting the peer lost or redialling it, and an identifier
+of a peer linked elsewhere is not dialled. CoreBluetooth reports a cancelled
+connect, including the one the connect timeout cancels, as a disconnect, so
+without this a redial of a dead address reported a linked peer lost, and the
+core refused every send to it until a new link was verified: ten minutes in
+run 5 of the 2026-10-19 volume test. Android keeps one link per peer pair, and
+its periodic refresh restarts the advertisement only while no link is up,
+because each restart gives the advertisement a new random address
+([ADR 0030](../adr/0030-one-bluetooth-le-link-per-peer-pair.md)).
+
 ## What "sent" means at each layer
 
 This is a recurring source of confusion for application teams:

@@ -14223,8 +14223,13 @@ mod tests {
             .find("is PeerIdentityBinding.Outcome.Verified ->")
             .expect("handleIdentityRead must have a verified arm");
         let check = identity
-            .find("if (host.connections.hasOtherClientLink(outcome.peerId, address)) {")
-            .expect("the verified arm must check for another client link to the peer");
+            .find(
+                "if (host.connections.hasOtherUsableLink(outcome.peerId, address, host::isCentralSubscribed)) {",
+            )
+            .expect(
+                "the verified arm must check for another usable link to the peer: a client \
+                 link, or its subscribed link to our server (ADR 0030)",
+            );
         let refuse = identity
             .find("refuseDuplicateLink(gatt, outcome.peerId)")
             .expect("a duplicate must be refused through refuseDuplicateLink");

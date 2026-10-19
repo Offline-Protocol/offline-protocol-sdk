@@ -1187,6 +1187,15 @@ public class BleManager: NSObject, TransportManager {
             return
         }
 
+        // 1b. A known peer we already hold a link to on another identifier.
+        // The Link Layer completes one connection between two devices, so
+        // this dial would only time out, and while it is pending it holds
+        // the identifier the send path may still fall back to.
+        if let deviceId = connections.peripheralDeviceId(for: peripheral.identifier),
+           !otherLiveLinks(of: deviceId, excluding: peripheral.identifier).isEmpty {
+            return
+        }
+
         // 2. Recent attempt cooldown check
         let now = Date()
         if let lastAttempt = connectionAttemptTimestamps[peripheral.identifier], now.timeIntervalSince(lastAttempt) < MIN_RECONNECT_INTERVAL {
@@ -1302,6 +1311,19 @@ public class BleManager: NSObject, TransportManager {
                 "deviceId": deviceId
             ])
         }
+    }
+
+    /// The other identifiers `deviceId` holds a usable link on (see
+    /// `PeerLinkResolution.otherLiveLinks`). Any thread.
+    private func otherLiveLinks(of deviceId: String, excluding identifier: UUID) -> [UUID] {
+        notifyLock.lock()
+        let subscribed = Set(subscribedCentralsById.keys)
+        notifyLock.unlock()
+        return connections.otherLiveLinks(
+            of: deviceId,
+            excluding: identifier,
+            isSubscribed: { subscribed.contains($0) }
+        )
     }
 
     private func ensureDeviceId(for centralId: UUID) {
@@ -2214,10 +2236,16 @@ public class BleManager: NSObject, TransportManager {
                 }
                 if writeStallPolicy.noteRefused(peripheral.identifier) {
                     print("[BleManager] ⚠️ Write buffer full for \(Int(BleWriteStallPolicy.defaultStallSeconds)) s on \(peripheral.identifier); tearing the link down to reconnect")
+                    // Which links the peer had when the write side died, for
+                    // the open question of what stalls it (a second link
+                    // between the same two radios is the suspect).
+                    let others = otherLiveLinks(of: recipientId, excluding: peripheral.identifier)
+                    print("[BleManager] Stall on \(peripheral.identifier): peer's other live links \(others.map { $0.uuidString })")
                     emitDiagnostic("warning", "BLE link refused every write; tearing it down", context: [
                         "recipientId": recipientId,
                         "identifier": peripheral.identifier.uuidString,
-                        "stallSeconds": BleWriteStallPolicy.defaultStallSeconds
+                        "stallSeconds": BleWriteStallPolicy.defaultStallSeconds,
+                        "otherLiveLinks": others.map { $0.uuidString }
                     ])
                     DispatchQueue.main.async { [weak self] in
                         self?.centralManager?.cancelPeripheralConnection(peripheral)
@@ -3355,6 +3383,29 @@ extension BleManager: CBCentralManagerDelegate {
             ])
         }
         
+        // The peer is still reachable on another identifier: this one is an
+        // address it left, or a second link to it. Retire it instead of
+        // reporting the peer lost or redialling. Both branches below used to
+        // do one of those, and in run 5 of the 2026-10-19 volume test a
+        // redial of the link the stall teardown cancelled timed out, landed
+        // here as "wasn't connected", and reported Android lost while the
+        // iPhone held a second, working link to it: the core refused every
+        // send for ten minutes. A cancelled connect arrives here, not in
+        // `didFailToConnect`, so this covers the connect timeout as well.
+        if let deviceId = connections.peripheralDeviceId(for: peripheral.identifier),
+           let kept = otherLiveLinks(of: deviceId, excluding: peripheral.identifier).first {
+            connectionRetryCount.removeValue(forKey: peripheral.identifier)
+            _ = connections.consumePendingRole(for: peripheral.identifier)
+            retireSupersededPeripherals(of: deviceId, verifiedOn: kept)
+            emitDiagnostic("info", "BLE link dropped; peer still linked on another identifier", context: [
+                "identifier": peripheral.identifier.uuidString,
+                "kept": kept.uuidString,
+                "deviceId": deviceId,
+                "wasConnected": wasConnected
+            ])
+            return
+        }
+
         // Don't remove from discovered list - keep trying to reconnect
         // Only remove RSSI if it's a permanent error
         if let error = error as? CBError, error.code == .connectionTimeout {

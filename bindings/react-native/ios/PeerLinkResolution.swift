@@ -17,13 +17,16 @@
 // stopped advertising, each cancelled and re-armed by the 10 s connect
 // timeout.
 //
-// Three rules, each closing one of those:
+// Four rules, each closing one of those or the failure named on
+// `otherLiveLinks`:
 // - Send on a connected link when the peer has one, whatever else maps to it.
 // - Verifying the peer on one identifier retires every other identifier that
 //   maps to it and is not connected: it is an address the peer has left.
 // - The monitor re-dials a peripheral it never identified only while it is
 //   still advertising. One that was identified is retired by the rule above
 //   instead, so the monitor still reconnects a known peer that went quiet.
+// - A peer with another live link is never reported lost when one of its
+//   identifiers drops, and an identifier of such a peer is never dialled.
 //
 // Pure functions over snapshots, so the rules are testable without
 // CoreBluetooth.
@@ -81,6 +84,33 @@ enum PeerLinkResolution {
         if identified { return true }
         guard let seen = lastAdvertisedAt else { return false }
         return now.timeIntervalSince(seen) < window
+    }
+
+    /// The identifiers, other than `excluding`, on which `deviceId` holds a
+    /// link the bridge can use right now: a connected peripheral it verified,
+    /// or a verified central subscribed to our server (the notify path).
+    ///
+    /// A non-empty answer means the peer is not lost when `excluding` goes,
+    /// and that dialling `excluding` again cannot succeed: two devices hold
+    /// one Link Layer connection between them (Core 5.4, Vol 6 Part B,
+    /// 1.1.1), so a dial from an address the peer already has a link with is
+    /// never completed. In run 5 of the 2026-10-19 volume test a redial of a
+    /// dead identifier timed out, was reported as the peer lost while the
+    /// iPhone held a second, working link to it, and the core refused every
+    /// send for ten minutes.
+    static func otherLiveLinks(
+        of deviceId: String,
+        excluding: UUID,
+        peripheralDeviceIds: [UUID: String],
+        centralDeviceIds: [UUID: String],
+        isConnected: (UUID) -> Bool,
+        isSubscribed: (UUID) -> Bool
+    ) -> [UUID] {
+        let peripherals = matches(deviceId, in: peripheralDeviceIds)
+            .filter { $0 != excluding && isConnected($0) }
+        let centrals = matches(deviceId, in: centralDeviceIds)
+            .filter { $0 != excluding && isSubscribed($0) && !peripherals.contains($0) }
+        return peripherals + centrals
     }
 
     private static func matches(_ deviceId: String, in map: [UUID: String]) -> [UUID] {

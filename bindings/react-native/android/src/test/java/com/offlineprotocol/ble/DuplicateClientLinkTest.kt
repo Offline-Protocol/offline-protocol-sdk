@@ -104,4 +104,56 @@ class DuplicateClientLinkTest {
 
         assertFalse(registry.isSuppressedDuplicate("EE:EE:EE:EE:EE:02", nowMs = 0L))
     }
+
+    /**
+     * Run 5 of the 2026-10-19 volume test: the iPhone held a link to our
+     * server at its old address and was subscribed; its address rotated, we
+     * dialled the "new" device and kept it. That second Link Layer connection
+     * between the same two radios is what made the reconnect impossible after
+     * the first link dropped. A subscribed server link makes it a duplicate.
+     */
+    @Test
+    fun `a subscribed server link to the peer makes a client link a duplicate`() {
+        val registry = MeshConnectionRegistry()
+        registry.setDeviceIdentifier("41:9B:ED:3F:CC:72", "off1iphone")
+        registry.trackServerConnection("41:9B:ED:3F:CC:72")
+        registry.registerGatt("4A:2A:C8:EB:B3:4D", gatt("4A:2A:C8:EB:B3:4D"))
+
+        assertTrue(
+            registry.hasOtherUsableLink("off1iphone", excluding = "4A:2A:C8:EB:B3:4D") {
+                it == "41:9B:ED:3F:CC:72"
+            },
+        )
+        assertFalse(
+            "a central that never subscribed carries nothing, so our link is the usable one",
+            registry.hasOtherUsableLink("off1iphone", excluding = "4A:2A:C8:EB:B3:4D") { false },
+        )
+    }
+
+    @Test
+    fun `a client link over the peer's own link to us is not a duplicate`() {
+        // Android reports our dial to an address the peer is connected from
+        // as the same address on both sides: one Link Layer connection.
+        val registry = MeshConnectionRegistry()
+        registry.setDeviceIdentifier("41:9B:ED:3F:CC:72", "off1iphone")
+        registry.trackServerConnection("41:9B:ED:3F:CC:72")
+        registry.registerGatt("41:9B:ED:3F:CC:72", gatt("41:9B:ED:3F:CC:72"))
+
+        assertFalse(
+            registry.hasOtherUsableLink("off1iphone", excluding = "41:9B:ED:3F:CC:72") { true },
+        )
+    }
+
+    @Test
+    fun `a refusal held by a subscribed server link lapses when that link goes`() {
+        val registry = MeshConnectionRegistry()
+        registry.setDeviceIdentifier("41:9B:ED:3F:CC:72", "off1iphone")
+        registry.trackServerConnection("41:9B:ED:3F:CC:72")
+        registry.suppressDuplicate("4A:2A:C8:EB:B3:4D", "off1iphone", untilMs = Long.MAX_VALUE)
+        val subscribed: (String) -> Boolean = { it == "41:9B:ED:3F:CC:72" }
+
+        assertTrue(registry.isSuppressedDuplicate("4A:2A:C8:EB:B3:4D", nowMs = 0L, isSubscribed = subscribed))
+        registry.untrackServerConnection("41:9B:ED:3F:CC:72")
+        assertFalse(registry.isSuppressedDuplicate("4A:2A:C8:EB:B3:4D", nowMs = 0L, isSubscribed = subscribed))
+    }
 }

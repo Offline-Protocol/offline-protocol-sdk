@@ -74,4 +74,73 @@ final class PeerLinkResolutionTests: XCTestCase {
         // handled by retiring the identifier, not by the monitor giving up.
         XCTAssertTrue(PeerLinkResolution.monitorShouldRedial(identified: true, lastAdvertisedAt: nil, now: now))
     }
+
+    /// Run 5: Android advertised on `stale` (the link the stall teardown
+    /// cancelled) and was also connected and verified on `fresh`. The timed-out
+    /// redial of `stale` must not lose the peer, and `stale` must not be
+    /// dialled while `fresh` is up.
+    func testAPeerConnectedOnAnotherIdentifierHasALiveLink() {
+        let links = PeerLinkResolution.otherLiveLinks(
+            of: peer,
+            excluding: stale,
+            peripheralDeviceIds: [stale: peer, fresh: peer, other: "off1other"],
+            centralDeviceIds: [stale: peer, fresh: peer],
+            isConnected: { $0 == self.fresh },
+            isSubscribed: { $0 == self.fresh }
+        )
+        XCTAssertEqual(links, [fresh], "one link, counted once though it is in both roles")
+    }
+
+    func testWithNoOtherLinkThePeerIsLost() {
+        XCTAssertEqual(
+            PeerLinkResolution.otherLiveLinks(
+                of: peer,
+                excluding: stale,
+                peripheralDeviceIds: [stale: peer, fresh: peer],
+                centralDeviceIds: [:],
+                isConnected: { _ in false },
+                isSubscribed: { _ in false }
+            ),
+            [],
+            "a mapped identifier that is not connected is not a link"
+        )
+        XCTAssertEqual(
+            PeerLinkResolution.otherLiveLinks(
+                of: peer,
+                excluding: stale,
+                peripheralDeviceIds: [stale: peer],
+                centralDeviceIds: [stale: peer],
+                isConnected: { $0 == self.stale },
+                isSubscribed: { $0 == self.stale }
+            ),
+            [],
+            "the identifier that dropped never counts for itself"
+        )
+    }
+
+    func testAVerifiedSubscribedCentralIsALink() {
+        XCTAssertEqual(
+            PeerLinkResolution.otherLiveLinks(
+                of: peer,
+                excluding: stale,
+                peripheralDeviceIds: [stale: peer],
+                centralDeviceIds: [other: peer],
+                isConnected: { _ in false },
+                isSubscribed: { $0 == self.other }
+            ),
+            [other]
+        )
+        XCTAssertEqual(
+            PeerLinkResolution.otherLiveLinks(
+                of: peer,
+                excluding: stale,
+                peripheralDeviceIds: [stale: peer],
+                centralDeviceIds: [other: peer],
+                isConnected: { _ in false },
+                isSubscribed: { _ in false }
+            ),
+            [],
+            "a central that unsubscribed carries nothing"
+        )
+    }
 }

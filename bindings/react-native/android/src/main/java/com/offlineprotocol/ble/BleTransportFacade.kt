@@ -497,6 +497,9 @@ class BleTransportFacade(
                 override val bluetoothAdapter: BluetoothAdapter? get() = this@BleTransportFacade.bluetoothAdapter
                 override val selfDeviceId: String get() = deviceId
 
+                override fun isCentralSubscribed(address: String): Boolean =
+                    peripheralGattServer?.isSubscribed(address) == true
+
                 override fun isShuttingDown(): Boolean = shuttingDown
                 override fun isRunning(): Boolean = state == TransportState.RUNNING
 
@@ -2747,13 +2750,25 @@ class BleTransportFacade(
             if (logThrottler.shouldLog("forced_ble_refresh", intervalMs = FORCED_BLE_REFRESH_MS)) {
                 Log.i(TAG, "Performing forced BLE refresh for reliability")
                 emitDiagnostic("info", "Forced BLE refresh for reliability", mapOf(
+                    "establishedLinks" to connections.establishedLinkCount(),
                     "connectedPeers" to connections.connectionCount(),
                     "discoveredPeers" to connections.discoveredPeerCount()
                 ))
             }
-            // Stop and restart both scanning and advertising
+            // Restart scanning always; advertising only with no link up. Each
+            // advertising restart starts a new advertising set, and the stack
+            // gives every set a new random address, so a linked peer saw a
+            // new device every two minutes, dialled it, and waited out its
+            // connect timeout: the Link Layer does not complete a second
+            // connection between two devices that already have one. Membership
+            // changes and disconnects still refresh the advertisement.
+            val linked = connections.establishedLinkCount() > 0
             stopScanning("forced_refresh")
-            refreshAdvertising("forced_refresh")
+            if (!linked) {
+                refreshAdvertising("forced_refresh")
+            } else if (logThrottler.shouldLog("forced_refresh_keeps_advertising", intervalMs = FORCED_BLE_REFRESH_MS)) {
+                Log.i(TAG, "Forced refresh keeps the advertisement: ${connections.establishedLinkCount()} link(s) up")
+            }
             bleHandler.postDelayed({
                 if (state == TransportState.RUNNING) {
                     startScanning("forced_refresh")
@@ -2810,7 +2825,10 @@ class BleTransportFacade(
                     return
                 }
                 
-                if (connections.isSuppressedDuplicate(device.address, SystemClock.elapsedRealtime())) {
+                if (connections.isSuppressedDuplicate(device.address, SystemClock.elapsedRealtime()) {
+                        peripheralGattServer?.isSubscribed(it) == true
+                    }
+                ) {
                     if (logThrottler.shouldLog("duplicate_skip_${device.address}", intervalMs = 30000)) {
                         Log.d(TAG, "Not redialing ${device.address}: a second link to a peer already held")
                     }

@@ -129,6 +129,31 @@ class MeshConnectionRegistry {
         }
 
     /**
+     * True when we hold a usable link to [deviceId] at an address other than
+     * [excluding]: a client link of ours, or a central connected to our server
+     * and subscribed to it ([isSubscribed]), which is the path the peer's
+     * writes and our notifications already take.
+     *
+     * A client link beside such a server link is a second Link Layer
+     * connection between the same two radios, and two devices hold one
+     * (Core 5.4, Vol 6 Part B, 1.1.1). It forms only when one side's address
+     * has rotated, and once it exists neither side can reconnect after the
+     * other link drops: every dial is from an address the peer already has a
+     * link with. In run 5 of the 2026-10-19 volume test that kept the phones
+     * apart for ten minutes.
+     */
+    fun hasOtherUsableLink(
+        deviceId: String,
+        excluding: String,
+        isSubscribed: (String) -> Boolean,
+    ): Boolean =
+        addressToDevice.any { (address, id) ->
+            id == deviceId && address != excluding &&
+                (gattClients.containsKey(address) ||
+                    (serverConnections.contains(address) && isSubscribed(address)))
+        }
+
+    /**
      * Refuse client links to [address], a duplicate of [deviceId], until
      * [untilMs] (elapsed realtime).
      */
@@ -139,14 +164,18 @@ class MeshConnectionRegistry {
     /**
      * Whether a dial to [address] is still inside a duplicate refusal.
      *
-     * Lapses early once the client link it duplicated is gone: otherwise a
+     * Lapses early once the link it duplicated is gone: otherwise a
      * peer whose kept link died just after the refusal stayed undialed at the
      * address it still advertises for the rest of the window.
      */
-    fun isSuppressedDuplicate(address: String, nowMs: Long): Boolean {
+    fun isSuppressedDuplicate(
+        address: String,
+        nowMs: Long,
+        isSubscribed: (String) -> Boolean = { false },
+    ): Boolean {
         val entry = duplicateUntil[address] ?: return false
         val (deviceId, until) = entry
-        if (nowMs < until && hasOtherClientLink(deviceId, address)) return true
+        if (nowMs < until && hasOtherUsableLink(deviceId, address, isSubscribed)) return true
         duplicateUntil.remove(address, entry)
         return false
     }

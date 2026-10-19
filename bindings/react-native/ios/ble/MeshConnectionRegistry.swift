@@ -111,6 +111,24 @@ final class MeshConnectionRegistry: @unchecked Sendable {
         return retired
     }
 
+    /// The other identifiers `deviceId` holds a usable link on: see
+    /// `PeerLinkResolution.otherLiveLinks`. `isSubscribed` answers for the
+    /// centrals subscribed to our server, which this registry does not track.
+    func otherLiveLinks(of deviceId: String, excluding: UUID, isSubscribed: (UUID) -> Bool) -> [UUID] {
+        lock.lock()
+        let connected = connectedPeripherals
+        let links = PeerLinkResolution.otherLiveLinks(
+            of: deviceId,
+            excluding: excluding,
+            peripheralDeviceIds: peripheralDeviceIds,
+            centralDeviceIds: centralDeviceIds,
+            isConnected: { connected[$0] != nil },
+            isSubscribed: isSubscribed
+        )
+        lock.unlock()
+        return links
+    }
+
     func setCentralDeviceId(_ deviceId: String, for identifier: UUID) {
         lock.lock()
         centralDeviceIds[identifier] = deviceId
