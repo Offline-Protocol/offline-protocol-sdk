@@ -9,7 +9,10 @@ import java.net.URI
  *
  * Mirrors the enable/configure path in [OfflineProtocolModule.configureAndStartInternet]
  * and the config extraction done during create on iOS. ADR 0025: one home for
- * bridge behaviour that must stay aligned across wrappers.
+ * bridge behaviour that must stay aligned across wrappers. React Native still
+ * inlines its path today; a follow-up should delegate here. CI guard:
+ * `internet_transport_bootstrap_keeps_rn_configure_invariants` in
+ * `offline-protocol-uniffi`.
  */
 internal object InternetTransportBootstrap {
     private const val TAG = "InternetTransportBootstrap"

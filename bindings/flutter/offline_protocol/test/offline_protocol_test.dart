@@ -41,6 +41,16 @@ void main() {
     expect(config['autoReconnect'], isFalse);
   });
 
+  test('resolveInternetAutoEnableConfig root authToken with legacy server', () {
+    final config = OfflineProtocol.resolveInternetAutoEnableConfig({
+      'internetEnabled': true,
+      'internetServerAddress': 'relay.example.com',
+      'authToken': 'root-secret',
+    });
+    expect(config, isNotNull);
+    expect(config!['authToken'], 'root-secret');
+  });
+
   test('resolveInternetAutoEnableConfig requires enabled flag', () {
     expect(
       OfflineProtocol.resolveInternetAutoEnableConfig({

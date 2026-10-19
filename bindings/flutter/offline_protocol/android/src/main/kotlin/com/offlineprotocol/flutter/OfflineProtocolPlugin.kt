@@ -204,28 +204,6 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
             }
         })
         InitialRuntimeConfigApplier.apply(proto, parsed.rawJson)
-        if (parsed.coreConfig.internetEnabled) {
-            val ctx = applicationContext
-                ?: throw IllegalStateException("Plugin not attached")
-            internetManager = InternetTransportBootstrap.createManager(
-                ctx,
-                proto,
-                parsed.coreConfig.profile,
-                parsed.coreConfig.appId,
-            ) { level, message, context ->
-                Log.println(
-                    when (level) {
-                        "error" -> Log.ERROR
-                        "warning" -> Log.WARN
-                        else -> Log.INFO
-                    },
-                    TAG,
-                    "$message ${context ?: emptyMap()}",
-                )
-            }.also { manager ->
-                InternetTransportBootstrap.attachEmitters(manager, ::emitEventJson)
-            }
-        }
         protocol = proto
         currentConfig = parsed.coreConfig
     }
@@ -261,21 +239,36 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
             ?: throw IllegalArgumentException("enableInternetTransport expects a JSON string")
         val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
         val config = currentConfig ?: throw IllegalStateException("Protocol config not initialized")
-        val ctx = applicationContext ?: throw IllegalStateException("Plugin not attached")
         val json = JSONObject(configJson)
-        if (internetManager == null) {
-            internetManager = InternetTransportBootstrap.createManager(
-                ctx,
-                proto,
-                config.profile,
-                config.appId,
-            ).also { manager ->
-                InternetTransportBootstrap.attachEmitters(manager, ::emitEventJson)
-            }
-        }
-        val manager = internetManager
-            ?: throw IllegalStateException("Failed to create Internet manager")
+        val manager = ensureInternetManager(proto, config)
         InternetTransportBootstrap.configureAndStart(manager, json)
+    }
+
+    private fun ensureInternetManager(
+        proto: OfflineProtocol,
+        config: ProtocolConfig,
+    ): InternetManager {
+        internetManager?.let { return it }
+        val ctx = applicationContext ?: throw IllegalStateException("Plugin not attached")
+        return InternetTransportBootstrap.createManager(
+            ctx,
+            proto,
+            config.profile,
+            config.appId,
+        ) { level, message, context ->
+            Log.println(
+                when (level) {
+                    "error" -> Log.ERROR
+                    "warning" -> Log.WARN
+                    else -> Log.INFO
+                },
+                TAG,
+                "$message ${context ?: emptyMap()}",
+            )
+        }.also { manager ->
+            InternetTransportBootstrap.attachEmitters(manager, ::emitEventJson)
+            internetManager = manager
+        }
     }
 
     private fun sendMessageOnEngine(arguments: Any?): String {

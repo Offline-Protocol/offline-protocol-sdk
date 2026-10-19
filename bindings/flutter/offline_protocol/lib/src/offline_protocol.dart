@@ -193,7 +193,10 @@ class OfflineProtocol {
       'serverAddress': serverRaw.trim(),
       'autoReconnect': autoReconnect,
     };
-    final auth = internet['authToken'] ?? internet['auth_token'];
+    final auth = internet['authToken'] ??
+        internet['auth_token'] ??
+        root['authToken'] ??
+        root['auth_token'];
     if (auth is String && auth.isNotEmpty) {
       enableConfig['authToken'] = auth;
     }

@@ -28,7 +28,9 @@ apply plugin: 'kotlin-android'
 def bridgeDir = file('../../../react-native/android')
 def bridgeJava = bridgeDir.path + '/src/main/java'
 
-// Keep in sync with ios/offline_protocol.podspec `pr2_bridge_swift`.
+// PR2 compile surface: keep `pr2KotlinIncludes`, the KotlinCompile `exclude`
+// block below, and ios/offline_protocol.podspec `pr2_bridge_swift` aligned
+// (Flutter PR4 may add a Rust guard). InternetManager needs PresenceWatchPolicy.
 def pr2KotlinIncludes = [
     'uniffi/**/*.kt',
     'com/offlineprotocol/ProtocolConfigParser.kt',

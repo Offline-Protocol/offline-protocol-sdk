@@ -14,8 +14,9 @@ results are posted on the main queue (see [Kotlin bridge K2](../../docs/bridges/
 ## PR2 scope (events, messaging, Internet)
 
 - **Events:** subscribe with `OfflineProtocol.events` **before** `create` / `start`
-  if you need early diagnostics. Payloads use the same `eventJson` (+ optional
-  `seq`) shape as React Native `OfflineProtocol_Event`.
+  if you need early diagnostics (native events are not buffered while unsubscribed).
+  Payloads use the same `eventJson` (+ optional `seq`) shape as React Native
+  `OfflineProtocol_Event`.
 - **Messaging:** `OfflineProtocol.sendMessage`.
 - **Internet:** `OfflineProtocol.enableInternetTransport`, plus auto-enable after
   `start()` when `transports.internet` is enabled with a `serverAddress` (same as
@@ -29,7 +30,15 @@ ship in PR3.
 the React Native bridge (applied via shared `InitialRuntimeConfigApplier` sources).
 
 Shared Internet wiring lives in `InternetTransportBootstrap` (Kotlin/Swift) for
-Flutter; the React Native module keeps its existing paths until a later refactor.
+Flutter; the React Native module keeps its existing paths until a later refactor
+(CI pins shared configure invariants via `internet_transport_bootstrap_keeps_rn_configure_invariants`).
+
+## PR3 scope (planned, stacked PR)
+
+- BLE, Wi‑Fi Direct, Nostr, Reticulum, and sticky event replay.
+- **Event `seq` / gap recovery:** PR2 emits monotonic `seq` like React Native, but
+  Dart does not yet implement `admitNativeEvent` / `replayEvents` parity; PR3
+  adds that before apps rely on gap detection.
 
 ## CI
 

@@ -172,17 +172,6 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
             self?.emitEventJson(json)
         }))
         InitialRuntimeConfigApplier.apply(proto: proto, rawConfig: parsed.raw)
-        if parsed.config.internetEnabled {
-            let manager = InternetManager(
-                protocol: proto,
-                deviceId: parsed.config.profile,
-                appId: parsed.config.appId
-            )
-            InternetTransportBootstrap.attachEmitters(manager: manager, emitEventJson: { [weak self] json in
-                self?.emitEventJson(json)
-            })
-            internetManager = manager
-        }
         protocolInstance = proto
         currentConfig = parsed.config
     }
@@ -257,21 +246,27 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
                 userInfo: [NSLocalizedDescriptionKey: "Protocol config not initialized"]
             )
         }
-        if internetManager == nil {
-            let manager = InternetManager(protocol: proto, deviceId: config.profile, appId: config.appId)
-            InternetTransportBootstrap.attachEmitters(manager: manager, emitEventJson: { [weak self] json in
-                self?.emitEventJson(json)
-            })
-            internetManager = manager
-        }
-        guard let manager = internetManager else {
-            throw NSError(
-                domain: "OfflineProtocol",
-                code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Failed to create Internet manager"]
-            )
-        }
+        let manager = try ensureInternetManager(proto: proto, config: config)
         try InternetTransportBootstrap.configureAndStart(manager: manager, config: object)
+    }
+
+    private func ensureInternetManager(
+        proto: OfflineProtocol,
+        config: ProtocolConfig
+    ) throws -> InternetManager {
+        if let manager = internetManager {
+            return manager
+        }
+        let manager = InternetManager(
+            protocol: proto,
+            deviceId: config.profile,
+            appId: config.appId
+        )
+        InternetTransportBootstrap.attachEmitters(manager: manager, emitEventJson: { [weak self] json in
+            self?.emitEventJson(json)
+        })
+        internetManager = manager
+        return manager
     }
 
     private func sendMessageOnEngine(_ arguments: Any?) throws -> String {
