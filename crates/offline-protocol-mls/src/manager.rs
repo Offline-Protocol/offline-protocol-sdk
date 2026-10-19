@@ -1146,7 +1146,7 @@ impl MlsManager {
     ///
     /// Thin read path: callers that only need to detect a session rekey
     /// (epoch change since a previously-captured value) use this instead of
-    /// [`Self::get_session_info`] to skip the O(roster) leaf verification.
+    /// the full session-info read to skip the O(roster) leaf verification.
     pub fn session_epoch(&self, other_user_id: &str) -> Result<Option<u64>> {
         self.session_manager.session_epoch(other_user_id)
     }
