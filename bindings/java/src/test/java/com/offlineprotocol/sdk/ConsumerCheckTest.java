@@ -2,7 +2,6 @@ package com.offlineprotocol.sdk;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -136,6 +135,7 @@ class ConsumerCheckTest {
         };
         String report = OfflineProtocolLib.runStorageConformance(failing);
         assertFalse(report.contains("\"failures\":[]"), "a provider that cannot store must not pass: " + report);
-        assertNotNull(report);
+        // The exception crossed back into the engine as its storage error, not as a crash.
+        assertTrue(report.contains("Failed to store protocol state"), report);
     }
 }
