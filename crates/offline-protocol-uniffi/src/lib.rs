@@ -16282,6 +16282,51 @@ mod tests {
     }
 
     #[test]
+    fn flutter_bridges_doc_is_linked_from_the_bridge_index() {
+        let readme = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/bridges/README.md"),
+        )
+        .unwrap_or_else(|e| panic!("cannot read docs/bridges/README.md: {e}"));
+        let flutter_doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/bridges/flutter.md");
+        assert!(
+            flutter_doc.is_file(),
+            "docs/bridges/flutter.md must exist — Flutter bridge contract (PR4)"
+        );
+        assert!(
+            readme.contains("flutter.md"),
+            "docs/bridges/README.md must link docs/bridges/flutter.md"
+        );
+        let body = std::fs::read_to_string(&flutter_doc)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", flutter_doc.display()));
+        for marker in ["F2", "F3", "F4", "measure-plugin-aar-size.sh"] {
+            assert!(
+                body.contains(marker),
+                "docs/bridges/flutter.md must document `{marker}`"
+            );
+        }
+    }
+
+    #[test]
+    fn flutter_binding_ci_job_is_wired_in_workflow() {
+        let ci = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/ci.yml"),
+        )
+        .unwrap_or_else(|e| panic!("cannot read .github/workflows/ci.yml: {e}"));
+        for needle in [
+            "flutter-binding:",
+            "bindings/flutter/scripts/ci-build-android-jni-arm64.sh",
+            "measure-plugin-aar-size.sh --check",
+            "bindings/flutter/offline_protocol",
+        ] {
+            assert!(
+                ci.contains(needle),
+                ".github/workflows/ci.yml Flutter Binding job must reference `{needle}`"
+            );
+        }
+    }
+
+    #[test]
     fn flutter_pr3_aar_baseline_json_is_well_formed() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../bindings/flutter/baselines/offline-protocol-release-aar.json");

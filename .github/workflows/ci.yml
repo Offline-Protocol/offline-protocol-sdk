@@ -1276,3 +1276,56 @@ jobs:
       - name: Build a minified application against the published library
         working-directory: bindings/kotlin/consumer-check
         run: gradle --no-daemon --stacktrace -PVERSION_NAME=0.0.0 :app:assembleRelease
+
+  flutter-binding:
+    name: Flutter Binding
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
+        id: setup-ndk
+        with:
+          ndk-version: r26b
+          add-to-path: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-flutter-binding
+
+      - name: Build arm64 UniFFI for Flutter Android
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: bash bindings/flutter/scripts/ci-build-android-jni-arm64.sh
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Dart unit tests and analyzer
+        working-directory: bindings/flutter/offline_protocol
+        run: |
+          flutter pub get
+          flutter test
+          flutter analyze
+
+      - name: Compile Flutter plugin Kotlin (shared bridge surface)
+        working-directory: bindings/flutter/offline_protocol/example/android
+        run: ./gradlew :offline_protocol:compileDebugKotlin --no-daemon --stacktrace
+
+      - name: Check plugin release AAR size baseline
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: bindings/flutter/scripts/measure-plugin-aar-size.sh --check
