@@ -158,7 +158,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   re-seal budget a resend went out verbatim, and a verbatim copy sealed more
   than 32 generations before the newest was refused by the receiver,
   unanswered on a mesh link, until its retries ran out. It is now re-sealed,
-  up to half the forward window.
+  up to 512 generations past the last acknowledgement.
 - **A full acknowledgement table no longer stops the engine.** Once 1,000
   messages were waiting for acknowledgements, a retry with no slot returned
   an error out of `process()` before the step that frees slots, on every
@@ -197,9 +197,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   Each resend used to be re-sealed under a fresh ratchet generation, so a
   link that stopped carrying acknowledgements walked the receiver past its
   forward window: one phone re-sealed 20,919 resends during a 17-minute
-  stall. A sender now re-seals only while it has sealed fewer than 2,048
+  stall. A sender now re-seals only while it has sealed fewer than 256
   frames past the peer's last acknowledgement, and resends verbatim beyond
-  that until the next one arrives.
+  that until the next one arrives. 256 is a quarter of 1,024, the receiver
+  window of a leaf node, which mls-rs fixes and which is smaller than a
+  phone's; `tools/mls-interop` pins it.
 - **An iOS central link whose write buffer never drains is torn down and
   reconnected.** CoreBluetooth kept refusing every write on such a link for
   as long as it lived while still delivering the peer's notifications, so

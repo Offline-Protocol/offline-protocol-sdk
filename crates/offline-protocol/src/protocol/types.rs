@@ -431,16 +431,32 @@ const _: () = assert!(
         < RESEAL_GAP_BUDGET
 );
 
+/// The smallest forward window any receiver of a 1:1 session has: a phone's
+/// OpenMLS group (configured) or a leaf's mls-rs one (fixed by mls-rs, and
+/// smaller). The re-seal budget is a fraction of this, not of the phone's
+/// window: derived from the phone's 8192, it let a sender burn 2,048
+/// generations past a leaf that can fast-forward over 1,024.
+pub(crate) const RECEIVER_FORWARD_WINDOW_FLOOR: u64 = {
+    let phone = offline_protocol_mls::group::SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE as u64;
+    let leaf = offline_protocol_mls::group::LEAF_SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE as u64;
+    if phone < leaf {
+        phone
+    } else {
+        leaf
+    }
+};
+
 /// How many frames a sender may seal for one peer past the last one that peer
 /// acknowledged before resends stop being re-sealed and go out verbatim.
 ///
-/// A receiver cannot decrypt a frame more than the forward window past the
-/// newest it has decrypted. A quarter of the window leaves the rest to new
-/// messages, which still seal: at the volume test's 5 msg/s that is about
-/// 20 minutes of sending with nothing acknowledged before the gap can reach
-/// the window, and past that the receiver re-keys.
-pub(crate) const RESEAL_GAP_BUDGET: u64 =
-    offline_protocol_mls::group::SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE as u64 / 4;
+/// A receiver cannot decrypt a frame more than its forward window past the
+/// newest it has decrypted. A quarter of the smallest window any receiver has
+/// ([`RECEIVER_FORWARD_WINDOW_FLOOR`]) leaves the rest to new messages, which
+/// still seal. The per-peer window keeps unacknowledged seals growing only by
+/// resends of at most [`PEER_SEND_WINDOW`] frames, so the budget trips only on
+/// a link that has carried no acknowledgement for a whole retry ladder; the
+/// compile-time assertion above keeps it above that ladder.
+pub(crate) const RESEAL_GAP_BUDGET: u64 = RECEIVER_FORWARD_WINDOW_FLOOR / 4;
 
 /// Past [`RESEAL_GAP_BUDGET`], a resend whose bytes the receiver can no
 /// longer decrypt is still re-sealed, until the gap reaches this.
@@ -452,10 +468,10 @@ pub(crate) const RESEAL_GAP_BUDGET: u64 =
 /// 2026-10-19 volume test, 525 such messages produced 3,308 decrypt
 /// failures and were never delivered. Re-sealing one spends a generation,
 /// which is what the budget rations, so the exception stops at half the
-/// forward window: the receiver going deaf is the failure the budget
-/// exists for, and a wasted resend is not.
-pub(crate) const RESEAL_HARD_LIMIT: u64 =
-    offline_protocol_mls::group::SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE as u64 / 2;
+/// smallest forward window ([`RECEIVER_FORWARD_WINDOW_FLOOR`]): the receiver
+/// going deaf is the failure the budget exists for, and a wasted resend is
+/// not.
+pub(crate) const RESEAL_HARD_LIMIT: u64 = RECEIVER_FORWARD_WINDOW_FLOOR / 2;
 
 /// The longest an acknowledgement timeout is postponed for a frame that is
 /// still waiting in a local transport queue, measured from the attempt.

@@ -22,12 +22,18 @@ pub const DEFAULT_CIPHERSUITE: Ciphersuite =
 /// with, re-exported from the sealed layer.
 ///
 /// They live there rather than here because the peer at the other end of a
-/// session may be a leaf node running a different MLS implementation, and it
-/// has to be configured with the same two numbers. A drifted copy does not
-/// fail a build or a test: it produces a session that stops decrypting under
-/// load, on a device, later.
+/// session may be a leaf node running a different MLS implementation, and the
+/// interop harness configures its OpenMLS side with the same two numbers. A
+/// drifted copy does not fail a build or a test: it produces a session that
+/// stops decrypting under load, on a device, later.
+///
+/// The leaf's own receiver window is not these. mls-rs fixes it at
+/// [`LEAF_SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE`] and offers no setting, so
+/// whatever the phone derives from how far ahead a receiver tolerates (the
+/// re-seal budget in `offline-protocol`) takes the smaller of the two.
 pub use offline_protocol_sealed::{
-    SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE, SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
+    LEAF_SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE, SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE,
+    SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
 };
 
 /// Sender ratchet configuration applied to every created and joined group.

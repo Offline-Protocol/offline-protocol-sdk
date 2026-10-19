@@ -310,22 +310,32 @@ message loss, for entries whose provenance is still in memory.
 
 ### The re-seal budget
 
-**A sender never seals more than a quarter of the receiver's forward window
-past the last frame that receiver acknowledged by re-sealing resends.** Every
+**A sender never seals more than a quarter of the smallest receiver forward
+window past the last frame that receiver acknowledged by re-sealing
+resends.** Every
 re-seal spends a ratchet generation. The receiver has to fast-forward over it,
 and one it drops as a duplicate of a message it already holds is never
 decrypted at all. A receiver more than the forward window behind decrypts
 nothing from that sender until the pair re-keys. So the sender counts, per
 session, the frames it has sealed past the newest one the peer acknowledged
 (an acknowledgement proves the peer decrypted that far). Once the count reaches
-the budget (2,048 of the 8,192-generation window), a resend goes out verbatim,
+the budget, a resend goes out verbatim,
 which spends nothing and still decrypts unless the receiver has since moved
 more than the out-of-order tolerance past it. The next acknowledgement re-opens
 the budget. New messages always seal; the budget leaves them the rest of the
 window.
 
+The budget is 256: a quarter of 1,024, the window of a leaf node, which runs
+mls-rs. mls-rs fixes that window and offers no setting, so it is smaller than
+the 8,192 a phone's OpenMLS group is configured with, and a budget derived
+from the phone's window (2,048) let a sender walk a leaf past its window by
+re-sealing alone. `tools/mls-interop` pins the leaf's 1,024 against mls-rs
+itself. With the per-peer window, unacknowledged seals grow only by resends of
+at most sixteen frames, so the budget trips only after a whole retry ladder
+with no acknowledgement; a compile-time assertion keeps it above that.
+
 **One exception: a resend whose verbatim bytes can no longer decrypt is
-re-sealed past the budget, up to half the forward window.** A copy sealed more
+re-sealed past the budget, up to half the smallest forward window (512).** A copy sealed more
 than the out-of-order tolerance (32) before the newest frame this device sealed
 is refused by a receiver that has decrypted anything since, and a mesh link
 carries no answer for it, so verbatim it was resent until its ladder ran out.
