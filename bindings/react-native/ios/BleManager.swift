@@ -59,6 +59,9 @@ public class BleManager: NSObject, TransportManager {
     // been reported yet. Keeping the constant here would duplicate the
     // floor and go stale the first time Rust changes it.
     private let CONNECTION_TIMEOUT: TimeInterval = 10.0
+    // Tears down a central link whose write buffer never drains again (see
+    // BleWriteStallPolicy). Without it such a link is never reported down.
+    private let writeStallPolicy = BleWriteStallPolicy()
     private let MAX_CONNECTIONS_PER_DEVICE = 4
     private let ADVERTISE_RESTART_MIN: TimeInterval = 0.2
     private let ADVERTISE_RESTART_MAX: TimeInterval = 1.2
@@ -1232,6 +1235,26 @@ public class BleManager: NSObject, TransportManager {
         }
 
         centralManager?.connect(peripheral, options: nil)
+        // CoreBluetooth never times a connect out: a pending one waits until
+        // the peripheral answers, and while it waits every later attempt is
+        // refused as "already connecting". In the 2026-10-19 rerun that held
+        // a dead link in place for 17 minutes, because the connect to the
+        // peer's new advertising identity never completed. In the foreground
+        // a connect that has not landed in CONNECTION_TIMEOUT is cancelled so
+        // the next discovery can try again. In the background a pending
+        // connect is how iOS reconnects a peer that comes back into range, so
+        // it is left alone.
+        DispatchQueue.main.asyncAfter(deadline: .now() + CONNECTION_TIMEOUT) { [weak self] in
+            guard let self = self,
+                  peripheral.state == .connecting,
+                  UIApplication.shared.applicationState == .active else { return }
+            print("[BleManager] Connect to \(peripheral.identifier) did not complete in \(Int(self.CONNECTION_TIMEOUT)) s; cancelling so it can be retried")
+            self.emitDiagnostic("warning", "BLE connect timed out; cancelled", context: [
+                "identifier": peripheral.identifier.uuidString,
+                "timeoutSeconds": self.CONNECTION_TIMEOUT
+            ])
+            self.centralManager?.cancelPeripheralConnection(peripheral)
+        }
         if logThrottler.shouldLog(key: "connect_attempt_\(peripheral.identifier.uuidString)", interval: 10) {
             print("[BleManager] Attempting connection to \(peripheral.identifier) (reason: \(reason))")
             var context: [String: Any] = [
@@ -2153,11 +2176,23 @@ public class BleManager: NSObject, TransportManager {
                     print("[BleManager] Cannot send fragment yet, write buffer full for recipient: \(recipientId)")
                     emitDiagnostic("info", "BLE write buffer full, retrying", context: ["recipientId": recipientId])
                 }
+                if writeStallPolicy.noteRefused(peripheral.identifier) {
+                    print("[BleManager] ⚠️ Write buffer full for \(Int(BleWriteStallPolicy.defaultStallSeconds)) s on \(peripheral.identifier); tearing the link down to reconnect")
+                    emitDiagnostic("warning", "BLE link refused every write; tearing it down", context: [
+                        "recipientId": recipientId,
+                        "identifier": peripheral.identifier.uuidString,
+                        "stallSeconds": BleWriteStallPolicy.defaultStallSeconds
+                    ])
+                    DispatchQueue.main.async { [weak self] in
+                        self?.centralManager?.cancelPeripheralConnection(peripheral)
+                    }
+                }
                 return false
             }
         }
         
         peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+        writeStallPolicy.noteWritable(peripheral.identifier)
         meshController.markPeerActive(recipientId)
         meshController.markPeerActive(deviceId)
         return true
@@ -4086,6 +4121,7 @@ extension BleManager: CBPeripheralDelegate {
     /// Flow-control signal: the BLE write buffer has drained for this peripheral.
     /// Resume sending queued fragments instead of waiting for a timer tick.
     public func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+        writeStallPolicy.noteWritable(peripheral.identifier)
         guard let recipientId = connections.peripheralDeviceId(for: peripheral.identifier) else { return }
         if logThrottler.shouldLog(key: "flow_ready_\(recipientId)", interval: 1.0) {
             emitDiagnostic("debug", "BLE write buffer drained, resuming sends", context: ["recipientId": recipientId])

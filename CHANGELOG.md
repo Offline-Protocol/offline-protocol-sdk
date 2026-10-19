@@ -156,6 +156,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   stall. A sender now re-seals only while it has sealed fewer than 2,048
   frames past the peer's last acknowledgement, and resends verbatim beyond
   that until the next one arrives.
+- **An iOS central link whose write buffer never drains is torn down and
+  reconnected.** CoreBluetooth kept refusing every write on such a link for
+  as long as it lived while still delivering the peer's notifications, so
+  nothing reported it down. After 15 s with no accepted write the link is
+  cancelled. A connect that has not completed in 10 s in the foreground is
+  cancelled too: CoreBluetooth never times one out, and the pending connect
+  refused every reconnect attempt as "already connecting".
 - **A message sent while its sender was blocked is never delivered.** Its id
   is now remembered, so a retry arriving after an unblock is answered rather
   than delivered.
