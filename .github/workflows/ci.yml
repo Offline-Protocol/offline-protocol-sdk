@@ -1287,7 +1287,8 @@ jobs:
           # paths-filter compares the PR diff to the base branch.
           fetch-depth: 0
 
-      # flutter_native includes Cargo.lock and engine crates in the UniFFI cdylib closure.
+      # Native AAR gate: structural/UniFFI paths or lockfile (engine-only PRs skip
+      # NDK/Gradle; pushes to main always run the full job).
       - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
         id: flutter_paths
         with:
@@ -1302,30 +1303,35 @@ jobs:
               - 'bindings/flutter/scripts/**'
               - 'bindings/react-native/android/**'
               - 'scripts/generate-bindings.sh'
-              - 'Cargo.lock'
-              - 'Cargo.toml'
               - 'crates/offline-protocol-uniffi/Cargo.toml'
               - 'crates/offline-protocol-uniffi/build.rs'
               - 'crates/offline-protocol-uniffi/src/lib.rs'
               - 'crates/offline-protocol-uniffi/src/offline_protocol.udl'
               - 'crates/offline-protocol-uniffi/src/capi/**'
               - 'crates/offline-protocol-uniffi/src/host_log.rs'
-              - 'crates/offline-protocol/**'
-              - 'crates/offline-protocol-core/**'
-              - 'crates/offline-protocol-sealed/**'
-              - 'crates/offline-protocol-router/**'
-              - 'crates/offline-protocol-transport/**'
-              - 'crates/offline-protocol-reliability/**'
-              - 'crates/offline-protocol-mls/**'
-              - 'crates/offline-protocol-data/**'
-              - 'crates/offline-protocol-services/**'
-              - 'crates/offline-protocol-telemetry-wire/**'
+            flutter_lock:
+              - 'Cargo.lock'
+              - 'Cargo.toml'
+
+      - name: Decide Flutter native (NDK + AAR) gate
+        id: flutter_native_gate
+        run: |
+          run=false
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            run=true
+          elif [[ "${{ steps.flutter_paths.outputs.flutter_native }}" == "true" ]]; then
+            run=true
+          elif [[ "${{ steps.flutter_paths.outputs.flutter_lock }}" == "true" ]]; then
+            run=true
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
 
       - name: Skip (no Flutter-related changes on this PR)
         if: >-
           github.event_name == 'pull_request'
           && steps.flutter_paths.outputs.flutter_dart != 'true'
           && steps.flutter_paths.outputs.flutter_native != 'true'
+          && steps.flutter_paths.outputs.flutter_lock != 'true'
         run: echo "No matching paths; Flutter Binding checks skipped for this PR."
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
@@ -1333,6 +1339,7 @@ jobs:
           github.event_name == 'push'
           || steps.flutter_paths.outputs.flutter_dart == 'true'
           || steps.flutter_paths.outputs.flutter_native == 'true'
+          || steps.flutter_paths.outputs.flutter_lock == 'true'
         with:
           channel: stable
           flutter-version: "3.27.4"
@@ -1343,6 +1350,7 @@ jobs:
           github.event_name == 'push'
           || steps.flutter_paths.outputs.flutter_dart == 'true'
           || steps.flutter_paths.outputs.flutter_native == 'true'
+          || steps.flutter_paths.outputs.flutter_lock == 'true'
         working-directory: bindings/flutter/offline_protocol
         run: |
           flutter pub get
@@ -1350,13 +1358,13 @@ jobs:
           flutter analyze
 
       - uses: actions/setup-java@v6
-        if: github.event_name == 'push' || steps.flutter_paths.outputs.flutter_native == 'true'
+        if: steps.flutter_native_gate.outputs.run == 'true'
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Setup Android NDK
-        if: github.event_name == 'push' || steps.flutter_paths.outputs.flutter_native == 'true'
+        if: steps.flutter_native_gate.outputs.run == 'true'
         uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
         id: setup-ndk
         with:
@@ -1364,23 +1372,23 @@ jobs:
           add-to-path: true
 
       - uses: dtolnay/rust-toolchain@stable
-        if: github.event_name == 'push' || steps.flutter_paths.outputs.flutter_native == 'true'
+        if: steps.flutter_native_gate.outputs.run == 'true'
         with:
           targets: aarch64-linux-android
 
       - uses: Swatinem/rust-cache@v2
-        if: github.event_name == 'push' || steps.flutter_paths.outputs.flutter_native == 'true'
+        if: steps.flutter_native_gate.outputs.run == 'true'
         with:
           shared-key: ci-flutter-binding
 
       - name: Build arm64 UniFFI for Flutter Android
-        if: github.event_name == 'push' || steps.flutter_paths.outputs.flutter_native == 'true'
+        if: steps.flutter_native_gate.outputs.run == 'true'
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: bash bindings/flutter/scripts/ci-build-android-jni-arm64.sh
 
       - name: Assemble release AAR and check size baseline
-        if: github.event_name == 'push' || steps.flutter_paths.outputs.flutter_native == 'true'
+        if: steps.flutter_native_gate.outputs.run == 'true'
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: bindings/flutter/scripts/measure-plugin-aar-size.sh --check

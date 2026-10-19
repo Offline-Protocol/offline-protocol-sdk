@@ -117,9 +117,10 @@ requests; full run on pushes to `main`):
 - **Android native (slow path):** arm64 UniFFI build, then
   `:offline_protocol:assembleRelease` via `measure-plugin-aar-size.sh --check`
   when baselines, Flutter scripts, shared RN Android tree (Kotlin, jniLibs,
-  ProGuard consumer rules, Gradle), bindgen, UniFFI ABI inputs, root
-  `Cargo.lock` / workspace manifest, or any engine crate in the UniFFI link
-  closure change.
+  ProGuard consumer rules, Gradle), bindgen, UniFFI ABI inputs, or root
+  `Cargo.lock` / workspace `Cargo.toml` change. Engine-only PRs (no lockfile or
+  Flutter/native path changes) skip NDK/Gradle; pushes to `main` always run
+  the full native gate.
 
 iOS pod compilation is not gated yet (requires XCFramework assembly like the
 Swift Package job); add when a macOS Flutter job is worth the runner cost.
