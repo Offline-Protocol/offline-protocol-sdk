@@ -28,9 +28,10 @@ Hand-written transport and config code lives under
 points (`OfflineProtocolModule`, mesh foreground services, sticky event
 dispatcher, and similar) stay out of the Flutter compile graph.
 
-Rust guards in `offline-protocol-uniffi` pin the compile lists and the
-method-channel surface against Dart (`flutter_pr3_compile_lists_*`,
-`flutter_pr3_method_channel_methods_match_native_plugins`).
+Rust guards in `offline-protocol-uniffi/src/tests/flutter_bridge_guards.rs`
+pin the compile lists and the method-channel surface against Dart
+(`flutter_pr3_compile_lists_*`, `flutter_pr3_method_channel_methods_match_native_plugins`).
+Production UniFFI code stays in `lib.rs`; CI treats `lib.rs` edits as native rebuilds.
 
 The failure this prevents: a rename or a new bridge file that React Native
 compiles but Flutter omits (or the reverse), found only when an app builds.
@@ -110,7 +111,9 @@ The `Flutter Binding` job in `.github/workflows/ci.yml` (path-filtered on pull
 requests; full run on pushes to `main`):
 
 - **Dart (fast path):** `flutter test` and `flutter analyze` when the plugin,
-  `docs/bridges/flutter.md`, workflow, or UniFFI `lib.rs` Flutter guards change.
+  `docs/bridges/flutter.md`, workflow, or `flutter_bridge_guards.rs` change.
+- **UniFFI production (`lib.rs`):** any edit runs the native path (jniLibs +
+  AAR gate), not the guard-only fast path.
 - **Android native (slow path):** arm64 UniFFI build, then
   `:offline_protocol:assembleRelease` via `measure-plugin-aar-size.sh --check`
   when baselines, Flutter scripts, shared RN Android tree (Kotlin, jniLibs,

@@ -1295,7 +1295,7 @@ jobs:
               - 'bindings/flutter/**'
               - 'docs/bridges/flutter.md'
               - '.github/workflows/ci.yml'
-              - 'crates/offline-protocol-uniffi/src/lib.rs'
+              - 'crates/offline-protocol-uniffi/src/tests/flutter_bridge_guards.rs'
             flutter_native:
               - 'bindings/flutter/baselines/**'
               - 'bindings/flutter/scripts/**'
@@ -1303,6 +1303,7 @@ jobs:
               - 'scripts/generate-bindings.sh'
               - 'crates/offline-protocol-uniffi/Cargo.toml'
               - 'crates/offline-protocol-uniffi/build.rs'
+              - 'crates/offline-protocol-uniffi/src/lib.rs'
               - 'crates/offline-protocol-uniffi/src/offline_protocol.udl'
               - 'crates/offline-protocol-uniffi/src/capi/**'
               - 'crates/offline-protocol-uniffi/src/host_log.rs'

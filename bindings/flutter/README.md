@@ -89,8 +89,10 @@ On pull requests the job is split by path: **Dart tests** run for plugin or
 Flutter-doc changes (and when the slow path runs); **NDK + release AAR + size
 gate** run only for native paths (shared `bindings/react-native/android/**`
 including consumer ProGuard rules, UniFFI UDL/C API/build inputs, baselines,
-Flutter scripts). UniFFI `lib.rs` guard-only edits run Dart checks without
-rebuilding jniLibs. Pushes to `main` always run the full job.
+Flutter scripts). Flutter guards live in `crates/offline-protocol-uniffi/src/tests/flutter_bridge_guards.rs`
+so guard-only PRs run Dart/`cargo test flutter_` without NDK; production UniFFI
+edits in `lib.rs` always run the native gate. Pushes to `main` always run the
+full job.
 
 Bridge contract: [docs/bridges/flutter.md](../../docs/bridges/flutter.md).
 
