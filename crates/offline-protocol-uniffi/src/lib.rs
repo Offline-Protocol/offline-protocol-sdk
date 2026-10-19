@@ -16315,9 +16315,12 @@ mod tests {
         .unwrap_or_else(|e| panic!("cannot read .github/workflows/ci.yml: {e}"));
         for needle in [
             "flutter-binding:",
+            "flutter_dart:",
+            "flutter_native:",
             "bindings/flutter/scripts/ci-build-android-jni-arm64.sh",
             "measure-plugin-aar-size.sh --check",
             "bindings/flutter/offline_protocol",
+            "bindings/react-native/android/**",
             "dorny/paths-filter@",
             "flutter-version:",
         ] {

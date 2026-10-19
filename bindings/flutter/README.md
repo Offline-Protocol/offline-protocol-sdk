@@ -85,9 +85,12 @@ pull request:
 - `measure-plugin-aar-size.sh --check` (`:offline_protocol:assembleRelease` plus
   AAR footprint gate) after building arm64 UniFFI into jniLibs
 
-On pull requests the job runs only when Flutter-related paths change (plugin,
-shared bridge sources, UniFFI crate, baselines, or this workflow). Pushes to
-`main` always run it.
+On pull requests the job is split by path: **Dart tests** run for plugin or
+Flutter-doc changes (and when the slow path runs); **NDK + release AAR + size
+gate** run only for native paths (shared `bindings/react-native/android/**`
+including consumer ProGuard rules, UniFFI UDL/C API/build inputs, baselines,
+Flutter scripts). UniFFI `lib.rs` guard-only edits run Dart checks without
+rebuilding jniLibs. Pushes to `main` always run the full job.
 
 Bridge contract: [docs/bridges/flutter.md](../../docs/bridges/flutter.md).
 

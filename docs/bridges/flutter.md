@@ -109,9 +109,12 @@ after compile-surface or UniFFI artifact changes.
 The `Flutter Binding` job in `.github/workflows/ci.yml` (path-filtered on pull
 requests; full run on pushes to `main`):
 
-- `flutter test` and `flutter analyze` on `bindings/flutter/offline_protocol`
-- `:offline_protocol:assembleRelease` via `measure-plugin-aar-size.sh --check`
-  after building arm64 UniFFI into jniLibs (one Gradle invocation)
+- **Dart (fast path):** `flutter test` and `flutter analyze` when the plugin,
+  `docs/bridges/flutter.md`, workflow, or UniFFI `lib.rs` Flutter guards change.
+- **Android native (slow path):** arm64 UniFFI build, then
+  `:offline_protocol:assembleRelease` via `measure-plugin-aar-size.sh --check`
+  when baselines, Flutter scripts, shared RN Android tree (Kotlin, jniLibs,
+  ProGuard consumer rules, Gradle), bindgen, or UniFFI ABI inputs change.
 
 iOS pod compilation is not gated yet (requires XCFramework assembly like the
 Swift Package job); add when a macOS Flutter job is worth the runner cost.
