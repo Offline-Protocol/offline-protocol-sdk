@@ -84,7 +84,8 @@ pub use identity_assertion::{
     IDENTITY_ASSERTION_MIN_LEN,
 };
 pub use keypackage::{
-    KeyPackagePayload, ACK_UNDECRYPTABLE_V1, CTRL_SIGN_V2, MLS_ENVELOPE_COMPACT_V1, SVC_SEALED_V1,
+    KeyPackagePayload, ACK_COALESCED_V1, ACK_UNDECRYPTABLE_V1, CTRL_SIGN_V2,
+    MLS_ENVELOPE_COMPACT_V1, SVC_SEALED_V1,
 };
 
 #[cfg(all(test, feature = "std"))]

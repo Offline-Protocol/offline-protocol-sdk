@@ -3227,6 +3227,12 @@ impl OfflineProtocol {
             {
                 self.peer_undecryptable_ack.insert(peer_id.clone());
             }
+            if caps
+                .ack_versions
+                .contains(&offline_protocol_sealed::ACK_COALESCED_V1)
+            {
+                self.peer_coalesced_ack.insert(peer_id.clone());
+            }
             if self.config.encryption.rich_payload_enabled
                 && caps.attested_rich_versions.contains(&RICH_PAYLOAD_V1)
             {

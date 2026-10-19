@@ -2,7 +2,7 @@
 
 use super::custody::CUSTODY_META_KEY;
 use super::{
-    base64_encode, internal_prefixes, lifetime_expired, lock_shared_state,
+    base64_encode, internal_prefixes, lifetime_expired, lock_shared_state, CoalescedAcks,
     ConnectionAcceptedPayload, ConnectionRequestPayload, KeyPackagePayload, MediaSendOptions,
     MediaTransferDescriptor, OfflineProtocol, OutboundMediaTransfer, OutboundSendPreparation,
     OutboxEntry, OutboxReseal, PendingConnectionRequest, PendingMessage, PendingProvenance,
@@ -20,8 +20,9 @@ use super::{
 };
 use super::{classify_transport_send_error, send_failure_token};
 use crate::constants::{
-    ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_STATUS_KEY, ACK_STATUS_UNDECRYPTABLE, ACK_TRANSPORT_KEY,
-    MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
+    ACK_COALESCE_MAX, ACK_COALESCE_WINDOW, ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_MORE_KEY,
+    ACK_STATUS_KEY, ACK_STATUS_UNDECRYPTABLE, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT,
+    MAX_OUTBOX_ENTRIES,
 };
 use crate::events::{DecryptionFailureCode, Event, PresenceStatus};
 use crate::file_transfer::{FileChunk, OutboundTransferState};
@@ -5363,8 +5364,113 @@ impl OfflineProtocol {
         inbound_transport: TransportType,
         status: Option<&str>,
     ) -> Result<()> {
+        if status.is_none() && self.try_coalesce_ack(message, inbound_transport) {
+            return Ok(());
+        }
         let ack = self.build_ack(message, inbound_transport, status)?;
         self.route_ack(&ack, inbound_transport)
+    }
+
+    /// Holds the delivery ACK for `message` to go out with others to the same
+    /// peer, when that peer reads coalesced ACKs and the frame came over a
+    /// mesh link. Returns `false` when the ACK must go on its own.
+    ///
+    /// Only the mesh carriers: they are where a phone's ACKs were a third of
+    /// the frames it sent, on a link carrying less than it was offered (the
+    /// 2026-10-19 volume test). A relay frame costs a round trip to a server,
+    /// not a share of a radio link. An `undecryptable` answer is never held:
+    /// it is not a delivery, and only a delivery may share a frame.
+    fn try_coalesce_ack(&mut self, message: &Message, inbound_transport: TransportType) -> bool {
+        if !matches!(
+            inbound_transport,
+            TransportType::BLE | TransportType::WiFiDirect
+        ) || !self.peer_coalesced_ack.contains(message.sender.as_str())
+        {
+            return false;
+        }
+        let peer = message.sender.as_str().to_string();
+        if self
+            .coalesced_acks_out
+            .get(&peer)
+            .is_some_and(|batch| batch.transport != inbound_transport)
+        {
+            self.flush_coalesced_acks_for(&peer);
+        }
+        let batch = self
+            .coalesced_acks_out
+            .entry(peer.clone())
+            .or_insert_with(|| CoalescedAcks {
+                transport: inbound_transport,
+                since: Instant::now(),
+                hop_count: message.hop_count.value().to_string(),
+                ids: Vec::new(),
+            });
+        let id = message.id.as_str();
+        if !batch.ids.contains(&id) {
+            batch.ids.push(id);
+        }
+        if batch.ids.len() >= ACK_COALESCE_MAX {
+            self.flush_coalesced_acks_for(&peer);
+        }
+        true
+    }
+
+    /// Sends every held ACK batch older than [`ACK_COALESCE_WINDOW`].
+    /// Called each tick.
+    pub(super) fn flush_due_coalesced_acks(&mut self) {
+        if self.coalesced_acks_out.is_empty() {
+            return;
+        }
+        let due: Vec<String> = self
+            .coalesced_acks_out
+            .iter()
+            .filter(|(_, batch)| batch.since.elapsed() >= ACK_COALESCE_WINDOW)
+            .map(|(peer, _)| peer.clone())
+            .collect();
+        for peer in due {
+            self.flush_coalesced_acks_for(&peer);
+        }
+    }
+
+    /// Sends the ACK batch held for `peer` as one frame: the first id in
+    /// [`ACK_FOR_KEY`], so even a peer that ignores [`ACK_MORE_KEY`] settles
+    /// one, and the rest in [`ACK_MORE_KEY`].
+    fn flush_coalesced_acks_for(&mut self, peer: &str) {
+        let Some(batch) = self.coalesced_acks_out.remove(peer) else {
+            return;
+        };
+        let Some((first, more)) = batch.ids.split_first() else {
+            return;
+        };
+        let built = (|| -> Result<Message> {
+            let ttl = TTL::new(self.config.initial_ttl).unwrap_or_else(|_| TTL::default());
+            let mut builder = Message::builder(
+                UserId::new(&self.local_id)?,
+                UserId::new(peer)?,
+                AppId::new(&self.config.app_id)?,
+            )
+            .content(String::new())
+            .priority(MessagePriority::Low)
+            .ttl(ttl)
+            .requires_ack(false)
+            .metadata(ACK_FOR_KEY, first.as_str())
+            .metadata(ACK_HOP_COUNT_KEY, batch.hop_count.as_str())
+            .metadata(ACK_TRANSPORT_KEY, Self::transport_label(batch.transport));
+            if !more.is_empty() {
+                builder = builder.metadata(ACK_MORE_KEY, more.join(","));
+            }
+            Ok(builder.build())
+        })();
+        let ack = match built {
+            Ok(ack) => ack,
+            Err(err) => {
+                warn!(peer = %peer, error = %err, "Failed to build a coalesced delivery ACK");
+                return;
+            }
+        };
+        if let Err(err) = self.route_ack(&ack, batch.transport) {
+            debug!(peer = %peer, error = %err, "Coalesced delivery ACK not routed");
+        }
     }
 
     /// Builds the acknowledgement for `message`, optionally carrying
@@ -5571,6 +5677,30 @@ impl OfflineProtocol {
     }
 
     pub(super) fn handle_ack_message(&mut self, message: &Message) {
+        // A coalesced ACK is settled as the single ACKs it stands for, so
+        // each id passes every check below on its own, the sender-equality
+        // check first. Never on an `undecryptable` answer, which is not a
+        // delivery and is never coalesced; and no more ids than a sender
+        // coalesces, so a forged one reaches no further than five frames
+        // could.
+        if message.metadata.contains_key(ACK_MORE_KEY) {
+            let mut single = message.clone();
+            let more = single.metadata.remove(ACK_MORE_KEY).unwrap_or_default();
+            self.handle_ack_message(&single);
+            if !single.metadata.contains_key(ACK_STATUS_KEY) {
+                for id in more
+                    .split(',')
+                    .filter(|id| !id.is_empty())
+                    .take(ACK_COALESCE_MAX - 1)
+                {
+                    single
+                        .metadata
+                        .insert(ACK_FOR_KEY.to_string(), id.to_string());
+                    self.handle_ack_message(&single);
+                }
+            }
+            return;
+        }
         if let Some(ack_for) = message.metadata.get(ACK_FOR_KEY) {
             if let Ok(message_id) = MessageId::from_str(ack_for) {
                 // Whoever answers has to be whoever we sent it to. An
@@ -6335,8 +6465,12 @@ impl OfflineProtocol {
             // downgrade the peer's traffic to the bootstrap key as a side
             // effect of a local setting.
             // Read unconditionally: an `undecryptable` ACK is settled as "not
-            // delivered" whatever our config, so a peer may always send us one.
-            ack_versions: vec![offline_protocol_sealed::ACK_UNDECRYPTABLE_V1],
+            // delivered" whatever our config, so a peer may always send us one,
+            // and a coalesced one settles every id it names.
+            ack_versions: vec![
+                offline_protocol_sealed::ACK_UNDECRYPTABLE_V1,
+                offline_protocol_sealed::ACK_COALESCED_V1,
+            ],
             nostr_pubkey: self.transport_manager.nostr_public_key(),
         }
     }

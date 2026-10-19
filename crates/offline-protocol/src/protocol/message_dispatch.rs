@@ -194,6 +194,19 @@ impl OfflineProtocol {
             } else {
                 self.peer_undecryptable_ack.remove(sender);
             }
+            if payload
+                .ack_versions
+                .contains(&offline_protocol_sealed::ACK_COALESCED_V1)
+            {
+                if !self.peer_coalesced_ack.contains(sender)
+                    && self.peer_coalesced_ack.len() >= MAX_KEY_PACKAGE_SENT_TO
+                {
+                    self.peer_coalesced_ack.clear();
+                }
+                self.peer_coalesced_ack.insert(sender.to_string());
+            } else {
+                self.peer_coalesced_ack.remove(sender);
+            }
 
             // Record whether this peer replicates documents, so the data
             // layer may push `__DATA_V1__` frames to them. Same shape again:

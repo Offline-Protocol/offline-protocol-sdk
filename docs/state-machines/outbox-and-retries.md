@@ -231,8 +231,9 @@ the bridge pull mark) each removed one amplifier of the same loop. The window
 removes the loop: it bounds the queue, and with it the round trip, the
 resends and the receiver's ratchet gap, at any link rate.
 
-Sixteen is above what that link carries in one unloaded round trip (a few
-messages, counting a processing tick on each side), so it costs no throughput, and it keeps the loaded round
+Sixteen is above what that link carries in one unloaded round trip (about six
+messages, counting the receiver's acknowledgement coalescing and a processing
+tick on each side), so it costs no throughput, and it keeps the loaded round
 trip there near three seconds. A compile-time assertion keeps a full window's
 worth of retries inside the re-seal budget.
 

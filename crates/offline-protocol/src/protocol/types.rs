@@ -412,9 +412,10 @@ pub(crate) const SEND_DEFER_REASON_PEER_WINDOW: &str = "peer_window";
 /// messages as "Outbox capacity exceeded". A window bounds the queue, and with
 /// it the round trip, the resends and the receiver's ratchet gap, at any link
 /// rate. It costs no throughput while it exceeds what the link carries in one
-/// unloaded round trip: a few messages on that link, counting a processing
-/// tick on each side. Sixteen leaves margin, and keeps the round trip under
-/// about three seconds there, well inside the timeout.
+/// unloaded round trip: about six messages on that link, counting the
+/// receiver's acknowledgement coalescing (`ACK_COALESCE_WINDOW`) and a
+/// processing tick on each side. Sixteen leaves margin, and keeps the
+/// round trip under about three seconds there, well inside the timeout.
 ///
 /// Only the mesh carriers: a relay mailbox is store-and-forward, and holding
 /// a message back from it would strand it on a device the user may close.
@@ -1483,6 +1484,21 @@ pub(crate) struct ReceivedKeyPackage {
     /// Local wall-clock deadline (ms since epoch) computed from the sender's
     /// `remaining_lifetime_ms`, anchored to *our* clock at receive time.
     pub(crate) local_expires_at_ms: u64,
+}
+
+/// Delivery ACKs held for one peer until they go out as one frame (see
+/// `OfflineProtocol::coalesced_acks_out`).
+#[derive(Debug, Clone)]
+pub(crate) struct CoalescedAcks {
+    /// The carrier the answered frames arrived on, which the ACK goes back
+    /// over. A frame from another carrier starts a new batch.
+    pub(crate) transport: offline_protocol_transport::TransportType,
+    /// When the first held ACK was owed.
+    pub(crate) since: std::time::Instant,
+    /// The first answered frame's hop count, as a single ACK reports it.
+    pub(crate) hop_count: String,
+    /// The answered message ids, oldest first.
+    pub(crate) ids: Vec<String>,
 }
 
 /// Durable record of the end-to-end capability versions a peer last

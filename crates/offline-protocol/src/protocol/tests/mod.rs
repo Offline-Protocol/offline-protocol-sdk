@@ -14,7 +14,8 @@ mod service_seal;
 
 use super::*;
 use crate::constants::{
-    ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_STATUS_KEY, ACK_STATUS_UNDECRYPTABLE, ACK_TRANSPORT_KEY,
+    ACK_COALESCE_MAX, ACK_COALESCE_WINDOW, ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_MORE_KEY,
+    ACK_STATUS_KEY, ACK_STATUS_UNDECRYPTABLE, ACK_TRANSPORT_KEY,
 };
 use crate::events::{DecryptionFailureCode, PresenceSource, PresenceStatus, SecurityWarningCode};
 use crate::mls_observability::{
@@ -43188,4 +43189,145 @@ fn held_frames_go_to_transport_selection_when_the_mesh_link_drops() {
         );
     }
     assert!(protocol.window_held.is_empty());
+}
+
+// ============================================================================
+// Coalesced delivery acknowledgements
+// ============================================================================
+
+fn plain_dm_from_bob(text: &str) -> Message {
+    Message::builder(
+        UserId::new("bob").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(text.to_string())
+    .requires_ack(true)
+    .build()
+}
+
+fn receive_dms_from_bob(
+    protocol: &mut OfflineProtocol,
+    ble: &MockTransport,
+    count: usize,
+) -> Vec<String> {
+    (0..count)
+        .map(|i| {
+            let dm = plain_dm_from_bob(&format!("dm-{i}"));
+            let id = dm.id.as_str();
+            ble.queue_message_from(dm, "bob".to_string());
+            while protocol.receive_message().is_some() {}
+            id
+        })
+        .collect()
+}
+
+fn ack_frames(ble: &MockTransport) -> Vec<Message> {
+    ble.sent_messages()
+        .into_iter()
+        .filter(|m| m.metadata.contains_key(ACK_FOR_KEY))
+        .collect()
+}
+
+#[test]
+fn acks_to_a_peer_that_reads_them_coalesce_into_one_frame() {
+    let (mut protocol, ble, _) = device_with_a_mesh_link_to_bob();
+    protocol.peer_coalesced_ack.insert("bob".to_string());
+
+    let ids = receive_dms_from_bob(&mut protocol, &ble, ACK_COALESCE_MAX);
+
+    let acks = ack_frames(&ble);
+    assert_eq!(acks.len(), 1, "five answers ride one frame");
+    assert_eq!(acks[0].metadata[ACK_FOR_KEY], ids[0]);
+    assert_eq!(acks[0].metadata[ACK_MORE_KEY], ids[1..].join(","));
+    assert!(!acks[0].requires_ack);
+}
+
+#[test]
+fn a_partial_ack_batch_goes_out_when_its_window_passes() {
+    let (mut protocol, ble, _) = device_with_a_mesh_link_to_bob();
+    protocol.peer_coalesced_ack.insert("bob".to_string());
+
+    let ids = receive_dms_from_bob(&mut protocol, &ble, 2);
+    assert!(ack_frames(&ble).is_empty(), "held to be coalesced");
+
+    protocol.process().unwrap();
+    assert!(ack_frames(&ble).is_empty(), "not yet due");
+
+    protocol.coalesced_acks_out.get_mut("bob").unwrap().since =
+        std::time::Instant::now() - ACK_COALESCE_WINDOW;
+    protocol.process().unwrap();
+    let acks = ack_frames(&ble);
+    assert_eq!(acks.len(), 1);
+    assert_eq!(acks[0].metadata[ACK_FOR_KEY], ids[0]);
+    assert_eq!(acks[0].metadata[ACK_MORE_KEY], ids[1]);
+    assert!(protocol.coalesced_acks_out.is_empty());
+}
+
+#[test]
+fn a_peer_that_never_advertised_coalescing_gets_an_ack_per_frame() {
+    let (mut protocol, ble, _) = device_with_a_mesh_link_to_bob();
+    let ids = receive_dms_from_bob(&mut protocol, &ble, 3);
+
+    let acks = ack_frames(&ble);
+    assert_eq!(
+        acks.iter()
+            .map(|a| a.metadata[ACK_FOR_KEY].clone())
+            .collect::<Vec<_>>(),
+        ids,
+        "an older SDK ignores ack_more, so it must never be sent one"
+    );
+    assert!(acks.iter().all(|a| !a.metadata.contains_key(ACK_MORE_KEY)));
+}
+
+#[test]
+fn a_coalesced_ack_settles_every_message_it_names() {
+    let (mut protocol, ble, events) = device_with_a_mesh_link_to_bob();
+    let ids = send_dms_to_bob(&mut protocol, 3);
+
+    let mut ack = delivery_ack_frame("bob", "user123", &ids[0]);
+    ack.metadata.insert(
+        ACK_MORE_KEY.to_string(),
+        format!("{},{}", ids[1].as_str(), ids[2].as_str()),
+    );
+    ble.queue_message_from(ack, "bob".to_string());
+    assert!(protocol.receive_message().is_none());
+
+    for id in &ids {
+        assert!(
+            !protocol.outbox.contains_key(id),
+            "every named message is settled"
+        );
+    }
+    let delivered = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, Event::MessageDelivered { .. }))
+        .count();
+    assert_eq!(
+        delivered, 3,
+        "one message_delivered per message, as single ACKs give"
+    );
+}
+
+#[test]
+fn ack_more_on_an_undecryptable_answer_settles_nothing_further() {
+    let (mut protocol, ble, _) = device_with_a_mesh_link_to_bob();
+    let ids = send_dms_to_bob(&mut protocol, 2);
+
+    let mut ack = delivery_ack_frame("bob", "user123", &ids[0]);
+    ack.metadata.insert(
+        ACK_STATUS_KEY.to_string(),
+        ACK_STATUS_UNDECRYPTABLE.to_string(),
+    );
+    ack.metadata
+        .insert(ACK_MORE_KEY.to_string(), ids[1].as_str());
+    ble.queue_message_from(ack, "bob".to_string());
+    assert!(protocol.receive_message().is_none());
+
+    assert!(
+        protocol.outbox.contains_key(&ids[1]),
+        "only a delivery may share a frame; an undecryptable answer names one id"
+    );
 }

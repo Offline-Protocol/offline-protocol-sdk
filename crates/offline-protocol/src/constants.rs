@@ -28,6 +28,24 @@ pub const ACK_STATUS_KEY: &str = "ack_status";
 /// the frame drops it.
 pub const ACK_STATUS_UNDECRYPTABLE: &str = "undecryptable";
 
+/// Metadata key on a delivery ACK that answers more than one frame: the ids
+/// after the one in [`ACK_FOR_KEY`], comma-separated. Sent only to a peer that
+/// advertised [`ACK_COALESCED_V1`](offline_protocol_sealed::ACK_COALESCED_V1),
+/// and never on an `undecryptable` answer. A peer that ignores it still
+/// settles the first id, and the rest through their resends' duplicate
+/// re-acknowledgement.
+pub const ACK_MORE_KEY: &str = "ack_more";
+
+/// How many frames one coalesced delivery ACK may answer. Five keeps a
+/// coalesced ACK inside one fragment at the 185-byte floor's neighbour, the
+/// 512-byte fragment both phones negotiate: 264 bytes plus four 37-byte ids.
+pub const ACK_COALESCE_MAX: usize = 5;
+
+/// The longest a delivery ACK waits to be coalesced with others to the same
+/// peer. Short against the 10-second acknowledgement timeout; long enough
+/// that at a few messages a second each ACK frame answers two or three.
+pub const ACK_COALESCE_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Metadata key marking a frame the SDK sent on its own: control traffic,
 /// key packages, data-sync frames, receipts, typing, presence, and a 1:1
 /// Welcome no user message is waiting on.

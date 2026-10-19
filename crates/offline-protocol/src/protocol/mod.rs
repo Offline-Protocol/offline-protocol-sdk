@@ -398,6 +398,21 @@ pub struct OfflineProtocol {
     /// [`ACK_UNDECRYPTABLE_V1`]: offline_protocol_sealed::ACK_UNDECRYPTABLE_V1
     pub(crate) peer_undecryptable_ack: std::collections::HashSet<String>,
 
+    /// Peers that read `ack_more` on a delivery ACK ([`ACK_COALESCED_V1`] in
+    /// `ack_versions`), so several of their frames may be answered by one ACK
+    /// frame. Same lifecycle as `peer_undecryptable_ack` above.
+    ///
+    /// [`ACK_COALESCED_V1`]: offline_protocol_sealed::ACK_COALESCED_V1
+    pub(crate) peer_coalesced_ack: std::collections::HashSet<String>,
+
+    /// Delivery ACKs waiting to be coalesced, per peer: the carrier the
+    /// answered frames arrived on, when the first was held, and the answered
+    /// ids with the first one's hop count. Sent as one frame once
+    /// `ACK_COALESCE_MAX` are held or `ACK_COALESCE_WINDOW` has passed
+    /// (`flush_coalesced_acks`). In-memory only: an ACK lost with it is
+    /// answered again when the resend arrives as a duplicate.
+    coalesced_acks_out: HashMap<String, CoalescedAcks>,
+
     /// Peers that have presented a control-frame signature over the
     /// freshness-bound payload, so their frames under the older one are
     /// refused.
@@ -1218,6 +1233,8 @@ impl OfflineProtocol {
             peer_compact_envelope: std::collections::HashSet::new(),
             peer_ctrl_freshness: std::collections::HashSet::new(),
             peer_undecryptable_ack: std::collections::HashSet::new(),
+            peer_coalesced_ack: std::collections::HashSet::new(),
+            coalesced_acks_out: HashMap::new(),
             control_freshness_peers: std::collections::HashSet::new(),
             control_reset_watermark: std::collections::HashMap::new(),
             peer_rich_payload: std::collections::HashSet::new(),
@@ -1427,6 +1444,7 @@ impl OfflineProtocol {
         let previous_peer_compact_envelope = self.peer_compact_envelope.clone();
         let previous_peer_ctrl_freshness = self.peer_ctrl_freshness.clone();
         let previous_peer_undecryptable_ack = self.peer_undecryptable_ack.clone();
+        let previous_peer_coalesced_ack = self.peer_coalesced_ack.clone();
         // Snapshotted with its siblings so a failed re-initialize restores it
         // too. It is a ratchet, so the direction that matters is that a
         // rollback must not *lose* it: a peer we hold to the newer payload has
@@ -1599,6 +1617,7 @@ impl OfflineProtocol {
             self.peer_compact_envelope = previous_peer_compact_envelope;
             self.peer_ctrl_freshness = previous_peer_ctrl_freshness;
             self.peer_undecryptable_ack = previous_peer_undecryptable_ack;
+            self.peer_coalesced_ack = previous_peer_coalesced_ack;
             self.control_freshness_peers = previous_control_freshness_peers;
             self.control_reset_watermark = previous_control_reset_watermark;
             self.peer_rich_payload = previous_peer_rich_payload;
@@ -3710,6 +3729,7 @@ impl OfflineProtocol {
         // Before the retry ladder, so a frame the app sent first is not
         // overtaken by one that only reached the retry queue later.
         self.flush_peer_windows();
+        self.flush_due_coalesced_acks();
         note("retry_queue", self.process_retry_queue());
         note("welcome_retry_queue", self.process_welcome_retry_queue());
         self.process_relay_register_retries();

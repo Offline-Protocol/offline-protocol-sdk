@@ -123,6 +123,29 @@ implementation's decrypt-result type also has five cases, but they are not the
 same five: it splits a delivered message out as its own case and does not model
 duplicates at all, because the duplicate check runs before it.
 
+## Acknowledgements on a mesh link
+
+**An acknowledgement is queued ahead of data, and one frame may answer up to
+five.** Both exist because an acknowledgement is what stops its sender's retry
+timer, and on a mesh link it shares a radio link that may carry less than it
+is offered.
+
+- **Ahead of data.** The Bluetooth LE carrier queues a frame carrying `ack_for`
+  ahead of every queued data frame, behind earlier acknowledgements. The
+  fragments of a message already being written are not overtaken. Behind data,
+  in run 4 of the 2026-10-19 volume test, the round trip reached 196 seconds
+  against a 10-second timeout.
+- **Coalesced.** To a peer that advertised `ack_versions` entry 2, delivery
+  acknowledgements for frames that arrived over a mesh carrier are held for up
+  to 500 ms and sent as one frame of up to five: the first id in `ack_for`, the
+  rest comma-separated in `ack_more`. A sender settles each id exactly as a
+  single acknowledgement, every check included, and emits one
+  `message_delivered` per id. An `undecryptable` answer is never coalesced, and
+  a frame carrying both `ack_status` and `ack_more` settles only its `ack_for`.
+  An acknowledgement per frame was a third of the frames a phone sent in that
+  test. A held batch is in memory only; one lost with a restart is answered
+  again when the resend arrives as a duplicate.
+
 ## The deferred-acknowledgement atom
 
 The `Deferred` outcome is not a single change. It is six interdependent pieces
