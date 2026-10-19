@@ -47,8 +47,20 @@ mesh service, sticky event dispatcher, full RN module) stay excluded.
 
 **Binary size / build time:** PR3 links the shared BLE and mesh bridge sources into
 the Flutter AAR and CocoaPod (same code React Native apps already ship). Expect
-longer native compiles and a modest APK/IPA increase versus PR2-only; PR4 may add
-CI size notes. Transports stay opt-in via config flags.
+longer native compiles and a modest APK/IPA increase versus PR2-only. Transports
+stay opt-in via config flags.
+
+Measure the plugin release AAR (direct read on PR3 native surface + UniFFI
+`jniLibs`):
+
+```bash
+bindings/flutter/scripts/measure-plugin-aar-size.sh          # report
+bindings/flutter/scripts/measure-plugin-aar-size.sh --check  # CI-style gate
+```
+
+Baseline: [baselines/offline-protocol-release-aar.json](baselines/offline-protocol-release-aar.json)
+(see [baselines/README.md](baselines/README.md)). PR4 Flutter CI should run
+`--check` after `:offline_protocol:assembleRelease`.
 
 `createFromConfig` accepts the same optional `dors` and `relay` JSON sections as
 the React Native bridge (applied via shared `InitialRuntimeConfigApplier` sources).
@@ -68,8 +80,10 @@ PR4 is expected to add, at minimum:
 - Example Android `:offline_protocol:compileDebugKotlin` (and iOS pod build smoke)
 - Rust guards already in `offline-protocol-uniffi` for PR3 compile lists and
   **method-channel parity** (`flutter_pr3_method_channel_methods_match_native_plugins`)
-- Optional: record release APK/IPA size for the example app (with transports
-  disabled vs BLE-enabled) so PR3 binary footprint stays visible in CI history
+- `bindings/flutter/scripts/measure-plugin-aar-size.sh --check` (committed
+  baseline under `bindings/flutter/baselines/`)
+- Optional later: full example release APK / iOS archive sizes (app + engine,
+  not just the plugin AAR)
 
 ## Prerequisites
 

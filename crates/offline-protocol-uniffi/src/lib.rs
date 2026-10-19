@@ -16282,6 +16282,29 @@ mod tests {
     }
 
     #[test]
+    fn flutter_pr3_aar_baseline_json_is_well_formed() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bindings/flutter/baselines/offline-protocol-release-aar.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).expect("offline-protocol-release-aar.json must be JSON");
+        let obj = value.as_object().expect("baseline must be a JSON object");
+        for key in ["artifact", "bytes", "tolerance_bytes"] {
+            assert!(
+                obj.contains_key(key),
+                "baseline missing `{key}` — see bindings/flutter/baselines/README.md"
+            );
+        }
+        let bytes = obj["bytes"].as_u64().expect("bytes must be a positive integer");
+        assert!(bytes > 0, "baseline bytes must be > 0");
+        let tol = obj["tolerance_bytes"]
+            .as_u64()
+            .expect("tolerance_bytes must be a non-negative integer");
+        assert!(tol > 0, "tolerance_bytes must be > 0 for regression headroom");
+    }
+
+    #[test]
     fn flutter_pr3_method_channel_methods_match_native_plugins() {
         let flutter = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../bindings/flutter/offline_protocol");
