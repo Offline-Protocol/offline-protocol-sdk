@@ -1,6 +1,11 @@
 import Foundation
 
 /// Shared Internet transport wiring for host wrappers (Flutter). ADR 0025.
+///
+/// React Native still inlines `configureAndStartInternet` in
+/// `OfflineProtocolModule.swift`; a follow-up should delegate here. CI guards:
+/// `internet_transport_bootstrap_swift_keeps_rn_configure_invariants` and the
+/// Android counterpart in `offline-protocol-uniffi`.
 enum InternetTransportBootstrap {
     struct StoredInternetConfig {
         var serverAddress: String?
