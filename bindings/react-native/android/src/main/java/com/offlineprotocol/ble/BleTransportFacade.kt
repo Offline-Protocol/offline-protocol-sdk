@@ -3429,7 +3429,18 @@ class BleTransportFacade(
      * calls back-to-back and Android 13+ rejects the concurrent ones with
      * ERROR_GATT_WRITE_REQUEST_BUSY (201), silently dropping fragments.
      */
-    fun onWriteCompleted(address: String) {
+    fun onWriteCompleted(address: String) = onWriteCompleted(address, peerConfirmed = false)
+
+    /**
+     * [peerConfirmed] is true for an ATT indication, whose completion is the
+     * central's confirmation: the peer has the fragment, so the next one goes
+     * at once. The pacing below exists for completions that only say our own
+     * controller took the op. On the indicate path it was dead time: one
+     * fragment per confirmation plus 20 ms held the Android-to-iPhone link to
+     * 12 to 16 fragments a second in the 2026-10-19 volume test, below the 15
+     * it was offered.
+     */
+    fun onWriteCompleted(address: String, peerConfirmed: Boolean) {
         assertOnBleThread("onWriteCompleted")
         // Address-keyed, not per-write: a stale onCharacteristicWrite for an
         // earlier write that fires after the watchdog/stale-check already advanced
@@ -3439,13 +3450,15 @@ class BleTransportFacade(
         // single ERROR_GATT_WRITE_REQUEST_BUSY (201) on that newer write, which
         // self-heals via the caller's re-enqueue + BACKPRESSURE_RETRY — no data loss.
         writeInFlight.remove(address)
-        if (state == TransportState.RUNNING) {
+        if (state == TransportState.RUNNING && peerConfirmed) {
+            drainAndSendFragments()
+        } else if (state == TransportState.RUNNING) {
             // Pace the next completion-driven send by one BLE connection
-            // interval instead of draining immediately. onNotificationSent /
-            // onCharacteristicWrite signal that OUR controller accepted the
-            // op, not that the peer has drained it — firing the next notify
-            // instantly out-runs a slower central (iOS) and drops fragments
-            // mid-burst, so a large multi-fragment Welcome never reassembles.
+            // interval instead of draining immediately. onCharacteristicWrite
+            // signals that OUR controller accepted the op, not that the peer
+            // has drained it; firing the next write instantly out-runs a
+            // slower peer and drops fragments mid-burst, so a large
+            // multi-fragment Welcome never reassembles.
             // The brief spacing lets the peer keep up; small messages are
             // unaffected in practice.
             bleHandler.postDelayed({
@@ -4332,7 +4345,7 @@ class BleTransportFacade(
             Log.i(TAG, "Notification flushed to $address status=$status")
             bleHandler.post {
                 if (shuttingDown) return@post
-                onWriteCompleted(address)
+                onWriteCompleted(address, peerConfirmed = true)
             }
         }
 
