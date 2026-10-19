@@ -1125,6 +1125,8 @@ impl OfflineProtocol {
         // this and spends its whole retry budget on dead bytes; there is no
         // reason to inherit that. Staged after the duplicate check so the
         // entry belongs to a frame that is actually on the ladder.
+        let (seal_epoch, seal_session_established_at_ms) =
+            self.current_session_fingerprint(peer);
         self.stage_outbox_reseal(
             &message.id,
             crate::protocol::types::OutboxReseal {
@@ -1135,6 +1137,8 @@ impl OfflineProtocol {
                 content_type: message.content_type,
                 media_metadata: None,
                 rich: None,
+                seal_epoch,
+                seal_session_established_at_ms,
             },
         );
 

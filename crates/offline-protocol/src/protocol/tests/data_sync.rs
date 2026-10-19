@@ -5423,8 +5423,9 @@ fn frames_the_sdk_sends_itself_are_marked_no_alert_and_user_messages_are_not() {
     assert!(user.iter().any(|m| m.id == rich));
 }
 
-/// The marker rides the outbox copy, so a resend, a re-seal against a new
-/// epoch, and a restart all keep it.
+/// The marker rides the outbox copy, so a resend (verbatim replay when the
+/// session fingerprint is unchanged, a fresh re-seal after a rekey) and a
+/// restart all keep it.
 #[test]
 fn a_resent_or_restored_sync_frame_keeps_its_no_alert_marker() {
     let (mut alice, bob) = pair();
@@ -5434,11 +5435,14 @@ fn a_resent_or_restored_sync_frame_keeps_its_no_alert_marker() {
     let frame = drain_sent(&alice).pop().expect("a delta");
     assert_eq!(no_alert(&frame), Some("1"));
 
+    // Within the same session + epoch, the resend replays verbatim; the
+    // marker survives trivially because it rides the outer metadata, not
+    // the sealed body.
     let mut resend = alice.protocol.outbox[&frame.id].message.clone();
     alice.protocol.reseal_for_resend_in_place(&mut resend);
-    assert_ne!(
+    assert_eq!(
         resend.content, frame.content,
-        "the resend was not re-sealed"
+        "within an unchanged session fingerprint the resend is verbatim"
     );
     assert_eq!(no_alert(&resend), Some("1"));
 

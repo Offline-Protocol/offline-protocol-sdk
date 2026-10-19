@@ -53,6 +53,8 @@ impl OfflineProtocol {
 
         match self.encrypt_content_for_recipient(recipient, &content, priority) {
             Ok(sealed) => {
+                let (seal_epoch, seal_session_established_at_ms) =
+                    self.current_session_fingerprint(recipient);
                 let reseal = OutboxReseal {
                     content,
                     priority,
@@ -61,6 +63,8 @@ impl OfflineProtocol {
                     content_type: ContentType::Text,
                     media_metadata: None,
                     rich: None,
+                    seal_epoch,
+                    seal_session_established_at_ms,
                 };
                 self.send_sealed_internal_message(recipient, sealed, priority, Some(reseal))
             }

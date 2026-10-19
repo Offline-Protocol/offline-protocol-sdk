@@ -299,6 +299,21 @@ impl SessionManager {
         let group = self.group_manager.load_group(&session_id)?;
         Ok(group.map(|g| self.group_manager.get_group_info(&g, &session_id)))
     }
+
+    /// Returns the current MLS epoch of the 1:1 session with `other_user_id`,
+    /// or `None` if no session exists.
+    ///
+    /// Thin alternative to [`Self::get_session_info`] when the caller only
+    /// needs the epoch: skips the O(roster) leaf-binding verification
+    /// `get_group_info` runs. The epoch is derived from the loaded group's
+    /// `MlsGroup::epoch`, so it reflects the latest commit this device has
+    /// processed and is the same value `EncryptedMessage::epoch` carries on
+    /// an outbound seal.
+    pub fn session_epoch(&self, other_user_id: &str) -> Result<Option<u64>> {
+        let session_id = self.get_session_id(other_user_id)?;
+        let group = self.group_manager.load_group(&session_id)?;
+        Ok(group.map(|g| g.epoch().as_u64()))
+    }
 }
 
 #[cfg(test)]

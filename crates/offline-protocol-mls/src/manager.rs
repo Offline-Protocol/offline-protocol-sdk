@@ -1141,6 +1141,16 @@ impl MlsManager {
         self.session_manager.list_sessions()
     }
 
+    /// Returns the current MLS epoch of the 1:1 session with `other_user_id`,
+    /// or `None` if no session exists.
+    ///
+    /// Thin read path: callers that only need to detect a session rekey
+    /// (epoch change since a previously-captured value) use this instead of
+    /// [`Self::get_session_info`] to skip the O(roster) leaf verification.
+    pub fn session_epoch(&self, other_user_id: &str) -> Result<Option<u64>> {
+        self.session_manager.session_epoch(other_user_id)
+    }
+
     /// Deletes a 1:1 session.
     ///
     /// The establishment stamp goes first: an `Err` must mean the session is
