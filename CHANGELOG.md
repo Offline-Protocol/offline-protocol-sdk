@@ -149,6 +149,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   fragment had been pulled. With a cap of 100, one 16 KB message was enough.
   Both drains now stop before pulling while any peer is backed up, and the
   cap is 768, above the largest message the core fragments.
+- **Resends stop burning encryption keys while nothing is acknowledged.**
+  Each resend used to be re-sealed under a fresh ratchet generation, so a
+  link that stopped carrying acknowledgements walked the receiver past its
+  forward window: one phone re-sealed 20,919 resends during a 17-minute
+  stall. A sender now re-seals only while it has sealed fewer than 2,048
+  frames past the peer's last acknowledgement, and resends verbatim beyond
+  that until the next one arrives.
 - **A message sent while its sender was blocked is never delivered.** Its id
   is now remembered, so a retry arriving after an unblock is answered rather
   than delivered.

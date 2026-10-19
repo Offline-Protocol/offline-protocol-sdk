@@ -210,6 +210,30 @@ This is the sender-side half of the desync recovery documented in
 withheld acknowledgement, it is what makes a session fork recoverable without
 message loss, for entries whose provenance is still in memory.
 
+### The re-seal budget
+
+**A sender never seals more than a quarter of the receiver's forward window
+past the last frame that receiver acknowledged by re-sealing resends.** Every
+re-seal spends a ratchet generation. The receiver has to fast-forward over it,
+and one it drops as a duplicate of a message it already holds is never
+decrypted at all. A receiver more than the forward window behind decrypts
+nothing from that sender until the pair re-keys. So the sender counts, per
+session, the frames it has sealed past the newest one the peer acknowledged
+(an acknowledgement proves the peer decrypted that far). Once the count reaches
+the budget (2,048 of the 8,192-generation window), a resend goes out verbatim,
+which spends nothing and still decrypts unless the receiver has since moved
+more than the out-of-order tolerance past it. The next acknowledgement re-opens
+the budget. New messages always seal; the budget leaves them the rest of the
+window.
+
+Without it, a link that stops carrying acknowledgements turns the retry ladder
+into a key-burner. In the 2026-10-19 rerun one phone re-sealed 20,919 resends
+during a 17-minute stall and left its peer past even the widened window. The
+count is in memory and per session incarnation, so a rebuilt session starts
+from nothing and an acknowledgement for a frame of the old one vouches for
+nothing. Acknowledgements are unauthenticated, so a forged one can give
+re-seals back, but never more than a sender had before the budget existed.
+
 ### Provenance handling
 
 Re-seal provenance holds **plaintext**, so it is memory-only and never

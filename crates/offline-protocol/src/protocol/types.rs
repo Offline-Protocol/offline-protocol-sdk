@@ -393,6 +393,17 @@ pub(crate) fn classify_transport_send_error(raw: &str) -> &'static str {
 /// produces this steadily, and it is the signal to slow down.
 pub(crate) const SEND_DEFER_REASON_ACK_CAPACITY: &str = "ack_capacity";
 
+/// How many frames a sender may seal for one peer past the last one that peer
+/// acknowledged before resends stop being re-sealed and go out verbatim.
+///
+/// A receiver cannot decrypt a frame more than the forward window past the
+/// newest it has decrypted. A quarter of the window leaves the rest to new
+/// messages, which still seal: at the volume test's 5 msg/s that is about
+/// 20 minutes of sending with nothing acknowledged before the gap can reach
+/// the window, and past that the receiver re-keys.
+pub(crate) const RESEAL_GAP_BUDGET: u64 =
+    offline_protocol_mls::group::SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE as u64 / 4;
+
 /// The longest an acknowledgement timeout is postponed for a frame that is
 /// still waiting in a local transport queue, measured from the attempt.
 ///
@@ -2485,6 +2496,12 @@ pub(crate) struct OutboxReseal {
     /// Sealed-only rich extras (reply context, rich media metadata, forward
     /// info) — re-evaluated against current capability at re-seal time.
     pub(crate) rich: Option<RichSendExtras>,
+    /// Where the bytes currently on the ladder sit in the session's sealing
+    /// order. An acknowledgement for this message proves the peer decrypted
+    /// that far, which is what lets later re-seals go ahead (see
+    /// `RESEAL_GAP_BUDGET`). Set when the message is staged and on every
+    /// re-seal; `None` when it could not be read.
+    pub(crate) seal_mark: Option<offline_protocol_mls::SealMark>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

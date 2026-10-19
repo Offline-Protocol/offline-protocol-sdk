@@ -12,10 +12,10 @@ use super::{
     MAX_PENDING_EXPIRIES_PER_PASS, MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER,
     MAX_PENDING_MESSAGE_BYTES_GLOBAL, MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS,
     MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL,
-    RICH_PAYLOAD_V1, SEND_DEFER_REASON_ACK_CAPACITY, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
-    SEND_FAIL_REASON_RELAY_PUSHED, SEND_FAIL_REASON_RELAY_PUSHED_STORED,
-    SEND_FAIL_REASON_RELAY_STORED, SEND_FAIL_REASON_TRANSPORT, WELCOME_NO_CARRIER_RETRY_SECS,
-    WELCOME_UNREACHABLE_RETRY_CAP_SECS,
+    RESEAL_GAP_BUDGET, RICH_PAYLOAD_V1, SEND_DEFER_REASON_ACK_CAPACITY,
+    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, SEND_FAIL_REASON_RELAY_PUSHED,
+    SEND_FAIL_REASON_RELAY_PUSHED_STORED, SEND_FAIL_REASON_RELAY_STORED,
+    SEND_FAIL_REASON_TRANSPORT, WELCOME_NO_CARRIER_RETRY_SECS, WELCOME_UNREACHABLE_RETRY_CAP_SECS,
 };
 use super::{classify_transport_send_error, send_failure_token};
 use crate::constants::{
@@ -218,6 +218,7 @@ impl OfflineProtocol {
         if message.content.starts_with(internal_prefixes::ENCRYPTED) {
             self.stage_outbox_reseal(
                 &message.id,
+                &recipient_str,
                 OutboxReseal {
                     content: content_str,
                     priority,
@@ -226,6 +227,7 @@ impl OfflineProtocol {
                     content_type: message.content_type,
                     media_metadata: None,
                     rich: Some(rich).filter(|r| r.is_any()),
+                    seal_mark: None,
                 },
             );
         }
@@ -357,6 +359,7 @@ impl OfflineProtocol {
         if message.content.starts_with(internal_prefixes::ENCRYPTED) {
             self.stage_outbox_reseal(
                 &message.id,
+                &recipient_str,
                 OutboxReseal {
                     content: original_message.content.clone(),
                     priority,
@@ -365,6 +368,7 @@ impl OfflineProtocol {
                     content_type: message.content_type,
                     media_metadata: message.media_metadata.clone(),
                     rich: Some(rich).filter(|r| r.is_any()),
+                    seal_mark: None,
                 },
             );
         }
@@ -589,7 +593,7 @@ impl OfflineProtocol {
 
         let message = self.create_message(recipient, sealed, Some(priority), None)?;
         if let Some(reseal) = reseal {
-            self.stage_outbox_reseal(&message.id, reseal);
+            self.stage_outbox_reseal(&message.id, recipient, reseal);
         }
         self.dispatch_internal_message(message)
     }
@@ -2384,6 +2388,7 @@ impl OfflineProtocol {
                 if message.content.starts_with(internal_prefixes::ENCRYPTED) {
                     self.stage_outbox_reseal(
                         &message.id,
+                        recipient,
                         OutboxReseal {
                             content: msg.content.clone(),
                             priority: msg.priority,
@@ -2392,6 +2397,7 @@ impl OfflineProtocol {
                             content_type: msg.content_type,
                             media_metadata: msg.media_metadata.clone(),
                             rich: msg.rich.clone(),
+                            seal_mark: None,
                         },
                     );
                 }
@@ -3301,8 +3307,25 @@ impl OfflineProtocol {
     /// outbox entry created during dispatch carries it. Callers gate on the
     /// content being a sealed encrypted DM (`__MLS_ENC__`); media and plaintext
     /// never stage and thus always replay verbatim.
-    pub(super) fn stage_outbox_reseal(&mut self, id: &MessageId, reseal: OutboxReseal) {
+    /// Stages `reseal` for message `id`, just sealed for `recipient`. Called
+    /// straight after the seal, before anything else is sealed, so the
+    /// session's latest seal is this message's.
+    pub(super) fn stage_outbox_reseal(
+        &mut self,
+        id: &MessageId,
+        recipient: &str,
+        mut reseal: OutboxReseal,
+    ) {
+        reseal.seal_mark = self.last_seal_mark(recipient);
         self.pending_reseal.insert(id.clone(), reseal);
+    }
+
+    fn last_seal_mark(&self, recipient: &str) -> Option<offline_protocol_mls::SealMark> {
+        self.mls_manager
+            .as_ref()?
+            .read()
+            .ok()?
+            .last_seal_mark(recipient)
     }
 
     /// Consumes any staged re-seal provenance for `message`, attaching it to a
@@ -3351,6 +3374,29 @@ impl OfflineProtocol {
             return None;
         }
         let reseal = self.outbox.get(&message.id)?.reseal.as_ref()?.clone();
+        // Every re-seal spends a ratchet generation the receiver has to
+        // fast-forward over, and one it drops as a duplicate is never
+        // decrypted at all. Past the budget, a resend goes out verbatim: it
+        // costs nothing, and it still decrypts unless the receiver has since
+        // moved more than the out-of-order tolerance past it. Without this, a
+        // link that stops carrying acknowledgements turns the retry ladder
+        // into a key-burner: in the 2026-10-19 rerun one phone re-sealed
+        // 20,919 resends during a 17-minute stall and left its peer past even
+        // the widened forward window.
+        let unacknowledged = self
+            .mls_manager
+            .as_ref()
+            .and_then(|mls| mls.read().ok())
+            .map_or(0, |mls| mls.unacknowledged_seals(&recipient));
+        if unacknowledged >= RESEAL_GAP_BUDGET {
+            debug!(
+                message_id = %message.id,
+                recipient = %recipient,
+                unacknowledged,
+                "Re-seal budget spent; resending verbatim until the peer acknowledges"
+            );
+            return None;
+        }
         match self.prepare_outbound_content(
             &recipient,
             &reseal.content,
@@ -3364,7 +3410,17 @@ impl OfflineProtocol {
             Some(PendingProvenance::for_id(message.id.clone())),
             "resend_reseal",
         ) {
-            Ok(OutboundSendPreparation::Ready(sealed)) if sealed != message.content => Some(sealed),
+            Ok(OutboundSendPreparation::Ready(sealed)) if sealed != message.content => {
+                let mark = self.last_seal_mark(&recipient);
+                if let Some(provenance) = self
+                    .outbox
+                    .get_mut(&message.id)
+                    .and_then(|entry| entry.reseal.as_mut())
+                {
+                    provenance.seal_mark = mark;
+                }
+                Some(sealed)
+            }
             // Identical bytes, or an error: replay verbatim this round. Tier 1
             // keeps the sender retrying until the session heals.
             //
@@ -5466,6 +5522,22 @@ impl OfflineProtocol {
                 {
                     self.handle_undecryptable_ack(&message_id);
                     return;
+                }
+
+                // The peer decrypted this frame, so it has reached at least
+                // its place in the session, which re-opens the re-seal budget
+                // up to there. Unauthenticated like the rest of this path: a
+                // forged acknowledgement can only give back re-seals, which is
+                // where every sender was before the budget existed.
+                if let Some(mark) = self
+                    .outbox
+                    .get(&message_id)
+                    .and_then(|entry| entry.reseal.as_ref())
+                    .and_then(|provenance| provenance.seal_mark)
+                {
+                    if let Some(mls) = self.mls_manager.as_ref().and_then(|m| m.read().ok()) {
+                        mls.note_acknowledged_seal(message.sender.as_str(), mark);
+                    }
                 }
 
                 // A delivery ack settles an outbound connection request:

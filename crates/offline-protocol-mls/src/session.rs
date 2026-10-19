@@ -12,8 +12,34 @@ use crate::types::{EncryptedMessage, GroupId, GroupInfo, MlsMessageType, Welcome
 use openmls::prelude::tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize};
 use openmls::prelude::*;
 use openmls_traits::signatures::Signer;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
+
+/// Where one sealed frame sits in its session's sending order: the
+/// `index`-th frame this device sealed in that session, and which session
+/// (`incarnation`) that was.
+///
+/// The incarnation is what keeps an acknowledgement for a frame of a session
+/// that has since been rebuilt from vouching for the new one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SealMark {
+    /// Which session the frame was sealed in. New on every create, join and
+    /// delete.
+    pub incarnation: u64,
+    /// The frame's position among this session's seals, from 1.
+    pub index: u64,
+}
+
+/// How far this device's sealing has run ahead of what the peer has shown
+/// it received, per session.
+#[derive(Debug, Clone, Copy)]
+struct SealProgress {
+    incarnation: u64,
+    sealed: u64,
+    acknowledged: u64,
+}
 
 /// Manages 1:1 encrypted sessions.
 pub struct SessionManager {
@@ -22,6 +48,15 @@ pub struct SessionManager {
 
     /// Group manager for underlying MLS operations.
     group_manager: GroupManager,
+
+    /// Seals per session against the highest seal the peer has acknowledged.
+    /// In memory only: after a restart the count starts again from nothing,
+    /// which reads as "no gap", the permissive direction, until the first
+    /// acknowledgement.
+    seal_progress: Mutex<HashMap<String, SealProgress>>,
+
+    /// Source of session incarnations.
+    next_incarnation: AtomicU64,
 }
 
 impl SessionManager {
@@ -31,7 +66,73 @@ impl SessionManager {
         Self {
             user_id,
             group_manager,
+            seal_progress: Mutex::new(HashMap::new()),
+            next_incarnation: AtomicU64::new(1),
         }
+    }
+
+    fn progress(&self) -> std::sync::MutexGuard<'_, HashMap<String, SealProgress>> {
+        self.seal_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn fresh_progress(&self) -> SealProgress {
+        SealProgress {
+            incarnation: self.next_incarnation.fetch_add(1, Ordering::Relaxed),
+            sealed: 0,
+            acknowledged: 0,
+        }
+    }
+
+    /// Starts a session's seal count from nothing: it was created, joined or
+    /// deleted, so nothing sealed before can vouch for it.
+    fn restart_seal_progress(&self, session_id: &GroupId) {
+        let fresh = self.fresh_progress();
+        self.progress().insert(session_id.to_string(), fresh);
+    }
+
+    /// The position of the most recent frame sealed for `other_user_id`, or
+    /// `None` when nothing has been sealed in this session since it started
+    /// (or since this process did).
+    pub fn last_seal_mark(&self, other_user_id: &str) -> Option<SealMark> {
+        let session_id = self.get_session_id(other_user_id).ok()?;
+        let progress = self.progress();
+        let entry = progress.get(session_id.as_str())?;
+        (entry.sealed > 0).then_some(SealMark {
+            incarnation: entry.incarnation,
+            index: entry.sealed,
+        })
+    }
+
+    /// Records that the peer received the frame at `mark`, so it has
+    /// decrypted at least that far into the session. Ignored for a frame of
+    /// an earlier incarnation of the session.
+    pub fn note_acknowledged_seal(&self, other_user_id: &str, mark: SealMark) {
+        let Ok(session_id) = self.get_session_id(other_user_id) else {
+            return;
+        };
+        if let Some(entry) = self.progress().get_mut(session_id.as_str()) {
+            if entry.incarnation == mark.incarnation {
+                entry.acknowledged = entry.acknowledged.max(mark.index);
+            }
+        }
+    }
+
+    /// How many frames this device has sealed for `other_user_id` past the
+    /// last one the peer acknowledged.
+    ///
+    /// A receiver cannot decrypt a frame more than the forward window past
+    /// the newest it has decrypted, and an acknowledged frame is one it has,
+    /// so keeping this below the window keeps every frame decryptable. The
+    /// sender is what controls it: each re-sealed resend adds one.
+    pub fn unacknowledged_seals(&self, other_user_id: &str) -> u64 {
+        let Ok(session_id) = self.get_session_id(other_user_id) else {
+            return 0;
+        };
+        self.progress()
+            .get(session_id.as_str())
+            .map_or(0, |entry| entry.sealed.saturating_sub(entry.acknowledged))
     }
 
     /// Returns a reference to the underlying group manager.
@@ -92,6 +193,7 @@ impl SessionManager {
             "Created new 1:1 session"
         );
 
+        self.restart_seal_progress(&session_id);
         Ok(WelcomeMessage {
             group_id: session_id,
             welcome_data: welcome_bytes,
@@ -176,6 +278,7 @@ impl SessionManager {
             "Joined/adopted 1:1 session (non-destructive)"
         );
 
+        self.restart_seal_progress(&welcome_msg.group_id);
         Ok(info)
     }
 
@@ -198,6 +301,13 @@ impl SessionManager {
             .encrypt_message(&mut group, plaintext, signer)?;
 
         self.group_manager.save_group(&session_id, &group)?;
+        {
+            let mut progress = self.progress();
+            let entry = progress
+                .entry(session_id.to_string())
+                .or_insert_with(|| self.fresh_progress());
+            entry.sealed = entry.sealed.saturating_add(1);
+        }
 
         let ciphertext = mls_message
             .tls_serialize_detached()
@@ -289,6 +399,7 @@ impl SessionManager {
     pub fn delete_session(&self, other_user_id: &str) -> Result<()> {
         let session_id = self.get_session_id(other_user_id)?;
         self.group_manager.delete_group(&session_id)?;
+        self.restart_seal_progress(&session_id);
         debug!(session_id = %session_id, "Deleted session");
         Ok(())
     }

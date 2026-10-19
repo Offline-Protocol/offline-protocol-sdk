@@ -1085,6 +1085,25 @@ impl MlsManager {
             .encrypt_message(other_user_id, plaintext, &signature_keys)
     }
 
+    /// The position of the most recent frame sealed for `other_user_id` (see
+    /// [`crate::session::SessionManager::last_seal_mark`]).
+    pub fn last_seal_mark(&self, other_user_id: &str) -> Option<crate::session::SealMark> {
+        self.session_manager.last_seal_mark(other_user_id)
+    }
+
+    /// Records that the peer received the frame at `mark` (see
+    /// [`crate::session::SessionManager::note_acknowledged_seal`]).
+    pub fn note_acknowledged_seal(&self, other_user_id: &str, mark: crate::session::SealMark) {
+        self.session_manager
+            .note_acknowledged_seal(other_user_id, mark);
+    }
+
+    /// Frames sealed for `other_user_id` past the last one it acknowledged
+    /// (see [`crate::session::SessionManager::unacknowledged_seals`]).
+    pub fn unacknowledged_seals(&self, other_user_id: &str) -> u64 {
+        self.session_manager.unacknowledged_seals(other_user_id)
+    }
+
     /// Encrypts a message for a 1:1 session that is known to exist.
     ///
     /// Unlike `encrypt_for_user`, this skips the `has_session()` storage check
@@ -4142,6 +4161,36 @@ mod tests {
             matches!(err, MlsError::Decryption(_)),
             "a frame behind the tolerance must stay Decryption, got {err:?}"
         );
+    }
+
+    /// The seal count is what bounds a sender's re-seals, so it must move
+    /// with seals and acknowledgements, and an acknowledgement for a frame of
+    /// a session that has since been rebuilt must not vouch for the new one.
+    #[test]
+    fn test_unacknowledged_seals_track_seals_acks_and_session_rebuilds() {
+        let (alice, _bob) = create_test_session();
+        let bob = addr("bob");
+        assert_eq!(alice.unacknowledged_seals(&bob), 0);
+
+        alice.encrypt_for_user(&bob, b"one").unwrap();
+        let first = alice.last_seal_mark(&bob).unwrap();
+        alice.encrypt_for_user(&bob, b"two").unwrap();
+        alice.encrypt_for_user(&bob, b"three").unwrap();
+        assert_eq!(alice.unacknowledged_seals(&bob), 3);
+
+        alice.note_acknowledged_seal(&bob, first);
+        assert_eq!(alice.unacknowledged_seals(&bob), 2);
+        // An older acknowledgement never moves the mark back.
+        alice.note_acknowledged_seal(&bob, crate::session::SealMark { index: 0, ..first });
+        assert_eq!(alice.unacknowledged_seals(&bob), 2);
+
+        alice.delete_session(&bob).unwrap();
+        assert_eq!(alice.unacknowledged_seals(&bob), 0);
+        assert!(alice.last_seal_mark(&bob).is_none());
+        // A mark from before the rebuild is ignored, so it cannot hide seals
+        // of the new session.
+        alice.note_acknowledged_seal(&bob, crate::session::SealMark { index: 99, ..first });
+        assert_eq!(alice.unacknowledged_seals(&bob), 0);
     }
 
     /// RFC 8032 §7.1 TEST 1 Ed25519 public key.

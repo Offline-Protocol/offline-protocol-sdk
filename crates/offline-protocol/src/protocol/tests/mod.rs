@@ -42933,3 +42933,59 @@ fn test_a_frame_still_in_the_local_queue_is_not_retried() {
         "a frame that has left the queue times out as before"
     );
 }
+
+/// A sender stops re-sealing a peer's resends once it has sealed the budget
+/// past that peer's last acknowledgement, and an acknowledgement re-opens it.
+/// Every re-seal spends a generation the receiver must fast-forward over; in
+/// the 2026-10-19 rerun 20,919 of them during a stall left the receiver past
+/// its forward window.
+#[test]
+fn test_resends_stop_re_sealing_past_the_unacknowledged_budget() {
+    let (mut alice, alice_h) = make_encrypted_protocol("alice");
+    let (mut bob, bob_h) = make_encrypted_protocol("bob");
+    alice.start().unwrap();
+    bob.start().unwrap();
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+
+    alice
+        .send_message(&id("bob"), "held back by a dead link", None, None::<String>)
+        .unwrap();
+    let mut on_the_wire = alice_h.sent_messages().last().unwrap().clone();
+    alice_h.clear_sent_messages();
+    let unacknowledged = |p: &OfflineProtocol| {
+        p.mls_manager
+            .as_ref()
+            .unwrap()
+            .read()
+            .unwrap()
+            .unacknowledged_seals(&id("bob"))
+    };
+
+    // Re-seal until the budget is spent, then once more: that one must go out
+    // verbatim and spend nothing.
+    while unacknowledged(&alice) < RESEAL_GAP_BUDGET {
+        let before = on_the_wire.content.clone();
+        alice.reseal_for_resend_in_place(&mut on_the_wire);
+        assert_ne!(
+            on_the_wire.content, before,
+            "within the budget a resend re-seals"
+        );
+        alice.outbox.get_mut(&on_the_wire.id).unwrap().message = on_the_wire.clone();
+    }
+    let before = on_the_wire.content.clone();
+    alice.reseal_for_resend_in_place(&mut on_the_wire);
+    assert_eq!(
+        on_the_wire.content, before,
+        "past the budget a resend is verbatim"
+    );
+    assert_eq!(unacknowledged(&alice), RESEAL_GAP_BUDGET);
+
+    // The newest copy still decrypts, and its acknowledgement re-opens the budget.
+    bob_h.queue_message_from(on_the_wire, id("alice").to_string());
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 10);
+    assert_eq!(
+        unacknowledged(&alice),
+        0,
+        "an acknowledgement for the newest seal clears the gap"
+    );
+}
