@@ -193,6 +193,14 @@ pub struct OfflineProtocol {
     /// to prevent large file transfers from evicting regular messages.
     media_outbox: HashMap<MessageId, OutboxEntry>,
 
+    /// Outbox ids held back by the per-peer send window, per recipient, in
+    /// the order the app sent them. Sent oldest first as the peer's
+    /// acknowledgements free the window (`flush_peer_windows`). An id whose
+    /// outbox entry is gone (settled, expired, evicted) is skipped and dropped
+    /// there, so no removal path has to know about this. In-memory only: a
+    /// restart re-drives the outbox, and the gate holds it again.
+    window_held: HashMap<String, VecDeque<MessageId>>,
+
     /// Consecutive unreachable-park counter per recipient for plain DMs,
     /// driving the escalating reachability-probe interval on every carrier
     /// (see `handle_recipient_unreachable_for_message` —
@@ -1192,6 +1200,7 @@ impl OfflineProtocol {
             pending_reseal: HashMap::new(),
             undecryptable_resent: HashSet::new(),
             media_outbox: HashMap::new(),
+            window_held: HashMap::new(),
             dm_unreachable_parks: HashMap::new(),
             unrouted_acks: VecDeque::new(),
             reachability: reachability::ReachabilityFacts::default(),
@@ -2843,6 +2852,12 @@ impl OfflineProtocol {
             let _ = self.retry_queue.enqueue(message, attempt_count);
             return None;
         }
+        // A full peer window holds a frame that has not gone out yet; the
+        // window flush sends it when an acknowledgement frees a slot.
+        if !self.peer_window_admits(&message) {
+            self.hold_for_peer_window(&message);
+            return None;
+        }
         self.ensure_outbox_entry(&message);
         // Tier 2: re-seal against the peer's current session before flushing, so
         // a post-re-key epoch change no longer leaves the bytes undecryptable.
@@ -2879,6 +2894,58 @@ impl OfflineProtocol {
                 let _ = self.retry_queue.enqueue(message.clone(), attempt_count);
                 debug!(message_id = %message.id, error = %e, "Flush send failed, re-enqueued");
                 None
+            }
+        }
+    }
+
+    /// Sends held messages into each peer's free window slots, oldest first,
+    /// at most a flush batch per peer per tick.
+    ///
+    /// Runs every tick rather than from the acknowledgement handler alone,
+    /// because a slot is also freed by give-up, expiry and eviction, and a
+    /// peer whose mesh link went away stops being governed by the window, so
+    /// everything held for it goes to transport selection.
+    fn flush_peer_windows(&mut self) {
+        if self.window_held.is_empty() {
+            return;
+        }
+        let peers: Vec<String> = self.window_held.keys().cloned().collect();
+        for peer in peers {
+            let mut budget = crate::constants::FLUSH_BATCH_LIMIT;
+            while budget > 0 {
+                let Some(message_id) = self
+                    .window_held
+                    .get(&peer)
+                    .and_then(|held| held.front().cloned())
+                else {
+                    break;
+                };
+                let Some((message, attempt_count)) = self
+                    .outbox
+                    .get(&message_id)
+                    .map(|entry| (entry.message.clone(), entry.attempt_count))
+                else {
+                    // Settled, expired or evicted while held.
+                    if let Some(held) = self.window_held.get_mut(&peer) {
+                        held.pop_front();
+                    }
+                    continue;
+                };
+                if !self.peer_window_admits(&message) {
+                    break;
+                }
+                if let Some(held) = self.window_held.get_mut(&peer) {
+                    held.pop_front();
+                }
+                budget -= 1;
+                let _ = self.try_flush_send_via(message, attempt_count, None);
+            }
+            if self
+                .window_held
+                .get(&peer)
+                .is_some_and(|held| held.is_empty())
+            {
+                self.window_held.remove(&peer);
             }
         }
     }
@@ -3640,6 +3707,9 @@ impl OfflineProtocol {
                 first_error.get_or_insert(err);
             }
         };
+        // Before the retry ladder, so a frame the app sent first is not
+        // overtaken by one that only reached the retry queue later.
+        self.flush_peer_windows();
         note("retry_queue", self.process_retry_queue());
         note("welcome_retry_queue", self.process_welcome_retry_queue());
         self.process_relay_register_retries();
@@ -3929,6 +3999,14 @@ impl OfflineProtocol {
                     entry.retry_count,
                     recheck_ms,
                 );
+                continue;
+            }
+
+            // A frame that has not gone out yet waits for the peer's window
+            // instead, out of this queue: re-checking it every second would
+            // spend the batch on frames that cannot move.
+            if !self.peer_window_admits(&entry.message) {
+                self.hold_for_peer_window(&entry.message);
                 continue;
             }
 

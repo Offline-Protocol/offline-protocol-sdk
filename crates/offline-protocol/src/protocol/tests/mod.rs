@@ -42989,3 +42989,203 @@ fn test_resends_stop_re_sealing_past_the_unacknowledged_budget() {
         "an acknowledgement for the newest seal clears the gap"
     );
 }
+
+// ============================================================================
+// Per-peer send window
+// ============================================================================
+
+/// A started device holding a live BLE link to "bob", with its events
+/// captured. Plain DMs (`create_test_config` opts out of encryption).
+fn device_with_a_mesh_link_to_bob() -> (OfflineProtocol, MockTransport, Arc<Mutex<Vec<Event>>>) {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    ble.add_connected_peer("bob", -55);
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble.clone()));
+    protocol.start().unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| events_handle.lock().unwrap().push(event));
+    (protocol, ble, events)
+}
+
+fn send_dms_to_bob(protocol: &mut OfflineProtocol, count: usize) -> Vec<MessageId> {
+    (0..count)
+        .map(|i| {
+            protocol
+                .send_message(
+                    "bob",
+                    &format!("dm-{i}"),
+                    None::<MessagePriority>,
+                    None::<String>,
+                )
+                .unwrap()
+        })
+        .collect()
+}
+
+fn window_sent_ids(ble: &MockTransport) -> Vec<String> {
+    ble.sent_messages()
+        .iter()
+        .map(|m| m.id.as_str().to_string())
+        .collect()
+}
+
+#[test]
+fn a_frame_past_the_peer_window_is_held_not_sent() {
+    let (mut protocol, ble, events) = device_with_a_mesh_link_to_bob();
+    let ids = send_dms_to_bob(&mut protocol, PEER_SEND_WINDOW + 2);
+
+    assert_eq!(
+        window_sent_ids(&ble),
+        ids[..PEER_SEND_WINDOW]
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect::<Vec<_>>(),
+        "only a window's worth of frames may be in flight to one peer"
+    );
+    for held in &ids[PEER_SEND_WINDOW..] {
+        assert!(
+            protocol.outbox.contains_key(held),
+            "a held message is accepted: it waits in the outbox"
+        );
+        assert!(
+            !protocol.ack_manager.is_waiting_for_ack(held),
+            "a held message was not sent, so nothing waits for its ACK"
+        );
+        assert_eq!(
+            protocol.outbox[held].attempt_count, 0,
+            "holding is not an attempt"
+        );
+    }
+    let deferred: Vec<_> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageDeferred {
+                message_id, reason, ..
+            } if reason == SEND_DEFER_REASON_PEER_WINDOW => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deferred,
+        ids[PEER_SEND_WINDOW..]
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
+        "the app is told each held message is queued"
+    );
+}
+
+#[test]
+fn an_acknowledgement_releases_the_oldest_held_frame() {
+    let (mut protocol, ble, _) = device_with_a_mesh_link_to_bob();
+    let ids = send_dms_to_bob(&mut protocol, PEER_SEND_WINDOW + 2);
+    ble.clear_sent_messages();
+
+    ble.queue_message_from(
+        delivery_ack_frame("bob", "user123", &ids[0]),
+        "bob".to_string(),
+    );
+    assert!(protocol.receive_message().is_none());
+    protocol.process().unwrap();
+
+    assert_eq!(
+        window_sent_ids(&ble),
+        vec![ids[PEER_SEND_WINDOW].as_str().to_string()],
+        "one slot freed sends exactly one held frame, the oldest"
+    );
+    assert!(protocol
+        .ack_manager
+        .is_waiting_for_ack(&ids[PEER_SEND_WINDOW]));
+}
+
+#[test]
+fn a_new_message_never_overtakes_one_already_held() {
+    let (mut protocol, ble, _) = device_with_a_mesh_link_to_bob();
+    let ids = send_dms_to_bob(&mut protocol, PEER_SEND_WINDOW + 1);
+    // Free a slot without a tick, then send again: the held one goes first.
+    protocol.forget_outbound_message(&ids[0]);
+    ble.clear_sent_messages();
+
+    let late = send_dms_to_bob(&mut protocol, 1);
+    assert!(
+        window_sent_ids(&ble).is_empty(),
+        "a slot is free, but an earlier message is held for it"
+    );
+    protocol.process().unwrap();
+    assert_eq!(
+        window_sent_ids(&ble),
+        vec![ids[PEER_SEND_WINDOW].as_str().to_string()],
+        "the held message takes the freed slot"
+    );
+    assert!(protocol.outbox.contains_key(&late[0]));
+}
+
+#[test]
+fn a_give_up_frees_its_window_slot() {
+    let (mut protocol, ble, _) = device_with_a_mesh_link_to_bob();
+    let ids = send_dms_to_bob(&mut protocol, PEER_SEND_WINDOW + 1);
+    ble.clear_sent_messages();
+
+    protocol.retire_undeliverable_message(&ids[0], "test");
+    protocol.process().unwrap();
+
+    assert_eq!(
+        window_sent_ids(&ble),
+        vec![ids[PEER_SEND_WINDOW].as_str().to_string()],
+        "a slot freed by giving up is as free as one freed by an ACK"
+    );
+}
+
+#[test]
+fn a_frame_already_in_flight_is_always_admitted() {
+    let (mut protocol, _ble, _) = device_with_a_mesh_link_to_bob();
+    let ids = send_dms_to_bob(&mut protocol, PEER_SEND_WINDOW);
+    let in_flight = protocol.outbox[&ids[0]].message.clone();
+    assert!(
+        protocol.peer_window_admits(&in_flight),
+        "a resend reuses its slot; holding it would stall the window for good"
+    );
+}
+
+#[test]
+fn the_window_does_not_govern_a_peer_without_a_mesh_link() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let ble = MockTransport::new(TransportType::BLE);
+    ble.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(ble.clone()));
+    protocol.start().unwrap();
+
+    let ids = send_dms_to_bob(&mut protocol, PEER_SEND_WINDOW + 4);
+    assert_eq!(
+        ble.sent_messages().len(),
+        ids.len(),
+        "store-and-forward carriers are not windowed: holding would strand messages"
+    );
+}
+
+#[test]
+fn held_frames_go_to_transport_selection_when_the_mesh_link_drops() {
+    let (mut protocol, ble, _) = device_with_a_mesh_link_to_bob();
+    let ids = send_dms_to_bob(&mut protocol, PEER_SEND_WINDOW + 3);
+    ble.clear_sent_messages();
+
+    ble.remove_connected_peer("bob");
+    protocol.process().unwrap();
+
+    let sent = window_sent_ids(&ble);
+    for held in &ids[PEER_SEND_WINDOW..] {
+        assert!(
+            sent.contains(&held.as_str().to_string()),
+            "with no mesh link the window no longer applies, so nothing stays held"
+        );
+    }
+    assert!(protocol.window_held.is_empty());
+}

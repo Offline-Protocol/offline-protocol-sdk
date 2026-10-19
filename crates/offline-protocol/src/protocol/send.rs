@@ -11,8 +11,9 @@ use super::{
     MAX_KEY_PACKAGE_SENT_TO, MAX_MESSAGE_CONTENT_BYTES, MAX_PENDING_CONNECTION_REQUESTS,
     MAX_PENDING_EXPIRIES_PER_PASS, MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER,
     MAX_PENDING_MESSAGE_BYTES_GLOBAL, MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS,
-    MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL,
-    RESEAL_GAP_BUDGET, RICH_PAYLOAD_V1, SEND_DEFER_REASON_ACK_CAPACITY,
+    MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PEER_SEND_WINDOW,
+    PENDING_CONNECTION_REQUEST_TTL, RESEAL_GAP_BUDGET, RICH_PAYLOAD_V1,
+    SEND_DEFER_REASON_ACK_CAPACITY, SEND_DEFER_REASON_PEER_WINDOW,
     SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, SEND_FAIL_REASON_RELAY_PUSHED,
     SEND_FAIL_REASON_RELAY_PUSHED_STORED, SEND_FAIL_REASON_RELAY_STORED,
     SEND_FAIL_REASON_TRANSPORT, WELCOME_NO_CARRIER_RETRY_SECS, WELCOME_UNREACHABLE_RETRY_CAP_SECS,
@@ -389,7 +390,9 @@ impl OfflineProtocol {
 
         self.deduplicator.mark_seen_local(message_id.clone());
 
-        if self.defer_app_message_for_ack_capacity(&message) {
+        if self.defer_app_message_for_ack_capacity(&message)
+            || self.defer_app_message_for_peer_window(&message)
+        {
             return Ok(message_id);
         }
 
@@ -483,7 +486,9 @@ impl OfflineProtocol {
 
         self.deduplicator.mark_seen_local(message_id.clone());
 
-        if self.defer_app_message_for_ack_capacity(&message) {
+        if self.defer_app_message_for_ack_capacity(&message)
+            || self.defer_app_message_for_peer_window(&message)
+        {
             return Ok(message_id);
         }
 
@@ -3823,6 +3828,102 @@ impl OfflineProtocol {
             SEND_DEFER_REASON_ACK_CAPACITY,
             0,
             Some(next_retry_at.timestamp_millis()),
+        ));
+        true
+    }
+
+    // ------------------------------------------------------------------------
+    // Per-peer send window (see `PEER_SEND_WINDOW`)
+    // ------------------------------------------------------------------------
+
+    /// Frames to `recipient` that went out over a mesh carrier and still
+    /// await its acknowledgement. Derived from the outbox rather than kept as
+    /// a count, so no settle, expiry or eviction path can leak a slot.
+    pub(super) fn mesh_frames_in_flight_to(&self, recipient: &str) -> usize {
+        self.outbox
+            .values()
+            .filter(|entry| {
+                entry.attempt_count > 0
+                    && entry.message.recipient.as_str() == recipient
+                    && matches!(
+                        entry.last_transport,
+                        Some(TransportType::BLE | TransportType::WiFiDirect)
+                    )
+            })
+            .count()
+    }
+
+    /// Whether `message` is one the window governs: a frame that waits for an
+    /// acknowledgement, is not a media chunk (transfers have their own
+    /// window), and goes to a peer this device holds a live mesh link to.
+    fn peer_window_governs(&self, message: &Message) -> bool {
+        message.requires_ack
+            && !Self::is_media_outbox_message(message)
+            && self
+                .transport_manager
+                .mesh_transport_for(message.recipient.as_str())
+                .is_some()
+    }
+
+    /// Whether `message` may be transmitted now. A frame already in flight
+    /// always may (its resend is not a new slot); a new one only while the
+    /// peer has fewer than [`PEER_SEND_WINDOW`] frames in flight.
+    pub(super) fn peer_window_admits(&self, message: &Message) -> bool {
+        if !self.peer_window_governs(message) {
+            return true;
+        }
+        if self
+            .outbox
+            .get(&message.id)
+            .is_some_and(|entry| entry.attempt_count > 0)
+        {
+            return true;
+        }
+        self.mesh_frames_in_flight_to(message.recipient.as_str()) < PEER_SEND_WINDOW
+    }
+
+    /// Parks `message` in the outbox, out of the retry queue, at the back of
+    /// its recipient's held line. No attempt is counted and nothing is
+    /// sealed again: being held is not an attempt.
+    pub(super) fn hold_for_peer_window(&mut self, message: &Message) {
+        self.ensure_outbox_entry(message);
+        self.retry_queue.remove(&message.id.as_str());
+        let held = self
+            .window_held
+            .entry(message.recipient.as_str().to_string())
+            .or_default();
+        if !held.contains(&message.id) {
+            held.push_back(message.id.clone());
+        }
+    }
+
+    /// The window gate for a message the app just sent. Holds it when the
+    /// peer's window is full, or when earlier messages to that peer are
+    /// already held, so a new message never overtakes them. Emits
+    /// `message_deferred` so the app can show it as queued.
+    fn defer_app_message_for_peer_window(&mut self, message: &Message) -> bool {
+        if !self.peer_window_governs(message) {
+            return false;
+        }
+        let held_ahead = self
+            .window_held
+            .get(message.recipient.as_str())
+            .is_some_and(|held| !held.is_empty());
+        if !held_ahead && self.peer_window_admits(message) {
+            return false;
+        }
+        self.hold_for_peer_window(message);
+        debug!(
+            message_id = %message.id,
+            recipient = %message.recipient,
+            "Peer send window full; message held until an acknowledgement frees it"
+        );
+        self.emit_event(Event::message_deferred(
+            message.id.clone(),
+            message.recipient.as_str().to_string(),
+            SEND_DEFER_REASON_PEER_WINDOW,
+            0,
+            None,
         ));
         true
     }

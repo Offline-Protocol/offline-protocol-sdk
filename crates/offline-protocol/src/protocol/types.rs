@@ -393,6 +393,43 @@ pub(crate) fn classify_transport_send_error(raw: &str) -> &'static str {
 /// produces this steadily, and it is the signal to slow down.
 pub(crate) const SEND_DEFER_REASON_ACK_CAPACITY: &str = "ack_capacity";
 
+/// The peer already had [`PEER_SEND_WINDOW`] frames over a mesh link awaiting
+/// its acknowledgement, so the frame waits in the outbox and goes out, oldest
+/// first, as acknowledgements come back. Not a fault: it is what a link
+/// carrying less than the app offers looks like.
+pub(crate) const SEND_DEFER_REASON_PEER_WINDOW: &str = "peer_window";
+
+/// How many frames this device keeps in flight to one peer over a mesh link
+/// (Bluetooth LE, Wi-Fi Direct) before it holds the next one back.
+///
+/// Without a window the sender handed the carrier every new frame, every
+/// resend and an acknowledgement per received frame, into one unbounded queue,
+/// on a timer that starts at enqueue. In the 2026-10-19 volume test (run 4)
+/// the Android side's indication path carried 12 to 16 frames a second against
+/// 15 offered: the acknowledgement round trip passed the timeout, every resend
+/// cost the receiver another acknowledgement on the saturated path, that
+/// path's rate halved, and both phones retried 50,000 times and evicted 6,000
+/// messages as "Outbox capacity exceeded". A window bounds the queue, and with
+/// it the round trip, the resends and the receiver's ratchet gap, at any link
+/// rate. It costs no throughput while it exceeds what the link carries in one
+/// unloaded round trip: a few messages on that link, counting a processing
+/// tick on each side. Sixteen leaves margin, and keeps the round trip under
+/// about three seconds there, well inside the timeout.
+///
+/// Only the mesh carriers: a relay mailbox is store-and-forward, and holding
+/// a message back from it would strand it on a device the user may close.
+pub(crate) const PEER_SEND_WINDOW: usize = 16;
+
+// Every in-window frame can be re-sealed on each of its attempts, and the
+// re-seal budget must never trip under the window: past it resends go out
+// verbatim, and a verbatim copy more than the out-of-order tolerance behind
+// the receiver never decrypts (run 4: 3,308 such failures).
+const _: () = assert!(
+    (PEER_SEND_WINDOW as u64)
+        * (1 + offline_protocol_reliability::constants::DEFAULT_MAX_RETRIES as u64)
+        < RESEAL_GAP_BUDGET
+);
+
 /// How many frames a sender may seal for one peer past the last one that peer
 /// acknowledged before resends stop being re-sealed and go out verbatim.
 ///
