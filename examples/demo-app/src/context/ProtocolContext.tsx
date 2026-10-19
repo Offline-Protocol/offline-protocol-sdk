@@ -936,6 +936,30 @@ export function ProtocolProvider({children}: {children: React.ReactNode}) {
     await proto.start();
     setIsStarted(true);
 
+    // Sessions restored from storage never emit secure_session_established:
+    // that event marks an establishment, and these were established in an
+    // earlier run. Seed the set from the SDK so a restored contact shows its
+    // lock. The ids share the event's namespace (the peer's address).
+    try {
+      const restored = await proto.mlsListSessions();
+      for (const peerId of restored) {sessionPeersRef.current.add(peerId);}
+      if (restored.length > 0) {
+        setContacts(prev => {
+          let next: Map<string, Contact> | null = null;
+          for (const peerId of restored) {
+            const existing = prev.get(peerId);
+            if (existing && !existing.hasSession) {
+              next = next ?? new Map(prev);
+              next.set(peerId, {...existing, hasSession: true});
+            }
+          }
+          return next ?? prev;
+        });
+      }
+    } catch (err) {
+      console.warn('[ProtocolContext] could not list restored sessions:', err);
+    }
+
     try {
       localAddressRef.current = await proto.localAddress();
       const groupIds = await proto.meshListGroups();
