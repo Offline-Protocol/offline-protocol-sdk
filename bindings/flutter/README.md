@@ -13,18 +13,54 @@ results are posted on the main queue (see [Kotlin bridge K2](../../docs/bridges/
 
 ## PR2 scope (events, messaging, Internet)
 
-- **Events:** subscribe with `OfflineProtocol.events` **before** `create` / `start`
-  if you need early diagnostics (native events are not buffered while unsubscribed).
-  Payloads use the same `eventJson` (+ optional `seq`) shape as React Native
-  `OfflineProtocol_Event`.
+- **Events:** subscribe with `OfflineProtocol.events` **before** `createFromConfig`
+  if you need every event, including gap recovery via `replayEvents`. Native code
+  only numbers and records events while a listener is attached; anything emitted
+  before you subscribe is not recoverable. Payloads use the same `eventJson`
+  (+ optional `seq`) shape as React Native `OfflineProtocol_Event`.
 - **Messaging:** `OfflineProtocol.sendMessage`.
 - **Internet:** `OfflineProtocol.enableInternetTransport`, plus auto-enable after
   `start()` when `transports.internet` is enabled with a `serverAddress` (same as
   the React Native JS layer).
 
-PR2 compiles a **narrow** native source set: UniFFI, config parser, secure storage,
-Internet transport, and shared relay helpers. BLE, Wi‑Fi Direct, Nostr, and Reticulum
-ship in PR3.
+## PR3 scope (transports, replay, lifecycle)
+
+- **Event replay:** native `EventReplayRing` + method-channel `replayEvents`; Dart
+  `NativeEventPipeline` implements the React Native `admitNativeEvent` gap contract.
+- **Session / `seq`:** `createFromConfig` and `stop` reset Dart seq tracking; native
+  event numbering restarts from zero only on `createFromConfig` (or `destroy`).
+  Call `destroy` before tearing down the plugin; your `events` subscription can
+  stay open across destroy → create.
+- **BLE:** created when `bleEnabled` is true; started on `start()`; also via
+  `OfflineProtocol.enableTransport('ble', …)`.
+- **Wi‑Fi Direct / peer stream:** `enableTransport('wifiDirect', …)` and auto-enable
+  after `start()` when `transports.wifiDirect.enabled` is true (Android Wi‑Fi Direct,
+  iOS Network framework peer stream).
+- **Foreground Internet heal:** shared `ForegroundReconnectPolicy` on Android
+  (`Activity` lifecycle) and iOS (`UIApplication` notifications).
+- **Nostr / Reticulum:** not in the Flutter compile surface yet; use React Native
+  or wait for PR4.
+
+PR3 compiles UniFFI, config, secure storage, Internet, relay helpers, BLE, peer
+stream, event replay, and teardown helpers. React Native–only services (foreground
+mesh service, sticky event dispatcher, full RN module) stay excluded.
+
+**Binary size / build time:** PR3 links the shared BLE and mesh bridge sources into
+the Flutter AAR and CocoaPod (same code React Native apps already ship). Expect
+longer native compiles and a modest APK/IPA increase versus PR2-only. Transports
+stay opt-in via config flags.
+
+Measure the plugin release AAR (direct read on PR3 native surface + UniFFI
+`jniLibs`):
+
+```bash
+bindings/flutter/scripts/measure-plugin-aar-size.sh          # report
+bindings/flutter/scripts/measure-plugin-aar-size.sh --check  # CI-style gate
+```
+
+Baseline: [baselines/offline-protocol-release-aar.json](baselines/offline-protocol-release-aar.json)
+(see [baselines/README.md](baselines/README.md)). PR4 Flutter CI should run
+`--check` after `:offline_protocol:assembleRelease`.
 
 `createFromConfig` accepts the same optional `dors` and `relay` JSON sections as
 the React Native bridge (applied via shared `InitialRuntimeConfigApplier` sources).
@@ -33,17 +69,21 @@ Shared Internet wiring lives in `InternetTransportBootstrap` (Kotlin/Swift) for
 Flutter; the React Native module keeps its existing paths until a later refactor
 (CI pins shared configure invariants via `internet_transport_bootstrap_keeps_rn_configure_invariants`).
 
-## PR3 scope (planned, stacked PR)
-
-- BLE, Wi‑Fi Direct, Nostr, Reticulum, and sticky event replay.
-- **Event `seq` / gap recovery:** PR2 emits monotonic `seq` like React Native, but
-  Dart does not yet implement `admitNativeEvent` / `replayEvents` parity; PR3
-  adds that before apps rely on gap detection.
-
 ## CI
 
 A Flutter CI job is planned (PR4 in the Flutter binding rollout). Merging this
 plugin does not yet gate on `flutter build` in GitHub Actions.
+
+PR4 is expected to add, at minimum:
+
+- `flutter test` / `flutter analyze` on `bindings/flutter/offline_protocol`
+- Example Android `:offline_protocol:compileDebugKotlin` (and iOS pod build smoke)
+- Rust guards already in `offline-protocol-uniffi` for PR3 compile lists and
+  **method-channel parity** (`flutter_pr3_method_channel_methods_match_native_plugins`)
+- `bindings/flutter/scripts/measure-plugin-aar-size.sh --check` (committed
+  baseline under `bindings/flutter/baselines/`)
+- Optional later: full example release APK / iOS archive sizes (app + engine,
+  not just the plugin AAR)
 
 ## Prerequisites
 
@@ -98,6 +138,7 @@ dependencies:
 ```dart
 import 'package:offline_protocol/offline_protocol.dart';
 
+// Before create — required for early events and seq / replay recovery.
 final sub = OfflineProtocol.events.listen((e) {
   final type = e.decodeEvent()['type'];
   // handle message_received, diagnostics, …
@@ -106,12 +147,14 @@ final sub = OfflineProtocol.events.listen((e) {
 await OfflineProtocol.createFromConfig({
   'appId': 'com.example.app',
   'profile': 'default',
+  'bleEnabled': true,
   'internetEnabled': true,
   'transports': {
     'internet': {
       'enabled': true,
       'serverAddress': 'wss://relay.example.com',
     },
+    'wifiDirect': {'enabled': true},
   },
 });
 await OfflineProtocol.initializeMlsWithSecureStorage();
@@ -122,7 +165,3 @@ final id = await OfflineProtocol.sendMessage(
   content: 'Hello',
 );
 ```
-
-## License
-
-AGPL-3.0-only, or commercial license. See repository root `LICENSE`.

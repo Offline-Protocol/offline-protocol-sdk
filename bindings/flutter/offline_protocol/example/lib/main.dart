@@ -40,6 +40,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    // Subscribe before create/start so native assigns seq and replay can recover gaps.
     _eventSub = OfflineProtocol.events.listen((event) {
       if (!mounted) return;
       setState(() {

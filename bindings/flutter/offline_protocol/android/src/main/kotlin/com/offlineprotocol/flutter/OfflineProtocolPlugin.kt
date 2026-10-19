@@ -1,27 +1,42 @@
 package com.offlineprotocol.flutter
 
+import android.app.Activity
+import android.app.Application
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import com.offlineprotocol.AppContainerProtocolStateStorage
+import com.offlineprotocol.EventReplayRing
+import com.offlineprotocol.ForegroundReconnectPolicy
+import com.offlineprotocol.InitialRuntimeConfigApplier
 import com.offlineprotocol.InternetManager
 import com.offlineprotocol.InternetTransportBootstrap
-import com.offlineprotocol.InitialRuntimeConfigApplier
 import com.offlineprotocol.MlsSecureStorage
 import com.offlineprotocol.ProtocolConfigParser
 import com.offlineprotocol.StorageNamespace
+import com.offlineprotocol.TeardownSequence
+import com.offlineprotocol.TransportManagerListener
+import com.offlineprotocol.TransportState
+import com.offlineprotocol.WifiDirectGroupFormation
+import com.offlineprotocol.WifiDirectManager
+import com.offlineprotocol.ble.BleTransportFacade
 import com.offlineprotocol.mapProtocolBridgeError
 import io.flutter.embedding.engine.plugins.FlutterPlugin
+import io.flutter.embedding.engine.plugins.activity.ActivityAware
+import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import org.json.JSONObject
+import uniffi.offline_protocol.BleTransportCallback
 import uniffi.offline_protocol.EventCallback
 import uniffi.offline_protocol.MessagePriority
 import uniffi.offline_protocol.OfflineProtocol
 import uniffi.offline_protocol.ProtocolConfig
+import uniffi.offline_protocol.WifiDirectTransportCallback
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -35,22 +50,34 @@ import java.util.concurrent.atomic.AtomicBoolean
  * and [EventChannel] deliveries are posted on the main looper ([mainHandler]).
  * See bridge contract K2.
  */
-class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler, EventChannel.StreamHandler {
+class OfflineProtocolPlugin :
+    FlutterPlugin,
+    MethodCallHandler,
+    EventChannel.StreamHandler,
+    ActivityAware {
+
     private lateinit var channel: MethodChannel
     private var eventsChannel: EventChannel? = null
     private var applicationContext: android.content.Context? = null
     private var protocol: OfflineProtocol? = null
     private var currentConfig: ProtocolConfig? = null
     private var internetManager: InternetManager? = null
+    private var bleTransport: BleTransportFacade? = null
+    private var wifiDirectManager: WifiDirectManager? = null
 
     private var engineExecutor: ExecutorService = newEngineExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val attached = AtomicBoolean(false)
 
+    private val foregroundReconnectPolicy = ForegroundReconnectPolicy()
+    private var activityBinding: ActivityPluginBinding? = null
+    private var activityLifecycleCallbacks: Application.ActivityLifecycleCallbacks? = null
+
     @Volatile
     private var eventSink: EventChannel.EventSink? = null
     private val eventSeqLock = Any()
     private var eventSeq = 0
+    private val eventReplay = EventReplayRing()
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         if (engineExecutor.isShutdown) {
@@ -69,6 +96,7 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
         if (!attached.getAndSet(false)) {
             return
         }
+        detachActivityLifecycle()
         eventsChannel?.setStreamHandler(null)
         eventsChannel = null
         eventSink = null
@@ -91,6 +119,66 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
                 executor.shutdown()
             }
         }
+    }
+
+    override fun onAttachedToActivity(binding: ActivityPluginBinding) {
+        val trackedActivity = binding.activity
+        val callbacks = object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityPaused(activity: Activity) {
+                if (activity !== trackedActivity) return
+                engineExecutor.execute {
+                    foregroundReconnectPolicy.didEnterBackground(
+                        nowMs = SystemClock.elapsedRealtime(),
+                    )
+                }
+            }
+
+            override fun onActivityResumed(activity: Activity) {
+                if (activity !== trackedActivity) return
+                engineExecutor.execute {
+                    if (foregroundReconnectPolicy.shouldReconnectOnForeground(
+                            nowMs = SystemClock.elapsedRealtime(),
+                        )
+                    ) {
+                        try {
+                            internetManager?.forceReconnect()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Internet forceReconnect on foreground failed", e)
+                        }
+                    }
+                }
+            }
+
+            override fun onActivityCreated(activity: Activity, savedInstanceState: android.os.Bundle?) {}
+            override fun onActivityStarted(activity: Activity) {}
+            override fun onActivityStopped(activity: Activity) {}
+            override fun onActivitySaveInstanceState(activity: Activity, outState: android.os.Bundle) {}
+            override fun onActivityDestroyed(activity: Activity) {}
+        }
+        activityBinding = binding
+        activityLifecycleCallbacks = callbacks
+        trackedActivity.application.registerActivityLifecycleCallbacks(callbacks)
+    }
+
+    override fun onDetachedFromActivityForConfigChanges() {
+        detachActivityLifecycle()
+    }
+
+    override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
+        onAttachedToActivity(binding)
+    }
+
+    override fun onDetachedFromActivity() {
+        detachActivityLifecycle()
+    }
+
+    private fun detachActivityLifecycle() {
+        val callbacks = activityLifecycleCallbacks
+        if (callbacks != null) {
+            activityBinding?.activity?.application?.unregisterActivityLifecycleCallbacks(callbacks)
+        }
+        activityLifecycleCallbacks = null
+        activityBinding = null
     }
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -138,9 +226,19 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
                         "localAddress" -> protocol?.localAddress()
                         "sendMessage" -> sendMessageOnEngine(call.arguments)
                         "enableInternetTransport" -> {
-                            enableInternetTransportOnEngine(call.arguments)
+                            enableTransportOnEngine("internet", call.arguments)
                             null
                         }
+                        "enableTransport" -> {
+                            val map = call.arguments as? Map<*, *>
+                                ?: throw IllegalArgumentException("enableTransport expects a map")
+                            val type = map["type"] as? String
+                                ?: throw IllegalArgumentException("enableTransport requires type")
+                            val configJson = map["config"] as? String
+                            enableTransportOnEngine(type, configJson)
+                            null
+                        }
+                        "replayEvents" -> replayEventsOnEngine(call.arguments)
                         else -> {
                             mainHandler.post { result.notImplemented() }
                             return@execute
@@ -176,6 +274,7 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
         val seq: Int
         synchronized(eventSeqLock) {
             seq = eventSeq
+            eventReplay.record(seq, eventJson)
             eventSeq += 1
         }
         mainHandler.post {
@@ -184,6 +283,21 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
                     "eventJson" to eventJson,
                     "seq" to seq,
                 ),
+            )
+        }
+    }
+
+    private fun replayEventsOnEngine(arguments: Any?): List<Map<String, Any>> {
+        val map = arguments as? Map<*, *>
+            ?: throw IllegalArgumentException("replayEvents expects a map")
+        val fromSeq = (map["fromSeq"] as? Number)?.toInt()
+            ?: throw IllegalArgumentException("replayEvents requires fromSeq")
+        val toSeq = (map["toSeq"] as? Number)?.toInt()
+            ?: throw IllegalArgumentException("replayEvents requires toSeq")
+        return eventReplay.replay(fromSeq, toSeq).map { entry ->
+            mapOf(
+                "seq" to entry.seq,
+                "eventJson" to entry.eventJson,
             )
         }
     }
@@ -206,6 +320,86 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
         InitialRuntimeConfigApplier.apply(proto, parsed.rawJson)
         protocol = proto
         currentConfig = parsed.coreConfig
+
+        val ctx = applicationContext
+        val config = parsed.coreConfig
+        if (config.bleEnabled && ctx != null) {
+            bleTransport = BleTransportFacade(
+                ctx,
+                proto,
+                config.profile,
+                config.appId,
+            ) { level, message, context ->
+                Log.println(
+                    when (level) {
+                        "error" -> Log.ERROR
+                        "warning" -> Log.WARN
+                        else -> Log.INFO
+                    },
+                    TAG,
+                    "$message ${context ?: emptyMap()}",
+                )
+            }.also { manager ->
+                manager.listener = object : TransportManagerListener {
+                    override fun onTransportStateChanged(
+                        manager: com.offlineprotocol.TransportManager,
+                        state: TransportState,
+                    ) {
+                        Log.i(TAG, "BLE transport state: ${state.name.lowercase()}")
+                    }
+
+                    override fun onTransportError(
+                        manager: com.offlineprotocol.TransportManager,
+                        error: Throwable,
+                    ) {
+                        Log.w(TAG, "BLE transport error", error)
+                    }
+
+                    override fun onTransportDiagnostic(
+                        manager: com.offlineprotocol.TransportManager,
+                        level: String,
+                        message: String,
+                        context: Map<String, Any?>,
+                    ) {
+                        Log.println(
+                            when (level) {
+                                "error" -> Log.ERROR
+                                "warning" -> Log.WARN
+                                else -> Log.INFO
+                            },
+                            TAG,
+                            "$message $context",
+                        )
+                    }
+                }
+            }
+        }
+        wireTransportCallbacks(proto)
+    }
+
+    private fun wireTransportCallbacks(proto: OfflineProtocol) {
+        bleTransport?.let { manager ->
+            try {
+                proto.setBleTransportCallback(object : BleTransportCallback {
+                    override fun onFragmentsAvailable() {
+                        manager.onFragmentsAvailable()
+                    }
+                })
+            } catch (e: Throwable) {
+                Log.w(TAG, "BLE transport callback not available", e)
+            }
+        }
+        if (currentConfig?.wifiDirectEnabled == true) {
+            try {
+                proto.setWifiDirectTransportCallback(object : WifiDirectTransportCallback {
+                    override fun onMessagesAvailable() {
+                        wifiDirectManager?.onMessagesAvailable()
+                    }
+                })
+            } catch (e: Throwable) {
+                Log.w(TAG, "Wi-Fi Direct transport callback not available", e)
+            }
+        }
     }
 
     private fun initializeMlsOnEngine() {
@@ -222,26 +416,108 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
     private fun startOnEngine() {
         val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
         proto.start()
-        // Internet auto-enable runs in Dart after start() (same layer as React Native JS).
+        bleTransport?.let { manager ->
+            try {
+                manager.start()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start BLE manager", e)
+            }
+        }
     }
 
     private fun stopOnEngine() {
-        try {
-            internetManager?.stop()
-        } catch (e: Exception) {
-            Log.w(TAG, "internet stop during protocol stop", e)
-        }
-        protocol?.stop()
+        val teardown = TeardownSequence()
+        teardown.step("BLE manager") { bleTransport?.stop() }
+        teardown.step("Internet manager") { internetManager?.stop() }
+        teardown.step("Wi-Fi Direct manager") { wifiDirectManager?.stop() }
+        teardown.step("protocol") { protocol?.stop() }
+        teardown.firstFailureOrNull()?.let { throw it }
     }
 
-    private fun enableInternetTransportOnEngine(arguments: Any?) {
+    private fun enableTransportOnEngine(type: String, arguments: Any?) {
         val configJson = arguments as? String
-            ?: throw IllegalArgumentException("enableInternetTransport expects a JSON string")
         val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
         val config = currentConfig ?: throw IllegalStateException("Protocol config not initialized")
-        val json = JSONObject(configJson)
-        val manager = ensureInternetManager(proto, config)
-        InternetTransportBootstrap.configureAndStart(manager, json)
+        val ctx = applicationContext ?: throw IllegalStateException("Plugin not attached")
+        when (type.lowercase()) {
+            "internet" -> {
+                val json = configJson?.let { JSONObject(it) } ?: JSONObject()
+                val manager = ensureInternetManager(proto, config)
+                if (manager.state == TransportState.RUNNING ||
+                    manager.state == TransportState.STARTING
+                ) {
+                    manager.stop()
+                }
+                InternetTransportBootstrap.configureAndStart(manager, json)
+            }
+            "wifidirect", "wifi_direct" -> {
+                if (wifiDirectManager == null) {
+                    wifiDirectManager = WifiDirectManager(
+                        ctx,
+                        proto,
+                        config.profile,
+                        appId = config.appId,
+                    ) { level, message, context ->
+                        Log.println(
+                            when (level) {
+                                "error" -> Log.ERROR
+                                "warning" -> Log.WARN
+                                else -> Log.INFO
+                            },
+                            TAG,
+                            "$message ${context ?: emptyMap()}",
+                        )
+                    }
+                }
+                val manager = wifiDirectManager
+                    ?: throw IllegalStateException("Failed to create Wi-Fi Direct manager")
+                wireTransportCallbacks(proto)
+                val autoAccept = configJson?.let {
+                    val json = JSONObject(it)
+                    if (json.has("autoAccept") && !json.isNull("autoAccept")) {
+                        json.getBoolean("autoAccept")
+                    } else {
+                        null
+                    }
+                }
+                if (manager.state == TransportState.RUNNING) {
+                    manager.stop()
+                }
+                manager.formGroups =
+                    WifiDirectGroupFormation.formGroupsAfterEnable(manager.formGroups, autoAccept)
+                manager.start()
+            }
+            "ble" -> {
+                if (bleTransport == null) {
+                    bleTransport = BleTransportFacade(
+                        ctx,
+                        proto,
+                        config.profile,
+                        config.appId,
+                    ) { level, message, context ->
+                        Log.println(
+                            when (level) {
+                                "error" -> Log.ERROR
+                                "warning" -> Log.WARN
+                                else -> Log.INFO
+                            },
+                            TAG,
+                            "$message ${context ?: emptyMap()}",
+                        )
+                    }
+                }
+                val manager = bleTransport
+                    ?: throw IllegalStateException("Failed to create BLE manager")
+                wireTransportCallbacks(proto)
+                if (manager.state != TransportState.RUNNING) {
+                    manager.start()
+                }
+            }
+            "reticulum", "nostr" -> throw UnsupportedOperationException(
+                "Transport $type is not compiled into the Flutter plugin yet",
+            )
+            else -> throw IllegalArgumentException("Unsupported transport type: $type")
+        }
     }
 
     private fun ensureInternetManager(
@@ -292,15 +568,13 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
     }
 
     private fun tearDownProtocol() {
-        try {
-            internetManager?.stop()
-        } catch (e: Exception) {
-            Log.w(TAG, "internet stop during teardown", e)
-        }
+        val teardown = TeardownSequence()
+        teardown.step("BLE manager") { bleTransport?.stop() }
+        bleTransport = null
+        teardown.step("Internet manager") { internetManager?.stop() }
         internetManager = null
-        synchronized(eventSeqLock) {
-            eventSeq = 0
-        }
+        teardown.step("Wi-Fi Direct manager") { wifiDirectManager?.stop() }
+        wifiDirectManager = null
         try {
             protocol?.stop()
         } catch (e: Exception) {
@@ -313,6 +587,10 @@ class OfflineProtocolPlugin : FlutterPlugin, MethodCallHandler, EventChannel.Str
         }
         protocol = null
         currentConfig = null
+        synchronized(eventSeqLock) {
+            eventSeq = 0
+            eventReplay.clear()
+        }
     }
 
     companion object {

@@ -51,6 +51,31 @@ void main() {
     expect(config!['authToken'], 'root-secret');
   });
 
+  test('resolveWifiDirectAutoEnableConfig nested transports.wifiDirect', () {
+    final config = OfflineProtocol.resolveWifiDirectAutoEnableConfig({
+      'transports': {
+        'wifiDirect': {
+          'enabled': true,
+          'autoAccept': true,
+        },
+      },
+    });
+    expect(config, isNotNull);
+    expect(config!['enabled'], isTrue);
+    expect(config['autoAccept'], isTrue);
+  });
+
+  test('nativeMethodChannelMethods includes PR3 replay and enableTransport', () {
+    expect(
+      OfflineProtocol.nativeMethodChannelMethods,
+      containsAll(['replayEvents', 'enableTransport', 'enableInternetTransport']),
+    );
+    expect(OfflineProtocol.nativeMethodChannelMethods, isNotEmpty);
+    expect(OfflineProtocol.nativeMethodChannelMethods.toSet().length,
+        OfflineProtocol.nativeMethodChannelMethods.length,
+        reason: 'method names must be unique');
+  });
+
   test('resolveInternetAutoEnableConfig requires enabled flag', () {
     expect(
       OfflineProtocol.resolveInternetAutoEnableConfig({
