@@ -131,6 +131,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `the_ffi_crate_builds_no_rust_library` refuses a crate type that would
   turn it off again.
 
+- **Python: type checkers read the package's annotations.** The package
+  shipped no PEP 561 `py.typed` marker, so mypy skipped it as untyped
+  ("missing library stubs or py.typed marker") and every value it returned
+  was `Any` in the application, although nearly every public function is
+  annotated. The wheel now carries the marker, and the wheel build fails
+  if it goes missing.
 - **Python: a Linux box that could no longer advertise recovers on its own.**
   Linux loses track of the controller's advertising when a central-role
   connection completes while advertising is on: the controller keeps
