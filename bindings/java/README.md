@@ -114,6 +114,8 @@ library for your platform from the release's assets, and give the JVM its path:
 path. Run on JDK 22 or later with `--enable-native-access=ALL-UNNAMED`. On
 Android use the AAR (`com.offlineprotocol:offline-protocol-sdk`) instead.
 
+A complete, runnable program is in [examples/java-app](../../examples/java-app/README.md).
+
 ## Telemetry
 
 Pass `TelemetryConfig.os` and `osMajor` as the platform you actually run on:
