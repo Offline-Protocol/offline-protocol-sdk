@@ -73,6 +73,20 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   JavaScriptCore. On the local API the two are platform operations: the wire
   already carries base64, and a signing twin there would reach the shared key
   past the `sign_data` deny group.
+- **Large file sends from React Native no longer stage a base64 string on
+  the bridge.** `sendFileFromPath({recipient, filePath, fileName})` sits
+  beside `sendFile`, which is unchanged. It passes a filesystem path to
+  the Rust core, which opens and reads the file in one allocation on its
+  own heap, so the full payload never crosses the JS/native bridge as a
+  JS string, and the Kotlin and Swift sides hold only the path. On
+  constrained Android a 25 MB attachment through `sendFile` materialised
+  a ~34 MB base64 JS string plus a ~34 MB native copy before Rust ever
+  saw the bytes; the new entry point allocates only the Rust `Vec<u8>`.
+  An unreadable path returns `InvalidArgument` naming the I/O failure.
+  Content type is always `File`; a typed streaming variant can be added
+  when a consumer needs it. The local API registers it as
+  `send_file_from_path`, and it is reachable from every binding
+  (TypeScript, Kotlin, Swift, Java, Python).
 - **The service image is published.** The release workflow builds
   `bindings/python/docker` for linux/amd64 and linux/arm64 and pushes it to
   `ghcr.io/offline-protocol/offline-protocol-service`, tagged `X.Y.Z`, and

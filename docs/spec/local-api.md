@@ -349,6 +349,7 @@ methods a client may call before `hello`.
 | `send_media` | `recipient`, `file_data b64`, `file_name`, `content_type <ContentType>`, `media_metadata {MediaMetadata}?` | string (file id). Stamped like `send_message` |
 | `send_media_rich` | `recipient`, `file_data b64`, `file_name`, `content_type <ContentType>`, `options {MediaSendOptions}` | string (file id). `options.app_id` as for `send_message_rich` |
 | `send_file` | `recipient`, `file_data b64`, `file_name` | string (file id) |
+| `send_file_from_path` | `recipient`, `file_path`, `file_name` | string (file id). Rust reads the file; the base64 bytes never cross the local-API wire |
 | `get_file_progress` | `file_id` | `{FileProgress}` or `null` |
 | `cancel_file_transfer` | `file_id` | `null` |
 

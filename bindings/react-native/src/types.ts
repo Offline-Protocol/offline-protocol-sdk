@@ -1221,6 +1221,31 @@ export interface SendFileParams {
 }
 
 /**
+ * Parameters for sending a file by filesystem path rather than by its bytes.
+ *
+ * The native side opens the file inside the SDK's Rust core and reads it in
+ * one allocation on the Rust heap, so the full payload never crosses the
+ * JS/native bridge as a base64 string. This is the preferred shape for any
+ * file over a few megabytes and the only safe option for large files
+ * (tens of MB range) on constrained Android devices, where the base64
+ * crossing's `DirectByteBuffer` allocation is the OOM pathology.
+ *
+ * `filePath` is a native filesystem path readable by the current process
+ * (e.g. an `expo-file-system` file URI once stripped of the `file://`
+ * scheme, or a raw absolute path). A missing file, a permission failure,
+ * or a path that resolves to something that is not a regular file
+ * rejects with `InvalidArgument`.
+ */
+export interface SendFileFromPathParams {
+  /** Recipient's user ID */
+  recipient: string;
+  /** Native filesystem path to the file. Must be readable by the app. */
+  filePath: string;
+  /** File name advertised to the recipient (does not have to match basename). */
+  fileName: string;
+}
+
+/**
  * Base event interface
  */
 interface BaseEvent {

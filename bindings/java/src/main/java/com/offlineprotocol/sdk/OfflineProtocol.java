@@ -4644,6 +4644,40 @@ public class OfflineProtocol implements AutoCloseable, OfflineProtocolInterface 
 
   
     @Override
+    public java.lang.String sendFileFromPath(java.lang.String recipient, java.lang.String filePath, java.lang.String fileName) throws ProtocolException {
+            try {
+                return FfiConverterString.INSTANCE.lift(
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCallWithError(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file_from_path(_allocator, _uniffiHandle,
+            FfiConverterString.INSTANCE.lower(recipient), FfiConverterString.INSTANCE.lower(filePath), FfiConverterString.INSTANCE.lower(fileName), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    );
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
     public java.util.List<java.lang.String> sendGroupMessage(java.lang.String groupId, java.lang.String content, MessagePriority priority, java.lang.String replyToMsg) throws ProtocolException {
             try {
                 return FfiConverterSequenceString.INSTANCE.lift(

@@ -56,6 +56,7 @@ EXPOSED: frozenset[str] = frozenset(
         "send_media",
         "send_media_rich",
         "send_file",
+        "send_file_from_path",
         "get_file_progress",
         "cancel_file_transfer",
         # secure sessions
@@ -322,6 +323,7 @@ ID_RESULTS: frozenset[str] = frozenset(
         "send_media",
         "send_media_rich",
         "send_file",
+        "send_file_from_path",
         "send_group_message",
         "forward_message_to_group",
         "services.discover_services",

@@ -1592,7 +1592,16 @@ interface OfflineProtocol {
 
     [Throws=ProtocolError]
     string send_file(string recipient, sequence<u8> file_data, string file_name);
-    
+
+    // Streaming file transport: reads the file from the native filesystem
+    // path inside the Rust core, so the full base64 payload never crosses
+    // the JS/native bridge. Preferred over send_file for files over a few
+    // megabytes; the only safe option for large files on constrained
+    // Android devices (DirectByteBuffer OOM pathology on the base64
+    // bridge crossing). An unreadable path returns InvalidArgument.
+    [Throws=ProtocolError]
+    string send_file_from_path(string recipient, string file_path, string file_name);
+
     [Throws=ProtocolError]
     void process_file_chunk(string file_id, u32 chunk_index, u32 total_chunks, u64 file_size, string file_name, string file_checksum, sequence<u8> data);
     

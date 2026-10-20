@@ -6053,6 +6053,43 @@ impl OfflineProtocol {
         self.send_media(recipient, file_data, file_name, ContentType::File, None)
     }
 
+    /// Reads a file from `file_path` on the native filesystem and sends it as
+    /// a generic attachment (same semantics as [`Self::send_file`], including
+    /// `ContentType::File`).
+    ///
+    /// Unlike `send_file`, which takes the bytes already in memory on the
+    /// caller side, this call reads the file inside the Rust core. React
+    /// Native consumers reach it with a filesystem path (e.g. an
+    /// `expo-file-system` URI) instead of a base64 string, so the full file
+    /// never crosses the JS/native bridge as a JS string. Peak heap during
+    /// the call is one `Vec<u8>` the size of the file in the Rust address
+    /// space; nothing accumulates in Hermes/V8 or in the Kotlin/Swift
+    /// bridge layer. Preferred over [`Self::send_file`] for any file over a
+    /// few megabytes, and the only safe option for large files
+    /// (tens of MB range) on constrained Android devices where a native
+    /// DirectByteBuffer alloc for the base64 crossing is the OOM pathology.
+    ///
+    /// `file_path` must point to a regular file readable by the current
+    /// process. A missing file, a permission failure, or a path that
+    /// resolves to something that is not a regular file returns
+    /// [`ProtocolError::InvalidArgument`] with a message that names the
+    /// underlying I/O failure. The path is not retained after the read
+    /// completes.
+    pub fn send_file_from_path(
+        &self,
+        recipient: String,
+        file_path: String,
+        file_name: String,
+    ) -> Result<String, ProtocolError> {
+        let bytes = std::fs::read(&file_path).map_err(|e| {
+            ProtocolError::InvalidArgument(format!(
+                "send_file_from_path: cannot read {}: {}",
+                file_path, e
+            ))
+        })?;
+        self.send_media(recipient, bytes, file_name, ContentType::File, None)
+    }
+
     /// Processes a received file chunk (manual path, for platforms handling
     /// their own chunk routing outside the protocol receive loop).
     ///
@@ -8858,6 +8895,90 @@ mod tests {
         assert_eq!(progress.chunks_sent, 1);
         assert_eq!(progress.total_chunks, 2);
         assert!(progress.percentage < 100);
+    }
+
+    #[test]
+    fn send_file_from_path_rejects_a_missing_path_with_invalid_argument() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        // Protocol is NotStarted here, but the file-read guard runs first.
+        // That is the contract: a path problem is reported as a path
+        // problem, so a caller sees the real cause and never gets a
+        // misleading "not started" rejection for a typo.
+        let err = protocol
+            .send_file_from_path(
+                "off1q0000000000000000000000000000000000000qapn78n".to_string(),
+                "/definitely/not/a/real/path-fixture".to_string(),
+                "x.bin".to_string(),
+            )
+            .unwrap_err();
+        match err {
+            ProtocolError::InvalidArgument(message) => {
+                assert!(
+                    message.contains("send_file_from_path"),
+                    "message should name the entry point, got: {message}",
+                );
+                assert!(
+                    message.contains("/definitely/not/a/real/path-fixture"),
+                    "message should include the offending path, got: {message}",
+                );
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_file_from_path_reads_the_bytes_before_the_running_check() {
+        // The I/O guard sits above the engine-state check so a missing
+        // file is reported as a missing file, not as "protocol not
+        // started". If a future refactor inverts that order, this test
+        // fails and the error surfaces the wrong cause to callers.
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        assert_eq!(protocol.get_state(), ProtocolState::Stopped);
+        let err = protocol
+            .send_file_from_path(
+                "off1q0000000000000000000000000000000000000qapn78n".to_string(),
+                "/definitely/not/a/real/path-fixture".to_string(),
+                "x.bin".to_string(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, ProtocolError::InvalidArgument(_)),
+            "a missing path must beat the NotStarted check, got: {err:?}",
+        );
+    }
+
+    #[test]
+    fn send_file_from_path_reads_a_real_file_and_hands_the_bytes_to_the_engine() {
+        use std::io::Write;
+        // A tempfile stands in for an app's `expo-file-system` URI. The
+        // engine refuses a send that is not running yet, but the path we
+        // care about here is the file-read path: if the bytes get read
+        // and the engine is the one that refuses (NotStarted, not
+        // InvalidArgument), then the Rust side of the streaming surface
+        // is wired. Running the engine for a real send would need a mesh
+        // peer and credentials; that is covered on-device.
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        let mut path = std::env::temp_dir();
+        path.push("op-sdk-send-file-from-path-fixture.bin");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(&[0u8; 128]).unwrap();
+        }
+        let err = protocol
+            .send_file_from_path(
+                "off1q0000000000000000000000000000000000000qapn78n".to_string(),
+                path.to_string_lossy().to_string(),
+                "x.bin".to_string(),
+            )
+            .unwrap_err();
+        // The engine refuses because it is Stopped, not because the
+        // path is bad: the file-read succeeded, bytes crossed into the
+        // engine, and the engine's own state machine rejected the send.
+        assert!(
+            !matches!(err, ProtocolError::InvalidArgument(_)),
+            "a readable file must not be reported as InvalidArgument, got: {err:?}",
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     fn create_reticulum_config() -> ProtocolConfig {

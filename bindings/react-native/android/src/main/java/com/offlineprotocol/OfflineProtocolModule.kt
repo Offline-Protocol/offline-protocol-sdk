@@ -3124,6 +3124,24 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    // Streaming file transport: hands the Rust core a filesystem path so the
+    // full payload never crosses the RN bridge as a base64 string. The base64
+    // crossing's DirectByteBuffer allocation was the OOM pathology that
+    // motivated this entry point; a 25 MB LoRA delta materialized as a
+    // ~34 MB base64 JS string plus a ~34 MB native copy before the bridge
+    // handed anything to Rust. Here Kotlin only holds the path string;
+    // Rust reads the file into one Vec<u8> on its own heap.
+    @ReactMethod
+    fun sendFileFromPath(recipient: String, filePath: String, fileName: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val id = proto.sendFileFromPath(recipient, filePath, fileName)
+            promise.resolve(id)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_SEND_FILE", "Failed to send file from path")
+        }
+    }
+
     @ReactMethod
     fun sendMedia(recipient: String, fileData: String, fileName: String, contentType: String, mediaMetadata: ReadableMap?, promise: Promise) {
         try {

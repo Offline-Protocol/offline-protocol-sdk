@@ -9,7 +9,7 @@ and a classification in ``dispatch.py``.
 
 from __future__ import annotations
 
-UDL_SHA256 = "f717c4ae13ef510032a013e717f9ad2d39d0aaa57aa95f91c52db03bdae2ff72"
+UDL_SHA256 = "dcdcab332b555de46398a2db9668b4fd5a8d1db3eca5623715da75c646fb4404"
 
 TABLE = {'callbacks': ('MlsStorageProvider',
                'ProtocolStateStorageProvider',
@@ -427,6 +427,10 @@ TABLE = {'callbacks': ('MlsStorageProvider',
                                                 ('file_data', 'sequence<u8>'),
                                                 ('file_name', 'string')),
                                                'string'),
+                                 'send_file_from_path': ((('recipient', 'string'),
+                                                          ('file_path', 'string'),
+                                                          ('file_name', 'string')),
+                                                         'string'),
                                  'send_group_message': ((('group_id', 'string'),
                                                          ('content', 'string'),
                                                          ('priority', 'MessagePriority?'),

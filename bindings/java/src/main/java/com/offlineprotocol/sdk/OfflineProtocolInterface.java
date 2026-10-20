@@ -142,6 +142,7 @@ public interface OfflineProtocolInterface {
     public void reticulumStatusChanged(boolean isConnected) throws ProtocolException;
     public java.lang.String sendConnectionRequest(java.lang.String recipient, java.lang.String senderName, java.util.List<java.lang.Byte> keyPackage, java.lang.String initialMessage) throws ProtocolException;
     public java.lang.String sendFile(java.lang.String recipient, java.util.List<java.lang.Byte> fileData, java.lang.String fileName) throws ProtocolException;
+    public java.lang.String sendFileFromPath(java.lang.String recipient, java.lang.String filePath, java.lang.String fileName) throws ProtocolException;
     public java.util.List<java.lang.String> sendGroupMessage(java.lang.String groupId, java.lang.String content, MessagePriority priority, java.lang.String replyToMsg) throws ProtocolException;
     public java.lang.String sendMedia(java.lang.String recipient, java.util.List<java.lang.Byte> fileData, java.lang.String fileName, ContentType contentType, MediaMetadata mediaMetadata) throws ProtocolException;
     public java.lang.String sendMediaRich(java.lang.String recipient, java.util.List<java.lang.Byte> fileData, java.lang.String fileName, ContentType contentType, MediaSendOptions options) throws ProtocolException;
