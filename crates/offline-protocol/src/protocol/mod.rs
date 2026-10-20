@@ -945,6 +945,15 @@ pub struct OfflineProtocol {
     pending_media_metadata: HashMap<String, PendingMediaMetadataEntry>,
     /// Tracks outbound media transfer delivery progress keyed by file_id.
     outbound_media_transfers: HashMap<String, OutboundMediaTransfer>,
+    /// Per-recipient FIFO queue of media transfers that were accepted at the
+    /// API boundary while that recipient's concurrent-transfer slots were
+    /// already full. Each entry carries its full chunk bytes until a slot
+    /// opens and the dispatcher re-enters `send_media_inner` for it; a stale
+    /// entry (past `MEDIA_QUEUE_WAIT_TIMEOUT_SECS`) is dropped with a loud
+    /// [`crate::Event::MediaQueueTimeout`] + [`crate::Event::MediaSendFailed`]
+    /// pair rather than silently vanishing. See [`crate::protocol::types::PendingMediaTransfer`].
+    pub(crate) pending_media_queues:
+        HashMap<String, VecDeque<crate::protocol::types::PendingMediaTransfer>>,
     /// Maps each outbound media chunk message ID to (file_id, chunk_index).
     outbound_media_chunks: HashMap<MessageId, (String, u32)>,
     /// Sliding-window state for outbound file transfers, keyed by file_id.
@@ -1320,6 +1329,7 @@ impl OfflineProtocol {
             file_transfer_manager: FileTransferManager::new(),
             pending_media_metadata: HashMap::new(),
             outbound_media_transfers: HashMap::new(),
+            pending_media_queues: HashMap::new(),
             outbound_media_chunks: HashMap::new(),
             outbound_media_windows: HashMap::new(),
             restored_media_descriptors: HashMap::new(),

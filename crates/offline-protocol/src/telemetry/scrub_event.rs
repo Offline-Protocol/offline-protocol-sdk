@@ -881,6 +881,33 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             hash_string(space_id, scrubber);
             hash_string(doc_id, scrubber);
         }
+        // The queue events carry only a `recipient` user id and the public
+        // `file_id` the caller already holds. `recipient` is hashed exactly
+        // like every other peer identifier; `file_id` is a locally-minted
+        // transfer id that is not peer-correlated and travels unhashed to
+        // match the sibling `FileProgress` / `MediaSent` events.
+        Event::MediaQueueEnqueued {
+            file_id: _,
+            recipient,
+            queue_depth: _,
+        } => {
+            hash_string(recipient, scrubber);
+        }
+        Event::MediaQueueDequeued {
+            file_id: _,
+            recipient,
+            queue_depth: _,
+            wait_ms: _,
+        } => {
+            hash_string(recipient, scrubber);
+        }
+        Event::MediaQueueTimeout {
+            file_id: _,
+            recipient,
+            wait_ms: _,
+        } => {
+            hash_string(recipient, scrubber);
+        }
     }
 }
 
@@ -968,7 +995,10 @@ fn event_variant_exhaustiveness_ward(e: &Event) {
         | Event::DataAttachmentRequested { .. }
         | Event::DataAttachmentReceived { .. }
         | Event::DataAttachmentUnavailable { .. }
-        | Event::DataDocUnsyncable { .. } => (),
+        | Event::DataDocUnsyncable { .. }
+        | Event::MediaQueueEnqueued { .. }
+        | Event::MediaQueueDequeued { .. }
+        | Event::MediaQueueTimeout { .. } => (),
     }
 }
 

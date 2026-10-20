@@ -2937,7 +2937,22 @@ class OfflineProtocolModule: RCTEventEmitter {
             }
         }
     }
-    
+
+    @objc func getMediaQueueDepth(_ recipient: String,
+                                  resolver: @escaping RCTPromiseResolveBlock,
+                                  rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_MEDIA_QUEUE", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let depth = try proto.getMediaQueueDepth(recipient: recipient)
+            resolver(NSNumber(value: depth))
+        } catch {
+            rejecter("ERROR_MEDIA_QUEUE", "Failed to read media queue depth: \(error.localizedDescription)", error)
+        }
+    }
+
     // MARK: - BLE Transport Methods
     
     @objc func blePeerDiscovered(_ peerId: String,

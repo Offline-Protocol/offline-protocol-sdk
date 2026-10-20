@@ -1602,6 +1602,40 @@ public class OfflineProtocol implements AutoCloseable, OfflineProtocolInterface 
 
   
     @Override
+    public int getMediaQueueDepth(java.lang.String recipient) throws ProtocolException {
+            try {
+                return 
+    callWithHandle(_uniffiHandle -> {
+        try {
+    
+            return
+    UniffiHelpers.uniffiRustCallWithErrorInt(new ProtocolExceptionErrorHandler(), (_allocator, _status) -> {
+        return UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_media_queue_depth(_uniffiHandle,
+            FfiConverterString.INSTANCE.lower(recipient), _status);
+    });
+    } catch (java.lang.RuntimeException _uniffi_ex) {
+            throw _uniffi_ex;
+        } catch (java.lang.Exception _uniffi_ex) {
+            throw new java.lang.RuntimeException(_uniffi_ex);
+        }
+    })
+    ;
+            } catch (java.lang.RuntimeException _uniffi_ex) {
+                
+                if (ProtocolException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (ProtocolException)_uniffi_ex.getCause();
+                }
+                
+                if (InternalException.class.isInstance(_uniffi_ex.getCause())) {
+                    throw (InternalException)_uniffi_ex.getCause();
+                }
+                throw _uniffi_ex;
+            }
+    }
+    
+
+  
+    @Override
     public byte getMedianHops()  {
             try {
                 return 

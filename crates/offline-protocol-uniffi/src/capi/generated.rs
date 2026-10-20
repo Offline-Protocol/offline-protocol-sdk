@@ -2647,6 +2647,12 @@ pub fn call_engine(target: &crate::OfflineProtocol, method: &str, mut args: Fiel
             target.cancel_file_transfer(arg_file_id)?;
             Ok(Value::Null)
         }
+        "get_media_queue_depth" => {
+            let arg_recipient = args.take("recipient")?;
+            args.finish()?;
+            let result = target.get_media_queue_depth(arg_recipient)?;
+            Ok(result.encode())
+        }
         "get_topology" => {
             args.finish()?;
             let result = target.get_topology()?;

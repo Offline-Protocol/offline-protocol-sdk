@@ -1611,6 +1611,15 @@ interface OfflineProtocol {
     
     [Throws=ProtocolError]
     void cancel_file_transfer(string file_id);
+
+    // Returns the number of outbound media transfers currently parked
+    // behind an already-in-flight transfer to `recipient`. A call to
+    // send_media / send_media_rich / send_file toward a saturated
+    // recipient parks its bytes on a per-recipient FIFO queue and returns
+    // the file_id immediately; this method reports how many parked
+    // transfers are ahead of the next one dispatched.
+    [Throws=ProtocolError]
+    u32 get_media_queue_depth(string recipient);
     
     // Network visualization and metrics
     [Throws=ProtocolError]

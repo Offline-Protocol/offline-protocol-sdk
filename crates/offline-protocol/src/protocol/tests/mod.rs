@@ -32540,7 +32540,7 @@ fn test_encrypted_media_chunk_with_mismatched_group_rejected() {
 }
 
 #[test]
-fn test_send_media_caps_concurrent_transfers_per_peer() {
+fn test_send_media_queues_beyond_concurrent_cap() {
     use crate::constants::MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER;
 
     let (mut alice, _alice_handle) = media_test_protocol("alice");
@@ -32548,7 +32548,7 @@ fn test_send_media_caps_concurrent_transfers_per_peer() {
     establish_media_session(&mut alice, &mut bob);
 
     // Start the maximum number of transfers; none complete (no ACKs ferried),
-    // so they all stay active.
+    // so they all stay active and the recipient's slots are saturated.
     for i in 0..MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER {
         alice
             .send_media(
@@ -32561,23 +32561,38 @@ fn test_send_media_caps_concurrent_transfers_per_peer() {
             .unwrap();
     }
 
-    // One more must be rejected: the combined in-flight windows would exceed
-    // the receiver's sender-ratchet out-of-order tolerance budget.
-    let result = alice.send_media(
-        &id("bob"),
-        vec![9u8; 512],
-        "overflow.bin",
-        ContentType::File,
-        None,
+    // One more now PARKS on the per-recipient FIFO queue instead of
+    // rejecting: the caller gets its file_id immediately and the transfer
+    // waits for a slot to free. Concurrent transfers used to error with
+    // MediaTransferLimit here; the queue is what turns that into "wait".
+    let parked = alice
+        .send_media(
+            &id("bob"),
+            vec![9u8; 512],
+            "overflow.bin",
+            ContentType::File,
+            None,
+        )
+        .expect("call past the cap must park on the queue, not reject");
+    assert!(!parked.is_empty(), "parked transfer must still get a file_id");
+    assert_eq!(
+        alice.media_queue_depth(&id("bob")),
+        1,
+        "parked transfer must be visible on the per-recipient queue depth"
     );
-    assert!(
-        matches!(result, Err(Error::MediaTransferLimit(_))),
-        "transfer beyond the per-peer cap must be rejected, got {:?}",
-        result.map(|_| ())
-    );
+    // The queued transfer must NOT have taken a live slot — the receiver's
+    // sender-ratchet out-of-order tolerance budget is what the cap bounds,
+    // and the queue exists to keep that bound intact.
+    let active_toward_bob = alice
+        .outbound_media_transfers
+        .values()
+        .filter(|t| t.recipient == id("bob"))
+        .count();
+    assert_eq!(active_toward_bob, MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER);
 
     // A different recipient is not affected by bob's cap.
-    // (No session with carol -> SessionNotReady, NOT MediaTransferLimit.)
+    // (No session with carol -> SessionNotReady; the queue path is only
+    // reached once the encryption gate confirms.)
     let other = alice.send_media(
         &id("carol"),
         vec![1u8; 64],
@@ -44216,5 +44231,390 @@ fn a_full_outbox_refuses_on_a_tie() {
     assert_eq!(
         capacity_failures(&events),
         vec![refused.as_str().to_string()]
+    );
+}
+
+// ============================================================================
+// Per-recipient media send queue
+// ============================================================================
+//
+// The queue turns the per-peer concurrent-transfer cap from a boundary
+// error (`MediaTransferLimit`) into a parking signal: a call past the cap
+// returns a file_id, the bytes park on a per-recipient FIFO, and the
+// transfer dispatches once one of the recipient's live slots frees. The
+// tests below pin the shape of that machinery, including the invariant
+// that one recipient's queue is independent of every other recipient's.
+
+/// Captures every emitted event (not just failures) for the queue tests.
+fn capture_all_events(protocol: &mut OfflineProtocol) -> Arc<Mutex<Vec<Event>>> {
+    let store: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let handle = Arc::clone(&store);
+    protocol.on_event(move |event| handle.lock().unwrap().push(event));
+    store
+}
+
+/// Drains the live outbound chunks for `file_id` on `alice` as if every
+/// chunk acknowledged, which pushes the transfer to completion and frees
+/// the recipient's live slot.
+fn complete_outbound_transfer(alice: &mut OfflineProtocol, file_id: &str) {
+    let chunk_ids: Vec<_> = alice
+        .outbound_media_chunks
+        .iter()
+        .filter(|(_, (fid, _))| fid == file_id)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for chunk_id in chunk_ids {
+        alice.handle_outbound_media_chunk_delivered(&chunk_id);
+    }
+}
+
+#[test]
+fn media_queue_serialises_sends_to_one_recipient() {
+    use crate::constants::MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER;
+
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    // Saturate bob's live slots.
+    let mut live_file_ids: Vec<String> = Vec::new();
+    for i in 0..MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER {
+        let fid = alice
+            .send_media(
+                &id("bob"),
+                vec![i as u8; 512],
+                &format!("live-{}.bin", i),
+                ContentType::File,
+                None,
+            )
+            .unwrap();
+        live_file_ids.push(fid);
+    }
+
+    // A send past the cap parks; the caller still receives a file_id.
+    let parked = alice
+        .send_media(
+            &id("bob"),
+            vec![7u8; 512],
+            "parked.bin",
+            ContentType::File,
+            None,
+        )
+        .expect("call past the cap must park, not reject");
+    assert_eq!(alice.media_queue_depth(&id("bob")), 1);
+    // The parked transfer must NOT be in the live-transfer map yet.
+    assert!(!alice.outbound_media_transfers.contains_key(&parked));
+
+    // Draining one live transfer frees exactly one slot — which fires the
+    // dispatch and promotes the parked transfer to live.
+    complete_outbound_transfer(&mut alice, &live_file_ids[0]);
+    assert_eq!(
+        alice.media_queue_depth(&id("bob")),
+        0,
+        "queue must drain when a slot opens"
+    );
+    assert!(
+        alice.outbound_media_transfers.contains_key(&parked),
+        "the parked transfer must be dispatched after a slot opens"
+    );
+}
+
+#[test]
+fn media_queue_different_recipients_run_in_parallel() {
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    let (mut carol, _carol_handle) = media_test_protocol("carol");
+    establish_media_session(&mut alice, &mut bob);
+    establish_media_session(&mut alice, &mut carol);
+
+    // Saturate bob's live slots.
+    for i in 0..crate::constants::MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER {
+        alice
+            .send_media(
+                &id("bob"),
+                vec![i as u8; 512],
+                &format!("b-{}.bin", i),
+                ContentType::File,
+                None,
+            )
+            .unwrap();
+    }
+    // One more past bob's cap parks.
+    alice
+        .send_media(
+            &id("bob"),
+            vec![9u8; 512],
+            "parked-bob.bin",
+            ContentType::File,
+            None,
+        )
+        .expect("bob queue must accept");
+
+    // Carol's path is independent — her send dispatches live immediately,
+    // completely unaffected by bob's saturated queue.
+    let carol_live = alice
+        .send_media(
+            &id("carol"),
+            vec![1u8; 512],
+            "c-live.bin",
+            ContentType::File,
+            None,
+        )
+        .expect("carol must not be gated by bob's queue");
+    assert!(
+        alice.outbound_media_transfers.contains_key(&carol_live),
+        "carol's transfer must dispatch live"
+    );
+    assert_eq!(
+        alice.media_queue_depth(&id("carol")),
+        0,
+        "carol must not have a queue of her own"
+    );
+    assert_eq!(
+        alice.media_queue_depth(&id("bob")),
+        1,
+        "bob's queue is untouched"
+    );
+}
+
+#[test]
+fn media_queue_depth_accessor_matches_live_queue() {
+    use crate::constants::MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER;
+
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    // No queue yet.
+    assert_eq!(alice.media_queue_depth(&id("bob")), 0);
+
+    // Saturate.
+    for i in 0..MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER {
+        alice
+            .send_media(
+                &id("bob"),
+                vec![i as u8; 512],
+                &format!("l-{}.bin", i),
+                ContentType::File,
+                None,
+            )
+            .unwrap();
+    }
+    assert_eq!(alice.media_queue_depth(&id("bob")), 0);
+
+    // Three more park.
+    for i in 0..3 {
+        alice
+            .send_media(
+                &id("bob"),
+                vec![7u8 + i; 512],
+                &format!("p-{}.bin", i),
+                ContentType::File,
+                None,
+            )
+            .unwrap();
+        assert_eq!(alice.media_queue_depth(&id("bob")), (i + 1) as usize);
+    }
+
+    // Depth is per-recipient — a different peer has none.
+    assert_eq!(alice.media_queue_depth(&id("carol")), 0);
+}
+
+#[test]
+fn media_queue_emits_enqueued_and_dequeued_events() {
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    let events = capture_all_events(&mut alice);
+
+    // Saturate (no queue event yet — these are live sends).
+    let mut live_ids: Vec<String> = Vec::new();
+    for i in 0..crate::constants::MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER {
+        live_ids.push(
+            alice
+                .send_media(
+                    &id("bob"),
+                    vec![i as u8; 512],
+                    &format!("l-{}.bin", i),
+                    ContentType::File,
+                    None,
+                )
+                .unwrap(),
+        );
+    }
+
+    let parked = alice
+        .send_media(
+            &id("bob"),
+            vec![9u8; 512],
+            "p.bin",
+            ContentType::File,
+            None,
+        )
+        .unwrap();
+
+    // Exactly one MediaQueueEnqueued, carrying our file_id and depth=1.
+    let enq_count: Vec<_> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::MediaQueueEnqueued {
+                file_id,
+                queue_depth,
+                ..
+            } if file_id == &parked => Some(*queue_depth),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(enq_count, vec![1]);
+
+    // Draining a live transfer fires MediaQueueDequeued for the parked id.
+    complete_outbound_transfer(&mut alice, &live_ids[0]);
+
+    let deq_file_ids: Vec<_> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::MediaQueueDequeued { file_id, .. } => Some(file_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(deq_file_ids, vec![parked]);
+}
+
+#[test]
+fn media_queue_sweep_times_out_pathologically_stuck_entries() {
+    // Simulate a queued transfer whose live slot never opens: the stale
+    // sweep retires the queued entry and emits the matching failure
+    // events so the caller is not left waiting on a file_id forever.
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    for i in 0..crate::constants::MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER {
+        alice
+            .send_media(
+                &id("bob"),
+                vec![i as u8; 512],
+                &format!("l-{}.bin", i),
+                ContentType::File,
+                None,
+            )
+            .unwrap();
+    }
+
+    let events = capture_all_events(&mut alice);
+    let parked = alice
+        .send_media(
+            &id("bob"),
+            vec![9u8; 512],
+            "p.bin",
+            ContentType::File,
+            None,
+        )
+        .unwrap();
+    assert_eq!(alice.media_queue_depth(&id("bob")), 1);
+
+    // Backdate the queued entry past the max wait.
+    use crate::constants::MEDIA_QUEUE_WAIT_TIMEOUT_SECS;
+    use std::time::Duration;
+    let backdate = Duration::from_secs(MEDIA_QUEUE_WAIT_TIMEOUT_SECS + 60);
+    if let Some(queue) = alice.pending_media_queues.get_mut(&id("bob")) {
+        for entry in queue.iter_mut() {
+            entry.enqueued_at = entry.enqueued_at.checked_sub(backdate).unwrap();
+        }
+    }
+
+    alice.sweep_stale_pending_media();
+
+    assert_eq!(
+        alice.media_queue_depth(&id("bob")),
+        0,
+        "the stuck queued entry must be swept"
+    );
+
+    let timeouts: Vec<_> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::MediaQueueTimeout { file_id, .. } => Some(file_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(timeouts, vec![parked.clone()]);
+
+    let failures: Vec<_> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::MediaSendFailed {
+                file_id, reason, ..
+            } if file_id == &parked => Some(reason.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failures, vec!["queue_wait_timeout".to_string()]);
+}
+
+#[test]
+fn media_queue_hard_cap_still_rejects_when_queue_is_full() {
+    use crate::constants::{
+        MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER, MAX_PENDING_MEDIA_QUEUE_DEPTH_PER_PEER,
+    };
+
+    let (mut alice, _alice_handle) = media_test_protocol("alice");
+    let (mut bob, _bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    // Saturate live.
+    for i in 0..MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER {
+        alice
+            .send_media(
+                &id("bob"),
+                vec![i as u8; 256],
+                &format!("l-{}.bin", i),
+                ContentType::File,
+                None,
+            )
+            .unwrap();
+    }
+
+    // Fill the queue to its hard cap.
+    for i in 0..MAX_PENDING_MEDIA_QUEUE_DEPTH_PER_PEER {
+        alice
+            .send_media(
+                &id("bob"),
+                vec![7u8; 256],
+                &format!("p-{}.bin", i),
+                ContentType::File,
+                None,
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        alice.media_queue_depth(&id("bob")),
+        MAX_PENDING_MEDIA_QUEUE_DEPTH_PER_PEER
+    );
+
+    // One beyond MUST surface the terminal cap error — the queue cannot
+    // grow without bound and a saturated recipient has to tell the caller
+    // to stop firing.
+    let err = alice
+        .send_media(
+            &id("bob"),
+            vec![0u8; 256],
+            "over.bin",
+            ContentType::File,
+            None,
+        )
+        .expect_err("beyond-queue-cap send must fail");
+    assert!(
+        matches!(err, Error::MediaTransferLimit(_)),
+        "unexpected error: {err:?}"
     );
 }

@@ -283,6 +283,9 @@ final class NamespaceLibrary {
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging() != ((short) 42857)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_media_queue_depth() != ((short) 45621)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops() != ((short) 54486)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }

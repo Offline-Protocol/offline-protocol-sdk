@@ -6185,6 +6185,24 @@ impl OfflineProtocol {
         }
     }
 
+    /// Returns the number of outbound media transfers currently parked
+    /// behind an already-in-flight transfer to `recipient`.
+    ///
+    /// Calling `send_media` / `send_media_rich` / `send_file` toward a
+    /// recipient whose concurrent-transfer slots are full accepts the
+    /// transfer and parks its bytes on a per-recipient FIFO queue instead
+    /// of returning `MediaTransferLimit`. This method reports the current
+    /// queue depth so an app that fires a burst of sends can render
+    /// "queued (N ahead)" alongside the live transfers.
+    ///
+    /// Returns 0 when the recipient has no queue. 0 does not mean "slots
+    /// available" — the recipient's active slots may still be full; it
+    /// means no transfers are *parked* behind them.
+    pub fn get_media_queue_depth(&self, recipient: String) -> Result<u32, ProtocolError> {
+        let protocol = self.lock_inner()?;
+        Ok(protocol.media_queue_depth(&recipient) as u32)
+    }
+
     // ========================================================================
     // NETWORK VISUALIZATION AND METRICS
     // ========================================================================

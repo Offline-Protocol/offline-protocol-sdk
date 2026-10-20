@@ -3430,10 +3430,12 @@ fn a_document_layer_transfer_is_never_sent_unsealed() {
 fn internal_transfers_leave_the_application_a_slot() {
     // The in-flight dedup stops a second copy of one transfer, not two
     // different ones, and two different ones are ordinary: a document
-    // snapshot and an answered blob request are separate errands to the same
-    // peer. Both slots filled by them fails the application's own send with
-    // a limit whose cause it cannot see, because what holds the slots is
-    // invisible to it by design.
+    // snapshot and an answered blob request are separate errands to the
+    // same peer. The second internal errand parks on the per-recipient
+    // FIFO queue rather than taking the app's live slot — the per-peer
+    // cap on live transfers is what bounds the ratchet gap, and the queue
+    // is the mechanism that keeps the live-slot count intact without
+    // telling the caller "retry later".
     let (mut alice, mut bob) = pair();
     let space = Node::space_for(&bob);
 
@@ -3450,18 +3452,23 @@ fn internal_transfers_leave_the_application_a_slot() {
     assert_eq!(internal(&alice), 1, "the document must be on its way");
 
     // A different internal errand to the same peer, which the dedup does not
-    // cover because it is not the same transfer.
+    // cover because it is not the same transfer. Under the queue model it
+    // parks silently (data-purposed sends have no app-facing identity to
+    // report an enqueue against). The invariant that still matters: the
+    // first live internal transfer is NOT displaced, and the app's own
+    // send must still have a live slot.
     let blob = vec![7u8; 32 * 1024];
     let hash = OfflineProtocol::data_attachment_hash(&blob);
-    let err = alice
+    alice
         .protocol
         .data_provide_attachment(&space, &bob.address, &hash, blob)
-        .expect_err("a second internal transfer must not take the app's slot");
-    assert!(
-        matches!(err, crate::Error::MediaTransferLimit(_)),
-        "unexpected refusal: {err:?}"
-    );
+        .expect("a second internal errand must park on the queue, not fail");
     assert_eq!(internal(&alice), 1);
+    assert_eq!(
+        alice.protocol.media_queue_depth(&bob.address),
+        1,
+        "the parked internal errand must be visible on the queue depth"
+    );
 
     // The slot the cap kept is the one that matters.
     alice

@@ -729,6 +729,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging() != 42857:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_media_queue_depth() != 45621:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops() != 54486:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_latency() != 20827:
@@ -1291,6 +1293,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_id
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_media_queue_depth.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_media_queue_depth.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops.restype = ctypes.c_uint16
@@ -2261,6 +2266,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_is_charg
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_is_charging.restype = ctypes.c_int8
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_media_queue_depth.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_media_queue_depth.restype = ctypes.c_uint32
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_hops.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -10190,6 +10201,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def get_is_charging(self, ) -> bool:
         raise NotImplementedError
+    def get_media_queue_depth(self, recipient: str) -> int:
+        raise NotImplementedError
     def get_median_hops(self, ) -> int:
         raise NotImplementedError
     def get_median_latency(self, ) -> int:
@@ -11153,6 +11166,21 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_is_charging,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def get_media_queue_depth(self, recipient: str) -> int:
+        
+        _UniffiFfiConverterString.check_lower(recipient)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(recipient),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterUInt32.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_media_queue_depth,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)

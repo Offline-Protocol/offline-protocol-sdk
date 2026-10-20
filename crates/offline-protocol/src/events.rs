@@ -1949,6 +1949,52 @@ pub enum Event {
         /// Why it could not be sent.
         reason: String,
     },
+
+    /// An outbound media transfer was accepted but held back behind an
+    /// already-in-flight transfer to the same recipient. The call that
+    /// enqueued it returned the `file_id` immediately; this event names the
+    /// moment the SDK took custody and parked it. Dispatch follows once the
+    /// recipient's in-flight slot opens, which emits
+    /// [`Event::MediaQueueDequeued`] with the matching `file_id`.
+    MediaQueueEnqueued {
+        /// File identifier of the queued transfer.
+        file_id: String,
+        /// Recipient's user ID.
+        recipient: String,
+        /// Number of transfers now parked for this recipient (including this
+        /// one). Useful for a UI that wants to show "queued (3 ahead)".
+        queue_depth: u32,
+    },
+
+    /// A previously enqueued outbound media transfer was dispatched to the
+    /// wire. Pairs with the earlier [`Event::MediaQueueEnqueued`] under the
+    /// same `file_id`. `wait_ms` is wall-clock milliseconds the transfer sat
+    /// in the per-recipient queue.
+    MediaQueueDequeued {
+        /// File identifier of the dispatched transfer.
+        file_id: String,
+        /// Recipient's user ID.
+        recipient: String,
+        /// Queue depth remaining after this dispatch (0 when the queue is
+        /// now drained).
+        queue_depth: u32,
+        /// Milliseconds spent waiting in the queue before dispatch.
+        wait_ms: u64,
+    },
+
+    /// A queued outbound media transfer sat past the max wait and was
+    /// discarded. No chunks ever reached the wire; the SDK's crash-recovery
+    /// descriptor was not persisted because the transfer never started.
+    /// The matching [`Event::MediaSendFailed`] follows so apps that render
+    /// only the failure surface still learn.
+    MediaQueueTimeout {
+        /// File identifier of the discarded transfer.
+        file_id: String,
+        /// Recipient's user ID.
+        recipient: String,
+        /// Milliseconds the transfer sat in the queue before timing out.
+        wait_ms: u64,
+    },
 }
 
 /// Member entry in GroupInfo.
@@ -2227,6 +2273,39 @@ impl Event {
             file_id,
             recipient,
             reason,
+        }
+    }
+
+    /// Creates a MediaQueueEnqueued event.
+    pub fn media_queue_enqueued(file_id: String, recipient: String, queue_depth: u32) -> Self {
+        Self::MediaQueueEnqueued {
+            file_id,
+            recipient,
+            queue_depth,
+        }
+    }
+
+    /// Creates a MediaQueueDequeued event.
+    pub fn media_queue_dequeued(
+        file_id: String,
+        recipient: String,
+        queue_depth: u32,
+        wait_ms: u64,
+    ) -> Self {
+        Self::MediaQueueDequeued {
+            file_id,
+            recipient,
+            queue_depth,
+            wait_ms,
+        }
+    }
+
+    /// Creates a MediaQueueTimeout event.
+    pub fn media_queue_timeout(file_id: String, recipient: String, wait_ms: u64) -> Self {
+        Self::MediaQueueTimeout {
+            file_id,
+            recipient,
+            wait_ms,
         }
     }
 
@@ -3023,6 +3102,9 @@ impl Event {
             Self::DataAttachmentReceived { .. } => "protocol.data.attachment_received",
             Self::DataAttachmentUnavailable { .. } => "protocol.data.attachment_unavailable",
             Self::DataDocUnsyncable { .. } => "protocol.data.doc_unsyncable",
+            Self::MediaQueueEnqueued { .. } => "protocol.media_queue.enqueued",
+            Self::MediaQueueDequeued { .. } => "protocol.media_queue.dequeued",
+            Self::MediaQueueTimeout { .. } => "protocol.media_queue.timeout",
         }
     }
 }
@@ -3948,6 +4030,38 @@ impl fmt::Debug for Event {
                 .field("group_id", group_id)
                 .field("new_name", new_name)
                 .field("renamed_by", &"[REDACTED]")
+                .finish(),
+            Self::MediaQueueEnqueued {
+                file_id,
+                recipient: _,
+                queue_depth,
+            } => f
+                .debug_struct("MediaQueueEnqueued")
+                .field("file_id", file_id)
+                .field("recipient", &"[REDACTED]")
+                .field("queue_depth", queue_depth)
+                .finish(),
+            Self::MediaQueueDequeued {
+                file_id,
+                recipient: _,
+                queue_depth,
+                wait_ms,
+            } => f
+                .debug_struct("MediaQueueDequeued")
+                .field("file_id", file_id)
+                .field("recipient", &"[REDACTED]")
+                .field("queue_depth", queue_depth)
+                .field("wait_ms", wait_ms)
+                .finish(),
+            Self::MediaQueueTimeout {
+                file_id,
+                recipient: _,
+                wait_ms,
+            } => f
+                .debug_struct("MediaQueueTimeout")
+                .field("file_id", file_id)
+                .field("recipient", &"[REDACTED]")
+                .field("wait_ms", wait_ms)
                 .finish(),
         }
     }

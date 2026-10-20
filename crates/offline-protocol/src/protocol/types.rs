@@ -2698,6 +2698,28 @@ pub(crate) struct PendingMediaMetadataEntry {
     pub(crate) data_purpose: Option<crate::media_envelope::DataPurpose>,
 }
 
+/// A media transfer that was accepted at the API boundary but held back
+/// behind an already-in-flight transfer to the same recipient.
+///
+/// The caller already received the `file_id`; the SDK owns the bytes until a
+/// slot opens on the recipient, at which point this record feeds back into
+/// `send_media_inner` for the normal dispatch path. A record older than
+/// [`crate::constants::MEDIA_QUEUE_WAIT_TIMEOUT_SECS`] is dropped by the
+/// stale-sweep: the honest surface for "this transfer never got to the
+/// wire" is a loud `Event::MediaQueueTimeout` + `Event::MediaSendFailed`
+/// pair, not a transfer whose `file_id` lingers forever.
+#[derive(Clone)]
+pub(crate) struct PendingMediaTransfer {
+    pub(crate) file_id: String,
+    pub(crate) recipient: String,
+    pub(crate) file_data: Vec<u8>,
+    pub(crate) file_name: String,
+    pub(crate) content_type: ContentType,
+    pub(crate) options: crate::protocol::types::MediaSendOptions,
+    pub(crate) data_purpose: Option<crate::media_envelope::DataPurpose>,
+    pub(crate) enqueued_at: Instant,
+}
+
 #[derive(Clone)]
 pub(crate) struct OutboundMediaTransfer {
     pub(crate) content_type: ContentType,

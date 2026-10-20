@@ -58,6 +58,7 @@ EXPOSED: frozenset[str] = frozenset(
         "send_file",
         "get_file_progress",
         "cancel_file_transfer",
+        "get_media_queue_depth",
         # secure sessions
         "is_mls_initialized",
         "has_pending_key_package",

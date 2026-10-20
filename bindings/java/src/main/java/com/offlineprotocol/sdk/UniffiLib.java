@@ -830,6 +830,15 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_media_queue_depth
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_media_queue_depth = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_media_queue_depth", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_INT, java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static int uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_media_queue_depth(long ptr, java.lang.foreign.MemorySegment recipient, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            return (int) MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_media_queue_depth.invokeExact(ptr, recipient, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_hops
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_hops = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_hops", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_BYTE, java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.ADDRESS));
 
@@ -3365,6 +3374,15 @@ final class UniffiLib {
     static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging() {
         try {
             return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_media_queue_depth
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_media_queue_depth = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_media_queue_depth", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_media_queue_depth() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_media_queue_depth.invokeExact();
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 

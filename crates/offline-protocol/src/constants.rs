@@ -165,6 +165,31 @@ const _: () = assert!(
 /// that error explainable by what the application itself is doing.
 pub const MAX_CONCURRENT_INTERNAL_MEDIA_TRANSFERS_PER_PEER: usize = 1;
 
+/// Longest wall-clock time a queued outbound media transfer may wait for the
+/// recipient's in-flight slot to open before the SDK gives up on dispatching
+/// it. A pathologically stuck recipient queue therefore surfaces as a
+/// timeout (an `Event::MediaQueueTimeout` + `Event::MediaSendFailed` pair),
+/// not a hang that holds the caller's `file_id` forever.
+///
+/// Five minutes is the same ceiling the per-transfer stale-timeout uses — a
+/// transfer whose chunks could not make it to the wire within that window
+/// is already given up on, so a queued transfer waiting longer than that
+/// for its slot is in the same unhealthy-link territory.
+pub const MEDIA_QUEUE_WAIT_TIMEOUT_SECS: u64 = 300;
+
+/// How deep the per-recipient outbound queue is allowed to grow before new
+/// transfers are refused with [`crate::Error::MediaTransferLimit`] again.
+///
+/// The queue is the mechanism that turns the per-peer concurrent-transfer
+/// cap into "wait" rather than "fail" at the API boundary, but the queue
+/// itself is bounded: every queued transfer still holds its chunk bytes in
+/// memory, so an unbounded queue would turn a saturated recipient into
+/// unbounded RSS. 32 is the point where a caller firing an open loop of
+/// `sendFile` toward one recipient hears a terminal error and stops
+/// retrying, instead of growing the SDK's working set until the host
+/// kills it.
+pub const MAX_PENDING_MEDIA_QUEUE_DEPTH_PER_PEER: usize = 32;
+
 /// Metadata key indicating preferred transport for a message.
 pub const TRANSPORT_PREFERENCE_KEY: &str = "transport_preference";
 

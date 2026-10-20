@@ -1033,6 +1033,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging(
     ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_media_queue_depth(
+    ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_latency(
@@ -1544,6 +1546,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_is_charging(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_media_queue_depth(`ptr`: Long,`recipient`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_hops(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_latency(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
@@ -2205,6 +2209,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging() and 0xFFFF) != 42857) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_media_queue_depth() and 0xFFFF) != 45621) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops() and 0xFFFF) != 54486) {
@@ -4455,6 +4462,8 @@ public interface OfflineProtocolInterface {
     
     fun `getIsCharging`(): kotlin.Boolean
     
+    fun `getMediaQueueDepth`(`recipient`: kotlin.String): kotlin.UInt
+    
     fun `getMedianHops`(): kotlin.UByte
     
     fun `getMedianLatency`(): kotlin.ULong
@@ -5475,6 +5484,21 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_is_charging(
         it,
         _status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `getMediaQueueDepth`(`recipient`: kotlin.String): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_media_queue_depth(
+        it,
+        
+        FfiConverterString.lower(`recipient`),_status)
 }
     }
     )

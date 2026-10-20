@@ -1465,6 +1465,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func getIsCharging()  -> Bool
     
+    func getMediaQueueDepth(recipient: String) throws  -> UInt32
+    
     func getMedianHops()  -> UInt8
     
     func getMedianLatency()  -> UInt64
@@ -2226,6 +2228,16 @@ open func getIsCharging() -> Bool  {
         uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_is_charging(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+    
+open func getMediaQueueDepth(recipient: String)throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_media_queue_depth(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(recipient),uniffiCallStatus
     )
 })
 }
@@ -10615,6 +10627,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging() != 42857) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_media_queue_depth() != 45621) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops() != 54486) {

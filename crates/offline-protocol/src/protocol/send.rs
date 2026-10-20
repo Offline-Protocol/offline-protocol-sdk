@@ -5,18 +5,19 @@ use super::{
     base64_encode, internal_prefixes, lifetime_expired, lock_shared_state, CoalescedAcks,
     ConnectionAcceptedPayload, ConnectionRequestPayload, KeyPackagePayload, MediaSendOptions,
     MediaTransferDescriptor, OfflineProtocol, OutboundMediaTransfer, OutboundSendPreparation,
-    OutboxEntry, OutboxReseal, PendingConnectionRequest, PendingMessage, PendingProvenance,
-    PresencePayload, ProtocolState, ReadReceiptPayload, RichPayloadV1, RichSendExtras,
-    SendMessageOptions, TypingIndicatorPayload, WelcomeDeliveryState, MAX_INITIAL_MESSAGE_BYTES,
-    MAX_KEY_PACKAGE_SENT_TO, MAX_MESSAGE_CONTENT_BYTES, MAX_PENDING_CONNECTION_REQUESTS,
-    MAX_PENDING_EXPIRIES_PER_PASS, MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER,
-    MAX_PENDING_MESSAGE_BYTES_GLOBAL, MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS,
-    MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PEER_SEND_WINDOW,
-    PENDING_CONNECTION_REQUEST_TTL, RESEAL_GAP_BUDGET, RESEAL_HARD_LIMIT, RICH_PAYLOAD_V1,
-    SEND_DEFER_REASON_ACK_CAPACITY, SEND_DEFER_REASON_PEER_WINDOW,
-    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, SEND_FAIL_REASON_RELAY_PUSHED,
-    SEND_FAIL_REASON_RELAY_PUSHED_STORED, SEND_FAIL_REASON_RELAY_STORED,
-    SEND_FAIL_REASON_TRANSPORT, WELCOME_NO_CARRIER_RETRY_SECS, WELCOME_UNREACHABLE_RETRY_CAP_SECS,
+    OutboxEntry, OutboxReseal, PendingConnectionRequest, PendingMediaTransfer, PendingMessage,
+    PendingProvenance, PresencePayload, ProtocolState, ReadReceiptPayload, RichPayloadV1,
+    RichSendExtras, SendMessageOptions, TypingIndicatorPayload, WelcomeDeliveryState,
+    MAX_INITIAL_MESSAGE_BYTES, MAX_KEY_PACKAGE_SENT_TO, MAX_MESSAGE_CONTENT_BYTES,
+    MAX_PENDING_CONNECTION_REQUESTS, MAX_PENDING_EXPIRIES_PER_PASS, MAX_PENDING_MESSAGES_GLOBAL,
+    MAX_PENDING_MESSAGES_PER_PEER, MAX_PENDING_MESSAGE_BYTES_GLOBAL,
+    MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS, MAX_RICH_EXTRAS_BYTES,
+    MLS_ENVELOPE_COMPACT_V1, PEER_SEND_WINDOW, PENDING_CONNECTION_REQUEST_TTL, RESEAL_GAP_BUDGET,
+    RESEAL_HARD_LIMIT, RICH_PAYLOAD_V1, SEND_DEFER_REASON_ACK_CAPACITY,
+    SEND_DEFER_REASON_PEER_WINDOW, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE,
+    SEND_FAIL_REASON_RELAY_PUSHED, SEND_FAIL_REASON_RELAY_PUSHED_STORED,
+    SEND_FAIL_REASON_RELAY_STORED, SEND_FAIL_REASON_TRANSPORT, WELCOME_NO_CARRIER_RETRY_SECS,
+    WELCOME_UNREACHABLE_RETRY_CAP_SECS,
 };
 use super::{classify_transport_send_error, send_failure_token};
 use crate::constants::{
@@ -2661,6 +2662,11 @@ impl OfflineProtocol {
 
         let recipient_str: String = recipient.into();
         let file_name_str: String = file_name.into();
+        // Preserve the full argument shape so a cap-check miss can park this
+        // call on the per-recipient queue and have a later dispatcher re-enter
+        // this function with the same inputs.
+        let options_for_queue = options.clone();
+        let data_purpose_for_queue = data_purpose.clone();
         let media_metadata = options.media_metadata;
         Self::validate_outbound_recipient(&recipient_str)?;
         // Before any transfer state exists, like the recipient check.
@@ -2796,6 +2802,17 @@ impl OfflineProtocol {
             // bounded number of generations — cap concurrent transfers so
             // the combined in-flight windows cannot push a delayed chunk
             // beyond that tolerance and permanently stall it.
+            //
+            // Hitting the cap used to be a terminal `MediaTransferLimit`
+            // error at the API boundary. It is now a parking signal: the
+            // call accepts the transfer, parks its bytes on a per-recipient
+            // FIFO queue, and returns the pre-allocated `file_id`. The
+            // dispatcher re-enters this function for the queued transfer
+            // once one of the recipient's active slots frees. The queue
+            // itself is bounded by `MAX_PENDING_MEDIA_QUEUE_DEPTH_PER_PEER`
+            // so a saturated recipient still surfaces a terminal error
+            // instead of growing the SDK's working set until the host
+            // kills it.
             use crate::constants::{
                 MAX_CONCURRENT_INTERNAL_MEDIA_TRANSFERS_PER_PEER,
                 MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER,
@@ -2805,9 +2822,7 @@ impl OfflineProtocol {
                 .values()
                 .filter(|transfer| transfer.recipient == recipient_str)
                 .count();
-            if active_transfers >= MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER {
-                return Err(Error::MediaTransferLimit(recipient_str));
-            }
+            let main_cap_hit = active_transfers >= MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER;
 
             // An SDK-internal transfer takes at most one of those slots.
             // The cap above bounds the ratchet gap and so cannot be raised
@@ -2816,10 +2831,7 @@ impl OfflineProtocol {
             // copy of one transfer, not two different ones, and two
             // different ones are ordinary here: a document snapshot and an
             // answered blob request are separate errands to the same peer.
-            // Filling both slots with them fails the app's own send with a
-            // limit whose cause it cannot see, because what holds the slots
-            // is invisible to it by design.
-            if data_purpose.is_some() {
+            let internal_cap_hit = if data_purpose.is_some() {
                 let internal_transfers = self
                     .outbound_media_transfers
                     .values()
@@ -2827,9 +2839,24 @@ impl OfflineProtocol {
                         transfer.recipient == recipient_str && transfer.data_purpose.is_some()
                     })
                     .count();
-                if internal_transfers >= MAX_CONCURRENT_INTERNAL_MEDIA_TRANSFERS_PER_PEER {
-                    return Err(Error::MediaTransferLimit(recipient_str));
-                }
+                internal_transfers >= MAX_CONCURRENT_INTERNAL_MEDIA_TRANSFERS_PER_PEER
+            } else {
+                false
+            };
+
+            if main_cap_hit || internal_cap_hit {
+                let file_id = options_for_queue.file_id.clone().unwrap_or_else(|| {
+                    format!("file_{}", MessageId::new().as_str())
+                });
+                return self.enqueue_pending_media_transfer(
+                    file_id,
+                    recipient_str,
+                    file_data,
+                    file_name_str,
+                    content_type,
+                    options_for_queue,
+                    data_purpose_for_queue,
+                );
             }
         } else if self.config.encryption.require_encryption {
             return Err(Error::EncryptFailed(
@@ -2961,6 +2988,279 @@ impl OfflineProtocol {
         )?;
 
         Ok(file_id)
+    }
+
+    /// Parks an accepted outbound media transfer on the recipient's FIFO
+    /// queue. Returns the `file_id` the caller advertises as the transfer's
+    /// identity; the dispatcher re-enters `send_media_inner` with the parked
+    /// bytes once the recipient's in-flight slots free up.
+    ///
+    /// A hard cap on queue depth stops a saturated recipient from growing
+    /// the SDK's working set without bound: once the queue holds
+    /// `MAX_PENDING_MEDIA_QUEUE_DEPTH_PER_PEER` entries, this surfaces a
+    /// terminal [`Error::MediaTransferLimit`] instead of enqueueing — the
+    /// one place the error still fires from the public send path.
+    fn enqueue_pending_media_transfer(
+        &mut self,
+        file_id: String,
+        recipient: String,
+        file_data: Vec<u8>,
+        file_name: String,
+        content_type: ContentType,
+        options: MediaSendOptions,
+        data_purpose: Option<crate::media_envelope::DataPurpose>,
+    ) -> Result<String> {
+        use crate::constants::MAX_PENDING_MEDIA_QUEUE_DEPTH_PER_PEER;
+
+        // A `file_id` already live in the active-transfer map was caught
+        // earlier in `send_media_inner`; the only remaining collision
+        // concern is a conflict against another entry already parked for
+        // this same recipient. Reject rather than silently overwrite — the
+        // caller is sending two transfers under the same id and should
+        // hear about it on this call rather than through a mystery wire
+        // outcome later.
+        if let Some(queue) = self.pending_media_queues.get(&recipient) {
+            if queue.iter().any(|entry| entry.file_id == file_id) {
+                return Err(Error::InvalidArgument(format!(
+                    "file_id {} already has a queued outbound transfer",
+                    file_id
+                )));
+            }
+            if queue.len() >= MAX_PENDING_MEDIA_QUEUE_DEPTH_PER_PEER {
+                return Err(Error::MediaTransferLimit(recipient));
+            }
+        }
+
+        let entry = PendingMediaTransfer {
+            file_id: file_id.clone(),
+            recipient: recipient.clone(),
+            file_data,
+            file_name,
+            content_type,
+            options,
+            data_purpose,
+            enqueued_at: Instant::now(),
+        };
+
+        let queue = self
+            .pending_media_queues
+            .entry(recipient.clone())
+            .or_default();
+        queue.push_back(entry);
+        let depth = queue.len() as u32;
+
+        debug!(
+            file_id = %file_id,
+            recipient = %recipient,
+            queue_depth = depth,
+            "Parking outbound media transfer behind an in-flight slot"
+        );
+
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            state.emit_event(Event::media_queue_enqueued(
+                file_id.clone(),
+                recipient,
+                depth,
+            ));
+        }
+
+        Ok(file_id)
+    }
+
+    /// Returns the number of outbound media transfers currently parked
+    /// behind an in-flight transfer to `recipient`. 0 when the recipient
+    /// has no queue.
+    ///
+    /// This counts only transfers waiting on a slot; a transfer that has
+    /// already started (its chunks are being pumped) is not in this count.
+    pub fn media_queue_depth(&self, recipient: &str) -> usize {
+        self.pending_media_queues
+            .get(recipient)
+            .map(|q| q.len())
+            .unwrap_or(0)
+    }
+
+    /// Dispatches the next parked media transfer for `recipient` if one is
+    /// waiting and a slot has just opened.
+    ///
+    /// Called from every place `outbound_media_transfers` loses an entry
+    /// for this recipient: happy-path completion, abort, stale sweep. A
+    /// loop rather than tail-recursion so a long queue drains without
+    /// unbounded stack depth; each iteration pops one entry and either
+    /// dispatches it (one slot was freed, so one dispatch — subsequent
+    /// slots open on their own completions) or walks past a timed-out
+    /// entry (emitting the matched failure events) and tries the next one.
+    pub(super) fn maybe_dispatch_pending_media(&mut self, recipient: &str) {
+        use crate::constants::MEDIA_QUEUE_WAIT_TIMEOUT_SECS;
+        let timeout = StdDuration::from_secs(MEDIA_QUEUE_WAIT_TIMEOUT_SECS);
+
+        loop {
+            let Some(entry) = self.pop_next_pending(recipient) else {
+                return;
+            };
+            let waited = entry.enqueued_at.elapsed();
+            let waited_ms = waited.as_millis().min(u64::MAX as u128) as u64;
+            if waited > timeout {
+                // The entry sat past the max wait; honour the ceiling and
+                // surface both the diagnostic (`MediaQueueTimeout`) and the
+                // user-facing failure (`MediaSendFailed`) rather than
+                // silently discarding it. A data-purposed transfer still
+                // suppresses the user-facing event, same rule as
+                // `abort_outbound_media_transfer`.
+                let is_data = entry.data_purpose.is_some();
+                let file_id = entry.file_id.clone();
+                let recipient_owned = entry.recipient.clone();
+                warn!(
+                    file_id = %file_id,
+                    recipient = %recipient_owned,
+                    waited_ms = waited_ms,
+                    "Discarding queued media transfer that waited past the max"
+                );
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::media_queue_timeout(
+                        file_id.clone(),
+                        recipient_owned.clone(),
+                        waited_ms,
+                    ));
+                    if !is_data {
+                        state.emit_event(Event::media_send_failed(
+                            file_id,
+                            recipient_owned,
+                            "queue_wait_timeout".to_string(),
+                        ));
+                    }
+                }
+                continue;
+            }
+
+            // The pop happened before we had any dispatch outcome, so
+            // depth now reflects what remains after the dispatch (even
+            // when the dispatch itself fails). An application that
+            // listens for depth to drop to 0 sees that transition even if
+            // the next transfer could not land.
+            let depth_after = self.media_queue_depth(recipient) as u32;
+            let file_id = entry.file_id.clone();
+            let recipient_owned = entry.recipient.clone();
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::media_queue_dequeued(
+                    file_id.clone(),
+                    recipient_owned.clone(),
+                    depth_after,
+                    waited_ms,
+                ));
+            }
+
+            // Pin the preserved file_id so the dispatched call does not
+            // mint a fresh one — the caller already received this id as
+            // the transfer's identity.
+            let mut options = entry.options;
+            options.file_id = Some(file_id.clone());
+
+            match self.send_media_inner(
+                entry.recipient,
+                entry.file_data,
+                entry.file_name,
+                entry.content_type,
+                options,
+                entry.data_purpose.clone(),
+            ) {
+                Ok(_) => {
+                    // One slot opened, one dispatch — stop. Subsequent
+                    // slots fire their own `maybe_dispatch_pending_media`
+                    // from their completion/abort hooks.
+                    return;
+                }
+                Err(err) => {
+                    // Dispatch failed (session gone away, user blocked
+                    // mid-wait, pack validation drift). Surface it with
+                    // the file_id the caller already holds and keep
+                    // walking the queue so a transient failure on one
+                    // entry does not strand everything behind it.
+                    let is_data = entry.data_purpose.is_some();
+                    warn!(
+                        file_id = %file_id,
+                        recipient = %recipient_owned,
+                        error = %err,
+                        "Queued media transfer failed on dispatch"
+                    );
+                    if !is_data {
+                        if let Ok(state) = lock_shared_state(&self.shared_state) {
+                            state.emit_event(Event::media_send_failed(
+                                file_id,
+                                recipient_owned,
+                                format!("dispatch_failed: {}", err),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Pops the oldest parked media transfer for `recipient`, cleaning up
+    /// the queue entry when it was the last one.
+    fn pop_next_pending(&mut self, recipient: &str) -> Option<PendingMediaTransfer> {
+        let queue = self.pending_media_queues.get_mut(recipient)?;
+        let popped = queue.pop_front();
+        if queue.is_empty() {
+            self.pending_media_queues.remove(recipient);
+        }
+        popped
+    }
+
+    /// Discards every queued media transfer that has waited past the
+    /// `MEDIA_QUEUE_WAIT_TIMEOUT_SECS` ceiling. Called from the periodic
+    /// stale-media sweep so a recipient whose slot never opens still
+    /// surfaces a loud failure instead of parking bytes forever.
+    pub(super) fn sweep_stale_pending_media(&mut self) {
+        use crate::constants::MEDIA_QUEUE_WAIT_TIMEOUT_SECS;
+        let timeout = StdDuration::from_secs(MEDIA_QUEUE_WAIT_TIMEOUT_SECS);
+        let now = Instant::now();
+
+        let mut timed_out: Vec<PendingMediaTransfer> = Vec::new();
+        self.pending_media_queues.retain(|_, queue| {
+            queue.retain(|entry| {
+                let waited = now.duration_since(entry.enqueued_at);
+                if waited > timeout {
+                    timed_out.push(entry.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            !queue.is_empty()
+        });
+
+        if timed_out.is_empty() {
+            return;
+        }
+        for entry in timed_out {
+            let waited_ms = now
+                .duration_since(entry.enqueued_at)
+                .as_millis()
+                .min(u64::MAX as u128) as u64;
+            let is_data = entry.data_purpose.is_some();
+            warn!(
+                file_id = %entry.file_id,
+                recipient = %entry.recipient,
+                waited_ms = waited_ms,
+                "Stale sweep discarded queued media transfer"
+            );
+            if let Ok(state) = lock_shared_state(&self.shared_state) {
+                state.emit_event(Event::media_queue_timeout(
+                    entry.file_id.clone(),
+                    entry.recipient.clone(),
+                    waited_ms,
+                ));
+                if !is_data {
+                    state.emit_event(Event::media_send_failed(
+                        entry.file_id,
+                        entry.recipient,
+                        "queue_wait_timeout".to_string(),
+                    ));
+                }
+            }
+        }
     }
 
     /// Sends a batch of file chunks, wiring each into the outbox and media tracking.
@@ -5462,7 +5762,11 @@ impl OfflineProtocol {
                     total_chunks,
                 ));
                 if completed {
-                    state.emit_event(Event::media_sent(file_id.clone(), content_type, recipient));
+                    state.emit_event(Event::media_sent(
+                        file_id.clone(),
+                        content_type,
+                        recipient.clone(),
+                    ));
                 }
             }
         }
@@ -5471,6 +5775,9 @@ impl OfflineProtocol {
             self.outbound_media_transfers.remove(&file_id);
             self.outbound_media_windows.remove(&file_id);
             self.remove_media_descriptor(&file_id);
+            // The recipient's in-flight slot just freed; dispatch the next
+            // parked transfer for the same recipient, if any.
+            self.maybe_dispatch_pending_media(&recipient);
         }
     }
 
@@ -5514,21 +5821,25 @@ impl OfflineProtocol {
         // seen. The requester's own fetch expires and can be asked again,
         // and a snapshot is re-offered by the next anti-entropy exchange, so
         // nothing is stranded by staying quiet here.
+        let recipient_for_dispatch = transfer.recipient.clone();
         if transfer.data_purpose.is_some() {
             debug!(
                 file_id = %file_id,
                 reason = %reason,
                 "A data-layer transfer was aborted; the asking side will retry"
             );
-            return;
-        }
-        if let Ok(state) = lock_shared_state(&self.shared_state) {
+        } else if let Ok(state) = lock_shared_state(&self.shared_state) {
             state.emit_event(Event::media_send_failed(
                 file_id.to_string(),
                 transfer.recipient,
                 reason.to_string(),
             ));
         }
+        // The aborted transfer's slot just freed, same as a happy-path
+        // completion — dispatch the next parked transfer for this
+        // recipient, if any, so a failed send does not strand everything
+        // waiting behind it.
+        self.maybe_dispatch_pending_media(&recipient_for_dispatch);
     }
 
     pub(super) fn cleanup_stale_media_state(&mut self, max_age: StdDuration) {
@@ -5536,6 +5847,11 @@ impl OfflineProtocol {
 
         self.pending_media_metadata
             .retain(|_, metadata| now.duration_since(metadata.last_updated_at) <= max_age);
+
+        // The queue sweep is scoped to its own ceiling, not `max_age` —
+        // a parked transfer is pre-wire state and judged against the
+        // dedicated queue-wait timeout.
+        self.sweep_stale_pending_media();
 
         let stale_outbound_file_ids: HashSet<String> = self
             .outbound_media_transfers
@@ -5552,6 +5868,20 @@ impl OfflineProtocol {
             return;
         }
 
+        // Collect the recipients whose slots are about to free so the queue
+        // can dispatch something after the retains below.
+        let freed_recipients: HashSet<String> = self
+            .outbound_media_transfers
+            .iter()
+            .filter_map(|(file_id, transfer)| {
+                if stale_outbound_file_ids.contains(file_id) {
+                    Some(transfer.recipient.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         self.outbound_media_transfers
             .retain(|file_id, _| !stale_outbound_file_ids.contains(file_id));
         self.outbound_media_chunks
@@ -5560,6 +5890,9 @@ impl OfflineProtocol {
             .retain(|file_id, _| !stale_outbound_file_ids.contains(file_id));
         for file_id in &stale_outbound_file_ids {
             self.remove_media_descriptor(file_id);
+        }
+        for recipient in freed_recipients {
+            self.maybe_dispatch_pending_media(&recipient);
         }
     }
 

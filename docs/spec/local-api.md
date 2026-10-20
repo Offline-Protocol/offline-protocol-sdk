@@ -351,6 +351,7 @@ methods a client may call before `hello`.
 | `send_file` | `recipient`, `file_data b64`, `file_name` | string (file id) |
 | `get_file_progress` | `file_id` | `{FileProgress}` or `null` |
 | `cancel_file_transfer` | `file_id` | `null` |
+| `get_media_queue_depth` | `recipient` | `number` (parked transfers for this recipient; 0 when no queue) |
 
 ### Engine: secure sessions
 
@@ -645,6 +646,9 @@ and is the one a client is written against.
 | `file_receive_failed` | `file_id`, `file_name`, `sender`, `reason` | `all` |
 | `media_sent` | `file_id`, `content_type`, `recipient` | `file_id` |
 | `media_send_failed` | `file_id`, `recipient`, `reason` | `file_id` |
+| `media_queue_enqueued` | `file_id`, `recipient`, `queue_depth #` | `file_id` |
+| `media_queue_dequeued` | `file_id`, `recipient`, `queue_depth #`, `wait_ms #` | `file_id` |
+| `media_queue_timeout` | `file_id`, `recipient`, `wait_ms #` | `file_id` |
 | `message_deferred` | `message_id`, `recipient`, `reason`, `retry_count #`, `next_retry_at #?` | `message_id` |
 | `message_retrying` | `message_id`, `recipient`, `retry_count #`, `next_retry_at #` | `message_id` |
 | `message_undeliverable` | `message_id`, `recipient`, `reason`, `file_id?` | `message_id` |

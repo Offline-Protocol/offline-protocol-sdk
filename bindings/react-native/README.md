@@ -1411,6 +1411,46 @@ const progress = await protocol.getFileProgress(fileId);
 await protocol.cancelFileTransfer(fileId);
 ```
 
+### Concurrent Sends to One Recipient
+
+`sendFile` / `sendMedia` / `sendMediaRich` toward a recipient whose
+per-peer concurrent-transfer slots are already full accepts the transfer
+and parks its bytes on a per-recipient FIFO queue instead of returning
+`MediaTransferLimit`. The call still returns a `file_id` immediately;
+dispatch follows once one of the recipient's active slots frees up.
+Sends to different recipients always run in parallel — each recipient
+has an independent queue.
+
+```typescript
+// Bursts to the same recipient drain serially instead of rejecting:
+const ids = await Promise.all([
+  protocol.sendFile({ recipient: 'bob', fileData: a, fileName: 'a.bin' }),
+  protocol.sendFile({ recipient: 'bob', fileData: b, fileName: 'b.bin' }),
+  protocol.sendFile({ recipient: 'bob', fileData: c, fileName: 'c.bin' }),
+]);
+
+// How many are still parked behind the live transfers:
+const parked = await protocol.getMediaQueueDepth('bob');
+
+// Observe the queue in flight:
+protocol.on('media_queue_enqueued', ({ file_id, recipient, queue_depth }) => {
+  console.log(`${file_id} parked behind ${queue_depth - 1} transfer(s)`);
+});
+protocol.on('media_queue_dequeued', ({ file_id, wait_ms }) => {
+  console.log(`${file_id} dispatched after ${wait_ms}ms`);
+});
+protocol.on('media_queue_timeout', ({ file_id }) => {
+  console.log(`${file_id} waited past the 5 min max and was discarded`);
+});
+```
+
+A queued transfer that waits past the 5 min max surfaces a
+`media_queue_timeout` event, matched by a terminal `media_send_failed`
+with `reason: 'queue_wait_timeout'` so apps that only render failures
+still learn. The queue has a hard depth cap of 32 per recipient — a
+caller firing an open loop past that cap gets `MediaTransferLimit` as a
+terminal error so the SDK's working set cannot grow without bound.
+
 ---
 
 ## Troubleshooting

@@ -182,6 +182,9 @@ pub(crate) mod tests {
         "protocol.data.attachment_received",
         "protocol.data.attachment_unavailable",
         "protocol.data.doc_unsyncable",
+        "protocol.media_queue.enqueued",
+        "protocol.media_queue.dequeued",
+        "protocol.media_queue.timeout",
         // MlsLifecycleEvent::*
         "mls.initialized",
         "mls.encryption_used",
@@ -369,7 +372,10 @@ pub(crate) mod tests {
             | Event::DataAttachmentRequested { .. }
             | Event::DataAttachmentReceived { .. }
             | Event::DataAttachmentUnavailable { .. }
-            | Event::DataDocUnsyncable { .. } => (),
+            | Event::DataDocUnsyncable { .. }
+            | Event::MediaQueueEnqueued { .. }
+            | Event::MediaQueueDequeued { .. }
+            | Event::MediaQueueTimeout { .. } => (),
         }
     }
 
@@ -831,6 +837,22 @@ pub(crate) mod tests {
                 doc_id: String::new(),
                 bytes: 0,
                 reason: String::new(),
+            },
+            Event::MediaQueueEnqueued {
+                file_id: String::new(),
+                recipient: String::new(),
+                queue_depth: 0,
+            },
+            Event::MediaQueueDequeued {
+                file_id: String::new(),
+                recipient: String::new(),
+                queue_depth: 0,
+                wait_ms: 0,
+            },
+            Event::MediaQueueTimeout {
+                file_id: String::new(),
+                recipient: String::new(),
+                wait_ms: 0,
             },
         ]
     }

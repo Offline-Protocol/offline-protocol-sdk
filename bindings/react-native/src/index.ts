@@ -2274,6 +2274,28 @@ export class OfflineProtocol {
   }
 
   /**
+   * Returns the number of outbound media transfers currently parked behind
+   * an already-in-flight transfer to `recipient`.
+   *
+   * `sendMedia` / `sendMediaRich` / `sendFile` toward a recipient whose
+   * per-peer concurrent-transfer slots are already full accepts the
+   * transfer and parks its bytes on a per-recipient FIFO queue instead of
+   * returning a `MediaTransferLimit` error. The call still returns a
+   * `file_id`; dispatch follows once one of the recipient's active slots
+   * frees. This method reports how many parked transfers are ahead of the
+   * next dispatch for the given recipient.
+   *
+   * 0 does NOT mean "slots available" — the recipient's live slots may
+   * still be full; it means no transfers are *parked* behind them.
+   *
+   * @param recipient - Recipient's user ID
+   * @returns Number of parked transfers (0 when no queue)
+   */
+  async getMediaQueueDepth(recipient: string): Promise<number> {
+    return await OfflineProtocolNativeModule.getMediaQueueDepth(recipient);
+  }
+
+  /**
    * Polls for the next received message
    *
    * @returns Message object if available, null otherwise

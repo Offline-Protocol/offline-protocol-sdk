@@ -47,6 +47,7 @@ public interface OfflineProtocolInterface {
     public java.util.Map<java.lang.String, java.lang.String> getGroupRoles(java.lang.String groupId) throws ProtocolException;
     public java.util.List<java.lang.Byte> getIdentityPublicKey() throws ProtocolException;
     public boolean getIsCharging();
+    public int getMediaQueueDepth(java.lang.String recipient) throws ProtocolException;
     public byte getMedianHops();
     public long getMedianLatency();
     public java.lang.String getMemberRole(java.lang.String groupId, java.lang.String userId) throws ProtocolException;

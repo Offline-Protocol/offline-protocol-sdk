@@ -3122,7 +3122,18 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.reject("ERROR_FILE_CANCEL", "Failed to cancel file transfer: ${e.message}", e)
         }
     }
-    
+
+    @ReactMethod
+    fun getMediaQueueDepth(recipient: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val depth = proto.getMediaQueueDepth(recipient)
+            promise.resolve(depth.toInt())
+        } catch (e: Exception) {
+            promise.reject("ERROR_MEDIA_QUEUE", "Failed to read media queue depth: ${e.message}", e)
+        }
+    }
+
     // ========================================================================
     // BLE TRANSPORT METHODS
     // ========================================================================

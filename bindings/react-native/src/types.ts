@@ -1572,6 +1572,46 @@ export interface MediaSendFailedEvent extends BaseEvent {
 }
 
 /**
+ * An outbound media transfer was accepted but parked behind an
+ * already-in-flight transfer to the same recipient. The call that enqueued
+ * it returned the `file_id` immediately; this event names the moment the
+ * SDK took custody and parked it. A matching `media_queue_dequeued` fires
+ * once the recipient's slot opens and the transfer dispatches.
+ */
+export interface MediaQueueEnqueuedEvent extends BaseEvent {
+  type: 'media_queue_enqueued';
+  file_id: string;
+  recipient: string;
+  queue_depth: number;
+}
+
+/**
+ * A previously enqueued outbound media transfer was dispatched to the wire.
+ * Pairs with the earlier `media_queue_enqueued` under the same `file_id`.
+ * `wait_ms` is wall-clock milliseconds the transfer sat in the per-recipient
+ * queue.
+ */
+export interface MediaQueueDequeuedEvent extends BaseEvent {
+  type: 'media_queue_dequeued';
+  file_id: string;
+  recipient: string;
+  queue_depth: number;
+  wait_ms: number;
+}
+
+/**
+ * A queued outbound media transfer sat past the max wait and was discarded.
+ * A matching `media_send_failed` with `reason: 'queue_wait_timeout'` follows
+ * so apps that only render terminal failures still learn.
+ */
+export interface MediaQueueTimeoutEvent extends BaseEvent {
+  type: 'media_queue_timeout';
+  file_id: string;
+  recipient: string;
+  wait_ms: number;
+}
+
+/**
  * A pending ACK was evicted due to capacity constraints.
  */
 export interface AckEvictedEvent extends BaseEvent {
@@ -2948,6 +2988,9 @@ export type ProtocolEvent =
   | FileReceiveFailedEvent
   | MediaSentEvent
   | MediaSendFailedEvent
+  | MediaQueueEnqueuedEvent
+  | MediaQueueDequeuedEvent
+  | MediaQueueTimeoutEvent
   | AckEvictedEvent
   | FragmentAssemblyEvictedEvent
   | DiagnosticEvent
