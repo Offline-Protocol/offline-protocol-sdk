@@ -254,7 +254,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   ("missing library stubs or py.typed marker") and every value it returned
   was `Any` in the application, although nearly every public function is
   annotated. The wheel now carries the marker, and the wheel build fails
-  if it goes missing.
+  if it goes missing. The root package also names its public surface in
+  `__all__`: under PEP 561 a type checker treats a bare `from .x import Y`
+  in `__init__.py` as private, so with the marker alone pyright (and so
+  Pylance) refused the README's own `from offline_protocol_sdk import
+  ProtocolManager`, and `mypy --strict` reported that the module "does not
+  explicitly export" it. A test pins the list to the attributes the package
+  exposes, and the wheel harness refuses a wheel without the marker.
 - **Python: a Linux box that could no longer advertise recovers on its own.**
   Linux loses track of the controller's advertising when a central-role
   connection completes while advertising is on: the controller keeps
