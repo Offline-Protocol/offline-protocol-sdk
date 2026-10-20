@@ -8,6 +8,17 @@ ignore = [
     # artifacts, and RUSTSEC-2026-0173 itself states no safe upgrade
     # exists. Re-evaluate when libcrux/hax drop the dependency.
     { id = "RUSTSEC-2026-0173", reason = "unmaintained build-time proc-macro via libcrux hax-lib; no fixed release exists; compile-time only" },
+    # Unmaintained-crate notice (not a vulnerability) for basic-toml, which
+    # reaches us only as a build dependency: offline-protocol-uniffi's build
+    # script -> uniffi 0.32 -> uniffi_build -> uniffi_bindgen -> askama 0.16 ->
+    # askama_derive, which parses its template config with it at compile time.
+    # It never links into a shipped library. uniffi 0.32.2 and askama 0.16.1
+    # are the latest releases and both still depend on it, and uniffi is
+    # pinned to 0.32 across every binding. Drop this waiver when an askama
+    # release replaces basic-toml and uniffi takes it (tracked upstream by
+    # askama-rs/askama#594, replacement drafted in askama-rs/askama#771).
+    # Mirrored in .cargo/audit.toml, which must stay a superset of this list.
+    { id = "RUSTSEC-2026-0374", reason = "basic-toml unmaintained; build-time only via uniffi_bindgen -> askama_derive template config; latest uniffi and askama still depend on it" },
     # Three 2026-07 advisories against libcrux crates that reach us only
     # through openmls_rust_crypto 0.4 -> hpke-rs 0.6 -> libcrux-sha3. The
     # vulnerable code is hpke-rs's SHAKE/ML-KEM support (incremental SHAKE
