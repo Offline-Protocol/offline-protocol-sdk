@@ -15299,6 +15299,92 @@ fn test_reseal_is_noop_without_provenance() {
     );
 }
 
+/// When the recipient's MLS session fingerprint (epoch + establishment stamp)
+/// is unchanged since the sealed bytes were produced, a retry replays the
+/// verbatim ciphertext instead of re-sealing. Advancing the sender's
+/// encryption ratchet one generation per retry under a lossy BLE link blows
+/// past the receiver's `SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE` window and
+/// surfaces as `INVALID_CIPHERTEXT`; verbatim replay keeps the generation
+/// count stable so the receiver can still open late / reordered frames.
+#[test]
+fn test_reseal_replays_verbatim_within_same_session_and_epoch() {
+    let mut alice_config = create_test_config_for_user("alice");
+    alice_config.encryption.enabled = true;
+    alice_config.encryption.store_pending = true;
+    alice_config.encryption.compact_envelope_enabled = false;
+
+    let mut alice = OfflineProtocol::new(alice_config).unwrap();
+    alice
+        .initialize_mls_for_test(Arc::new(InMemoryStorage::new()))
+        .unwrap();
+    let alice_transport = MockTransport::new(TransportType::BLE);
+    alice_transport.start().unwrap();
+    alice
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(alice_transport));
+    alice.start().unwrap();
+
+    let bob_storage = Arc::new(crate::mls::InMemoryStorage::new());
+    let bob_manager = crate::test_identity::manager_for("bob", bob_storage);
+    let bob_kp = bob_manager.get_or_create_key_package().unwrap();
+    {
+        let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        mgr.import_key_package(&id("bob"), &bob_kp.key_package_data)
+            .unwrap();
+    }
+    let welcome = {
+        let mgr = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        mgr.create_session(&id("bob")).unwrap()
+    };
+    bob_manager.join_session(&welcome).unwrap();
+    alice.confirmed_sessions.insert(id("bob"));
+
+    let msg_id = alice
+        .send_message(&id("bob"), "hello", None, None::<String>)
+        .unwrap();
+
+    let entry = alice
+        .outbox
+        .get(&msg_id)
+        .expect("encrypted DM must enter the outbox")
+        .clone();
+    let c1 = entry.message.content.clone();
+    let reseal = entry
+        .reseal
+        .as_ref()
+        .expect("encrypted DM carries re-seal provenance");
+    assert!(
+        reseal.seal_epoch.is_some(),
+        "the seal epoch must be captured on an encrypted DM"
+    );
+    assert!(
+        reseal.seal_session_established_at_ms.is_some(),
+        "the session establishment stamp must be captured on an encrypted DM"
+    );
+
+    let mut resend = entry.message.clone();
+    alice.reseal_for_resend_in_place(&mut resend);
+    assert_eq!(
+        resend.content, c1,
+        "within the same session + epoch the retry replays verbatim"
+    );
+    assert_eq!(
+        resend.id, msg_id,
+        "the message id is preserved on every retry"
+    );
+
+    // A verbatim replay still decrypts on bob's session (bob has not yet
+    // consumed that generation).
+    let enc: offline_protocol_mls::EncryptedMessage =
+        serde_json::from_str(c1.strip_prefix(internal_prefixes::ENCRYPTED).unwrap()).unwrap();
+    let pt = bob_manager.decrypt_from_user(&enc, &id("alice")).unwrap();
+    assert_eq!(
+        pt.as_deref(),
+        Some(&b"hello"[..]),
+        "verbatim resend bytes still decrypt within the same session"
+    );
+}
+
 /// An alice with a confirmed session to a bare bob manager, one encrypted DM
 /// in her outbox, and her transport handle cleared. Events land in the vec.
 fn alice_with_sealed_dm() -> (
@@ -15376,11 +15462,15 @@ fn delivered_or_failed(events: &Mutex<Vec<Event>>, msg_id: &MessageId) -> (usize
     (delivered, failed)
 }
 
-/// An `undecryptable` answer is not a delivery: the sender re-seals the DM
-/// under its current session and resends it once, same id, fresh ciphertext
-/// the recipient can open. A second answer for the same id resends nothing, so
-/// two devices cannot ping-pong; the entry stays for its retry ladder, and a
-/// real delivery ACK still settles it.
+/// An `undecryptable` answer is not a delivery: the sender resends the DM
+/// once, same id, with content the recipient can open. Within an unchanged
+/// session fingerprint that is a verbatim replay (the receiver's dedup
+/// catches a true repeat, so a verbatim ciphertext decrypts on a receiver
+/// whose pending-decryption queue previously dropped it before trying), and
+/// across a rekey it would be a fresh re-seal under the current session.
+/// A second answer for the same id resends nothing, so two devices cannot
+/// ping-pong; the entry stays for its retry ladder, and a real delivery
+/// ACK still settles it.
 #[test]
 fn test_undecryptable_ack_reseals_once_and_never_reports_delivered() {
     let (mut alice, alice_handle, bob_manager, msg_id, events) = alice_with_sealed_dm();
@@ -15393,10 +15483,15 @@ fn test_undecryptable_ack_reseals_once_and_never_reports_delivered() {
         .into_iter()
         .filter(|m| m.id == msg_id)
         .collect();
-    assert_eq!(resent.len(), 1, "exactly one re-sealed resend");
-    assert_ne!(
+    assert_eq!(resent.len(), 1, "exactly one resend");
+    // Session fingerprint has not changed between the original seal and the
+    // undecryptable-triggered resend, so the resend replays verbatim. The
+    // ciphertext still decrypts on bob's session (bob has never tried to
+    // decrypt that generation before, so his ratchet accepts it on the
+    // first attempt).
+    assert_eq!(
         resent[0].content, original,
-        "the resend carries new ciphertext"
+        "verbatim replay within an unchanged session fingerprint"
     );
     let enc: offline_protocol_mls::EncryptedMessage = serde_json::from_str(
         resent[0]

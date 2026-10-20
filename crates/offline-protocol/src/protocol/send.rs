@@ -215,6 +215,8 @@ impl OfflineProtocol {
         // each resend re-seals against the peer's current session instead of
         // replaying dead-epoch ciphertext (see `OutboxReseal`).
         if message.content.starts_with(internal_prefixes::ENCRYPTED) {
+            let (seal_epoch, seal_session_established_at_ms) =
+                self.current_session_fingerprint(&recipient_str);
             self.stage_outbox_reseal(
                 &message.id,
                 OutboxReseal {
@@ -225,6 +227,8 @@ impl OfflineProtocol {
                     content_type: message.content_type,
                     media_metadata: None,
                     rich: Some(rich).filter(|r| r.is_any()),
+                    seal_epoch,
+                    seal_session_established_at_ms,
                 },
             );
         }
@@ -354,6 +358,8 @@ impl OfflineProtocol {
         // Tier 2 provenance (see `send_message_with`): re-seal forwarded encrypted
         // DMs against the peer's current session on resend.
         if message.content.starts_with(internal_prefixes::ENCRYPTED) {
+            let (seal_epoch, seal_session_established_at_ms) =
+                self.current_session_fingerprint(&recipient_str);
             self.stage_outbox_reseal(
                 &message.id,
                 OutboxReseal {
@@ -364,6 +370,8 @@ impl OfflineProtocol {
                     content_type: message.content_type,
                     media_metadata: message.media_metadata.clone(),
                     rich: Some(rich).filter(|r| r.is_any()),
+                    seal_epoch,
+                    seal_session_established_at_ms,
                 },
             );
         }
@@ -2364,6 +2372,8 @@ impl OfflineProtocol {
                 // carries its plaintext forward so later resends re-seal against
                 // the peer's current session (see `send_message_with`).
                 if message.content.starts_with(internal_prefixes::ENCRYPTED) {
+                    let (seal_epoch, seal_session_established_at_ms) =
+                        self.current_session_fingerprint(recipient);
                     self.stage_outbox_reseal(
                         &message.id,
                         OutboxReseal {
@@ -2374,6 +2384,8 @@ impl OfflineProtocol {
                             content_type: msg.content_type,
                             media_metadata: msg.media_metadata.clone(),
                             rich: msg.rich.clone(),
+                            seal_epoch,
+                            seal_session_established_at_ms,
                         },
                     );
                 }
@@ -3302,12 +3314,41 @@ impl OfflineProtocol {
         staged
     }
 
+    /// Current MLS session fingerprint `(epoch, session_established_at_ms)`
+    /// for the 1:1 session with `recipient`. Each half is `None` when the
+    /// MLS manager is not initialized, the session does not exist, the
+    /// lock is poisoned, or the underlying read fails.
+    ///
+    /// Shallow read on purpose: callers that fall back to the pre-fix
+    /// "always re-seal" behavior on `None` stay honest when the fingerprint
+    /// is genuinely unknown — no silent "assume unchanged" shortcut.
+    ///
+    /// Both halves are needed to detect a session rebuild that lands at the
+    /// same epoch number (a torn-down-and-rebuilt 1:1 session restarts at
+    /// epoch 0): the establishment stamp distinguishes two distinct sessions
+    /// both at epoch 0, which the raw epoch alone cannot.
+    pub(super) fn current_session_fingerprint(
+        &self,
+        recipient: &str,
+    ) -> (Option<u64>, Option<u64>) {
+        let Some(mls) = self.mls_manager.as_ref() else {
+            return (None, None);
+        };
+        let Ok(manager) = mls.read() else {
+            return (None, None);
+        };
+        let epoch = manager.session_epoch(recipient).ok().flatten();
+        let established_at_ms = manager.session_established_at_ms(recipient).ok().flatten();
+        (epoch, established_at_ms)
+    }
+
     /// Re-seals an outbound encrypted DM against the recipient's *current* MLS
     /// session for a resend, returning fresh sealed content, or `None` to replay
     /// verbatim. Returns `None` when it is not a re-sealable encrypted DM, when
     /// there is no stored provenance (plaintext, media, or a pre-upgrade
-    /// persisted entry), when the session is not currently confirmed, or when
-    /// the re-seal produced identical bytes.
+    /// persisted entry), when the session is not currently confirmed, when the
+    /// recorded seal epoch matches the current session epoch (verbatim replay
+    /// is still decryptable), or when the re-seal produced identical bytes.
     ///
     /// This is the Tier 2 core: after a desync + re-key the recipient's session
     /// is rebuilt at a new epoch, so replaying the ciphertext sealed at the old
@@ -3316,6 +3357,20 @@ impl OfflineProtocol {
     /// receiver's dedup and ACK correlation are unaffected. Gating on a
     /// confirmed session guarantees `prepare_outbound_content` takes the
     /// encrypt-now path and never the `store_pending` queueing path.
+    ///
+    /// Within an unchanged epoch the sealed bytes are still cryptographically
+    /// valid for the receiver's current state, so replaying them verbatim is
+    /// correct and avoids advancing the sender's encryption ratchet one
+    /// generation per retry. Advancing on every retry under a lossy BLE link
+    /// with many frames in flight blows past the receiver's
+    /// `SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE` window (defined in the sealed
+    /// crate) and surfaces as `INVALID_CIPHERTEXT` on the receive side. A
+    /// verbatim retransmit of the same `message_id` is caught by the
+    /// receiver's dedup before OpenMLS is asked to re-decrypt it, so no
+    /// duplicate reaches the application layer; the ratchet-reuse variant on
+    /// a receiver without dedup state (restart or TTL eviction) falls back to
+    /// the same `message_decryption_failed` surface the pre-fix code already
+    /// produced, so there is no new silent-drop mode.
     fn reseal_resend_content(&mut self, message: &Message) -> Option<String> {
         if !message.content.starts_with(internal_prefixes::ENCRYPTED) {
             return None;
@@ -3325,7 +3380,28 @@ impl OfflineProtocol {
             return None;
         }
         let reseal = self.outbox.get(&message.id)?.reseal.as_ref()?.clone();
-        match self.prepare_outbound_content(
+
+        // Replay verbatim when the session fingerprint has not changed since
+        // the current sealed bytes were produced. Short-circuit requires both
+        // halves to equal and be `Some` on both sides: a `None` from either
+        // "at seal time" (legacy outbox entry restored without memory
+        // provenance, MLS not initialized, read failure) or "right now"
+        // (same reasons at retry time) falls through to a fresh re-seal,
+        // which preserves the pre-fix recovery path for the uncertain cases.
+        let (current_epoch, current_established_at_ms) =
+            self.current_session_fingerprint(&recipient);
+        if let (Some(se), Some(ce), Some(sm), Some(cm)) = (
+            reseal.seal_epoch,
+            current_epoch,
+            reseal.seal_session_established_at_ms,
+            current_established_at_ms,
+        ) {
+            if se == ce && sm == cm {
+                return None;
+            }
+        }
+
+        let fresh = match self.prepare_outbound_content(
             &recipient,
             &reseal.content,
             reseal.priority,
@@ -3338,7 +3414,7 @@ impl OfflineProtocol {
             Some(PendingProvenance::for_id(message.id.clone())),
             "resend_reseal",
         ) {
-            Ok(OutboundSendPreparation::Ready(sealed)) if sealed != message.content => Some(sealed),
+            Ok(OutboundSendPreparation::Ready(sealed)) if sealed != message.content => sealed,
             // Identical bytes, or an error: replay verbatim this round. Tier 1
             // keeps the sender retrying until the session heals.
             //
@@ -3352,8 +3428,20 @@ impl OfflineProtocol {
             // pending copy later flushes, the sender's own `dispatch_prepared_message`
             // dedup drops it as a duplicate id. So no double-delivery, just a
             // transient pending entry that self-clears on flush.
-            _ => None,
+            _ => return None,
+        };
+
+        // A fresh reseal advanced the sender ratchet one generation and the
+        // group may be at a new epoch or a rebuilt session; record both so
+        // the next retry can short-circuit if nothing else has changed.
+        let (new_epoch, new_established_at_ms) = self.current_session_fingerprint(&recipient);
+        if let Some(entry) = self.outbox.get_mut(&message.id) {
+            if let Some(ref mut r) = entry.reseal {
+                r.seal_epoch = new_epoch;
+                r.seal_session_established_at_ms = new_established_at_ms;
+            }
         }
+        Some(fresh)
     }
 
     /// Re-seals `message` in place against the current session if it is a

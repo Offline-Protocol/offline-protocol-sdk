@@ -2471,6 +2471,33 @@ pub(crate) struct OutboxReseal {
     /// Sealed-only rich extras (reply context, rich media metadata, forward
     /// info) — re-evaluated against current capability at re-seal time.
     pub(crate) rich: Option<RichSendExtras>,
+    /// MLS session fingerprint `(session_established_at_ms, epoch)` captured
+    /// at the time the entry's current sealed bytes were produced. The
+    /// resend path short-circuits (replays verbatim) only when BOTH halves
+    /// equal the recipient session's current values; a `None` on either side
+    /// — unreadable at stage time (legacy outbox entry, MLS unavailable), or
+    /// unreadable at retry time — falls through to a fresh re-seal so the
+    /// pre-fix recovery behavior stands when state is uncertain.
+    ///
+    /// Both halves matter. The epoch alone cannot distinguish "same session
+    /// at the same epoch" from "fresh session happens to be at the same
+    /// epoch number" (a torn-down-and-rebuilt 1:1 session restarts at
+    /// epoch 0 under its new group state, so a seal under the old session's
+    /// epoch 0 would alias). The establishment stamp (`stamp_session_established`
+    /// in the MLS manager) is renewed on every `create_session` and
+    /// `join_session`, so a rebuilt session has a different value and the
+    /// stale sealed bytes are correctly re-sealed instead of being replayed
+    /// into bytes the receiver cannot open.
+    ///
+    /// When both halves match the current session, replaying the verbatim
+    /// ciphertext is still decryptable, so the receiver's dedup catches a
+    /// true repeat before OpenMLS is asked to decrypt it and the sender's
+    /// encryption ratchet does not advance a second generation per retry.
+    /// A difference on either half means the session has advanced or been
+    /// rebuilt since the seal, so a fresh seal is correct and both halves
+    /// are updated to the new session's values.
+    pub(crate) seal_epoch: Option<u64>,
+    pub(crate) seal_session_established_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
