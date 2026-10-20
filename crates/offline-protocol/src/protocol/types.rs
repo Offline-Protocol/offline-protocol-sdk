@@ -2469,6 +2469,24 @@ impl SharedState {
     }
 
     pub(crate) fn emit_event(&self, event: Event) {
+        self.notify_handlers(&event);
+        self.forward_to_telemetry(&event);
+    }
+
+    /// [`Self::emit_event`] without the telemetry sink: the app's handlers
+    /// see the event exactly as they always have, and the pipe never does.
+    ///
+    /// For engine traffic that reuses an app-facing event type but is not
+    /// what that type's telemetry column counts. A delivery acknowledgement
+    /// for a media chunk or an internal frame (a connection request, a key
+    /// package, a Welcome, a data-sync frame) is one: forwarded, it counted
+    /// as a delivered message on the dashboard, once per chunk, against a
+    /// "sent" figure that never included any of them.
+    pub(crate) fn emit_event_to_app(&self, event: Event) {
+        self.notify_handlers(&event);
+    }
+
+    fn notify_handlers(&self, event: &Event) {
         // Legacy `EventCallback` handlers run first and receive the raw
         // event. This preserves the pre-telemetry contract — any app that
         // relied on `on_event` sees exactly what it used to.
@@ -2497,6 +2515,9 @@ impl SharedState {
                 );
             }
         }
+    }
+
+    fn forward_to_telemetry(&self, event: &Event) {
         // Sink fan-out runs after, gated on an installed context. The pipe,
         // the one production sink, consumes every event by reference in
         // `dispatch_protocol_event` and reads no identifier from it, so it
@@ -2512,10 +2533,10 @@ impl SharedState {
             // The gate comes first so a disabled pipe stops the clone too,
             // and the borrowed offer comes next so a sink that collects by
             // name never pays for an event it drops.
-            if !ctx.enabled() || dispatch_protocol_event(&ctx.sink, &event) {
+            if !ctx.enabled() || dispatch_protocol_event(&ctx.sink, event) {
                 return;
             }
-            let scrubbed = scrub_event::scrub_event(&event, &ctx.scrubber);
+            let scrubbed = scrub_event::scrub_event(event, &ctx.scrubber);
             let record = TelemetryRecord::Protocol(Box::new(scrubbed.into_owned()));
             dispatch_record(&ctx.sink, &record);
         }
@@ -2620,6 +2641,22 @@ pub(crate) struct OutboxEntry {
     /// probe after upgrading emits once; nothing is lost.
     #[serde(default)]
     pub(crate) relay_pushed: bool,
+    /// The application sent this message: it went through the app send path
+    /// (`send_message`, `forward_message`, a rich send), which is the path
+    /// that reports `MessageSent`. Internal frames share the outbox and the
+    /// acknowledgement machinery but are never set.
+    ///
+    /// Read when the message is acknowledged, to decide whether the delivery
+    /// is reported to telemetry. Telemetry's delivered count is compared with
+    /// its sent count, so both must count the same messages; counting every
+    /// acknowledged frame put connection requests, key packages and Welcomes
+    /// in delivered and never in sent.
+    ///
+    /// Persisted. A legacy record restores as `false`, so a delivery restored
+    /// across the upgrade still reaches `on_event` and is only left out of
+    /// telemetry.
+    #[serde(default)]
+    pub(crate) app_send: bool,
 }
 
 #[derive(Clone)]

@@ -4380,6 +4380,177 @@ fn test_delivery_ack_settles_pending_connection_request() {
     );
 }
 
+fn ack_from_bob(acked: &MessageId) -> Message {
+    Message::builder(
+        UserId::new("bob").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(String::new())
+    .metadata(ACK_FOR_KEY, acked.as_str())
+    .build()
+}
+
+fn delivered_ids(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageDelivered { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn delivered_records(records: &[TelemetryRecord]) -> usize {
+    records
+        .iter()
+        .filter(|r| {
+            matches!(r, TelemetryRecord::Protocol(e) if e.telemetry_name() == "protocol.message.delivered")
+        })
+        .count()
+}
+
+/// Telemetry's delivered count is read against its sent count, so it counts
+/// the application's messages only. An acknowledged internal frame (here a
+/// connection request) still reaches `on_event` exactly as before, and never
+/// reaches the sink; before, it counted as a delivered message that was never
+/// sent.
+#[test]
+fn test_delivery_of_an_internal_frame_reaches_the_app_but_not_telemetry() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+
+    let app_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let request_id = protocol
+        .send_connection_request("bob", "Alice", None, None)
+        .unwrap();
+    assert!(protocol.outbox.get(&app_id).unwrap().app_send);
+    assert!(!protocol.outbox.get(&request_id).unwrap().app_send);
+    sink.take();
+
+    protocol.handle_ack_message(&ack_from_bob(&app_id));
+    protocol.handle_ack_message(&ack_from_bob(&request_id));
+
+    assert_eq!(
+        delivered_ids(&events.lock().unwrap()),
+        vec![app_id.as_str(), request_id.as_str()],
+        "the app hears about both deliveries, as it always has"
+    );
+    assert_eq!(
+        delivered_records(&sink.take()),
+        1,
+        "telemetry counts the app's message and not the connection request"
+    );
+}
+
+/// The settle path with no pending ACK (a parked DM a neighbour carried)
+/// applies the same rule.
+#[test]
+fn test_delivery_without_a_pending_ack_reaches_telemetry_only_for_an_app_send() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+
+    let ids: Vec<_> = (0..2)
+        .map(|i| {
+            protocol
+                .send_message(
+                    "bob",
+                    &format!("hello {i}"),
+                    None::<MessagePriority>,
+                    None::<String>,
+                )
+                .unwrap()
+        })
+        .collect();
+    for id in &ids {
+        protocol
+            .on_transport_send_failed(
+                &id.as_str(),
+                Some("recipient_unreachable: peer offline".to_string()),
+            )
+            .unwrap();
+        assert!(!protocol.ack_manager.is_waiting_for_ack(id));
+    }
+    // Stand in for an entry the app did not send.
+    protocol.outbox.get_mut(&ids[1]).unwrap().app_send = false;
+    sink.take();
+
+    protocol.handle_ack_message(&ack_from_bob(&ids[0]));
+    protocol.handle_ack_message(&ack_from_bob(&ids[1]));
+
+    assert_eq!(delivered_records(&sink.take()), 1);
+}
+
+/// A delivery reports how long it took from the first send, on the pending-ACK
+/// path as on the other one. Before, a message whose ACK was registered after
+/// its first send (a deferral, a re-send after an ACK timeout) reported only
+/// its last attempt.
+#[test]
+fn test_delivered_latency_runs_from_the_first_send() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    assert!(protocol.ack_manager.is_waiting_for_ack(&id));
+    protocol.outbox.get_mut(&id).unwrap().first_sent_at =
+        Utc::now() - chrono::Duration::seconds(30);
+
+    protocol.handle_ack_message(&ack_from_bob(&id));
+
+    let latency = events
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|e| match e {
+            Event::MessageDelivered { latency_ms, .. } => Some(*latency_ms),
+            _ => None,
+        })
+        .expect("delivered");
+    assert!(
+        latency >= 30_000,
+        "latency {latency} ms is the last attempt only"
+    );
+}
+
 /// An authenticated answer from the peer settles every request tracked
 /// toward them (the accept/reject frame carries no request id, so
 /// settlement is recipient-keyed): accept clears bob's entry while
@@ -8713,6 +8884,7 @@ fn test_unreachable_media_chunk_resolves_file_id() {
             last_transport: Some(TransportType::BLE),
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
     protocol
@@ -10076,6 +10248,7 @@ fn test_unreachable_media_chunk_is_not_parked() {
             last_transport: Some(TransportType::Internet),
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
     protocol
@@ -10554,6 +10727,7 @@ fn test_unreachable_media_chunk_is_offered_to_the_mesh() {
             last_transport: Some(TransportType::Internet),
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
     protocol
@@ -10975,6 +11149,7 @@ fn test_unpark_cancel_spares_connection_request_ack() {
             last_transport: Some(TransportType::Internet),
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
     protocol
@@ -11154,6 +11329,7 @@ fn test_unpark_cancel_spares_welcome_ack() {
             last_transport: Some(TransportType::Internet),
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
     protocol
@@ -11365,6 +11541,7 @@ fn test_cleanup_outbox_absolute_lifetime_cap_is_terminal_in_process() {
                 last_transport: None,
                 reseal: None,
                 relay_pushed: false,
+                app_send: false,
             },
         )
     };
@@ -22409,6 +22586,7 @@ fn test_outbox_capacity_prune_stays_inside_the_launch_budget() {
                 last_transport: None,
                 reseal: None,
                 relay_pushed: false,
+                app_send: false,
             },
         );
     }
@@ -22489,6 +22667,7 @@ fn test_outbox_absolute_expiry_prune_stays_inside_the_launch_budget() {
                 last_transport: None,
                 reseal: None,
                 relay_pushed: false,
+                app_send: false,
             },
         );
     }
@@ -26262,6 +26441,7 @@ fn test_restore_outbox_skips_corrupted_entries() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
     storage
@@ -26310,6 +26490,7 @@ fn test_restore_outbox_prunes_overflow() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         };
         if i == 0 {
             oldest_id = Some(entry.message.id.as_str());
@@ -26355,6 +26536,7 @@ fn test_restore_outbox_refreshes_expired_ttl_carrier_relative() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
 
@@ -26506,6 +26688,7 @@ fn test_restore_outbox_prune_keeps_fresh_over_refreshed_stale() {
                 last_transport: None,
                 reseal: None,
                 relay_pushed: false,
+                app_send: false,
             },
         );
     }
@@ -26520,6 +26703,7 @@ fn test_restore_outbox_prune_keeps_fresh_over_refreshed_stale() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         };
         lapsed_ids.push(entry.message.id.as_str().to_string());
         store_outbox_entry(&storage, &entry);
@@ -27358,6 +27542,7 @@ fn test_cleanup_outbox_media_expiry_does_not_emit_message_failed() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
 
@@ -27395,6 +27580,7 @@ fn test_restore_outbox_drops_absolutely_expired() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
 
@@ -27410,6 +27596,7 @@ fn test_restore_outbox_drops_absolutely_expired() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
 
@@ -27515,6 +27702,7 @@ fn test_flush_outbox_for_peer_includes_media_outbox() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
 
@@ -27581,6 +27769,7 @@ fn test_flush_outbox_all_includes_media_outbox() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
 
@@ -38911,6 +39100,7 @@ fn test_relay_unreachable_reason_is_classified_and_still_parks_the_dm() {
             last_transport: Some(TransportType::BLE),
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
 
@@ -41757,6 +41947,7 @@ fn a_persisted_confirmation_probe_is_not_restored() {
         last_transport: None,
         reseal: None,
         relay_pushed: false,
+        app_send: false,
     };
     let probe = test_message("bob", internal_prefixes::SESSION_CONFIRM_PROBE);
     let real = test_message("bob", "hello");
@@ -41798,6 +41989,7 @@ fn an_outbox_full_of_legacy_probes_clears_in_one_launch() {
         last_transport: None,
         reseal: None,
         relay_pushed: false,
+        app_send: false,
     };
     for _ in 0..crate::constants::MAX_OUTBOX_ENTRIES {
         store_outbox_entry(
@@ -42324,6 +42516,7 @@ fn outbox_entry_at(
         last_transport: None,
         reseal: None,
         relay_pushed,
+        app_send: false,
     }
 }
 

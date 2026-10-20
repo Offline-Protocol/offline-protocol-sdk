@@ -140,6 +140,23 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **Telemetry counts a delivered message once, and only the application's.**
+  Every acknowledged frame reported `protocol.message.delivered` to the
+  telemetry pipe: each chunk of a media transfer, and internal frames such as
+  connection requests, key packages, Welcomes and data-sync frames. None of
+  them is ever reported as sent, so the dashboard's delivered count, success
+  rate, hop count and latency were inflated against its sent count, most for
+  apps that send media. The pipe now hears a delivery only for a message sent
+  through the app send path (`send_message`, `forward_message`, a rich send).
+  `on_event` is unchanged: the app still receives every `MessageDelivered` it
+  did before.
+- **`MessageDelivered.latency_ms` runs from the first send.** On the usual
+  path it ran from when the pending acknowledgement was registered, so a
+  message that was deferred, or re-sent after its acknowledgement timed out,
+  reported only its last attempt, while a parked message settled by a
+  neighbour reported the whole wait. Both now report the whole wait. Transport
+  scoring still uses the last attempt's round trip.
+
 - **A phone no longer loses a Bluetooth peer it is still linked to.** In the
   2026-10-19 volume test an iPhone and an Android phone held two Bluetooth LE
   links between them; the one that stalled was torn down, the iPhone's redial

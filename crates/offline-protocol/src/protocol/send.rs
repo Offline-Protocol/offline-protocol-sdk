@@ -383,6 +383,23 @@ impl OfflineProtocol {
     /// Used by `forward_message`, `flush_pending_messages` (for forwarded messages),
     /// and any path that has a fully-constructed `Message` ready to send.
     fn dispatch_prepared_message(&mut self, message: Message) -> Result<MessageId> {
+        let message_id = self.dispatch_prepared_message_inner(message)?;
+        self.mark_outbox_app_send(&message_id);
+        Ok(message_id)
+    }
+
+    /// Marks the outbox entry an app send left behind as the application's,
+    /// whichever way the send went: sent, deferred, held for a window or
+    /// parked for capacity all leave an entry, a refusal or a message that
+    /// needs no acknowledgement leaves none and has nothing to mark. See
+    /// [`OutboxEntry::app_send`].
+    fn mark_outbox_app_send(&mut self, message_id: &MessageId) {
+        if let Some(entry) = self.outbox.get_mut(message_id) {
+            entry.app_send = true;
+        }
+    }
+
+    fn dispatch_prepared_message_inner(&mut self, message: Message) -> Result<MessageId> {
         let message_id = message.id.clone();
 
         if self.deduplicator.is_duplicate(&message_id) {
@@ -476,6 +493,16 @@ impl OfflineProtocol {
     /// Unlike `TransportManager::send`, `send_via_transport` does not record
     /// retry failures internally, so the failure arm records one explicitly.
     fn dispatch_prepared_message_via(
+        &mut self,
+        message: Message,
+        transport: TransportType,
+    ) -> Result<MessageId> {
+        let message_id = self.dispatch_prepared_message_via_inner(message, transport)?;
+        self.mark_outbox_app_send(&message_id);
+        Ok(message_id)
+    }
+
+    fn dispatch_prepared_message_via_inner(
         &mut self,
         message: Message,
         transport: TransportType,
@@ -3419,6 +3446,7 @@ impl OfflineProtocol {
                 last_transport: None,
                 reseal: staged_reseal,
                 relay_pushed: false,
+                app_send: false,
             });
         // Persist newly-created main-outbox entries so they survive a restart.
         // media entries are intentionally not persisted.
@@ -3471,6 +3499,7 @@ impl OfflineProtocol {
                 last_transport: transport,
                 reseal: staged_reseal,
                 relay_pushed: false,
+                app_send: false,
             });
 
         entry.message = message.clone();
@@ -6024,14 +6053,35 @@ impl OfflineProtocol {
                         .map(|label| Self::transport_from_label(label))
                         .unwrap_or(TransportType::BLE);
 
+                    // `latency` above is this attempt's round trip, which is
+                    // what DORS scores a carrier on. The event reports how long
+                    // delivery took, from the first send, as the settle path
+                    // without a pending ACK already does: a message that was
+                    // deferred, or re-sent after its ACK timed out, otherwise
+                    // reported only its last attempt, and the two paths gave
+                    // the same delivery two different latencies.
+                    let outbox_entry = self.outbox.get(&message_id);
+                    let delivery_latency = outbox_entry.map_or(latency, |entry| {
+                        Utc::now()
+                            .signed_duration_since(entry.first_sent_at)
+                            .num_milliseconds()
+                            .max(0) as u64
+                    });
+                    let app_send = outbox_entry.is_some_and(|entry| entry.app_send);
+
                     // Emit event if we can lock the state, but don't fail if we can't
                     if let Ok(state) = lock_shared_state(&self.shared_state) {
-                        state.emit_event(Event::message_delivered(
+                        let event = Event::message_delivered(
                             message_id.clone(),
-                            latency,
+                            delivery_latency,
                             hop_count,
                             transport,
-                        ));
+                        );
+                        if app_send {
+                            state.emit_event(event);
+                        } else {
+                            state.emit_event_to_app(event);
+                        }
                         drop(state);
                     } else {
                         error!(
@@ -6217,6 +6267,7 @@ impl OfflineProtocol {
             return;
         };
         let recipient = entry.message.recipient.as_str().to_string();
+        let app_send = entry.app_send;
 
         let latency = Utc::now()
             .signed_duration_since(entry.first_sent_at)
@@ -6253,12 +6304,14 @@ impl OfflineProtocol {
             })
         });
         if let Ok(state) = lock_shared_state(&self.shared_state) {
-            state.emit_event(Event::message_delivered(
-                message_id.clone(),
-                latency,
-                hop_count,
-                transport,
-            ));
+            // Reported to telemetry only for the app's own messages, as on
+            // the pending-ACK path; see [`OutboxEntry::app_send`].
+            let event = Event::message_delivered(message_id.clone(), latency, hop_count, transport);
+            if app_send {
+                state.emit_event(event);
+            } else {
+                state.emit_event_to_app(event);
+            }
             drop(state);
         } else {
             error!("Failed to lock shared state for an ACK event, skipping event emission");
