@@ -15,7 +15,9 @@ ignore = [
     # It never links into a shipped library. uniffi 0.32.2 and askama 0.16.1
     # are the latest releases and both still depend on it, and uniffi is
     # pinned to 0.32 across every binding. Drop this waiver when an askama
-    # release replaces basic-toml and uniffi takes it.
+    # release replaces basic-toml and uniffi takes it (tracked upstream by
+    # askama-rs/askama#594, replacement drafted in askama-rs/askama#771).
+    # Mirrored in .cargo/audit.toml, which must stay a superset of this list.
     { id = "RUSTSEC-2026-0374", reason = "basic-toml unmaintained; build-time only via uniffi_bindgen -> askama_derive template config; latest uniffi and askama still depend on it" },
     # Three 2026-07 advisories against libcrux crates that reach us only
     # through openmls_rust_crypto 0.4 -> hpke-rs 0.6 -> libcrux-sha3. The

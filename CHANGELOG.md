@@ -129,6 +129,14 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   in the workspace or on crates.io did. The C binding's fuzzer compiles the
   crate's source under its own package instead, which also lets it run on
   macOS.
+- **The dependency audit waives RUSTSEC-2026-0374**, an unmaintained-crate
+  notice (not a vulnerability) for `basic-toml`. It reaches the workspace only
+  through the FFI crate's build script, beneath `uniffi_bindgen` and
+  `askama_derive`, which read template configuration with it at compile time,
+  so it never links into a shipped library. No upgrade removes it: uniffi
+  0.32.2 and askama 0.16.1 are the latest releases. The waiver is in both
+  `deny.toml` and `.cargo/audit.toml`, and is dropped once an askama release
+  replaces the crate and uniffi takes it.
 
 ### Fixed
 
