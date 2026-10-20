@@ -148,8 +148,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   rate, hop count and latency were inflated against its sent count, most for
   apps that send media. The pipe now hears a delivery only for a message sent
   through the app send path (`send_message`, `forward_message`, a rich send).
-  `on_event` is unchanged: the app still receives every `MessageDelivered` it
-  did before.
+  `MessageFailed` follows the same rule, so the success rate (delivered over
+  delivered plus failed) is no longer lowered by internal frames that failed.
+  `on_event` is unchanged: the app still receives every `MessageDelivered` and
+  `MessageFailed` it did before.
 - **`MessageDelivered.latency_ms` runs from the first send.** On the usual
   path it ran from when the pending acknowledgement was registered, so a
   message that was deferred, or re-sent after its acknowledgement timed out,

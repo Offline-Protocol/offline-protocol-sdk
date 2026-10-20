@@ -4551,6 +4551,84 @@ fn test_delivered_latency_runs_from_the_first_send() {
     );
 }
 
+fn failed_records(records: &[TelemetryRecord]) -> usize {
+    records
+        .iter()
+        .filter(|r| {
+            matches!(r, TelemetryRecord::Protocol(e) if e.telemetry_name() == "protocol.message.failed")
+        })
+        .count()
+}
+
+/// Failures follow the rule deliveries do: telemetry's success rate divides
+/// delivered by delivered plus failed, so a failed internal frame counted
+/// there would lower the rate of messages the app never sent. Retry
+/// exhaustion and outbox expiry both apply it; the app hears every failure.
+#[test]
+fn test_failure_of_an_internal_frame_reaches_the_app_but_not_telemetry() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+
+    let app_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let request_id = protocol
+        .send_connection_request("bob", "Alice", None, None)
+        .unwrap();
+    sink.take();
+
+    protocol.handle_max_retries_exceeded(&app_id, 10).unwrap();
+    protocol
+        .handle_max_retries_exceeded(&request_id, 10)
+        .unwrap();
+
+    let failed: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed, vec![app_id.as_str(), request_id.as_str()]);
+    assert_eq!(failed_records(&sink.take()), 1, "only the app's message");
+
+    // Outbox expiry, for an internal frame and an app message.
+    let expired_app = protocol
+        .send_message("bob", "later", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let expired_request = protocol
+        .send_connection_request("carol", "Alice", None, None)
+        .unwrap();
+    for id in [&expired_app, &expired_request] {
+        protocol.ack_manager.remove_ack(id);
+        let entry = protocol.outbox.get_mut(id).unwrap();
+        entry.first_sent_at = Utc::now() - chrono::Duration::days(30);
+        entry.last_sent_at = entry.first_sent_at;
+    }
+    sink.take();
+    protocol.cleanup_outbox();
+    assert!(!protocol.outbox.contains_key(&expired_app));
+    assert!(!protocol.outbox.contains_key(&expired_request));
+    assert_eq!(failed_records(&sink.take()), 1, "only the app's message");
+}
+
 /// An authenticated answer from the peer settles every request tracked
 /// toward them (the accept/reject frame carries no request id, so
 /// settlement is recipient-keyed): accept clears bob's entry while
@@ -19501,6 +19579,7 @@ fn test_pending_decrypt_record_past_persisted_max_age_is_dropped_with_event() {
     let expired: Vec<_> = bob
         .deferred_restore_settlements
         .iter()
+        .map(|(event, _)| event)
         .filter_map(|event| match event {
             Event::MessageDecryptionFailed {
                 message_id,
@@ -20121,7 +20200,12 @@ fn test_pending_decrypt_restore_overflow_is_settled_after_start() {
             "drop_oldest={drop_oldest}: nothing may reach the app during initialize_mls"
         );
         assert_eq!(
-            dropped_ids(&bob.deferred_restore_settlements),
+            dropped_ids(
+                &bob.deferred_restore_settlements
+                    .iter()
+                    .map(|(event, _)| event.clone())
+                    .collect::<Vec<_>>()
+            ),
             vec![dropped.id.as_str()],
             "drop_oldest={drop_oldest}: the drop waits for start()"
         );
@@ -20174,6 +20258,7 @@ fn test_pending_decrypt_restore_drops_are_budgeted_and_reported_with_their_delet
     let reported = |bob: &OfflineProtocol| -> HashSet<String> {
         bob.deferred_restore_settlements
             .iter()
+            .map(|(event, _)| event)
             .filter_map(|event| match event {
                 Event::MessageDecryptionFailed {
                     message_id,
@@ -35285,6 +35370,7 @@ fn test_restore_settlements_survive_an_initialization_rollback() {
     let settled: Vec<_> = protocol
         .deferred_restore_settlements
         .iter()
+        .map(|(event, _)| event)
         .filter_map(|event| match event {
             Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
             _ => None,
@@ -35585,13 +35671,17 @@ fn test_restore_settles_an_unreadable_outbox_record_whose_key_is_not_a_message_i
         .unwrap();
 
     assert!(
-        protocol.deferred_restore_settlements.iter().any(|event| {
-            matches!(
-                event,
-                Event::ConvergenceDiag { stage, peer_id, .. }
-                    if stage == "pending_state_lost" && peer_id == "not-a-uuid"
-            )
-        }),
+        protocol
+            .deferred_restore_settlements
+            .iter()
+            .map(|(event, _)| event)
+            .any(|event| {
+                matches!(
+                    event,
+                    Event::ConvergenceDiag { stage, peer_id, .. }
+                        if stage == "pending_state_lost" && peer_id == "not-a-uuid"
+                )
+            }),
         "a destroyed outbox record with an unparseable key must not vanish silently: {:?}",
         protocol.deferred_restore_settlements
     );
@@ -36525,6 +36615,7 @@ fn test_migration_whose_writes_fail_keeps_the_legacy_record_and_settles_nothing(
     let settled: Vec<String> = protocol
         .deferred_restore_settlements
         .iter()
+        .map(|(event, _)| event)
         .filter_map(|event| match event {
             Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
             _ => None,
@@ -36608,6 +36699,7 @@ fn test_settlement_is_withheld_while_a_surviving_legacy_record_can_refile_the_id
     let settled: Vec<String> = protocol
         .deferred_restore_settlements
         .iter()
+        .map(|(event, _)| event)
         .filter_map(|event| match event {
             Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
             _ => None,
@@ -36640,6 +36732,7 @@ fn test_settlement_is_withheld_while_a_surviving_legacy_record_can_refile_the_id
         later
             .deferred_restore_settlements
             .iter()
+            .map(|(event, _)| event)
             .all(|event| !matches!(event, Event::MessageFailed { .. })),
         "nothing may settle on the launch that recovers the queue"
     );

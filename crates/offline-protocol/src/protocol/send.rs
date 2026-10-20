@@ -3319,22 +3319,33 @@ impl OfflineProtocol {
         // Retired, not just removed: the retry and flush paths re-create a
         // missing entry before resending, so a retry entry left behind would
         // bring the message back.
-        let attempt_count = self
+        let (attempt_count, app_send) = self
             .retire_undeliverable_message(&victim, "outbox eviction")
-            .map_or(0, |entry| entry.attempt_count);
-        self.emit_outbox_capacity_failure(&victim, attempt_count);
+            .map_or((0, false), |entry| (entry.attempt_count, entry.app_send));
+        self.emit_outbox_capacity_failure(&victim, attempt_count, app_send);
         true
     }
 
     /// The terminal events a message dropped for outbox capacity owes the
     /// app: `message_failed`, and for a connection request its typed
     /// undeliverable event. Shared by eviction and by a refused send.
-    fn emit_outbox_capacity_failure(&mut self, message_id: &MessageId, attempt_count: u32) {
-        self.emit_event(Event::message_failed(
-            message_id.clone(),
-            "Outbox capacity exceeded",
-            attempt_count,
-        ));
+    ///
+    /// `app_send` decides whether the failure reaches telemetry; see
+    /// [`Self::emit_settlement`].
+    fn emit_outbox_capacity_failure(
+        &mut self,
+        message_id: &MessageId,
+        attempt_count: u32,
+        app_send: bool,
+    ) {
+        self.emit_settlement(
+            Event::message_failed(
+                message_id.clone(),
+                "Outbox capacity exceeded",
+                attempt_count,
+            ),
+            app_send,
+        );
         if let Some(recipient) = self.take_undeliverable_connection_request(message_id) {
             warn!(
                 recipient = %recipient,
@@ -3384,7 +3395,8 @@ impl OfflineProtocol {
             recipient = %message.recipient,
             "Outbox full and this recipient holds the largest backlog; send refused"
         );
-        self.emit_outbox_capacity_failure(&message.id, 0);
+        // Only the app send path refuses at capacity, so this is an app send.
+        self.emit_outbox_capacity_failure(&message.id, 0, true);
         true
     }
 
@@ -3874,9 +3886,14 @@ impl OfflineProtocol {
             {
                 continue;
             }
-            expired_from_outbox.push((message_id.clone(), entry.attempt_count, entry.relay_pushed));
+            expired_from_outbox.push((
+                message_id.clone(),
+                entry.attempt_count,
+                entry.relay_pushed,
+                entry.app_send,
+            ));
         }
-        for (message_id, attempt_count, relay_pushed) in expired_from_outbox {
+        for (message_id, attempt_count, relay_pushed, app_send) in expired_from_outbox {
             self.retire_undeliverable_message(&message_id, "outbox lifetime exceeded");
 
             // Outcome unknown, so nothing app-facing: the push may already
@@ -3896,11 +3913,14 @@ impl OfflineProtocol {
             // Expiry is terminal: without an event the app shows the message
             // as pending forever. Mirrors handle_max_retries_exceeded, which
             // settles the same way when the retry budget runs out.
-            self.emit_event(Event::message_failed(
-                message_id.clone(),
-                "Outbox lifetime exceeded",
-                attempt_count,
-            ));
+            self.emit_settlement(
+                Event::message_failed(
+                    message_id.clone(),
+                    "Outbox lifetime exceeded",
+                    attempt_count,
+                ),
+                app_send,
+            );
             if let Some(recipient) = self.take_undeliverable_connection_request(&message_id) {
                 warn!(
                     recipient = %recipient,
@@ -6333,7 +6353,10 @@ impl OfflineProtocol {
             );
             e
         })?;
-        state.emit_event(Event::message_failed(
+        // No entry, so no record of whether the app sent it: the app hears
+        // about it and telemetry does not, the rule for a delivery whose
+        // origin is unknown too.
+        state.emit_event_to_app(Event::message_failed(
             message_id.clone(),
             "Message missing from outbox (cannot retry)",
             retry_count,

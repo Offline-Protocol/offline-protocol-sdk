@@ -268,7 +268,9 @@ pub struct OfflineProtocol {
     /// bound it as a *sum* across every category, and nothing drains this until
     /// `start()` — which an app that only ever calls `initialize_mls`, or that
     /// retries it against a failing store, may never reach.
-    deferred_restore_settlements: Vec<Event>,
+    /// Each settlement carries whether it reaches telemetry; see
+    /// [`Self::emit_settlement`].
+    deferred_restore_settlements: Vec<(Event, bool)>,
 
     /// Number of settlements suppressed by the cap above, so the count is
     /// reported even though the individual events are not.
@@ -2356,8 +2358,8 @@ impl OfflineProtocol {
     /// [`Self::resume`]) so a parked settlement has no state to be stranded in.
     /// Idempotent: draining an empty queue emits nothing.
     fn drain_deferred_restore_settlements(&mut self) {
-        for event in std::mem::take(&mut self.deferred_restore_settlements) {
-            self.emit_event(event);
+        for (event, telemetry) in std::mem::take(&mut self.deferred_restore_settlements) {
+            self.emit_settlement(event, telemetry);
         }
         let suppressed = std::mem::take(&mut self.suppressed_restore_settlements);
         if suppressed > 0 {
@@ -4205,6 +4207,8 @@ impl OfflineProtocol {
         // the generic message_failed, so apps keep connection-request
         // context without parsing reason strings.
         let undeliverable_recipient = self.take_undeliverable_connection_request(message_id);
+        // Read before `retire_undeliverable_message` below removes the entry.
+        let app_send = self.is_app_send(message_id);
 
         let state = lock_shared_state(&self.shared_state).map_err(|e| {
             error!(
@@ -4213,11 +4217,13 @@ impl OfflineProtocol {
             );
             e
         })?;
-        state.emit_event(Event::message_failed(
-            message_id.clone(),
-            "Max retries exceeded",
-            retry_count,
-        ));
+        let failed = Event::message_failed(message_id.clone(), "Max retries exceeded", retry_count);
+        // Telemetry counts the app's own messages only; see `emit_settlement`.
+        if app_send {
+            state.emit_event(failed);
+        } else {
+            state.emit_event_to_app(failed);
+        }
         if let Some(recipient) = undeliverable_recipient {
             warn!(
                 recipient = %recipient,
@@ -4275,6 +4281,33 @@ impl OfflineProtocol {
         }
     }
 
+    /// Emits a message's terminal event (`MessageDelivered` or
+    /// `MessageFailed`) to the app, and to telemetry only when `telemetry` is
+    /// set.
+    ///
+    /// Telemetry's delivered and failed counts are read against its sent
+    /// count, which only the app send path reports, so all three count the
+    /// same messages: the app's own. A settlement for a media chunk, an
+    /// internal frame, or a message whose origin is no longer known still
+    /// reaches `on_event` and stays out of telemetry. See
+    /// [`OutboxEntry::app_send`].
+    pub(crate) fn emit_settlement(&self, event: Event, telemetry: bool) {
+        if let Ok(state) = lock_shared_state(&self.shared_state) {
+            if telemetry {
+                state.emit_event(event);
+            } else {
+                state.emit_event_to_app(event);
+            }
+        }
+    }
+
+    /// Whether `message_id` is an outbox entry the app send path created.
+    pub(crate) fn is_app_send(&self, message_id: &MessageId) -> bool {
+        self.outbox
+            .get(message_id)
+            .is_some_and(|entry| entry.app_send)
+    }
+
     /// Emits a terminal settlement, or parks it until `start()` if the event
     /// pipeline is not live yet.
     ///
@@ -4286,7 +4319,20 @@ impl OfflineProtocol {
     /// `process()`-driven expiry, where no deferral is wanted.
     pub(crate) fn settle_restored_message_failure(&mut self, event: Event) {
         let running = self.protocol_is_running();
-        self.settle_one_restored_message_failure(event, running);
+        self.settle_one_restored_message_failure(event, true, running);
+    }
+
+    /// [`Self::settle_restored_message_failures`] for restored outbox entries,
+    /// each paired with its [`OutboxEntry::app_send`]: only the app's own
+    /// reach telemetry, as on the live path.
+    pub(crate) fn settle_restored_outbox_failures(
+        &mut self,
+        settlements: impl IntoIterator<Item = (Event, bool)>,
+    ) {
+        let running = self.protocol_is_running();
+        for (event, telemetry) in settlements {
+            self.settle_one_restored_message_failure(event, telemetry, running);
+        }
     }
 
     /// Settles a batch, taking the shared-state lock once rather than once per
@@ -4298,7 +4344,7 @@ impl OfflineProtocol {
     ) {
         let running = self.protocol_is_running();
         for event in events {
-            self.settle_one_restored_message_failure(event, running);
+            self.settle_one_restored_message_failure(event, true, running);
         }
     }
 
@@ -4316,9 +4362,14 @@ impl OfflineProtocol {
             .unwrap_or(false)
     }
 
-    fn settle_one_restored_message_failure(&mut self, event: Event, running: bool) {
+    fn settle_one_restored_message_failure(
+        &mut self,
+        event: Event,
+        telemetry: bool,
+        running: bool,
+    ) {
         if running {
-            self.emit_event(event);
+            self.emit_settlement(event, telemetry);
             return;
         }
         // Every other accumulation on the restore path has an explicit ceiling
@@ -4331,7 +4382,7 @@ impl OfflineProtocol {
             self.suppressed_restore_settlements += 1;
             return;
         }
-        self.deferred_restore_settlements.push(event);
+        self.deferred_restore_settlements.push((event, telemetry));
     }
 
     /// Returns an iterator over outbox messages (test-only).
