@@ -383,20 +383,19 @@ impl OfflineProtocol {
     /// Used by `forward_message`, `flush_pending_messages` (for forwarded messages),
     /// and any path that has a fully-constructed `Message` ready to send.
     fn dispatch_prepared_message(&mut self, message: Message) -> Result<MessageId> {
-        let message_id = self.dispatch_prepared_message_inner(message)?;
-        self.mark_outbox_app_send(&message_id);
-        Ok(message_id)
+        self.staged_app_send = Some(message.id.clone());
+        let result = self.dispatch_prepared_message_inner(message);
+        self.staged_app_send = None;
+        result
     }
 
-    /// Marks the outbox entry an app send left behind as the application's,
-    /// whichever way the send went: sent, deferred, held for a window or
-    /// parked for capacity all leave an entry, a refusal or a message that
-    /// needs no acknowledgement leaves none and has nothing to mark. See
-    /// [`OutboxEntry::app_send`].
-    fn mark_outbox_app_send(&mut self, message_id: &MessageId) {
-        if let Some(entry) = self.outbox.get_mut(message_id) {
-            entry.app_send = true;
-        }
+    /// Whether an outbox entry being created for `message` belongs to the app
+    /// send in progress; see `staged_app_send`. Every outcome of an app send
+    /// that keeps the message (sent, deferred, held for a window, parked for
+    /// capacity) creates its entry inside the dispatch, so the flag is on the
+    /// entry before its first write to storage.
+    fn is_staged_app_send(&self, message: &Message) -> bool {
+        self.staged_app_send.as_ref() == Some(&message.id)
     }
 
     fn dispatch_prepared_message_inner(&mut self, message: Message) -> Result<MessageId> {
@@ -497,9 +496,10 @@ impl OfflineProtocol {
         message: Message,
         transport: TransportType,
     ) -> Result<MessageId> {
-        let message_id = self.dispatch_prepared_message_via_inner(message, transport)?;
-        self.mark_outbox_app_send(&message_id);
-        Ok(message_id)
+        self.staged_app_send = Some(message.id.clone());
+        let result = self.dispatch_prepared_message_via_inner(message, transport);
+        self.staged_app_send = None;
+        result
     }
 
     fn dispatch_prepared_message_via_inner(
@@ -3442,6 +3442,7 @@ impl OfflineProtocol {
         // (non-media) entry here (the failure/retry path); later calls find the
         // entry already present and leave its `reseal` intact.
         let staged_reseal = self.take_staged_reseal(message, is_media);
+        let app_send = !is_media && self.is_staged_app_send(message);
         let outbox = if is_media {
             &mut self.media_outbox
         } else {
@@ -3458,7 +3459,7 @@ impl OfflineProtocol {
                 last_transport: None,
                 reseal: staged_reseal,
                 relay_pushed: false,
-                app_send: false,
+                app_send,
             });
         // Persist newly-created main-outbox entries so they survive a restart.
         // media entries are intentionally not persisted.
@@ -3495,6 +3496,7 @@ impl OfflineProtocol {
         // (non-media) outbox entry; on later attempts the entry already carries
         // it. Staging for media is never populated.
         let staged_reseal = self.take_staged_reseal(message, is_media);
+        let app_send = !is_media && self.is_staged_app_send(message);
         let outbox = if is_media {
             &mut self.media_outbox
         } else {
@@ -3511,7 +3513,7 @@ impl OfflineProtocol {
                 last_transport: transport,
                 reseal: staged_reseal,
                 relay_pushed: false,
-                app_send: false,
+                app_send,
             });
 
         entry.message = message.clone();

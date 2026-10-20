@@ -26443,6 +26443,76 @@ fn test_outbox_persisted_and_restored_after_restart() {
     assert_eq!(restored.content, "durable");
 }
 
+/// `OutboxEntry::app_send` is on the entry from its first write to storage,
+/// on both creation paths: a deferred send (`ensure_outbox_entry`) and an
+/// accepted one (`mark_message_sent`). Entries are not re-persisted on later
+/// attempts, so a flag set after creation stayed in memory and every app
+/// message restored after a restart dropped out of telemetry.
+#[test]
+fn test_app_send_flag_survives_restart_and_restored_deliveries_reach_telemetry() {
+    let storage = Arc::new(InMemoryStorage::new());
+
+    let (deferred_id, sent_id, request_id);
+    {
+        let mut protocol = OfflineProtocol::new(outbox_persistence_config()).unwrap();
+        protocol
+            .enable_message_persistence_for_test(storage.clone())
+            .unwrap();
+        let flaky = FlakyTransport::fail_first(TransportType::BLE, 1);
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(flaky));
+        protocol.start().unwrap();
+
+        // The first send fails and is deferred; the second is accepted.
+        deferred_id = protocol
+            .send_message("bob", "deferred", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        sent_id = protocol
+            .send_message("bob", "accepted", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        request_id = protocol
+            .send_connection_request("carol", "Alice", None, None)
+            .unwrap();
+        assert!(
+            protocol.staged_app_send.is_none(),
+            "staging never outlives a dispatch"
+        );
+    }
+
+    let mut protocol = OfflineProtocol::new(outbox_persistence_config()).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+    assert!(protocol.outbox.get(&deferred_id).unwrap().app_send);
+    assert!(protocol.outbox.get(&sent_id).unwrap().app_send);
+    assert!(!protocol.outbox.get(&request_id).unwrap().app_send);
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+
+    for id in [&deferred_id, &sent_id] {
+        let entry = protocol.outbox.get(id).unwrap().message.clone();
+        protocol.ensure_ack_registration(&entry).unwrap();
+    }
+    sink.take();
+    protocol.handle_ack_message(&ack_from_bob(&deferred_id));
+    protocol.handle_ack_message(&ack_from_bob(&sent_id));
+    assert_eq!(
+        delivered_records(&sink.take()),
+        2,
+        "both restored app messages are counted when delivered"
+    );
+}
+
 #[test]
 fn test_remove_outbox_entry_clears_storage() {
     let storage = Arc::new(InMemoryStorage::new());
