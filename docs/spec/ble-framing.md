@@ -51,6 +51,25 @@ them is a wire break rather than a refactor:
   to keep a hostile header from costing memory or CPU, never to establish
   trust.
 
+One more holds for the links that carry the frames, and it is a property of
+the radio rather than of this format:
+
+- **Two devices hold one Bluetooth LE link between them.** The Link Layer
+  does not complete a second connection between two devices that already have
+  one (Core 5.4, Vol 6 Part B, 1.1.1), so a dial from an address the peer
+  already holds a link with times out, however often it is retried. A second
+  link can still form when one side's random address has rotated, because the
+  pair then looks new to both radios, and once it has formed neither side can
+  reconnect after the other link drops until an address rotates again. So a
+  device SHOULD close a link that proves the identity of a peer it already
+  holds a usable link to (a client link of its own, or the peer's subscribed
+  link to its server), and MUST NOT report a peer lost, or dial it, while such
+  a link is up. In run 5 of the 2026-10-19 volume test both rules were missing: the
+  phones held two links, the one that stalled was torn down, the redial of
+  its address timed out and reported a peer lost that was still linked, and
+  the pair was apart for ten minutes
+  ([ADR 0030](../adr/0030-one-bluetooth-le-link-per-peer-pair.md)).
+
 ## The GATT contract
 
 A device offers one primary service for each application on it that runs this

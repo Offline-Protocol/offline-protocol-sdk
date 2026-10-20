@@ -271,6 +271,13 @@ pub const SVC_SEALED_V1: u8 = 1;
 /// recipient can never decrypt this frame" rather than as a delivery.
 pub const ACK_UNDECRYPTABLE_V1: u8 = 1;
 
+/// Acknowledgement version advertised in [`KeyPackagePayload::ack_versions`]:
+/// the sender reads the `ack_more` metadata on a delivery ACK, so one ACK
+/// frame may answer several of its frames. Over a mesh link an ACK per frame
+/// was a third of the frames a phone sent, on a link already carrying less
+/// than it was offered.
+pub const ACK_COALESCED_V1: u8 = 2;
+
 /// The conformance vectors for the key package payload.
 ///
 /// The chapter these pin is `docs/spec/capability-negotiation.md`, and they pin

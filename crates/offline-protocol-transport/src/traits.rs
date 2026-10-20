@@ -272,6 +272,16 @@ pub trait Transport: Send + Sync + Any {
     // Confirmation loop (platform → Rust delivery outcomes)
     // ------------------------------------------------------------------
 
+    /// Ids of messages this transport has accepted but not yet started
+    /// writing: still in its local queue, not yet handed to the radio.
+    ///
+    /// The sender uses it to tell "unanswered" from "not sent yet" when an
+    /// acknowledgement times out. The default is empty: a transport that
+    /// writes on `send`, or does not know, keeps the ordinary timeout.
+    fn queued_message_ids(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Platform confirms a message previously returned by
     /// [`Transport::get_next_message`] was sent over the wire.
     ///

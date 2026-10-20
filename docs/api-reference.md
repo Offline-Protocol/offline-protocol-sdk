@@ -687,8 +687,18 @@ MessageDeferred {
 }
 ```
 
-Emitted when a message is queued for retry because no transport could deliver
-it right now. Non-terminal.
+Emitted when a message the app sent is accepted but not transmitted yet.
+Non-terminal: `message_delivered` or `message_failed` follows. `reason` says
+why it waits:
+
+| `reason` | Meaning | `next_retry_at` |
+|----------|---------|-----------------|
+| a transport failure token | No transport could deliver it right now; the retry queue tries again | When the retry is due |
+| `ack_capacity` | The pending-acknowledgement table is full; it goes out as soon as an acknowledgement frees a slot | The retry queue's next look |
+| `peer_window` | Sixteen messages to this peer already await acknowledgement over a Bluetooth LE or Wi-Fi Direct link; it goes out, in order, as they are answered | `None` |
+
+A deferred message never emits `message_sent`, even once it is transmitted.
+Show it as queued until it is delivered or fails.
 
 #### MessageRetrying
 

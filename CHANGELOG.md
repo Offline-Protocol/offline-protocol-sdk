@@ -115,6 +115,124 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A phone no longer loses a Bluetooth peer it is still linked to.** In the
+  2026-10-19 volume test an iPhone and an Android phone held two Bluetooth LE
+  links between them; the one that stalled was torn down, the iPhone's redial
+  of its address timed out and reported Android lost, and the core refused
+  every send to Android for ten minutes while the second link sat idle. No
+  reconnect could succeed, because the radios complete one connection between
+  two devices. Now iOS retires the dropped identifier instead of reporting the
+  peer lost while another link to it is up, and skips dials to a peer it is
+  linked to; Android closes a client link to a peer already subscribed to its
+  server, and restarts its advertisement (which gives it a new address) on its
+  two-minute refresh only while no identified peer is linked, or when the
+  advertisement has stopped. Evicting a peer on iOS now drops every
+  identifier it maps from, so a second link no longer survives a peer the
+  core was told is lost. See ADR 0030.
+- **A full outbox refuses the newest message instead of failing the oldest.**
+  At 500 entries the outbox failed its least recently sent entry to admit any
+  new one, so the same outage failed about 2,500 queued messages per phone,
+  each to make room for a newer message to the same peer. Now a message to the
+  recipient with the largest backlog is refused (`message_failed`, "Outbox
+  capacity exceeded", no attempts, while `send` returns its id); a message to
+  a recipient with a smaller backlog evicts from the largest one (its newest
+  message held by the per-peer window, else its oldest entry); and a message
+  awaiting its acknowledgement is never evicted.
+- **A link carrying less than it is offered no longer collapses.** Two phones
+  sending 5 messages a second each way over Bluetooth LE delivered 70.5%: the
+  Android phone's indication path carried 12 to 16 frames a second against 15
+  offered, acknowledgements queued behind data until every message timed out,
+  each resend cost the receiver one more acknowledgement on the saturated
+  link, and both phones retried 50,000 times and failed 6,000 messages as
+  "Outbox capacity exceeded". Four changes:
+  - A sender keeps at most 16 frames awaiting acknowledgement in flight to
+    one peer over a mesh link. Further messages wait in the outbox, are
+    reported as `message_deferred` with reason `peer_window`, and go out
+    oldest first as acknowledgements return. The relay is not windowed, and
+    neither is session control (key packages, Welcomes, confirmation
+    probes), which heals the session the held frames are sealed under.
+  - The Bluetooth LE carrier queues an acknowledgement ahead of data.
+  - Delivery acknowledgements to a peer that advertises `ack_versions` entry 2
+    are coalesced, up to five per frame within 500 ms, in a new `ack_more`
+    metadata key. Older peers get one acknowledgement per frame.
+  - On Android, the indication path sends the next fragment as soon as the
+    peer confirms the last, instead of 20 ms later.
+- **A resend the receiver can no longer decrypt is re-sealed.** Past the
+  re-seal budget a resend went out verbatim, and a verbatim copy sealed more
+  than 32 generations before the newest was refused by the receiver,
+  unanswered on a mesh link, until its retries ran out. It is now re-sealed,
+  up to 512 generations past the last acknowledgement.
+- **A full acknowledgement table no longer stops the engine.** Once 1,000
+  messages were waiting for acknowledgements, a retry with no slot returned
+  an error out of `process()` before the step that frees slots, on every
+  tick, and the engine never recovered: every later send failed and nothing
+  more was retried. A frame is now never transmitted without a slot to track
+  it. At the ceiling a send is held for the retry queue, reported as
+  `message_deferred` with reason `ack_capacity`, and sent once an
+  acknowledgement frees a slot; `process()` runs every step on every tick.
+  Two leaks that kept the table full are fixed with it: a refused
+  registration orphaned every timed-out entry so it was never retried, and
+  the prune of timed-out entries ran at exactly the retry ladder's maximum
+  delay, so a ninth retry found its slot gone.
+- **`sendMessage` no longer reports a failure for a message it sent.** The
+  capacity error used to surface after the frame was on the wire, so an
+  application showed messages as failed that the recipient had received.
+- **A receiver that falls far behind a sender re-keys instead of going
+  deaf.** A frame more than the forward window ahead of the receiver's
+  ratchet failed as an ordinary decryption error, and so did every later
+  frame and every resend from that sender, permanently. It now triggers the
+  same rate-limited re-key as an epoch desync. The trigger is authenticated:
+  it needs the epoch's sender-data secret. The window is also raised from
+  1,000 to 8,192 generations, pinned at four times the in-flight ceiling.
+- **A frame still waiting in the BLE queue is not retried.** Its
+  acknowledgement timeout is extended, for up to a minute, instead of
+  queueing a second re-sealed copy behind it. On a link carrying less than it
+  was offered, those copies grew the queue, the round trip and the
+  receiver's ratchet gap together.
+- **Large BLE messages are no longer torn under load.** The Android and iOS
+  outbound fragment queues discarded everything queued for a peer when they
+  filled, and they could fill: Android's periodic poll pulled fragments from
+  the core with no backpressure check, and both drains checked only after a
+  fragment had been pulled. With a cap of 100, one 16 KB message was enough.
+  Both drains now stop before pulling while any peer with a link is backed
+  up, and the cap is 768, above the largest message the core fragments. A
+  peer with no link does not stop the pull, so its undeliverable fragments
+  no longer hold back every other peer's.
+- **Resends stop burning encryption keys while nothing is acknowledged.**
+  Each resend used to be re-sealed under a fresh ratchet generation, so a
+  link that stopped carrying acknowledgements walked the receiver past its
+  forward window: one phone re-sealed 20,919 resends during a 17-minute
+  stall. A sender now re-seals only while it has sealed fewer than 256
+  frames past the peer's last acknowledgement, and resends verbatim beyond
+  that until the next one arrives. 256 is a quarter of 1,024, the receiver
+  window of a leaf node, which mls-rs fixes and which is smaller than a
+  phone's; `tools/mls-interop` pins it.
+- **An iOS central link whose write buffer never drains is torn down and
+  reconnected.** CoreBluetooth kept refusing every write on such a link for
+  as long as it lived while still delivering the peer's notifications, so
+  nothing reported it down. After 15 s with no accepted write the link is
+  cancelled. A connect that has not completed in 10 s in the foreground is
+  cancelled too: CoreBluetooth never times one out, and the pending connect
+  refused every reconnect attempt as "already connecting".
+- **A message sent while its sender was blocked is never delivered.** Its id
+  is now remembered, so a retry arriving after an unblock is answered rather
+  than delivered.
+- **An iOS phone keeps talking to a peer that changed its Bluetooth
+  address.** The peer reappears under a new identifier, and the old one still
+  mapped to it, so the send path could pick the old, disconnected one and
+  report "no connected peripheral" indefinitely while the verified link to
+  the same peer sat idle: 25 minutes in one test. Sends now go to the
+  connected link, verifying a peer retires its other disconnected
+  identifiers, and the connection monitor stops dialling a peripheral it
+  never identified once it stops advertising.
+- **The BLE bridges stop pulling far ahead of the link.** Both outbound
+  fragment queues pulled from the core until a peer held 576 fragments, so
+  the core saw nothing queued, could not extend the acknowledgement timeout
+  of what was still waiting, and resent it: 19,404 resends from one Android
+  phone on an indication-paced link. They now stop at 32 fragments, a few
+  seconds of link time, and the rest waits in the core where the extension
+  sees it. The 768 cap is unchanged.
+
 - **Link-time optimisation reaches the libraries the release ships.** The
   release profile has always asked for it, but cargo runs it on a library
   only when every crate type in the library's list can take it, and the FFI

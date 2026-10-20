@@ -69,8 +69,8 @@ pub use canonical::{
 };
 pub use constants::{
     ACK_FOR_KEY, LEAF_KEY_PACKAGE_LIFETIME, LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS,
-    MAX_ACCEPTED_KEY_PACKAGE_LIFETIME, SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE,
-    SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
+    LEAF_SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE, MAX_ACCEPTED_KEY_PACKAGE_LIFETIME,
+    SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE, SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
 };
 pub use derive::{derive_address, ED25519_PUBLIC_KEY_LEN};
 pub use envelope::{EncryptedMessage, GroupId, MlsMessageType, WelcomeMessage};
@@ -84,7 +84,8 @@ pub use identity_assertion::{
     IDENTITY_ASSERTION_MIN_LEN,
 };
 pub use keypackage::{
-    KeyPackagePayload, ACK_UNDECRYPTABLE_V1, CTRL_SIGN_V2, MLS_ENVELOPE_COMPACT_V1, SVC_SEALED_V1,
+    KeyPackagePayload, ACK_COALESCED_V1, ACK_UNDECRYPTABLE_V1, CTRL_SIGN_V2,
+    MLS_ENVELOPE_COMPACT_V1, SVC_SEALED_V1,
 };
 
 #[cfg(all(test, feature = "std"))]
@@ -187,6 +188,7 @@ mod interop_harness_guard_tests {
             "derive_address",
             "SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE",
             "SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE",
+            "LEAF_SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE",
             "LEAF_KEY_PACKAGE_LIFETIME",
             "LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS",
             "MAX_ACCEPTED_KEY_PACKAGE_LIFETIME",
@@ -204,6 +206,7 @@ mod interop_harness_guard_tests {
             "fn derive_address",
             "const OUT_OF_ORDER_TOLERANCE",
             "const MAXIMUM_FORWARD_DISTANCE",
+            "const LEAF_FORWARD_DISTANCE",
             "const KEY_PACKAGE_LIFETIME",
             "const NOT_BEFORE_BACKDATE",
             "const MAX_ACCEPTED",

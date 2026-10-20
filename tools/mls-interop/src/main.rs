@@ -52,12 +52,12 @@ use mls_rs::{CipherSuite, CipherSuiteProvider, Client, CryptoProvider, MlsMessag
 use mls_rs_crypto_rustcrypto::RustCryptoProvider;
 
 // The SDK's own declarations, not copies of them. The derivation rule and
-// these four numbers are what this harness exists to test the phone against;
+// these numbers are what this harness exists to test the phone against;
 // a local copy would leave it green while it stopped testing them.
 use offline_protocol_sealed::{
     derive_address, LEAF_KEY_PACKAGE_LIFETIME, LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS,
-    MAX_ACCEPTED_KEY_PACKAGE_LIFETIME, SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE,
-    SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
+    LEAF_SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE, MAX_ACCEPTED_KEY_PACKAGE_LIFETIME,
+    SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE, SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -278,7 +278,10 @@ fn corrections_are_load_bearing() {
 fn the_lifetime_cap_is_ours_to_apply() {
     let (provider, _, _) = phone();
     let (client, _) = leaf_client(MLS_RS_DEFAULT_LIFETIME);
-    let bytes = leaf_key_package(&client, unix_now() - LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS);
+    let bytes = leaf_key_package(
+        &client,
+        unix_now() - LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS,
+    );
 
     if let Err(e) = openmls_admits(&provider, &bytes) {
         panic!(
@@ -316,7 +319,10 @@ fn main() {
     let (leaf, leaf_address) = leaf_client(LEAF_KEY_PACKAGE_LIFETIME);
     step(1, &format!("leaf identity derives to {leaf_address}"));
 
-    let key_package_bytes = leaf_key_package(&leaf, unix_now() - LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS);
+    let key_package_bytes = leaf_key_package(
+        &leaf,
+        unix_now() - LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS,
+    );
     step(
         2,
         &format!("leaf key package, {} bytes", key_package_bytes.len()),
@@ -485,6 +491,54 @@ fn main() {
         }
         other => panic!("expected an application message, got {other:?}"),
     }
+
+    // ---- The leaf's receiver window -------------------------------------
+    //
+    // mls-rs fixes how far ahead a frame may be and exposes no setting. The
+    // phone's re-seal budget is derived from it, so an mls-rs upgrade that
+    // moves it has to fail here, not on a device under load. A frame exactly
+    // the window past the next generation the leaf expects decrypts; one
+    // further is refused.
+    let phone_frame = |group: &mut MlsGroup, text: &[u8]| {
+        group
+            .create_message(&provider, &phone_keys, text)
+            .expect("phone encrypts")
+            .tls_serialize_detached()
+            .expect("serialize")
+    };
+    for _ in 0..LEAF_SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE {
+        let _lost = phone_frame(&mut phone_group, b"lost");
+    }
+    let at_the_edge = phone_frame(&mut phone_group, b"at the edge");
+    match leaf_group
+        .process_incoming_message(MlsMessage::from_bytes(&at_the_edge).expect("leaf parses"))
+        .expect("leaf decrypts a frame exactly its window ahead")
+    {
+        mls_rs::group::ReceivedMessage::ApplicationMessage(app) => {
+            assert_eq!(app.data(), b"at the edge");
+            step(
+                11,
+                &format!(
+                    "leaf decrypted a frame {LEAF_SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE} generations ahead"
+                ),
+            );
+        }
+        other => panic!("expected an application message, got {other:?}"),
+    }
+    for _ in 0..=LEAF_SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE {
+        let _lost = phone_frame(&mut phone_group, b"lost");
+    }
+    let past_the_edge = phone_frame(&mut phone_group, b"past the edge");
+    let refused = leaf_group
+        .process_incoming_message(MlsMessage::from_bytes(&past_the_edge).expect("leaf parses"));
+    assert!(
+        refused.is_err(),
+        "mls-rs accepted a frame {} generations ahead: its receiver window moved, so \
+         LEAF_SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE and the phone's re-seal budget \
+         derived from it are stale",
+        LEAF_SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE + 1
+    );
+    step(12, "leaf refused a frame one generation past its window");
 
     println!("\nPASS: the leaf stack interoperates with the phone's, both directions,");
     println!("across a commit, with the SDK's ciphersuite and credential shape.");

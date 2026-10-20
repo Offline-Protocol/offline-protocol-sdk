@@ -998,13 +998,13 @@ jobs:
             PeerStreamSession.swift ReticulumManager.swift mesh/Mesh.swift ble/MeshConnectionRegistry.swift \
             ble/BleDiscoveryBootstrapPolicy.swift \
             PeripheralRestorationAgeOutPolicy.swift \
-            BleHelloPolicy.swift BleMessageNotificationPolicy.swift \
+            BleHelloPolicy.swift BleMessageNotificationPolicy.swift BleWriteStallPolicy.swift \
             BleAppTag.swift BleDensityPolicy.swift BleServiceInstanceSelection.swift \
             Generated/offline_protocol.swift ForcedPresenceCheckQueue.swift \
             AddressDeclarationPolicy.swift \
             GatewayAttachPolicy.swift GatewayVerdictTracker.swift \
             InboundFragmentBuffer.swift OutboundFragmentQueue.swift \
-            PeerIdentityBinding.swift RelayAnswerPrefixes.swift \
+            PeerIdentityBinding.swift PeerLinkResolution.swift RelayAnswerPrefixes.swift \
             RelayControlOpTranslator.swift RelayGroupSnapshotBridge.swift \
             RelayRateLimiter.swift LegacyRelayMessage.swift MonotonicClock.swift \
             NostrQueryTracker.swift \

@@ -230,6 +230,14 @@ sealed to an epoch the recipient has left is withheld like any other desync.
 Custody widens nobody's view of the acknowledgement channel in this version,
 because acknowledgements are not carried.
 
+A coalesced acknowledgement (`ack_more`, see
+[Delivery and acknowledgements](../state-machines/delivery-and-acks.md#acknowledgements-on-a-mesh-link))
+does not widen this. Each id it names is settled as a single acknowledgement,
+including the check that it comes from the frame's recipient, and a receiver
+settles at most five, so a forged one does what five forged single
+acknowledgements could already do. Acknowledgements are unauthenticated either
+way; binding one to its sender needs signed acknowledgements.
+
 ## Known residual risks
 
 Stated plainly, because a threat model that lists only what it defeats is
@@ -276,6 +284,13 @@ framing header (group identifier, then epoch) **before** any AEAD, sender-data,
 or signature check; and a 1:1 slot identifier is a public function of two public
 addresses. The MLS credential that would authenticate the sender exists only
 once decryption **succeeds**.
+
+The desync class has one member this does not apply to: a frame more than the
+forward window ahead of the receiver's ratchet. MLS decrypts the sender data
+under AEAD before it reads the generation from it, so reaching that check takes
+the epoch's sender-data secret, which only a group member holds. It was added
+so a receiver that fell that far behind re-keys instead of failing every later
+frame, and it leaves the unauthenticated surface exactly as described.
 
 **Why it is tolerable:** the mitigation is that acting on the trigger is
 **harmless**, not that the trigger is trusted.

@@ -28,6 +28,7 @@ use crate::constants::{
 };
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
 use offline_protocol_core::{Message, MutexExt};
+use offline_protocol_sealed::ACK_FOR_KEY;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -237,6 +238,30 @@ pub struct BleTransport {
     /// reassembly cache due to capacity pressure. Wired by the protocol layer
     /// to emit `Event::FragmentAssemblyEvicted`.
     eviction_callback: Arc<Mutex<Option<FragmentEvictionCallback>>>,
+}
+
+/// Queues a message for the bridge, a delivery acknowledgement ahead of every
+/// queued data frame (behind earlier acknowledgements, so they keep their
+/// order).
+///
+/// An acknowledgement is what stops its sender's retry timer. Queued behind
+/// data on a link carrying less than it is offered, it arrived after that
+/// timer had fired, and each resend it provoked cost the receiver another
+/// acknowledgement on the same saturated link: in the 2026-10-19 volume test
+/// the acknowledgement round trip reached 196 seconds against a 10-second
+/// timeout. The fragments of a message already being written are not
+/// overtaken; they are past this queue.
+fn enqueue_send(queue: &mut VecDeque<(String, Message)>, entry: (String, Message)) {
+    let is_ack = |message: &Message| message.metadata.contains_key(ACK_FOR_KEY);
+    if is_ack(&entry.1) {
+        let at = queue
+            .iter()
+            .position(|(_, queued)| !is_ack(queued))
+            .unwrap_or(queue.len());
+        queue.insert(at, entry);
+    } else {
+        queue.push_back(entry);
+    }
 }
 
 impl BleTransport {
@@ -1046,15 +1071,25 @@ impl Transport for BleTransport {
             }
         }
 
-        {
-            let mut queue = self.send_queue.lock_or_recover();
-            queue.push_back((recipient, message.clone()));
-        }
+        enqueue_send(
+            &mut self.send_queue.lock_or_recover(),
+            (recipient, message.clone()),
+        );
 
         self.update_queue_metric();
         self.notify_fragments_available();
 
         Ok(())
+    }
+
+    /// A message leaves this list when the bridge pulls its first fragment:
+    /// from then on it is being written, and a timeout means what it says.
+    fn queued_message_ids(&self) -> Vec<String> {
+        self.send_queue
+            .lock_or_recover()
+            .iter()
+            .map(|(_, message)| message.id.as_str())
+            .collect()
     }
 
     /// Queues `message` for a specific connected peer.
@@ -1082,10 +1117,10 @@ impl Transport for BleTransport {
             }
         }
 
-        {
-            let mut queue = self.send_queue.lock_or_recover();
-            queue.push_back((peer_id.to_string(), message.clone()));
-        }
+        enqueue_send(
+            &mut self.send_queue.lock_or_recover(),
+            (peer_id.to_string(), message.clone()),
+        );
 
         self.update_queue_metric();
         self.notify_fragments_available();
@@ -1567,6 +1602,22 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             1
         );
+    }
+
+    /// A message counts as queued until the bridge pulls its first fragment.
+    /// The sender reads this to tell "not sent yet" from "unanswered" when an
+    /// acknowledgement times out.
+    #[test]
+    fn queued_message_ids_lists_a_message_until_its_first_fragment_is_pulled() {
+        let transport = BleTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+        transport.on_peer_discovered(peer_device("bob"));
+        let message = small_message();
+        transport.send(&message).unwrap();
+
+        assert_eq!(transport.queued_message_ids(), vec![message.id.as_str()]);
+        assert!(transport.get_next_fragment().unwrap().is_some());
+        assert!(transport.queued_message_ids().is_empty());
     }
 
     #[test]
@@ -2756,5 +2807,46 @@ mod tests {
         assert_eq!(metrics.sample_count(), 0);
         assert_eq!(metrics.delivery_ratio, None);
         assert_eq!(metrics.drop_rate, None);
+    }
+
+    #[test]
+    fn an_acknowledgement_is_queued_ahead_of_data_but_behind_earlier_acknowledgements() {
+        let transport = BleTransport::new("test-device");
+        transport.on_status_changed(TransportStatus::Available);
+        transport.on_peer_discovered(peer_device("bob"));
+
+        let data: Vec<Message> = (0..3).map(|_| small_message()).collect();
+        let mut ack = small_message();
+        ack.metadata
+            .insert(ACK_FOR_KEY.to_string(), "first".to_string());
+        let mut second_ack = small_message();
+        second_ack
+            .metadata
+            .insert(ACK_FOR_KEY.to_string(), "second".to_string());
+
+        transport.send(&data[0]).unwrap();
+        transport.send(&data[1]).unwrap();
+        transport.send(&ack).unwrap();
+        transport.send(&data[2]).unwrap();
+        transport.send(&second_ack).unwrap();
+
+        let order: Vec<_> = transport
+            .send_queue
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, message)| message.id.clone())
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                ack.id.clone(),
+                second_ack.id.clone(),
+                data[0].id.clone(),
+                data[1].id.clone(),
+                data[2].id.clone()
+            ],
+            "acknowledgements stop retry timers; queued behind data they arrived too late"
+        );
     }
 }

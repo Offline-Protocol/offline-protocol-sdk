@@ -40,7 +40,7 @@ pub(crate) const MAX_BASE64_PAYLOAD_SIZE: usize = 1_048_576;
 /// the generation every member must reach to decrypt anything later from
 /// this device. A frame delivered to one member advances it for all of them
 /// and is observed by one, and OpenMLS refuses a generation more than
-/// [`SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE`] (1000) ahead of the highest
+/// [`SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE`] (8192) ahead of the highest
 /// a receiver has seen. Past that gap the absent member cannot decrypt this
 /// device's next frame, and cannot decrypt the one after that either,
 /// because nothing advanced their ratchet: the group silently stops
@@ -50,7 +50,7 @@ pub(crate) const MAX_BASE64_PAYLOAD_SIZE: usize = 1_048_576;
 /// Directed replication answers are the first traffic in this SDK that
 /// advances the ratchet without every member seeing it, and they are
 /// produced by rediscovery rather than by anything the user does, so
-/// unbounded they cross 1000 on their own. Promoting one frame per budget
+/// unbounded they cross that distance on their own. Promoting one frame per budget
 /// to the whole roster puts a decryptable rung in every member's outbox and
 /// bounds the gap at the budget, restoring the property group messaging
 /// always had: generations advance roughly with roster-wide traffic.
@@ -361,7 +361,7 @@ pub(crate) struct GroupMeshState {
     /// others must reach. This counts how far that has run ahead of what
     /// the roster has been given a chance to observe;
     /// [`MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS`] documents what happens
-    /// when it is allowed to run to 1000.
+    /// when it is allowed to run past the forward distance.
     ///
     /// **A missing entry means "unknown", not "zero".** The MLS sender
     /// ratchet is persisted with the group state and this map is not, so a

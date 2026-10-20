@@ -387,6 +387,100 @@ pub(crate) fn classify_transport_send_error(raw: &str) -> &'static str {
     }
 }
 
+/// The pending-ACK table was full, so the frame was held back instead of
+/// transmitted. Not a transport fault: the retry queue sends it as soon as an
+/// acknowledgement frees a slot. A link carrying less than the app offers
+/// produces this steadily, and it is the signal to slow down.
+pub(crate) const SEND_DEFER_REASON_ACK_CAPACITY: &str = "ack_capacity";
+
+/// The peer already had [`PEER_SEND_WINDOW`] frames over a mesh link awaiting
+/// its acknowledgement, so the frame waits in the outbox and goes out, oldest
+/// first, as acknowledgements come back. Not a fault: it is what a link
+/// carrying less than the app offers looks like.
+pub(crate) const SEND_DEFER_REASON_PEER_WINDOW: &str = "peer_window";
+
+/// How many frames this device keeps in flight to one peer over a mesh link
+/// (Bluetooth LE, Wi-Fi Direct) before it holds the next one back.
+///
+/// Without a window the sender handed the carrier every new frame, every
+/// resend and an acknowledgement per received frame, into one unbounded queue,
+/// on a timer that starts at enqueue. In the 2026-10-19 volume test (run 4)
+/// the Android side's indication path carried 12 to 16 frames a second against
+/// 15 offered: the acknowledgement round trip passed the timeout, every resend
+/// cost the receiver another acknowledgement on the saturated path, that
+/// path's rate halved, and both phones retried 50,000 times and evicted 6,000
+/// messages as "Outbox capacity exceeded". A window bounds the queue, and with
+/// it the round trip, the resends and the receiver's ratchet gap, at any link
+/// rate. It costs no throughput while it exceeds what the link carries in one
+/// unloaded round trip: about six messages on that link, counting the
+/// receiver's acknowledgement coalescing (`ACK_COALESCE_WINDOW`) and a
+/// processing tick on each side. Sixteen leaves margin, and keeps the
+/// round trip under about three seconds there, well inside the timeout.
+///
+/// Only the mesh carriers: a relay mailbox is store-and-forward, and holding
+/// a message back from it would strand it on a device the user may close.
+pub(crate) const PEER_SEND_WINDOW: usize = 16;
+
+// Every in-window frame can be re-sealed on each of its attempts, and the
+// re-seal budget must never trip under the window: past it resends go out
+// verbatim, and a verbatim copy more than the out-of-order tolerance behind
+// the receiver never decrypts (run 4: 3,308 such failures).
+const _: () = assert!(
+    (PEER_SEND_WINDOW as u64)
+        * (1 + offline_protocol_reliability::constants::DEFAULT_MAX_RETRIES as u64)
+        < RESEAL_GAP_BUDGET
+);
+
+/// The smallest forward window any receiver of a 1:1 session has: a phone's
+/// OpenMLS group (configured) or a leaf's mls-rs one (fixed by mls-rs, and
+/// smaller). The re-seal budget is a fraction of this, not of the phone's
+/// window: derived from the phone's 8192, it let a sender burn 2,048
+/// generations past a leaf that can fast-forward over 1,024.
+pub(crate) const RECEIVER_FORWARD_WINDOW_FLOOR: u64 = {
+    let phone = offline_protocol_mls::group::SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE as u64;
+    let leaf = offline_protocol_mls::group::LEAF_SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE as u64;
+    if phone < leaf {
+        phone
+    } else {
+        leaf
+    }
+};
+
+/// How many frames a sender may seal for one peer past the last one that peer
+/// acknowledged before resends stop being re-sealed and go out verbatim.
+///
+/// A receiver cannot decrypt a frame more than its forward window past the
+/// newest it has decrypted. A quarter of the smallest window any receiver has
+/// ([`RECEIVER_FORWARD_WINDOW_FLOOR`]) leaves the rest to new messages, which
+/// still seal. The per-peer window keeps unacknowledged seals growing only by
+/// resends of at most [`PEER_SEND_WINDOW`] frames, so the budget trips only on
+/// a link that has carried no acknowledgement for a whole retry ladder; the
+/// compile-time assertion above keeps it above that ladder.
+pub(crate) const RESEAL_GAP_BUDGET: u64 = RECEIVER_FORWARD_WINDOW_FLOOR / 4;
+
+/// Past [`RESEAL_GAP_BUDGET`], a resend whose bytes the receiver can no
+/// longer decrypt is still re-sealed, until the gap reaches this.
+///
+/// A verbatim copy sealed more than the out-of-order tolerance before the
+/// newest frame this device sealed is refused by a receiver that has
+/// decrypted anything since, and refused without an acknowledgement on a
+/// mesh link, so it was resent until its ladder ran out: in run 4 of the
+/// 2026-10-19 volume test, 525 such messages produced 3,308 decrypt
+/// failures and were never delivered. Re-sealing one spends a generation,
+/// which is what the budget rations, so the exception stops at half the
+/// smallest forward window ([`RECEIVER_FORWARD_WINDOW_FLOOR`]): the receiver
+/// going deaf is the failure the budget exists for, and a wasted resend is
+/// not.
+pub(crate) const RESEAL_HARD_LIMIT: u64 = RECEIVER_FORWARD_WINDOW_FLOOR / 2;
+
+/// The longest an acknowledgement timeout is postponed for a frame that is
+/// still waiting in a local transport queue, measured from the attempt.
+///
+/// Bounded so a queue that never drains (a link that died without telling
+/// the transport) still reaches the retry ladder, and through it the other
+/// carriers and the mesh, within a minute.
+pub(crate) const QUEUED_ACK_GRACE_MAX: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Classifies a locally raised send failure for an event field.
 ///
 /// The sibling of [`classify_transport_send_error`] for errors this device
@@ -1421,6 +1515,21 @@ pub(crate) struct ReceivedKeyPackage {
     /// Local wall-clock deadline (ms since epoch) computed from the sender's
     /// `remaining_lifetime_ms`, anchored to *our* clock at receive time.
     pub(crate) local_expires_at_ms: u64,
+}
+
+/// Delivery ACKs held for one peer until they go out as one frame (see
+/// `OfflineProtocol::coalesced_acks_out`).
+#[derive(Debug, Clone)]
+pub(crate) struct CoalescedAcks {
+    /// The carrier the answered frames arrived on, which the ACK goes back
+    /// over. A frame from another carrier starts a new batch.
+    pub(crate) transport: offline_protocol_transport::TransportType,
+    /// When the first held ACK was owed.
+    pub(crate) since: std::time::Instant,
+    /// The first answered frame's hop count, as a single ACK reports it.
+    pub(crate) hop_count: String,
+    /// The answered message ids, oldest first.
+    pub(crate) ids: Vec<String>,
 }
 
 /// Durable record of the end-to-end capability versions a peer last
@@ -2471,6 +2580,12 @@ pub(crate) struct OutboxReseal {
     /// Sealed-only rich extras (reply context, rich media metadata, forward
     /// info) — re-evaluated against current capability at re-seal time.
     pub(crate) rich: Option<RichSendExtras>,
+    /// Where the bytes currently on the ladder sit in the session's sealing
+    /// order. An acknowledgement for this message proves the peer decrypted
+    /// that far, which is what lets later re-seals go ahead (see
+    /// `RESEAL_GAP_BUDGET`). Set when the message is staged and on every
+    /// re-seal; `None` when it could not be read.
+    pub(crate) seal_mark: Option<offline_protocol_mls::SealMark>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
