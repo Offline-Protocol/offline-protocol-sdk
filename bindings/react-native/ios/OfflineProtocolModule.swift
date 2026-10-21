@@ -3137,11 +3137,10 @@ class OfflineProtocolModule: RCTEventEmitter {
         }
     }
 
-    // Streaming file transport: hands the Rust core a filesystem path so the
-    // full payload never crosses the RN bridge as a base64 string. The
-    // monolithic base64 crossing is what trips large-file OOMs on
-    // constrained Android devices; iOS carries the same shape for API
-    // parity even though its heap pressure profile is different.
+    // The path twin of sendFile: hands the Rust core a filesystem path so the
+    // payload never crosses the RN bridge as a base64 string. The base64
+    // crossing is what runs constrained Android devices out of memory; iOS
+    // carries the same shape for API parity.
     @objc func sendFileFromPath(_ recipient: String,
                                 filePath: String,
                                 fileName: String,

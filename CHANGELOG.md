@@ -75,18 +75,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   past the `sign_data` deny group.
 - **Large file sends from React Native no longer stage a base64 string on
   the bridge.** `sendFileFromPath({recipient, filePath, fileName})` sits
-  beside `sendFile`, which is unchanged. It passes a filesystem path to
-  the Rust core, which opens and reads the file in one allocation on its
-  own heap, so the full payload never crosses the JS/native bridge as a
-  JS string, and the Kotlin and Swift sides hold only the path. On
-  constrained Android a 25 MB attachment through `sendFile` materialised
-  a ~34 MB base64 JS string plus a ~34 MB native copy before Rust ever
-  saw the bytes; the new entry point allocates only the Rust `Vec<u8>`.
-  An unreadable path returns `InvalidArgument` naming the I/O failure.
-  Content type is always `File`; a typed streaming variant can be added
-  when a consumer needs it. The local API registers it as
-  `send_file_from_path`, and it is reachable from every binding
-  (TypeScript, Kotlin, Swift, Java, Python).
+  beside `sendFile`, which is unchanged. It passes a path (or a `file://`
+  URI) to the Rust core, which reads the file itself, so the Kotlin and
+  Swift sides hold only the path. On constrained Android a 25 MB attachment
+  through `sendFile` materialised a ~34 MB base64 JS string, a decoded byte
+  array and a boxed `List<UByte>` before Rust saw it; the new entry point
+  skips all three. The read is whole-file into the Rust heap, not streamed.
+  A missing file, anything that is not a regular file (a FIFO would block,
+  a device file would read until the process aborted) and a file over the
+  100 MiB transfer limit return `InvalidArgument` before a byte is read.
+  Content type is always `File`. It is reachable from every binding
+  (TypeScript, Kotlin, Swift, Java, Python, C). The local API withholds it
+  as a platform operation: on the wire a path would be a read of any file
+  the server can open.
 - **The service image is published.** The release workflow builds
   `bindings/python/docker` for linux/amd64 and linux/arm64 and pushes it to
   `ghcr.io/offline-protocol/offline-protocol-service`, tagged `X.Y.Z`, and

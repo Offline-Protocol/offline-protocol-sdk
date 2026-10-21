@@ -2128,13 +2128,15 @@ export class OfflineProtocol {
   /**
    * Sends a file to a recipient by filesystem path.
    *
-   * The native side opens the file inside the SDK's Rust core and reads it
-   * in one allocation on the Rust heap, so the full payload never crosses
-   * the JS/native bridge as a base64 string. Preferred over `sendFile` for
-   * any file over a few megabytes; the only safe option for large files
-   * (tens of MB range) on constrained Android devices, where the base64
-   * crossing's `DirectByteBuffer` allocation is the OOM pathology that
-   * motivated this API.
+   * The SDK's Rust core opens and reads the file, so the payload never
+   * crosses the JS/native bridge as a base64 string. Prefer it over
+   * `sendFile` for anything over a few megabytes: on constrained Android
+   * devices the base64 crossing is what runs out of memory. The file is
+   * read whole into the Rust heap and chunked there (about twice its size
+   * while chunking); it is not streamed.
+   *
+   * `filePath` may be a plain path or a `file://` URI. A `content://` URI
+   * is refused: copy the content to a file first.
    *
    * The content type is always `ContentType.File`. Callers that need
    * image/video/audio typing with a filesystem-path source can either keep
@@ -2143,8 +2145,9 @@ export class OfflineProtocol {
    *
    * @param params - File-by-path sending parameters
    * @returns File ID for tracking progress
-   * @throws `InvalidArgument` if the path is missing, unreadable, or not a
-   *         regular file.
+   * @throws `InvalidArgument` if the path is missing, unreadable, not a
+   *         regular file, or over the 100 MiB transfer limit. Each is refused
+   *         before a byte is read.
    */
   async sendFileFromPath(params: SendFileFromPathParams): Promise<string> {
     return await OfflineProtocolNativeModule.sendFileFromPath(

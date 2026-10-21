@@ -1380,16 +1380,15 @@ protocol.on('file_progress', (event) => {
 });
 ```
 
-### Sending Large Files (streaming from a path)
+### Sending Large Files (from a path)
 
 For files over a few megabytes, use `sendFileFromPath` instead. The SDK's
-Rust core opens the file on the native side, so the full base64 payload
-never crosses the JS/native bridge; peak heap during the call is one
-`Vec<u8>` the size of the file in the Rust address space, not twice that
-in the JS runtime plus a native copy. On constrained Android devices,
-this is the only safe path for files in the tens-of-megabytes range: the
-base64 crossing's `DirectByteBuffer` allocation is the OOM pathology
-large payloads trip.
+Rust core opens the file itself, so the payload never crosses the JS/native
+bridge as base64: nothing is staged in the JavaScript heap or in the
+bridge's native buffers. On constrained Android devices those staging
+copies are what run out of memory on files in the tens of megabytes. The
+file is still read whole into the Rust heap and chunked there, which costs
+about twice its size while chunking; the read is not streamed.
 
 ```typescript
 const fileId = await protocol.sendFileFromPath({
@@ -1399,8 +1398,11 @@ const fileId = await protocol.sendFileFromPath({
 });
 ```
 
-An unreadable `filePath` rejects with `InvalidArgument` naming the
-underlying I/O failure.
+`filePath` may also be a `file://` URI, as `expo-file-system` returns it.
+A `content://` URI is refused; copy the content to a file first. A missing
+or unreadable file, anything that is not a regular file, and a file over
+the 100 MiB transfer limit reject with `InvalidArgument` before any byte is
+read.
 
 ### Managing Transfers
 

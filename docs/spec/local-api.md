@@ -349,7 +349,6 @@ methods a client may call before `hello`.
 | `send_media` | `recipient`, `file_data b64`, `file_name`, `content_type <ContentType>`, `media_metadata {MediaMetadata}?` | string (file id). Stamped like `send_message` |
 | `send_media_rich` | `recipient`, `file_data b64`, `file_name`, `content_type <ContentType>`, `options {MediaSendOptions}` | string (file id). `options.app_id` as for `send_message_rich` |
 | `send_file` | `recipient`, `file_data b64`, `file_name` | string (file id) |
-| `send_file_from_path` | `recipient`, `file_path`, `file_name` | string (file id). Rust reads the file; the base64 bytes never cross the local-API wire |
 | `get_file_progress` | `file_id` | `{FileProgress}` or `null` |
 | `cancel_file_transfer` | `file_id` | `null` |
 
@@ -555,6 +554,7 @@ this chapter asserts it.
 | `erase_custody` | Drops every frame this device holds for its neighbours, whichever client's traffic brought them, and resets the counters. The operator's erase, like `data.wipe_all`, never one application's call |
 | `run_storage_conformance` | Takes a callback interface; a storage backend is verified by the host that supplies it |
 | `sign_data_bytes`, `verify_signature_bytes` | The `bytes` twins of `sign_data` and `verify_signature`, which exist so a mobile bridge can hand a large payload to the core without one boxed object per byte. The wire already carries base64, and a signing twin on the wire would reach the shared identity key past the `sign_data` deny group |
+| `send_file_from_path` | The path twin of `send_file`, which exists so a mobile bridge can hand a large file to the core without staging it as base64 in the JavaScript heap. The wire already carries base64, and on the wire a path would be a read of any file the server process can open (its token file, its store key), sent to any peer, past the frame-size limit that bounds an in-band file |
 
 ## Event catalogue
 

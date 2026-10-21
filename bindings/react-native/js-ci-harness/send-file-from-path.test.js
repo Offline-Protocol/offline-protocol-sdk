@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Behavioural tests for the streaming file transport (`sendFileFromPath`
+ * Behavioural tests for the path-based file send (`sendFileFromPath`
  * in `src/index.ts`).
  *
  * `sendFileFromPath` exists so React Native consumers can hand the SDK a

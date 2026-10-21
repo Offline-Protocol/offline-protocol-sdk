@@ -3124,13 +3124,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    // Streaming file transport: hands the Rust core a filesystem path so the
-    // full payload never crosses the RN bridge as a base64 string. The base64
-    // crossing's DirectByteBuffer allocation was the OOM pathology that
-    // motivated this entry point; a 25 MB LoRA delta materialized as a
-    // ~34 MB base64 JS string plus a ~34 MB native copy before the bridge
-    // handed anything to Rust. Here Kotlin only holds the path string;
-    // Rust reads the file into one Vec<u8> on its own heap.
+    // The path twin of sendFile: hands the Rust core a filesystem path so the
+    // payload never crosses the RN bridge. sendFile stages a 25 MB file as a
+    // ~34 MB base64 JS string, a decoded ByteArray, and a List<UByte> with one
+    // boxed object per byte before Rust sees it; that is the out-of-memory
+    // failure on constrained devices. Here Kotlin holds only the path, and
+    // Rust reads and chunks the file on its own heap.
     @ReactMethod
     fun sendFileFromPath(recipient: String, filePath: String, fileName: String, promise: Promise) {
         try {
