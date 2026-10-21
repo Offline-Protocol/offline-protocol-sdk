@@ -54,33 +54,51 @@ def parse_objc_method(module: str, name: str) -> tuple[str, str, str]:
     return sig, *error_for(name, load_manifest())
 
 
-def swift_param_names(params: str) -> list[tuple[str, str]]:
+def swift_param_names(params: str) -> list[tuple[str | None, str, str]]:
+    """(external label or None for `_`, internal name, type) for each parameter."""
     if not params.strip():
         return []
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str | None, str, str]] = []
     for part in params.split(","):
         part = part.strip()
         if not part or "rejecter" in part or "resolver" in part:
             continue
-        if part.startswith("_ "):
-            part = part[2:]
-        name, _, typ = part.partition(":")
-        out.append((name.strip(), typ.strip()))
+        name_part, _, typ = part.partition(":")
+        typ = typ.strip()
+        tokens = name_part.strip().split()
+        if len(tokens) == 1:
+            token = tokens[0]
+            if token.startswith("_"):
+                out.append((None, token[1:], typ))
+            else:
+                out.append((token, token, typ))
+        elif len(tokens) == 2 and tokens[0] == "_":
+            out.append((None, tokens[1], typ))
+        elif len(tokens) == 2:
+            out.append((tokens[0], tokens[1], typ))
+        else:
+            raise SystemExit(f"unsupported Swift parameter form: {part!r}")
     return out
 
 
-def param_names_csv(params: str) -> str:
-    return ", ".join(name for name, _ in swift_param_names(params))
+def param_names_call_expr(params: str) -> str:
+    bits: list[str] = []
+    for ext, internal, _ in swift_param_names(params):
+        if ext is None:
+            bits.append(internal)
+        else:
+            bits.append(f"{ext}: {internal}")
+    return ", ".join(bits)
 
 
 def build_args_expr(params: str) -> str:
     pairs = swift_param_names(params)
     if not pairs:
         return "nil"
-    if len(pairs) == 1 and pairs[0][0] == "configJson":
+    if len(pairs) == 1 and pairs[0][1] == "configJson":
         return "configJson"
     items = []
-    for name, typ in pairs:
+    for _, name, typ in pairs:
         if "NSDictionary" in typ or "[String: Any" in typ:
             items.append(f'"{name}": BridgeResults.argumentMap(from: {name} as? [String: Any])')
         elif "[NSNumber]" in typ:
@@ -151,7 +169,7 @@ def generate_swift(module: str, manifest: dict[str, dict[str, str]]) -> str:
 def replace_method_bodies(module: str) -> str:
     for name in METHODS:
         params, _, _ = parse_objc_method(module, name)
-        names = param_names_csv(params)
+        names = param_names_call_expr(params)
         if names:
             call = f"ProtocolEngineHostBridgeReactNative.{name}(self, {names}, resolver: resolver, rejecter: rejecter)"
         else:

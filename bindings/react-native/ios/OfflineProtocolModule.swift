@@ -1386,7 +1386,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                options: NSDictionary?,
                                resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.sendMessageRich(self, recipient, content, priority, replyToMsg, options, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.sendMessageRich(self, recipient, content: content, priority: priority, replyToMsg: replyToMsg, options: options, resolver: resolver, rejecter: rejecter)
     }
 
     private func parseReplyContext(_ dict: [String: Any]?) -> ReplyContext? {
@@ -1441,7 +1441,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                               priority: Int,
                               resolver: @escaping RCTPromiseResolveBlock,
                               rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.forwardMessage(self, originalMessageJson, newRecipient, priority, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.forwardMessage(self, originalMessageJson, newRecipient: newRecipient, priority: priority, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func sendConnectionRequest(_ recipient: String,
@@ -1450,7 +1450,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                      initialMessage: String?,
                                      resolver: @escaping RCTPromiseResolveBlock,
                                      rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.sendConnectionRequest(self, recipient, senderName, keyPackage, initialMessage, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.sendConnectionRequest(self, recipient, senderName: senderName, keyPackage: keyPackage, initialMessage: initialMessage, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func acceptConnectionRequest(_ recipient: String,
@@ -1458,7 +1458,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                        keyPackage: [NSNumber]?,
                                        resolver: @escaping RCTPromiseResolveBlock,
                                        rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.acceptConnectionRequest(self, recipient, accepterName, keyPackage, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.acceptConnectionRequest(self, recipient, accepterName: accepterName, keyPackage: keyPackage, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func rejectConnectionRequest(_ recipient: String,
@@ -2052,7 +2052,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                capabilitiesJson: String,
                                resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.registerService(self, serviceId, version, capabilitiesJson, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.registerService(self, serviceId, version: version, capabilitiesJson: capabilitiesJson, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func unregisterService(_ serviceId: String,
@@ -2073,7 +2073,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                   body: String,
                                   resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.sendServiceRequest(self, provider, serviceId, method, body, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.sendServiceRequest(self, provider, serviceId: serviceId, method: method, body: body, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func respondToServiceRequest(_ requestId: String,
@@ -2083,7 +2083,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                        body: String,
                                        resolver: @escaping RCTPromiseResolveBlock,
                                        rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.respondToServiceRequest(self, requestId, requester, serviceId, status, body, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.respondToServiceRequest(self, requestId, requester: requester, serviceId: serviceId, status: status, body: body, resolver: resolver, rejecter: rejecter)
     }
 
     // MARK: - User Blocking
@@ -2117,7 +2117,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                   status: Int,
                                   resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.sendPresenceUpdate(self, recipient, status, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.sendPresenceUpdate(self, recipient, status: status, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func sendTypingIndicator(_ recipient: String,
@@ -2125,14 +2125,14 @@ class OfflineProtocolModule: RCTEventEmitter {
                                    isTyping: Bool,
                                    resolver: @escaping RCTPromiseResolveBlock,
                                    rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.sendTypingIndicator(self, recipient, conversationId, isTyping, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.sendTypingIndicator(self, recipient, conversationId: conversationId, isTyping: isTyping, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func sendReadReceipt(_ recipient: String,
                                messageIds: [String],
                                resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.sendReadReceipt(self, recipient, messageIds, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.sendReadReceipt(self, recipient, messageIds: messageIds, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func receiveMessage(_ resolver: @escaping RCTPromiseResolveBlock,
@@ -2197,7 +2197,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                   profile: String,
                                   resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.wipePersistedState(self, appId, profile, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.wipePersistedState(self, appId, profile: profile, resolver: resolver, rejecter: rejecter)
     }
 
     // MARK: - Transport Management
@@ -2493,7 +2493,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                 fileName: String,
                                 resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.sendFileFromPath(self, recipient, filePath, fileName, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.sendFileFromPath(self, recipient, filePath: filePath, fileName: fileName, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func sendMedia(_ recipient: String,
@@ -2503,7 +2503,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                          mediaMetadata: NSDictionary?,
                          resolver: @escaping RCTPromiseResolveBlock,
                          rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.sendMedia(self, recipient, fileData, fileName, contentType, mediaMetadata, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.sendMedia(self, recipient, fileData: fileData, fileName: fileName, contentType: contentType, mediaMetadata: mediaMetadata, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func sendMediaRich(_ recipient: String,
@@ -2513,7 +2513,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                              options: NSDictionary?,
                              resolver: @escaping RCTPromiseResolveBlock,
                              rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.sendMediaRich(self, recipient, fileData, fileName, contentType, options, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.sendMediaRich(self, recipient, fileData: fileData, fileName: fileName, contentType: contentType, options: options, resolver: resolver, rejecter: rejecter)
     }
 
     private func parseContentType(_ value: String) -> ContentType {
@@ -2674,7 +2674,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                isCharging: Bool,
                                resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.setBatteryState(self, level, isCharging, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.setBatteryState(self, level, isCharging: isCharging, resolver: resolver, rejecter: rejecter)
     }
 
     @objc func getBatteryLevel(_ resolver: @escaping RCTPromiseResolveBlock,
@@ -2852,7 +2852,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                 data: [NSNumber],
                                 resolver: @escaping RCTPromiseResolveBlock,
                                 rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.processFileChunk(self, fileId, chunkIndex, totalChunks, fileSize, fileName, fileChecksum, data, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.processFileChunk(self, fileId, chunkIndex: chunkIndex, totalChunks: totalChunks, fileSize: fileSize, fileName: fileName, fileChecksum: fileChecksum, data: data, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func finalizeFile(_ fileId: String,
@@ -2873,7 +2873,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                          data: [NSNumber],
                                          resolver: @escaping RCTPromiseResolveBlock,
                                          rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.wifiDirectMessageReceived(self, senderId, data, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.wifiDirectMessageReceived(self, senderId, data: data, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func wifiDirectGetNextMessage(_ resolver: @escaping RCTPromiseResolveBlock,
@@ -2905,7 +2905,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                        data: [NSNumber],
                                        resolver: @escaping RCTPromiseResolveBlock,
                                        rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.internetMessageReceived(self, senderId, data, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.internetMessageReceived(self, senderId, data: data, resolver: resolver, rejecter: rejecter)
     }
     
     @objc func internetGetNextMessage(_ resolver: @escaping RCTPromiseResolveBlock,
@@ -3071,7 +3071,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                             sign: NSNumber,
                             resolver: @escaping RCTPromiseResolveBlock,
                             rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.createInvite(self, petname, sign, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.createInvite(self, petname, sign: sign, resolver: resolver, rejecter: rejecter)
     }
 
     /// Resolve a username to the set of devices claiming it.
@@ -3117,7 +3117,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                signature: [NSNumber],
                                resolver: @escaping RCTPromiseResolveBlock,
                                rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.verifySignature(self, publicKey, data, signature, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.verifySignature(self, publicKey, data: data, signature: signature, resolver: resolver, rejecter: rejecter)
     }
 
     /// Byte-oriented variant of `verifySignature`, base64 across the bridge
@@ -3127,7 +3127,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                      signature signatureBase64: String,
                                      resolver: @escaping RCTPromiseResolveBlock,
                                      rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.verifySignatureBase64(self, publicKeyBase64, data dataBase64, signature signatureBase64, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.verifySignatureBase64(self, publicKeyBase64, data: dataBase64, signature: signatureBase64, resolver: resolver, rejecter: rejecter)
     }
     
     /// Generate a new MLS key package
@@ -3188,7 +3188,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                    keyPackageData: [NSNumber],
                                    resolver: @escaping RCTPromiseResolveBlock,
                                    rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.mlsImportKeyPackage(self, userId, keyPackageData, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.mlsImportKeyPackage(self, userId, keyPackageData: keyPackageData, resolver: resolver, rejecter: rejecter)
     }
     
     /// Check if a session exists with a user
@@ -3240,7 +3240,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                  plaintext: [NSNumber],
                                  resolver: @escaping RCTPromiseResolveBlock,
                                  rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.mlsEncryptForUser(self, otherUserId, plaintext, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.mlsEncryptForUser(self, otherUserId, plaintext: plaintext, resolver: resolver, rejecter: rejecter)
     }
     
     /// Decrypt a message
@@ -3589,7 +3589,7 @@ class OfflineProtocolModule: RCTEventEmitter {
                                      options: NSDictionary,
                                      resolver: @escaping RCTPromiseResolveBlock,
                                      rejecter: @escaping RCTPromiseRejectBlock) {
-        ProtocolEngineHostBridgeReactNative.checkInternetPresence(self, userId, options, resolver: resolver, rejecter: rejecter)
+        ProtocolEngineHostBridgeReactNative.checkInternetPresence(self, userId, options: options, resolver: resolver, rejecter: rejecter)
     }
 
     /// Sends a raw, caller-built relay command verbatim over the SDK's

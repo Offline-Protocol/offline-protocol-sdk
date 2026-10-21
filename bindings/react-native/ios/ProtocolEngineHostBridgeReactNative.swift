@@ -622,7 +622,7 @@ enum ProtocolEngineHostBridgeReactNative {
 
     static func verifySignatureBase64(_ module: OfflineProtocolModule, _ publicKeyBase64: String, data dataBase64: String, signature signatureBase64: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
         run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_NOT_INITIALIZED", errorMessage: "Protocol not initialized") { host, env in
-            try ProtocolEngineHostBridge.verifySignatureBase64(host: host, env: env, arguments: ["publicKeyBase64": publicKeyBase64, "data dataBase64": data dataBase64, "signature signatureBase64": signature signatureBase64])
+            try ProtocolEngineHostBridge.verifySignatureBase64(host: host, env: env, arguments: ["publicKeyBase64": publicKeyBase64, "dataBase64": dataBase64, "signatureBase64": signatureBase64])
         }
     }
 

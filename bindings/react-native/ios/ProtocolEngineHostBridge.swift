@@ -1403,9 +1403,10 @@ enum ProtocolEngineHostBridge {
 
     static func dataExportRaw(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataExportRaw")
-        let bytes = try host.dataExportRaw(spaceId: try A.requireString(m, "spaceId"), docId: try A.requireString(m, "docId"))
-        // A `Uint8List` on the Dart side, as the Kotlin `ByteArray` is.
-        return FlutterStandardTypedData(bytes: bytes)
+        return try host.dataExportRaw(
+            spaceId: try A.requireString(m, "spaceId"),
+            docId: try A.requireString(m, "docId")
+        )
     }
 
     static func dataFlush(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {

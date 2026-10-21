@@ -430,20 +430,18 @@ fn flutter_docs_describe_ios_bridge_ci() {
         changelog.contains("ci-typecheck-flutter-ios-bridge.sh"),
         "CHANGELOG must name the iOS bridge typecheck script"
     );
-    let readme = std::fs::read_to_string(
-        flutter_plugin_dir()
-            .parent()
-            .expect("flutter plugin parent")
-            .join("README.md"),
+    let bridge_doc = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/bridges/flutter.md"),
     )
-    .unwrap_or_else(|e| panic!("cannot read bindings/flutter/README.md: {e}"));
+    .unwrap_or_else(|e| panic!("cannot read docs/bridges/flutter.md: {e}"));
     assert!(
-        !readme.contains("No CI job compiles the iOS plugin yet"),
-        "bindings/flutter/README.md must describe Flutter Binding (iOS bridge)"
+        !bridge_doc.contains("nothing in CI compiles the iOS plugin yet")
+            && !bridge_doc.contains("No CI job compiles the iOS plugin yet"),
+        "docs/bridges/flutter.md must describe Flutter Binding (iOS bridge)"
     );
     assert!(
-        readme.contains("Flutter Binding (iOS bridge)"),
-        "bindings/flutter/README.md must name the iOS CI job"
+        bridge_doc.contains("Flutter Binding (iOS bridge)"),
+        "docs/bridges/flutter.md must name the iOS CI job"
     );
 }
 

@@ -70,9 +70,25 @@ def methods() -> list[str]:
     return [ln.strip() for ln in MANIFEST.read_text().splitlines() if ln.strip()]
 
 
+# Bridge returns `Data`; Flutter's codec needs `FlutterStandardTypedData`.
+SPECIAL_CASES: dict[str, str] = {
+    "dataExportRaw": """\
+        case "dataExportRaw":
+            let data = try ProtocolEngineHostBridge.dataExportRaw(host: host, env: env, arguments: arguments)
+            if let bytes = data as? Data {
+                return FlutterStandardTypedData(bytes: bytes)
+            }
+            return data
+""",
+}
+
+
 def render() -> str:
     lines = [HEADER]
     for m in methods():
+        if m in SPECIAL_CASES:
+            lines.append(SPECIAL_CASES[m])
+            continue
         lines.append(f'        case "{m}":\n')
         lines.append(
             f"            return try ProtocolEngineHostBridge.{m}"

@@ -1,15 +1,6 @@
 # Flutter bindings
 
-Flutter plugin for the [Offline Protocol SDK](https://github.com/Offline-Protocol/offline-protocol-sdk): offline-first mesh messaging with MLS encryption.
-
-Hand-written native bridge code is shared with the React Native module under
-`bindings/react-native/{ios,android}`
-([ADR 0025](../../docs/adr/0025-native-packages-are-assembled-in-place.md)).
-The plugin links the same UniFFI artifacts (Kotlin/Swift generated from the UDL)
-as React Native, not a separate bindgen output.
-
-Bridge contract (for contributors changing the boundary):
-[docs/bridges/flutter.md](../../docs/bridges/flutter.md).
+Flutter plugin for the [Offline Protocol SDK](https://github.com/Offline-Protocol/offline-protocol-sdk): offline-first mesh messaging with MLS encryption on iOS and Android.
 
 ## Requirements
 
@@ -17,34 +8,20 @@ Bridge contract (for contributors changing the boundary):
 |----------|---------|
 | Flutter | >= 3.10 |
 | iOS | >= 13.0 |
-| Android | >= API 24 (Android 7.0) |
-
-You also need the Rust toolchain and a one-time build of the mobile UniFFI
-libraries (same steps as React Native).
-
-## Native libraries
-
-From the repository root:
-
-```bash
-./scripts/generate-bindings.sh
-cd bindings/react-native
-npm run build:uniffi:all
-```
-
-This produces:
-
-- `bindings/react-native/android/src/main/jniLibs/**/*.so`
-- `bindings/react-native/ios/libs/offline_protocol_uniffi.xcframework`
-- Generated Kotlin/Swift under the React Native tree
+| Android | API 24+ (Android 7.0) |
 
 ## Add the plugin
 
-**pub.dev (release packages):** depend on the published `offline_protocol` version
-that matches your SDK release. Native libraries are bundled in the plugin when
-built through the release pipeline (see [flutter-integration.md](../../docs/flutter-integration.md)).
+**From pub.dev** (when published for your release):
 
-**Monorepo / development:** path dependency:
+```yaml
+dependencies:
+  offline_protocol: ^0.30.0   # match your SDK release
+```
+
+Published packages include prebuilt native libraries. See [Flutter integration](../../docs/flutter-integration.md) for permissions and platform setup.
+
+**From this repository** (development):
 
 ```yaml
 dependencies:
@@ -52,40 +29,26 @@ dependencies:
     path: ../bindings/flutter/offline_protocol   # adjust for your layout
 ```
 
-After `npm run build:uniffi:all` in `bindings/react-native`, stage artifacts into
-the plugin for local pub builds:
+Build UniFFI mobile artifacts once, then stage them into the plugin:
 
 ```bash
+./scripts/generate-bindings.sh
+cd bindings/react-native && npm run build:uniffi:all
 bash bindings/flutter/scripts/stage-plugin-native-artifacts.sh
 ```
 
 ## Platform setup
 
-Use the same host permissions and manifests as React Native:
+Use the same permissions and manifests as React Native:
 
-- **iOS:** Bluetooth usage descriptions and `UIBackgroundModes` (`bluetooth-central`,
-  `bluetooth-peripheral`) before BLE starts. See
-  [React Native iOS permissions](../react-native/README.md#ios-permissions).
-- **Android:** Runtime Bluetooth and (where applicable) location / nearby Wi‑Fi
-  permissions. See
-  [React Native Android permissions](../react-native/README.md#android-permissions).
+- **iOS:** Bluetooth usage descriptions and `UIBackgroundModes` (`bluetooth-central`, `bluetooth-peripheral`) before BLE starts. See [React Native iOS permissions](../react-native/README.md#ios-permissions).
+- **Android:** Runtime Bluetooth and (where applicable) location / nearby Wi‑Fi permissions. See [React Native Android permissions](../react-native/README.md#android-permissions).
 
-### iOS: shared bridge copy (`BridgeRN`)
-
-CocoaPods indexes sources only under the pod root. On `pod install`, the plugin
-copies shared Swift bridge files from `bindings/react-native/ios` into
-`offline_protocol/ios/BridgeRN/` (gitignored). After you change shared iOS
-bridge sources, refresh and reinstall:
-
-```bash
-bash bindings/flutter/offline_protocol/ios/sync_bridge_rn.sh
-cd your_app/ios && pod install
-```
+**iOS:** After upgrading the plugin, run `pod install` in your app’s `ios/` directory.
 
 ## Quick start
 
-Subscribe to events **before** `createFromConfig` if you need every event or
-gap recovery via native replay (same contract as React Native).
+Subscribe to events **before** `createFromConfig` if you need every event or gap recovery via native replay.
 
 ```dart
 import 'package:offline_protocol/offline_protocol.dart';
@@ -117,9 +80,7 @@ final messageId = await OfflineProtocol.sendMessage(
 );
 ```
 
-UniFFI and transport work run on a dedicated engine thread; method-channel and
-event-channel callbacks are delivered on the main isolate’s platform thread
-([F2](../../docs/bridges/flutter.md#f2-engine-thread-and-main-thread-callbacks-k2-parity)).
+Engine work runs on a dedicated native thread; method-channel and event-channel callbacks arrive on the platform main thread.
 
 ## API surface
 
@@ -128,27 +89,20 @@ event-channel callbacks are delivered on the main isolate’s platform thread
 | Lifecycle | `createFromConfig`, `initializeMlsWithSecureStorage`, `start`, `stop`, `destroy` |
 | Identity | `localAddress` |
 | Messaging | `sendMessage` |
-| Events | `OfflineProtocol.events`, native `replayEvents` via `NativeEventPipeline` |
-| Internet | `enableInternetTransport`, auto-enable after `start()` when `transports.internet` has `serverAddress` |
-| BLE | Wired when `bleEnabled` is true; `enableTransport('ble', …)` |
-| Wi‑Fi Direct / peer stream | `enableTransport('wifiDirect', …)`, auto-enable when configured |
-| Config | Optional top-level `dors` and `relay` JSON (shared `InitialRuntimeConfigApplier`) |
+| Events | `OfflineProtocol.events` (sequence numbers and `replayEvents` when you subscribe early) |
+| Full native surface | `MeshSdk` (parity with React Native native methods) |
 
-**Transports:** Nostr and Reticulum use the same shared host as React Native
-(`reticulumEnabled` / `nostrEnabled` or `enableTransport`). **Android** starts
-the shared `MeshForegroundService` on engine `start` (notification Stop runs the
-same teardown path as RN and sticky-delivers `mesh_stopped_by_user`). **iOS**
-re-emits `internet_session_superseded` on app foreground while the latch is set.
-**Not ported:** React Native `MeshHeadlessWakeService` (JS wake after process kill);
-use RN if you need that opt-in.
+Internet, BLE, Wi‑Fi Direct, Nostr, and Reticulum follow the same configuration model as React Native. Optional top-level `dors` and `relay` JSON use the shared runtime config applier.
 
-Configuration fields and transport behavior match the core and React Native;
-see [Configuration](../../docs/configuration.md) and the
-[React Native README](../react-native/README.md).
+**Android:** `MeshForegroundService` keeps mesh work alive while the engine is running; the notification Stop action matches React Native teardown.
+
+**Not in Flutter:** React Native `MeshHeadlessWakeService` (opt-in wake after process kill). Use React Native if you need that behavior.
+
+For every config field and transport, see [Configuration](../../docs/configuration.md) and the [React Native README](../react-native/README.md).
 
 ## Example app
 
-**Android** (minimal Gradle tree is in the repository):
+**Android:**
 
 ```bash
 cd bindings/flutter/offline_protocol/example
@@ -156,31 +110,17 @@ flutter pub get
 flutter run -d android
 ```
 
-**iOS** (generate the Xcode `Runner` project once; not committed because Flutter
-tooling versions differ):
+**iOS** (generate the Xcode project once):
 
 ```bash
 bindings/flutter/scripts/bootstrap-example-platforms.sh
 cd bindings/flutter/offline_protocol/example
 flutter pub get
-flutter run -d <device-or-simulator-id>   # flutter devices
+flutter run -d <device-or-simulator-id>
 ```
 
-The example uses a minimal config (Internet transport flag only, no relay or BLE
-start), subscribes to events, and prints the device `off1…` address. Details:
-[example/README.md](offline_protocol/example/README.md).
+The example uses a minimal config, listens for events, and prints the device `off1…` address. See [example/README.md](offline_protocol/example/README.md).
 
-## Maintainers
+## Contributors
 
-- **CI:** GitHub Actions jobs `Flutter Binding` and `Flutter Binding (iOS bridge)`
-  (`.github/workflows/ci.yml`): `flutter test`, `flutter analyze`, arm64 UniFFI
-  into jniLibs, release AAR assembly with `measure-plugin-aar-size.sh --check`,
-  and iOS bridge typecheck via `scripts/ci-typecheck-flutter-ios-bridge.sh`.
-  Path filters skip native gates when only Dart or guard tests change; pushes to
-  `main` run the full paths. Details: [docs/bridges/flutter.md](../../docs/bridges/flutter.md#what-ci-runs).
-- **Footprint (F9):** prefer [OfflineProtocol.minimalFootprintConfig](offline_protocol/lib/src/offline_protocol.dart)
-  for production-shaped create payloads; see [baselines/README.md](baselines/README.md).
-- **Version:** the podspec and the Gradle build read it from
-  `bindings/react-native/package.json`. Bump `offline_protocol/pubspec.yaml`
-  with it; the release refuses a tag the pubspec does not match.
-- **Rust guards:** `crates/offline-protocol-uniffi/src/tests/flutter_bridge_guards.rs`.
+Bridge layout, CI, and generator rules: [docs/bridges/flutter.md](../../docs/bridges/flutter.md).

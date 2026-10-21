@@ -66,7 +66,11 @@ enum FlutterEngineChannel {
         case "dataDocSize":
             return try ProtocolEngineHostBridge.dataDocSize(host: host, env: env, arguments: arguments)
         case "dataExportRaw":
-            return try ProtocolEngineHostBridge.dataExportRaw(host: host, env: env, arguments: arguments)
+            let data = try ProtocolEngineHostBridge.dataExportRaw(host: host, env: env, arguments: arguments)
+            if let bytes = data as? Data {
+                return FlutterStandardTypedData(bytes: bytes)
+            }
+            return data
         case "dataFetchAttachment":
             return try ProtocolEngineHostBridge.dataFetchAttachment(host: host, env: env, arguments: arguments)
         case "dataFetchAttachmentFrom":

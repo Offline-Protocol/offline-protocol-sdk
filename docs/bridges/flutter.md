@@ -7,7 +7,8 @@ compile ([ADR 0025](../adr/0025-native-packages-are-assembled-in-place.md)).
 Read [the shared contract](README.md) first. This document covers what is
 specific to Flutter.
 
-Integration steps live in [bindings/flutter/README.md](../../bindings/flutter/README.md).
+App integration: [bindings/flutter/README.md](../../bindings/flutter/README.md) and
+[flutter-integration.md](../flutter-integration.md).
 
 ## The generated layer
 
@@ -182,10 +183,6 @@ on each app foreground (`supersedeRestatementJson()`), matching React Native iOS
 Use `MeshSdk.internetIsSupersededTyped()` after process restart when no event
 was buffered.
 
-Subscribe to `OfflineProtocol.events` before `createFromConfig` when you need
-every engine event and gap replay; one-shots still benefit from the native
-redelivery above when Dart was not listening at emit time.
-
 ## F8. Telemetry
 
 Telemetry methods are exposed on the method channel (`enableTelemetry`,
@@ -240,27 +237,14 @@ narrow nested sections for mesh and data features you actually ship.
 
 ## What CI runs
 
-The `Flutter Binding` job in `.github/workflows/ci.yml` (path-filtered on pull
-requests; full run on pushes to `main`):
+GitHub Actions (see `.github/workflows/ci.yml`):
 
-- **Dart (fast path):** `flutter test` and `flutter analyze` when the plugin,
-  `docs/bridges/flutter.md`, workflow, or `flutter_bridge_guards.rs` change.
-- **UniFFI production (`lib.rs`):** any edit runs the native path (jniLibs +
-  AAR gate), not the guard-only fast path.
-- **Android native (slow path):** arm64 UniFFI build, a check of the
-  example's committed Gradle wrapper, then `:offline_protocol:assembleRelease`
-  via `measure-plugin-aar-size.sh --check` when the plugin's own Android tree
-  or the example's, baselines, Flutter scripts, shared RN Android tree
-  (Kotlin, jniLibs, ProGuard consumer rules, Gradle), bindgen, UniFFI ABI
-  inputs, or root `Cargo.lock` / workspace `Cargo.toml` change. Changes
-  confined to Dart or guard-only tests can skip the NDK/Gradle path; pushes to
-  `main` always run the full native gate. `flutter analyze` excludes
-  `android/**`, so the plugin's own Kotlin is compiled only by this path.
+- **`Flutter Binding`:** `flutter test`, `flutter analyze`, Android arm64 UniFFI,
+  release AAR assembly, and `measure-plugin-aar-size.sh --check` (path-filtered
+  on pull requests; full run on pushes to `main`).
+- **`Flutter Binding (iOS bridge)`:** `bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh`
+  (syncs `BridgeRN/`, typechecks plugin and shared Swift against the Flutter
+  engine and simulator UniFFI archive).
 
-**iOS native (slow path):** the `Flutter Binding (iOS bridge)` job runs
-`bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh` when the plugin
-iOS tree, shared React Native Swift, or UniFFI inputs change (full run on
-pushes to `main`). The script syncs `BridgeRN/`, then typechecks plugin
-`Classes/` plus shared RN Swift against the Flutter engine framework and the
-simulator UniFFI archive. Run the same script locally after editing shared Swift
-or before relying on a stale `BridgeRN/` copy (F1).
+Run the iOS script locally after editing shared Swift or before trusting a stale
+`BridgeRN/` copy (F1).
