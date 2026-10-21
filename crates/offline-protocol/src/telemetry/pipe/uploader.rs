@@ -1436,7 +1436,8 @@ pub(crate) mod tests {
 
     /// The real ingest's chain validates against the pinned roots. Needs the
     /// network, so it runs only on request:
-    /// `cargo test -p offline-protocol -- --ignored the_ingest_chain`.
+    /// `cargo test -p offline-protocol -- --ignored the_ingest_chain`. The
+    /// `Ingest Chain` workflow runs it daily.
     /// Any HTTP answer passes (an unauthenticated batch is refused with a
     /// 4xx); only a TLS or connection failure fails it.
     #[test]

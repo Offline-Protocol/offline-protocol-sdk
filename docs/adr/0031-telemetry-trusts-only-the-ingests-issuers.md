@@ -110,6 +110,7 @@ announced that it will become a public certificate authority, and a Universal
 SSL certificate issued from its own root would not validate against this set.
 Whichever it is, the roots file is the one place to change, the fingerprint
 test says so, and the change ships in an SDK release before the edge moves,
-never after. The ignored live test,
-`cargo test -p offline-protocol --lib -- --ignored the_ingest_chain`, is the
-check to run before and after any of these.
+never after. The `Ingest Chain` workflow runs the live test
+(`cargo test -p offline-protocol --lib -- --ignored the_ingest_chain`) against
+the production ingest daily, so such a move shows up there before it shows up
+in applications' `lastError`.
