@@ -1902,6 +1902,7 @@ dependencies = [
  "offline-protocol-transport",
  "rand_core 0.6.4",
  "rustix",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3342,7 +3343,6 @@ dependencies = [
  "rustls-pki-types",
  "ureq-proto",
  "utf8-zero",
- "webpki-roots",
 ]
 
 [[package]]
@@ -3488,15 +3488,6 @@ dependencies = [
  "hashbrown 0.15.5",
  "indexmap",
  "semver",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "1.0.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]
