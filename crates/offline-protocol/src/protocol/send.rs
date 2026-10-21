@@ -2845,18 +2845,20 @@ impl OfflineProtocol {
             };
 
             if main_cap_hit || internal_cap_hit {
-                let file_id = options_for_queue.file_id.clone().unwrap_or_else(|| {
-                    format!("file_{}", MessageId::new().as_str())
-                });
-                return self.enqueue_pending_media_transfer(
+                let file_id = options_for_queue
+                    .file_id
+                    .clone()
+                    .unwrap_or_else(|| format!("file_{}", MessageId::new().as_str()));
+                return self.enqueue_pending_media_transfer(PendingMediaTransfer {
                     file_id,
-                    recipient_str,
+                    recipient: recipient_str,
                     file_data,
-                    file_name_str,
+                    file_name: file_name_str,
                     content_type,
-                    options_for_queue,
-                    data_purpose_for_queue,
-                );
+                    options: options_for_queue,
+                    data_purpose: data_purpose_for_queue,
+                    enqueued_at: Instant::now(),
+                });
             }
         } else if self.config.encryption.require_encryption {
             return Err(Error::EncryptFailed(
@@ -3000,16 +3002,7 @@ impl OfflineProtocol {
     /// `MAX_PENDING_MEDIA_QUEUE_DEPTH_PER_PEER` entries, this surfaces a
     /// terminal [`Error::MediaTransferLimit`] instead of enqueueing — the
     /// one place the error still fires from the public send path.
-    fn enqueue_pending_media_transfer(
-        &mut self,
-        file_id: String,
-        recipient: String,
-        file_data: Vec<u8>,
-        file_name: String,
-        content_type: ContentType,
-        options: MediaSendOptions,
-        data_purpose: Option<crate::media_envelope::DataPurpose>,
-    ) -> Result<String> {
+    fn enqueue_pending_media_transfer(&mut self, entry: PendingMediaTransfer) -> Result<String> {
         use crate::constants::MAX_PENDING_MEDIA_QUEUE_DEPTH_PER_PEER;
 
         // A `file_id` already live in the active-transfer map was caught
@@ -3019,28 +3012,20 @@ impl OfflineProtocol {
         // caller is sending two transfers under the same id and should
         // hear about it on this call rather than through a mystery wire
         // outcome later.
-        if let Some(queue) = self.pending_media_queues.get(&recipient) {
-            if queue.iter().any(|entry| entry.file_id == file_id) {
+        if let Some(queue) = self.pending_media_queues.get(&entry.recipient) {
+            if queue.iter().any(|q| q.file_id == entry.file_id) {
                 return Err(Error::InvalidArgument(format!(
                     "file_id {} already has a queued outbound transfer",
-                    file_id
+                    entry.file_id
                 )));
             }
             if queue.len() >= MAX_PENDING_MEDIA_QUEUE_DEPTH_PER_PEER {
-                return Err(Error::MediaTransferLimit(recipient));
+                return Err(Error::MediaTransferLimit(entry.recipient));
             }
         }
 
-        let entry = PendingMediaTransfer {
-            file_id: file_id.clone(),
-            recipient: recipient.clone(),
-            file_data,
-            file_name,
-            content_type,
-            options,
-            data_purpose,
-            enqueued_at: Instant::now(),
-        };
+        let file_id = entry.file_id.clone();
+        let recipient = entry.recipient.clone();
 
         let queue = self
             .pending_media_queues

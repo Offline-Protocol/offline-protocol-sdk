@@ -32574,7 +32574,10 @@ fn test_send_media_queues_beyond_concurrent_cap() {
             None,
         )
         .expect("call past the cap must park on the queue, not reject");
-    assert!(!parked.is_empty(), "parked transfer must still get a file_id");
+    assert!(
+        !parked.is_empty(),
+        "parked transfer must still get a file_id"
+    );
     assert_eq!(
         alice.media_queue_depth(&id("bob")),
         1,
@@ -44445,13 +44448,7 @@ fn media_queue_emits_enqueued_and_dequeued_events() {
     }
 
     let parked = alice
-        .send_media(
-            &id("bob"),
-            vec![9u8; 512],
-            "p.bin",
-            ContentType::File,
-            None,
-        )
+        .send_media(&id("bob"), vec![9u8; 512], "p.bin", ContentType::File, None)
         .unwrap();
 
     // Exactly one MediaQueueEnqueued, carrying our file_id and depth=1.
@@ -44508,13 +44505,7 @@ fn media_queue_sweep_times_out_pathologically_stuck_entries() {
 
     let events = capture_all_events(&mut alice);
     let parked = alice
-        .send_media(
-            &id("bob"),
-            vec![9u8; 512],
-            "p.bin",
-            ContentType::File,
-            None,
-        )
+        .send_media(&id("bob"), vec![9u8; 512], "p.bin", ContentType::File, None)
         .unwrap();
     assert_eq!(alice.media_queue_depth(&id("bob")), 1);
 
