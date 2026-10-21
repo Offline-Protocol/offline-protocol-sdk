@@ -92,9 +92,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   blocking telemetry flush explicitly (F8).
 - **Flutter `OfflineProtocol.minimalFootprintConfig`.** Transport flags-only create
   payload for the smallest runtime surface (F9).
-- **Flutter preview transport policy.** `createFromConfig`, native create, and
-  `enableTransport` / `forceTransport` refuse Reticulum and Nostr until the plugin
-  hosts them (Dart + Android + iOS guards, tests, and F1 docs).
+- **Flutter Android mesh foreground keep-alive.** `MeshForegroundService` ships with
+  the plugin; `start`/`stop`/`destroy` drive it like React Native.
+- **Flutter pub.dev publish path.** Release staging plus
+  `bindings/flutter/scripts/publish-to-pub.sh` and [flutter-integration.md](docs/flutter-integration.md).
 - **Engine-bridge poll smoke tests.** `js-ci-harness/engine-bridge-smoke.test.js`
   (MLS and Internet readiness through the RN SDK) and
   `ProtocolEngineHostBridgeSmokeTest` on Android complement Rust delegation guards.
@@ -105,9 +106,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   Internet, BLE and Wi-Fi Direct transports, and core events with the same
   sequence numbers and gap replay as React Native. Its Android and iOS hosts
   compile the React Native bridge sources where they are, less a named list
-  of the ones that need React, so a transport fix reaches both. Nostr and
-  Reticulum are not hosted yet, and a config that enables either is refused
-  at create. Until it is on pub.dev it is a path dependency. CI runs Dart tests
+  of the ones that need React, so a transport fix reaches both. Nostr, Reticulum,
+  and Android mesh foreground keep-alive use the same shared managers as RN.
+  Until it is on pub.dev it is a path dependency. CI runs Dart tests
   and analysis, gates the Android release AAR against a size baseline, and
   typechecks the iOS plugin plus shared Swift via
   `ci-typecheck-flutter-ios-bridge.sh` (see `docs/bridges/flutter.md`).

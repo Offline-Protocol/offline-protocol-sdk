@@ -38,3 +38,15 @@ Native tree.
 
 Use `OfflineProtocol` for lifecycle, events, and common helpers. Use `MeshSdk` for the
 full method-channel surface pinned in `method_channel_methods.txt` (React Native parity).
+
+## Publish to pub.dev (maintainers)
+
+On a release tag, CI stages UniFFI libraries into the plugin tree
+(`bindings/flutter/scripts/stage-plugin-native-artifacts.sh`). To publish:
+
+1. Match `bindings/flutter/offline_protocol/pubspec.yaml` `version:` to the git tag.
+2. Stage natives (or use CI artifacts from the release job).
+3. From the plugin directory: `dart pub publish --dry-run`, then `dart pub publish`.
+
+Helper: `bash bindings/flutter/scripts/publish-to-pub.sh` (dry-run only).
+Requires a [pub.dev publisher](https://dart.dev/tools/pub/publishing) for the package name.

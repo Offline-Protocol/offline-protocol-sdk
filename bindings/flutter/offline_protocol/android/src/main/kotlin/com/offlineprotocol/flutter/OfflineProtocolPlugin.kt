@@ -331,7 +331,6 @@ class OfflineProtocolPlugin :
         }
 
     private fun createOnEngine(configJson: String) {
-        FlutterCreateConfigPolicy.requireCreateConfigSupported(configJson)
         tearDownProtocol()
         val ctx = applicationContext ?: throw IllegalStateException("Plugin not attached")
         engineHost.create(
@@ -377,10 +376,34 @@ class OfflineProtocolPlugin :
     private fun startOnEngine() {
         engineHost.startProtocolCore()
         engineHost.startBleTransportIfPresent()
+        val ctx = applicationContext
+        if (ctx != null) {
+            FlutterMeshForegroundKeepAlive.start(ctx, ::handleUserRequestedMeshStop)
+        }
     }
 
-    private fun stopOnEngine() {
+    private fun handleUserRequestedMeshStop() {
+        engineExecutor.execute {
+            try {
+                stopOnEngine(skipForegroundStop = true)
+            } catch (e: Exception) {
+                Log.e(TAG, "User-requested mesh stop failed", e)
+            } finally {
+                val json = JSONObject()
+                json.put("type", "mesh_stopped_by_user")
+                emitEventJson(json.toString())
+                applicationContext?.let { FlutterMeshForegroundKeepAlive.stop(it) }
+            }
+        }
+    }
+
+    private fun stopOnEngine(skipForegroundStop: Boolean = false) {
         val teardown = TeardownSequence()
+        if (!skipForegroundStop) {
+            teardown.step("mesh foreground service") {
+                applicationContext?.let { FlutterMeshForegroundKeepAlive.stop(it) }
+            }
+        }
         teardown.step("process scheduler") { engineHost.backgroundProcessor.stopProcessScheduler() }
         teardown.step("BLE manager") { engineHost.bleTransport?.stop() }
         teardown.step("Internet manager") { engineHost.internetManager?.stop() }
@@ -392,6 +415,7 @@ class OfflineProtocolPlugin :
     }
 
     private fun tearDownProtocol() {
+        applicationContext?.let { FlutterMeshForegroundKeepAlive.stop(it) }
         engineHost.backgroundProcessor.stopProcessScheduler()
         val teardown = TeardownSequence()
         teardown.step("BLE manager") { engineHost.bleTransport?.stop() }

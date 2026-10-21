@@ -447,27 +447,28 @@ fn flutter_docs_describe_ios_bridge_ci() {
 }
 
 #[test]
-fn flutter_plugin_refuses_reticulum_and_nostr_at_create() {
+fn flutter_android_hosts_mesh_foreground_keep_alive() {
     let flutter = flutter_plugin_dir();
-    let dart = std::fs::read_to_string(flutter.join("lib/src/flutter_create_config_policy.dart"))
-        .unwrap_or_else(|e| panic!("cannot read flutter_create_config_policy.dart: {e}"));
+    let gradle = std::fs::read_to_string(flutter.join("android/build.gradle"))
+        .unwrap_or_else(|e| panic!("cannot read android/build.gradle: {e}"));
     assert!(
-        dart.contains("assertCreateConfigSupported") && dart.contains("reticulumEnabled"),
-        "Dart must refuse Reticulum/Nostr before create reaches native"
+        !gradle.contains("MeshForegroundService.kt"),
+        "Flutter must compile MeshForegroundService, not exclude it"
     );
     let plugin_kt = std::fs::read_to_string(
         flutter.join("android/src/main/kotlin/com/offlineprotocol/flutter/OfflineProtocolPlugin.kt"),
     )
     .unwrap_or_else(|e| panic!("cannot read OfflineProtocolPlugin.kt: {e}"));
     assert!(
-        plugin_kt.contains("FlutterCreateConfigPolicy.requireCreateConfigSupported"),
-        "Android createOnEngine must refuse unsupported transports before teardown"
+        plugin_kt.contains("FlutterMeshForegroundKeepAlive.start")
+            && plugin_kt.contains("FlutterMeshForegroundKeepAlive.stop"),
+        "Flutter start/stop must drive the shared mesh foreground service"
     );
-    let plugin_swift = std::fs::read_to_string(flutter.join("ios/Classes/OfflineProtocolPlugin.swift"))
-        .unwrap_or_else(|e| panic!("cannot read OfflineProtocolPlugin.swift: {e}"));
+    let manifest = std::fs::read_to_string(flutter.join("android/src/main/AndroidManifest.xml"))
+        .unwrap_or_else(|e| panic!("cannot read plugin AndroidManifest.xml: {e}"));
     assert!(
-        plugin_swift.contains("FlutterCreateConfigPolicy.requireCreateConfigSupported"),
-        "iOS createOnEngine must refuse unsupported transports before teardown"
+        manifest.contains("MeshForegroundService"),
+        "Flutter plugin manifest must declare MeshForegroundService"
     );
     let ci_script = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

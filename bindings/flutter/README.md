@@ -134,11 +134,11 @@ event-channel callbacks are delivered on the main isolate’s platform thread
 | Wi‑Fi Direct / peer stream | `enableTransport('wifiDirect', …)`, auto-enable when configured |
 | Config | Optional top-level `dors` and `relay` JSON (shared `InitialRuntimeConfigApplier`) |
 
-**Not in the Flutter plugin yet:** Nostr, Reticulum, telemetry pipe, and the
-React Native foreground mesh service. Their shared bridge sources compile with
-the plugin, but `createFromConfig`, native create, and `enableTransport` /
-`forceTransport` **refuse** configs that enable them (Dart, Android, and iOS).
-Use React Native for those transports until the plugin hosts them explicitly.
+**Transports:** Nostr and Reticulum use the same shared host as React Native
+(`reticulumEnabled` / `nostrEnabled` or `enableTransport`). **Android** starts
+the shared `MeshForegroundService` on engine `start` (notification Stop runs the
+same teardown path as RN). **Not ported:** React Native `MeshHeadlessWakeService`
+(JS wake after process kill); use RN if you need that opt-in.
 
 Configuration fields and transport behavior match the core and React Native;
 see [Configuration](../../docs/configuration.md) and the

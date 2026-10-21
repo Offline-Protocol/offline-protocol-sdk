@@ -95,7 +95,6 @@ internal object EngineMethodHandlers {
     ): Any? {
     val configJson = arguments as? String
             ?: throw IllegalArgumentException("create expects a JSON string")
-        FlutterCreateConfigPolicy.requireCreateConfigSupported(configJson)
         env.createOnEngine(configJson)
         return null
     }
@@ -505,7 +504,6 @@ internal object EngineMethodHandlers {
     val map = arguments as? Map<*, *>
             ?: throw IllegalArgumentException("enableTransport expects a map")
         val type = FlutterBridgeArgs.requireString(map, "type")
-        FlutterCreateConfigPolicy.requireTransportTypeSupported(type)
         val configJson = map["config"] as? String
         val json = configJson?.let { JSONObject(it) }
         when (type.lowercase()) {
@@ -574,8 +572,7 @@ internal object EngineMethodHandlers {
         env: FlutterEngineChannel.Environment,
         arguments: Any?,
     ): Any? {
-    FlutterCreateConfigPolicy.requireForceTransportSupported(arguments)
-        return com.offlineprotocol.ProtocolEngineHostBridge.forceTransport(host, env.context, arguments)
+    return com.offlineprotocol.ProtocolEngineHostBridge.forceTransport(host, env.context, arguments)
     }
 
     @JvmStatic

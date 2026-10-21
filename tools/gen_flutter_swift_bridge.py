@@ -70,30 +70,14 @@ def methods() -> list[str]:
     return [ln.strip() for ln in MANIFEST.read_text().splitlines() if ln.strip()]
 
 
-# Flutter-only guards (preview: Reticulum/Nostr not hosted).
-CASE_BODY: dict[str, str] = {
-    "enableTransport": (
-        "try FlutterCreateConfigPolicy.requireTransportTypeSupported(arguments: arguments)\n"
-        "            return try ProtocolEngineHostBridge.enableTransport(host: host, env: env, arguments: arguments)\n"
-    ),
-    "forceTransport": (
-        "try FlutterCreateConfigPolicy.requireTransportTypeSupported(arguments: arguments)\n"
-        "            return try ProtocolEngineHostBridge.forceTransport(host: host, env: env, arguments: arguments)\n"
-    ),
-}
-
-
 def render() -> str:
     lines = [HEADER]
     for m in methods():
         lines.append(f'        case "{m}":\n')
-        if m in CASE_BODY:
-            lines.append(f"            {CASE_BODY[m]}")
-        else:
-            lines.append(
-                f"            return try ProtocolEngineHostBridge.{m}"
-                "(host: host, env: env, arguments: arguments)\n"
-            )
+        lines.append(
+            f"            return try ProtocolEngineHostBridge.{m}"
+            "(host: host, env: env, arguments: arguments)\n"
+        )
     lines.append(FOOTER)
     return "".join(lines)
 

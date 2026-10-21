@@ -124,7 +124,6 @@ enum FlutterEngineChannel {
         case "enableTelemetry":
             return try ProtocolEngineHostBridge.enableTelemetry(host: host, env: env, arguments: arguments)
         case "enableTransport":
-            try FlutterCreateConfigPolicy.requireTransportTypeSupported(arguments: arguments)
             return try ProtocolEngineHostBridge.enableTransport(host: host, env: env, arguments: arguments)
         case "endTelemetrySession":
             return try ProtocolEngineHostBridge.endTelemetrySession(host: host, env: env, arguments: arguments)
@@ -137,7 +136,6 @@ enum FlutterEngineChannel {
         case "flushTelemetry":
             return try ProtocolEngineHostBridge.flushTelemetry(host: host, env: env, arguments: arguments)
         case "forceTransport":
-            try FlutterCreateConfigPolicy.requireTransportTypeSupported(arguments: arguments)
             return try ProtocolEngineHostBridge.forceTransport(host: host, env: env, arguments: arguments)
         case "forwardMessage":
             return try ProtocolEngineHostBridge.forwardMessage(host: host, env: env, arguments: arguments)

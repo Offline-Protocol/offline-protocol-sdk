@@ -28,10 +28,9 @@ On Android that is the `KotlinCompile` excludes in `android/build.gradle`. On
 iOS it is `rn_only_swift` in `ios/offline_protocol.podspec`, which must agree
 with the `--exclude` list in `ios/sync_bridge_rn.sh`. What is left out needs
 React (the module, its package, the mesh foreground and wake services, the
-sticky event dispatcher). Reticulum and Nostr **sources** compile with the
-plugin so the shared `ProtocolEngineHost` type-checks, but **create** and
-`enableTransport` / `forceTransport` refuse configs that turn those transports
-on until the Flutter plugin hosts them (use React Native today). Release AAR
+sticky event dispatcher). Reticulum, Nostr, and `MeshForegroundService` compile
+with the plugin; headless mesh wake (`MeshHeadlessWakeService`) stays React-only.
+Release AAR
 size is gated in CI ([F9](#f9-binary-footprint)); use
 `OfflineProtocol.minimalFootprintConfig` when you ship a subset of transports.
 

@@ -92,7 +92,6 @@ tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
     exclude('com/offlineprotocol/OfflineProtocolModule.kt')
     exclude('com/offlineprotocol/OfflineProtocolPackage.kt')
     exclude('com/offlineprotocol/MeshHeadlessWakeService.kt')
-    exclude('com/offlineprotocol/MeshForegroundService.kt')
     exclude('com/offlineprotocol/StickyEventBuffer.kt')
     exclude('com/offlineprotocol/StickyEventDispatcher.kt')
     exclude('com/offlineprotocol/MeshWakePolicy.kt')

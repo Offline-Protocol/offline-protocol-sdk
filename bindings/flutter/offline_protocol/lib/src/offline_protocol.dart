@@ -4,7 +4,6 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
-import 'flutter_create_config_policy.dart';
 import 'native_event_pipeline.dart';
 import 'offline_protocol_event.dart';
 
@@ -92,7 +91,6 @@ class OfflineProtocol {
   /// Resets Dart `seq` tracking to match the native session (native [create]
   /// tears down the previous engine and restarts event numbering from zero).
   static Future<void> createFromConfig(Map<String, dynamic> config) async {
-    FlutterCreateConfigPolicy.assertCreateConfigSupported(config);
     _lastCreateConfig = Map<String, dynamic>.from(config);
     _ensureEventPipeline();
     _eventPipeline!.reset();
