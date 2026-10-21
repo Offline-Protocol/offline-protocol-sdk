@@ -15,7 +15,12 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
     private var bleManager: BleManager?
     private var wifiDirectManager: WifiDirectManager?
 
-    private let engineQueue = DispatchQueue(
+    /// One serial queue for every plugin instance in the process. Flutter
+    /// registers a new instance for every engine, so a queue per instance would
+    /// let a new engine's `create` run while the previous engine's queued
+    /// teardown is still blocked on transport I/O: two cores under one identity,
+    /// both on BLE and the relay. Shared, the teardown always runs first.
+    private static let engineQueue = DispatchQueue(
         label: "com.offlineprotocol.flutter.engine",
         qos: .userInitiated
     )
@@ -68,7 +73,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         channel?.setMethodCallHandler(nil)
         // Queued behind every call already submitted, never waited on. The block
         // holds `self` until the teardown has run.
-        engineQueue.async { [self] in
+        Self.engineQueue.async { [self] in
             self.tearDownProtocol()
         }
     }
@@ -89,7 +94,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.engineQueue.async {
+            OfflineProtocolPlugin.engineQueue.async {
                 self?.foregroundReconnectPolicy.didEnterBackground(
                     nowMs: MonotonicClock.nowMs()
                 )
@@ -100,7 +105,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.engineQueue.async {
+            OfflineProtocolPlugin.engineQueue.async {
                 self?.handleAppBecameActive()
             }
         }
@@ -145,7 +150,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
             postDetachedError(to: result)
             return
         }
-        engineQueue.async { [self] in
+        Self.engineQueue.async { [self] in
             guard self.isAttached() else {
                 self.postDetachedError(to: result)
                 return

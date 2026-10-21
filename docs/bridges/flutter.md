@@ -71,10 +71,24 @@ main looper / main queue.
 
 Nothing blocking runs on the UI thread, detach included: engine stop can wait
 on transport I/O, so detach queues the teardown behind the calls already
-submitted and returns. On Android the executor is never shut down, so a later
-attach queues behind that teardown and cannot interleave with it. On iOS,
-`deinit` tears down directly and never syncs onto the engine queue, where it
-may itself be running. See [K2](kotlin.md#k2-nothing-blocking-on-the-main-looper).
+submitted and returns.
+
+**The engine thread is one per process, not one per plugin instance.** Flutter
+creates a new plugin instance for every engine, for example after an Android
+activity is destroyed and relaunched. With a thread per instance, the new
+engine's `create` would run while the old engine's teardown is still blocked
+on transport I/O, leaving two cores with one identity on BLE and the relay,
+and the old one able to flush protocol state over what the new one loaded.
+So the Android executor lives in the plugin's companion object and is never
+shut down, and the iOS queue is a `static let`: every call from every
+instance queues behind the teardown before it.
+`flutter_engine_thread_is_shared_by_every_plugin_instance` holds both. On
+iOS, `deinit` tears down directly and never syncs onto the engine queue,
+where it may itself be running.
+
+`create` parses and validates its config before it tears down the running
+engine, so a config the plugin refuses leaves the current session untouched.
+See [K2](kotlin.md#k2-nothing-blocking-on-the-main-looper).
 
 Every engine-thread failure is caught as `Throwable` on Android. The generated
 bindings load the native library on first use, and a missing or mismatched

@@ -50,11 +50,14 @@ import java.util.concurrent.atomic.AtomicBoolean
  * and [EventChannel] deliveries are posted on the main looper ([mainHandler]).
  * See bridge contract K2.
  *
- * The executor is never shut down. Detach queues the teardown behind every call
- * already submitted and returns, so the main thread never waits on transport
- * I/O, and a later attach queues behind that teardown on the same thread: no
- * create can interleave with the previous session's teardown. The one thread
- * exits after it has been idle for [ENGINE_IDLE_SECONDS].
+ * The executor is one per process, in the companion object, and is never shut
+ * down. Flutter creates a new plugin instance for every engine, so an executor
+ * per instance would let a new engine's `create` run while the previous
+ * engine's teardown is still blocked on transport I/O: two cores under one
+ * identity, both on BLE and the relay. Detach queues the teardown behind every
+ * call already submitted and returns, so the main thread never waits, and any
+ * later call from any instance queues behind that teardown on the same thread.
+ * The one thread exits after it has been idle for [ENGINE_IDLE_SECONDS].
  */
 class OfflineProtocolPlugin :
     FlutterPlugin,
@@ -72,7 +75,6 @@ class OfflineProtocolPlugin :
     private var bleTransport: BleTransportFacade? = null
     private var wifiDirectManager: WifiDirectManager? = null
 
-    private val engineExecutor: ThreadPoolExecutor = newEngineExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val attached = AtomicBoolean(false)
 
@@ -631,8 +633,12 @@ class OfflineProtocolPlugin :
         /** Error code for a native library that is missing or does not match the bindings. */
         private const val NATIVE_LIBRARY_ERROR = "NATIVE_LIBRARY_UNAVAILABLE"
 
-        /** One thread, so calls run in submission order; it exits when idle. */
-        private fun newEngineExecutor(): ThreadPoolExecutor =
+        /**
+         * The engine thread for every plugin instance in the process, so calls
+         * from all engines run in submission order (see the class comment).
+         * It exits when idle and is recreated by the next submission.
+         */
+        private val engineExecutor: ThreadPoolExecutor =
             ThreadPoolExecutor(1, 1, ENGINE_IDLE_SECONDS, TimeUnit.SECONDS, LinkedBlockingQueue()) { runnable ->
                 Thread(runnable, "OfflineProtocolEngine").apply { isDaemon = true }
             }.apply { allowCoreThreadTimeOut(true) }

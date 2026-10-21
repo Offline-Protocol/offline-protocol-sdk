@@ -271,6 +271,56 @@ fn flutter_native_builds_read_what_the_react_native_package_declares() {
     );
 }
 
+/// The text of `kt` from the companion object onwards, with `//` comments
+/// dropped, so a declaration counts only where it is code.
+fn kotlin_companion_code(kt: &str) -> String {
+    kt.split("companion object {")
+        .nth(1)
+        .unwrap_or_else(|| panic!("companion object not found in OfflineProtocolPlugin.kt"))
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// Flutter creates a new plugin instance for every engine. With an engine
+// thread per instance, a new engine's `create` runs while the previous one's
+// queued teardown is still blocked on transport I/O: two cores under one
+// identity. One thread per process orders every call behind that teardown
+// (docs/bridges/flutter.md, F2).
+#[test]
+fn flutter_engine_thread_is_shared_by_every_plugin_instance() {
+    let plugin = flutter_plugin_dir();
+    let kt = read_text(
+        &plugin
+            .join("android/src/main/kotlin/com/offlineprotocol/flutter/OfflineProtocolPlugin.kt"),
+    );
+    let (instance, _) = kt
+        .split_once("companion object {")
+        .unwrap_or_else(|| panic!("companion object not found in OfflineProtocolPlugin.kt"));
+    assert!(
+        !instance.contains("val engineExecutor"),
+        "OfflineProtocolPlugin.kt declares engineExecutor per instance; it must live in \
+         the companion object, one per process"
+    );
+    assert!(
+        kotlin_companion_code(&kt).contains("val engineExecutor"),
+        "OfflineProtocolPlugin.kt must declare engineExecutor in its companion object"
+    );
+
+    let swift = read_text(&plugin.join("ios/Classes/OfflineProtocolPlugin.swift"));
+    let declarations: Vec<&str> = swift
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.starts_with("//") && line.contains("engineQueue = DispatchQueue("))
+        .collect();
+    assert_eq!(
+        declarations,
+        ["private static let engineQueue = DispatchQueue("],
+        "OfflineProtocolPlugin.swift must declare engineQueue once, as a static let"
+    );
+}
+
 #[test]
 fn flutter_bridges_doc_is_linked_from_the_bridge_index() {
     let readme = std::fs::read_to_string(
