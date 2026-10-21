@@ -12669,11 +12669,11 @@ mod tests {
             "fun getState(",
             "fun getTopology(",
         ));
-        let swift_src = read("ios/OfflineProtocolModule.swift");
+        let swift_src = read("ios/ProtocolEngineHostBridge.swift");
         let swift = code_only(slice_between(
             &swift_src,
-            "func getState(",
-            "resolver(stateString)",
+            "static func getState(",
+            "static func localAddress(",
         ));
 
         for state in VARIANTS {
@@ -12686,10 +12686,10 @@ mod tests {
                  a name that disagrees with types.ts is invisible to tsc and to a bindings regen"
             );
 
-            let swift_arm = format!("case .{}: stateString = \"{name}\"", swift_spelling(name));
+            let swift_arm = format!("case .{}: return \"{name}\"", swift_spelling(name));
             assert!(
                 swift.contains(&swift_arm),
-                "OfflineProtocolModule.swift getState must resolve `{swift_arm}`; \
+                "ProtocolEngineHostBridge.swift getState must resolve `{swift_arm}`; \
                  nothing in CI compiles this file, so this assertion is its only guard"
             );
         }
@@ -12702,8 +12702,8 @@ mod tests {
             "ProtocolEngineHostBridge.kt getState must fall back to \"Stopped\""
         );
         assert!(
-            swift.contains("@unknown default: stateString = \"Stopped\""),
-            "OfflineProtocolModule.swift getState must fall back to \"Stopped\", matching Android"
+            swift.contains("@unknown default: return \"Stopped\""),
+            "ProtocolEngineHostBridge.swift getState must fall back to \"Stopped\", matching Android"
         );
     }
 
@@ -17368,6 +17368,8 @@ mod tests {
         // every file that still narrows JavaScript numbers must stay bounded.
         const SWIFT_JS_NUMERIC_SOURCES: &[&str] = &[
             "ios/OfflineProtocolModule.swift",
+            "ios/ProtocolEngineHostBridge.swift",
+            "ios/BridgeArgumentMaps.swift",
             "ios/ProtocolConfigParser.swift",
             "ios/InitialRuntimeConfigApplier.swift",
         ];
@@ -18406,6 +18408,20 @@ mod tests {
                 module.contains(&needle),
                 "OfflineProtocolModule.kt must delegate `{name}` through \
                  ProtocolEngineHostBridgeReactNative (found neither `{needle}`): \
+                 RN-only edits would drift from Flutter's shared bridge"
+            );
+        }
+    }
+
+    #[test]
+    fn react_native_ios_engine_bridge_methods_delegate_through_shared_bridge() {
+        let module = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        for name in rn_protocol_engine_host_bridge_method_names() {
+            let needle = format!("ProtocolEngineHostBridgeReactNative.{name}(self");
+            assert!(
+                module.contains(&needle),
+                "OfflineProtocolModule.swift must delegate `{name}` through \
+                 ProtocolEngineHostBridgeReactNative (expected `{needle}`): \
                  RN-only edits would drift from Flutter's shared bridge"
             );
         }
@@ -19958,7 +19974,8 @@ mod tests {
     /// with any mapper that merely compiled.
     #[test]
     fn react_native_transport_name_mappers_know_every_transport() {
-        let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        let swift_bridge = rn_source_code_only("ios/ProtocolEngineHostBridge.swift");
+        let swift_transport = rn_source_code_only("ios/TransportBridge.swift");
         let kotlin_bridge = rn_source_code_only(
             "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt",
         );
@@ -19982,27 +19999,27 @@ mod tests {
             (
                 "Swift",
                 region(
-                    "Swift transportType(from:)",
-                    &swift,
-                    "func transportType(from type: String)",
-                    "func buildTopologyJson(",
+                    "Swift mapTransportType",
+                    &swift_transport,
+                    "static func mapTransportType(",
+                    "static func buildTopologyJson(",
                 ),
-                "default:",
+                "default: throw",
                 [
                     region(
                         "Swift getTransportMetrics",
-                        &swift,
-                        "func getTransportMetrics(",
-                        "proto.getTransportMetrics(",
+                        &swift_bridge,
+                        "static func getTransportMetrics(",
+                        "static func shouldEscalateToWifi(",
                     ),
                     region(
                         "Swift forceTransport",
-                        &swift,
-                        "func forceTransport(",
-                        "try proto.forceTransport(",
+                        &swift_bridge,
+                        "static func forceTransport(",
+                        "static func releaseTransportLock(",
                     ),
                 ],
-                "transportType(from: transportType)",
+                "TransportBridge.mapTransportType(",
             ),
             (
                 "Kotlin",
@@ -20138,21 +20155,21 @@ mod tests {
             assert_has(label, &code, "app_id: params.appId ?? null");
         }
 
-        let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        let swift_bridge = rn_source_code_only("ios/ProtocolEngineHostBridge.swift");
         for (label, code, from, to, read) in [
             (
                 "Swift sendMessageRich",
-                &swift,
-                "func sendMessageRich(",
-                "proto.sendMessageRich(",
-                "appId: dict[\"app_id\"] as? String",
+                &swift_bridge,
+                "static func sendMessageRich(",
+                "host.sendMessageRich(",
+                "appId: options?[\"app_id\"] as? String",
             ),
             (
                 "Swift sendMediaRich",
-                &swift,
-                "func sendMediaRich(",
-                "proto.sendMediaRich(",
-                "appId: dict?[\"app_id\"] as? String",
+                &swift_bridge,
+                "static func sendMediaRich(",
+                "host.requireProtocol().sendMediaRich(",
+                "appId: options?[\"app_id\"] as? String",
             ),
             (
                 "Kotlin sendMessageRich",
@@ -21097,9 +21114,9 @@ mod tests {
             "fun getMessageStats(",
         ));
         let swift = code_only(slice_between(
-            &read("ios/OfflineProtocolModule.swift"),
-            "func getMeshRelayStats(",
-            "resolver(statsDict)",
+            &read("ios/ProtocolEngineHostBridge.swift"),
+            "static func getMeshRelayStats(",
+            "static func getMeshRelayTunables(",
         ));
         let types_ts = code_only(slice_between(
             &read("src/types.ts"),
@@ -21114,7 +21131,7 @@ mod tests {
             );
             assert!(
                 swift.contains(&format!("\"{field}\"")),
-                "OfflineProtocolModule.swift getMeshRelayStats must report `{field}`"
+                "ProtocolEngineHostBridge.swift getMeshRelayStats must report `{field}`"
             );
             // Types are erased at runtime, so a counter missing from the TS
             // interface cannot be caught by any JS test — an app simply cannot
@@ -21648,9 +21665,9 @@ mod tests {
             "fun getDedupStats(",
         ));
         let swift = code_only(slice_between(
-            &read("ios/OfflineProtocolModule.swift"),
-            "func getCustodyStats(",
-            "resolver(statsDict)",
+            &read("ios/ProtocolEngineHostBridge.swift"),
+            "static func getCustodyStats(",
+            "static func eraseCustody(",
         ));
         let types_ts = code_only(slice_between(
             &read("src/types.ts"),
@@ -21665,7 +21682,7 @@ mod tests {
             );
             assert!(
                 swift.contains(&format!("\"{field}\"")),
-                "OfflineProtocolModule.swift getCustodyStats must report `{field}`"
+                "ProtocolEngineHostBridge.swift getCustodyStats must report `{field}`"
             );
             assert!(
                 types_ts.contains(&format!("{field}:")),
@@ -21862,9 +21879,9 @@ mod tests {
         );
 
         let swift = code_only(slice_between(
-            &read("ios/OfflineProtocolModule.swift"),
-            "func updateDorsConfig(",
-            "try proto.updateDorsConfig(config: dorsConfig)",
+            &read("ios/ProtocolEngineHostBridge.swift"),
+            "static func updateDorsConfig(",
+            "try proto.updateDorsConfig(config: config)",
         ));
         let kotlin = code_only(slice_between(
             &read("android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt"),
@@ -21874,7 +21891,7 @@ mod tests {
 
         assert!(
             swift.contains("let current = proto.getDorsConfig()"),
-            "OfflineProtocolModule.swift updateDorsConfig must read the live config to merge onto"
+            "ProtocolEngineHostBridge.swift updateDorsConfig must read the live config to merge onto"
         );
         assert!(
             kotlin.contains("val current = proto.getDorsConfig()"),
@@ -21885,7 +21902,7 @@ mod tests {
             let needle = format!("current.{field}");
             assert!(
                 swift.contains(&needle),
-                "OfflineProtocolModule.swift updateDorsConfig must fall back to `{needle}` for \
+                "ProtocolEngineHostBridge.swift updateDorsConfig must fall back to `{needle}` for \
                  an absent `{field}`. A literal fallback there resets the field on every update \
                  that does not restate it"
             );

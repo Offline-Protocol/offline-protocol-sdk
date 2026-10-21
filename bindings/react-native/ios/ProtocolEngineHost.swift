@@ -88,15 +88,15 @@ final class ProtocolEngineHost: TransportManagerDelegate {
     /// `(level, message, context)`, with level one of `info`, `warning`, `error`.
     typealias DiagnosticHandler = (_ level: String, _ message: String, _ context: [String: Any]) -> Void
 
-    @HostGuarded private(set) var protocolInstance: OfflineProtocol?
-    @HostGuarded private(set) var meshServices: MeshServices?
-    @HostGuarded private(set) var dataStore: DataStore?
-    @HostGuarded private(set) var bleManager: BleManager?
-    @HostGuarded private(set) var internetManager: InternetManager?
-    @HostGuarded private(set) var wifiDirectManager: WifiDirectManager?
-    @HostGuarded private(set) var reticulumManager: ReticulumManager?
-    @HostGuarded private(set) var nostrManager: NostrManager?
-    @HostGuarded private(set) var currentConfig: ProtocolConfig?
+    @HostGuarded var protocolInstance: OfflineProtocol?
+    @HostGuarded var meshServices: MeshServices?
+    @HostGuarded var dataStore: DataStore?
+    @HostGuarded var bleManager: BleManager?
+    @HostGuarded var internetManager: InternetManager?
+    @HostGuarded var wifiDirectManager: WifiDirectManager?
+    @HostGuarded var reticulumManager: ReticulumManager?
+    @HostGuarded var nostrManager: NostrManager?
+    @HostGuarded var currentConfig: ProtocolConfig?
 
     /// How the Internet manager's relay frames reach the host's event stream.
     /// Kept so a manager created on demand by `enableTransport` is wired the

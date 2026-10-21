@@ -3,9 +3,9 @@
 //
 // Shared transport naming and topology JSON encoding for native bridges.
 // Mirrors android/ TransportBridge.kt: keep the JSON keys, the transport name
-// normalisation and the field fallbacks in sync. Used by the Flutter plugin;
-// the React Native module keeps its own private copies and is not changed by
-// this file. No React import: the Swift package assembly refuses one.
+// normalisation and the field fallbacks in sync. Used by Flutter and React
+// Native through ProtocolEngineHostBridge. No React import: the Swift package
+// assembly refuses one.
 //
 
 import Foundation

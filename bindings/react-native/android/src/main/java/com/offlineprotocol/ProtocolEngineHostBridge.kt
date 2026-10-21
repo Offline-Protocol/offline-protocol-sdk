@@ -14,8 +14,8 @@ import kotlin.math.min
 /**
  * Engine operations shared by React Native and Flutter hosts. Flutter
  * reaches these through [com.offlineprotocol.flutter.ProtocolEngineHostBridge]
- * adapters; React Native inlines or delegates here as methods migrate off
- * [OfflineProtocolModule].
+ * adapters; React Native reaches these through [ProtocolEngineHostBridgeReactNative]
+ * (regenerate with `tools/gen_rn_protocol_engine_bridge_react_native.py`).
  */
 object ProtocolEngineHostBridge {
     private object Limits {
@@ -198,21 +198,26 @@ object ProtocolEngineHostBridge {
         "timestampMs" to encrypted.timestampMs.toDouble(),
     )
 
-    private fun mlsKeyPackageBundleMap(bundle: MlsKeyPackageBundle): Map<String, Any?> = mapOf(
-        "packageId" to bundle.packageId,
-        "userId" to bundle.userId,
-        "keyPackageData" to bundle.keyPackageData.map { it.toInt() },
-        "createdAtMs" to bundle.createdAtMs.toDouble(),
-        "expiresAtMs" to bundle.expiresAtMs.toDouble(),
-        "synced" to bundle.synced,
-    )
-
     private fun JSONObject.optNullableString(key: String): String? =
         if (has(key) && !isNull(key)) optString(key) else null
 
     private fun configJsonString(arguments: Any?): String = when (arguments) {
         is String -> arguments
         else -> requireString(mapFromAny(arguments), "configJson")
+    }
+
+    private fun JSONObject.optIntCompat(vararg keys: String): Int? {
+        for (key in keys) {
+            if (has(key) && !isNull(key)) return optDouble(key).toInt()
+        }
+        return null
+    }
+
+    private fun JSONObject.optBooleanCompat(vararg keys: String): Boolean? {
+        for (key in keys) {
+            if (has(key) && !isNull(key)) return getBoolean(key)
+        }
+        return null
     }
 
     fun acceptConnectionRequest(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
@@ -750,21 +755,27 @@ object ProtocolEngineHostBridge {
     fun mlsGenerateKeyPackage(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
 
         val bundle = host.requireProtocolBridge().mlsGenerateKeyPackage()
-        return mlsKeyPackageBundleMap(bundle)
+        return mapOf(
+            "packageId" to bundle.packageId,
+            "keyPackage" to bundle.keyPackage.map { it.toInt() },
+        )
 
     }
 
     fun mlsGetOrCreateKeyPackage(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
 
         val bundle = host.requireProtocolBridge().mlsGetOrCreateKeyPackage()
-        return mlsKeyPackageBundleMap(bundle)
+        return mapOf(
+            "packageId" to bundle.packageId,
+            "keyPackage" to bundle.keyPackage.map { it.toInt() },
+        )
 
     }
 
     fun mlsGetPendingKeyPackages(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
 
         val packages = host.requireProtocolBridge().mlsGetPendingKeyPackages()
-        return packages.map { mlsKeyPackageBundleMap(it) }
+        return packages.map { mapOf("packageId" to it.packageId, "keyPackage" to it.keyPackage.map { b -> b.toInt() }) }
 
     }
 
@@ -1146,8 +1157,10 @@ object ProtocolEngineHostBridge {
                 .coerceIn(Limits.MIN_BATTERY, Limits.MAX_BATTERY).toUByte(),
             relayMinBatteryLevel = json.optInt("relayMinBatteryLevel", current.relayMinBatteryLevel.toInt())
                 .coerceIn(Limits.MIN_BATTERY, Limits.MAX_BATTERY).toUByte(),
-            relayOptimalConnectionCount = json.optInt("relayOptimalConnectionCount", current.relayOptimalConnectionCount.toInt())
-                .coerceIn(0, UByte.MAX_VALUE.toInt()).toUByte(),
+            relayOptimalConnectionCount = json.optInt(
+                "relayOptimalConnectionCount",
+                current.relayOptimalConnectionCount.toInt(),
+            ).coerceIn(Limits.MIN_BATTERY, Limits.MAX_BATTERY).toUByte(),
         )
         proto.updateDorsConfig(dorsConfig)
         return null

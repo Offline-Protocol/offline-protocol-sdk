@@ -229,8 +229,25 @@ def ensure_module_helpers(module: str) -> str:
 
 
 def main() -> None:
+    import sys
+
     module = MODULE.read_text()
-    OUT.write_text(generate_react_native_kt(module))
+    generated = generate_react_native_kt(module)
+    if "--check" in sys.argv:
+        if OUT.read_text() != generated:
+            print(f"{OUT.relative_to(REPO)} is stale; run {pathlib.Path(__file__).name}", file=sys.stderr)
+            raise SystemExit(1)
+        for name in METHODS:
+            needle = f"ProtocolEngineHostBridgeReactNative.{name}("
+            if needle not in module:
+                print(
+                    f"{MODULE.relative_to(REPO)} must delegate `{name}` through ProtocolEngineHostBridgeReactNative",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+        print(f"{OUT.name}: OK ({len(METHODS)} methods)")
+        return
+    OUT.write_text(generated)
     module = ensure_module_helpers(module)
     module = replace_method_bodies(module)
     MODULE.write_text(module)

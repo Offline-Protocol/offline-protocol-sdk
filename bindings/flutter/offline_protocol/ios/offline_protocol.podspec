@@ -30,6 +30,7 @@ ios_deployment_target = rn_targets.first
 rn_only_swift = [
   'BridgeRN/OfflineProtocolModule.swift',
   'BridgeRN/OfflineProtocolModule.m',
+  'BridgeRN/ProtocolEngineHostBridgeReactNative.swift',
   'BridgeRN/InboundEventBuffer.swift',
 ]
 

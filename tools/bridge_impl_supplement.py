@@ -209,10 +209,12 @@ _m("updateDorsConfig", """
             queueRecoveryRatio = json.optDouble("queueRecoveryRatio", current.queueRecoveryRatio.toDouble()).toFloat().coerceIn(0f, 1f),
             lowBatteryThreshold = json.optInt("lowBatteryThreshold", current.lowBatteryThreshold.toInt())
                 .coerceIn(Limits.MIN_BATTERY, Limits.MAX_BATTERY).toUByte(),
-            relayMinBattery = json.optInt("relayMinBattery", current.relayMinBattery.toInt())
+            relayMinBatteryLevel = json.optInt("relayMinBatteryLevel", current.relayMinBatteryLevel.toInt())
                 .coerceIn(Limits.MIN_BATTERY, Limits.MAX_BATTERY).toUByte(),
-            relayPriority = InitialRuntimeConfigApplier.normalizeRelayPriority(json.optString("relayPriority"))
-                ?: current.relayPriority,
+            relayOptimalConnectionCount = json.optInt(
+                "relayOptimalConnectionCount",
+                current.relayOptimalConnectionCount.toInt(),
+            ).coerceIn(Limits.MIN_BATTERY, Limits.MAX_BATTERY).toUByte(),
         )
         proto.updateDorsConfig(dorsConfig)
         return null
@@ -237,8 +239,8 @@ _m("getDorsConfig", """
             put("historyWindowSize", config.historyWindowSize.toLong())
             put("queueRecoveryRatio", config.queueRecoveryRatio.toDouble())
             put("lowBatteryThreshold", config.lowBatteryThreshold.toInt())
-            put("relayMinBattery", config.relayMinBattery.toInt())
-            put("relayPriority", InitialRuntimeConfigApplier.relayPriorityName(config.relayPriority))
+            put("relayMinBatteryLevel", config.relayMinBatteryLevel.toInt())
+            put("relayOptimalConnectionCount", config.relayOptimalConnectionCount.toInt())
         }.toString()
 """)
 

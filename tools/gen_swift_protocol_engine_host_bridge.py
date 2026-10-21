@@ -22,11 +22,11 @@ import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST = REPO / "bindings/flutter/offline_protocol/method_channel_methods.txt"
-BRIDGE = REPO / "bindings/flutter/offline_protocol/ios/Classes/ProtocolEngineHostBridge.swift"
+BRIDGE = REPO / "bindings/react-native/ios/ProtocolEngineHostBridge.swift"
 
 SIGNATURE = re.compile(
     r"^    static func (\w+)\(host: ProtocolEngineHost, "
-    r"env: FlutterEngineChannel\.Environment, arguments: Any\?\) throws -> Any\? \{$",
+    r"env: EngineBridgeEnvironment, arguments: Any\?\) throws -> Any\? \{$",
     re.MULTILINE,
 )
 STUB_MARKERS = ("FlutterMethodNotImplemented", "not implemented", "notImplemented", "TODO", "FIXME")

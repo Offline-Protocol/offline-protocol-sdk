@@ -19,6 +19,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 > of those keys on the network path could read the telemetry API key and
 > the batches. It now trusts only the sixteen roots the ingest's issuers use.
 >
+> **Flutter iOS shares Swift with React Native.** After editing shared bridge
+> sources under `bindings/react-native/ios/`, run
+> `bindings/flutter/offline_protocol/ios/sync_bridge_rn.sh` or `pod install`
+> so the plugin's `BridgeRN/` copy matches (CI refreshes it automatically).
+>
 > **Three new ways in: C, Java and Flutter.** A C header over the native
 > library every release already ships, a Java binding generated from the
 > interface definition (JDK 22+, on Maven Central), and a preview Flutter

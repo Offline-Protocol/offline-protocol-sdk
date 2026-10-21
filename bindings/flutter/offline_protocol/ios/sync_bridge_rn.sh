@@ -12,6 +12,7 @@ mkdir -p "$DEST"
 rsync -a \
   --exclude OfflineProtocolModule.swift \
   --exclude OfflineProtocolModule.m \
+  --exclude ProtocolEngineHostBridgeReactNative.swift \
   --exclude InboundEventBuffer.swift \
   --exclude tests/ \
   --exclude Package.swift \

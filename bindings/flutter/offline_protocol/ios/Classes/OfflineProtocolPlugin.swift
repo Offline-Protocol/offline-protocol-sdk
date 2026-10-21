@@ -183,8 +183,8 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
     /// What the bridge needs beyond the host: the pieces that also touch this
     /// plugin's event bookkeeping. Closures hold `self` weakly so a retained
     /// environment never keeps a detached plugin alive.
-    private var channelEnvironment: FlutterEngineChannel.Environment {
-        FlutterEngineChannel.Environment(
+    private var channelEnvironment: EngineBridgeEnvironment {
+        EngineBridgeEnvironment(
             appState: { [weak self] in self?.currentAppState() ?? .active },
             replayEvents: { [weak self] fromSeq, toSeq in
                 self?.replayEventsOnEngine(fromSeq: fromSeq, toSeq: toSeq) ?? []

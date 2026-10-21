@@ -1,4 +1,6 @@
+#if canImport(Flutter)
 import Flutter
+#endif
 import Foundation
 
 /// Argument decoding for the Flutter method channel. Mirrors Android's
@@ -7,7 +9,7 @@ import Foundation
 /// error rather than a silent default, and a number that cannot be what the
 /// method needs is refused by name instead of trapping in a narrowing
 /// conversion.
-enum FlutterBridgeArgs {
+enum BridgeArgumentMaps {
     /// The map form of the method arguments. A method that takes no arguments
     /// never calls this, so a `nil` from Dart is only an error where a value is
     /// actually read.
@@ -138,9 +140,11 @@ enum FlutterBridgeArgs {
     }
 
     private static func bytes(_ raw: Any, _ key: String) throws -> [UInt8] {
+        #if canImport(Flutter)
         if let typed = raw as? FlutterStandardTypedData {
             return [UInt8](typed.data)
         }
+        #endif
         if let list = raw as? [Any] {
             return try list.map { element in
                 guard let number = element as? NSNumber else {

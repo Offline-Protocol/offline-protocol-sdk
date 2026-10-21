@@ -1,6 +1,6 @@
 import CoreBluetooth
-import Flutter
 import Foundation
+
 
 /// Per-method bodies for `FlutterEngineChannel`. The Swift counterpart of
 /// Android's `ProtocolEngineHostBridge.kt` and `EngineMethodHandlers.kt`:
@@ -18,7 +18,7 @@ import Foundation
 /// choices where the platforms agree: 64-bit counters as doubles, bytes as
 /// lists of ints, JSON-valued results as strings.
 enum ProtocolEngineHostBridge {
-    private typealias A = FlutterBridgeArgs
+    private typealias A = BridgeArgumentMaps
 
     /// How long a call waits for a transport to report whether it wrote a
     /// frame. A forced presence check parks for up to eight seconds inside the
@@ -27,7 +27,7 @@ enum ProtocolEngineHostBridge {
 
     // MARK: - Connection requests and invites
 
-    static func acceptConnectionRequest(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func acceptConnectionRequest(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "acceptConnectionRequest")
         let keyPackage = try A.byteList(m, "keyPackage")
         return try host.requireProtocol().acceptConnectionRequest(
@@ -37,17 +37,17 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func cancelConnectionRequest(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func cancelConnectionRequest(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "cancelConnectionRequest")
         return try host.requireProtocol().cancelConnectionRequest(recipient: try A.requireString(m, "recipient"))
     }
 
-    static func rejectConnectionRequest(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func rejectConnectionRequest(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "rejectConnectionRequest")
         return try host.requireProtocol().rejectConnectionRequest(recipient: try A.requireString(m, "recipient"))
     }
 
-    static func sendConnectionRequest(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func sendConnectionRequest(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "sendConnectionRequest")
         let keyPackage = try A.byteList(m, "keyPackage")
         return try host.requireProtocol().sendConnectionRequest(
@@ -58,7 +58,7 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func createInvite(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func createInvite(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "createInvite")
         return try host.requireProtocol().createInvite(
             petname: A.optionalString(m, "petname"),
@@ -66,7 +66,7 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func parseInvite(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func parseInvite(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "parseInvite")
         let invite = try uniffiParseInvite(blob: try A.requireString(m, "blob"))
         return [
@@ -77,14 +77,14 @@ enum ProtocolEngineHostBridge {
         ] as [String: Any]
     }
 
-    static func resolveUsername(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func resolveUsername(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "resolveUsername")
         return try host.requireProtocol().resolveUsername(username: try A.requireString(m, "username"))
     }
 
     // MARK: - BLE
 
-    static func bleGetDiagnostics(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func bleGetDiagnostics(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let proto = host.protocolInstance
         return [
             "fragmentFallbacks": Double(proto?.bleFragmentFallbackCount() ?? 0),
@@ -93,11 +93,11 @@ enum ProtocolEngineHostBridge {
         ] as [String: Any]
     }
 
-    static func bleGetPeerCount(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func bleGetPeerCount(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         Int(host.protocolInstance?.bleGetPeerCount() ?? 0)
     }
 
-    static func isBluetoothEnabled(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func isBluetoothEnabled(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         // iOS shows its own prompt when BLE is first used, and a manager that
         // has not asked yet reports `unknown`: treated as enabled, as the
         // React Native module does, so the app does not show a manual prompt
@@ -110,7 +110,7 @@ enum ProtocolEngineHostBridge {
         }
     }
 
-    static func requestEnableBluetooth(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func requestEnableBluetooth(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         // iOS never enables Bluetooth programmatically. False tells the app to
         // show its own prompt; the system dialog appears when BLE is used.
         false
@@ -118,40 +118,40 @@ enum ProtocolEngineHostBridge {
 
     // MARK: - Blocking, files, presence
 
-    static func blockUser(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func blockUser(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "blockUser")
         try host.requireProtocol().blockUser(userId: try A.requireString(m, "userId"))
         return nil
     }
 
-    static func unblockUser(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func unblockUser(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "unblockUser")
         try host.requireProtocol().unblockUser(userId: try A.requireString(m, "userId"))
         return nil
     }
 
-    static func getBlockedUsers(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getBlockedUsers(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try host.requireProtocol().getBlockedUsers()
     }
 
-    static func isUserBlocked(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func isUserBlocked(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "isUserBlocked")
         return try host.requireProtocol().isUserBlocked(userId: try A.requireString(m, "userId"))
     }
 
-    static func cancelFileTransfer(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func cancelFileTransfer(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "cancelFileTransfer")
         try host.requireProtocol().cancelFileTransfer(fileId: try A.requireString(m, "fileId"))
         return nil
     }
 
-    static func finalizeFile(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func finalizeFile(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "finalizeFile")
         try host.requireProtocol().finalizeFile(fileId: try A.requireString(m, "fileId"))
         return nil
     }
 
-    static func getFileProgress(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getFileProgress(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "getFileProgress")
         guard let progress = try host.requireProtocol().getFileProgress(fileId: try A.requireString(m, "fileId")) else {
             return nil
@@ -164,7 +164,7 @@ enum ProtocolEngineHostBridge {
         ] as [String: Any]
     }
 
-    static func processFileChunk(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func processFileChunk(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "processFileChunk")
         try host.requireProtocol().processFileChunk(
             fileId: try A.requireString(m, "fileId"),
@@ -178,7 +178,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func sendFileFromPath(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func sendFileFromPath(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "sendFileFromPath")
         return try host.requireProtocol().sendFileFromPath(
             recipient: try A.requireString(m, "recipient"),
@@ -187,7 +187,7 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func sendMedia(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func sendMedia(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "sendMedia")
         let bytes = try A.requireBase64(m, "fileData")
         let fileName = try A.requireString(m, "fileName")
@@ -213,7 +213,7 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func sendMediaRich(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func sendMediaRich(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "sendMediaRich")
         let bytes = try A.requireBase64(m, "fileData")
         let options = m["options"] as? [String: Any]
@@ -235,7 +235,7 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func sendPresenceUpdate(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func sendPresenceUpdate(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "sendPresenceUpdate")
         let status: PresenceStatus
         switch try A.requireInt(m, "status") {
@@ -246,7 +246,7 @@ enum ProtocolEngineHostBridge {
         return try host.requireProtocol().sendPresenceUpdate(recipient: try A.requireString(m, "recipient"), status: status)
     }
 
-    static func sendReadReceipt(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func sendReadReceipt(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "sendReadReceipt")
         let ids = try A.stringList(m, "messageIds")
         guard !ids.isEmpty else {
@@ -255,7 +255,7 @@ enum ProtocolEngineHostBridge {
         return try host.requireProtocol().sendReadReceipt(recipient: try A.requireString(m, "recipient"), messageIds: ids)
     }
 
-    static func sendTypingIndicator(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func sendTypingIndicator(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "sendTypingIndicator")
         return try host.requireProtocol().sendTypingIndicator(
             recipient: try A.requireString(m, "recipient"),
@@ -266,7 +266,7 @@ enum ProtocolEngineHostBridge {
 
     // MARK: - Messaging
 
-    static func sendMessage(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func sendMessage(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "sendMessage")
         return try host.sendMessage(
             recipient: try A.requireString(m, "recipient"),
@@ -276,7 +276,7 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func sendMessageRich(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func sendMessageRich(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "sendMessageRich")
         let options = m["options"] as? [String: Any]
         let sendOptions = SendMessageOptions(
@@ -295,7 +295,7 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func forwardMessage(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func forwardMessage(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "forwardMessage")
         return try host.requireProtocol().forwardMessage(
             originalMessageJson: try A.requireString(m, "originalMessageJson"),
@@ -304,13 +304,13 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func receiveMessage(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func receiveMessage(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         host.receiveMessage()
     }
 
     // MARK: - Lifecycle
 
-    static func create(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func create(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         guard let configJson = arguments as? String else {
             throw HostError.invalidArgument("create expects a JSON string")
         }
@@ -318,37 +318,37 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func destroy(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func destroy(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         env.tearDownProtocol()
         return nil
     }
 
-    static func start(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func start(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try env.startOnEngine()
         return nil
     }
 
-    static func stop(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func stop(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try env.stopOnEngine()
         return nil
     }
 
-    static func pause(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func pause(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try host.pause()
         return nil
     }
 
-    static func resume(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func resume(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try host.resume()
         return nil
     }
 
-    static func replayEvents(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func replayEvents(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "replayEvents")
         return env.replayEvents(try A.requireInt(m, "fromSeq"), try A.requireInt(m, "toSeq"))
     }
 
-    static func getState(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getState(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         guard let proto = host.protocolInstance else { return "Stopped" }
         switch proto.getState() {
         case .stopped: return "Stopped"
@@ -361,11 +361,11 @@ enum ProtocolEngineHostBridge {
         }
     }
 
-    static func localAddress(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func localAddress(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         host.protocolInstance?.localAddress()
     }
 
-    static func wipePersistedState(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func wipePersistedState(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "wipePersistedState")
         let appId = try A.requireString(m, "appId")
         let profile = try A.requireString(m, "profile")
@@ -394,7 +394,7 @@ enum ProtocolEngineHostBridge {
 
     // MARK: - Transports
 
-    static func enableTransport(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func enableTransport(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "enableTransport")
         let type = try A.requireString(m, "type")
         if let object = m["config"] as? [String: Any] {
@@ -405,7 +405,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func disableTransport(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func disableTransport(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "disableTransport")
         let type = try A.requireString(m, "type")
         let proto = try host.requireProtocol()
@@ -433,7 +433,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func forceTransport(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func forceTransport(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "forceTransport")
         try host.requireProtocol().forceTransport(
             transportType: try TransportBridge.mapTransportType(try A.requireString(m, "transportType"))
@@ -441,16 +441,16 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func releaseTransportLock(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func releaseTransportLock(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         host.protocolInstance?.releaseTransportLock()
         return nil
     }
 
-    static func getActiveTransports(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getActiveTransports(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         host.protocolInstance?.getActiveTransports() ?? [String]()
     }
 
-    static func getTransportMetrics(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getTransportMetrics(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "getTransportMetrics")
         let type = try TransportBridge.mapTransportType(try A.requireString(m, "transportType"))
         guard let metrics = host.protocolInstance?.getTransportMetrics(transportType: type) else { return nil }
@@ -464,13 +464,13 @@ enum ProtocolEngineHostBridge {
         ] as [String: Any]
     }
 
-    static func shouldEscalateToWifi(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func shouldEscalateToWifi(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try host.requireProtocol().shouldEscalateToWifi()
     }
 
     // MARK: - Internet transport
 
-    static func checkInternetPresence(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func checkInternetPresence(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "checkInternetPresence")
         guard let manager = host.internetManager else {
             throw HostError.illegalState("Internet transport not initialized")
@@ -482,19 +482,19 @@ enum ProtocolEngineHostBridge {
         }
     }
 
-    static func internetConfirmSent(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func internetConfirmSent(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "internetConfirmSent")
         try host.requireProtocol().internetConfirmSent(messageId: try A.requireString(m, "messageId"))
         return nil
     }
 
-    static func internetForceReconnect(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func internetForceReconnect(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         guard let manager = host.internetManager else { return false }
         manager.forceReconnect()
         return true
     }
 
-    static func internetGetNextMessage(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func internetGetNextMessage(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         guard let message = try host.requireProtocol().internetGetNextMessage() else { return nil }
         return [
             "messageId": message.messageId,
@@ -503,15 +503,15 @@ enum ProtocolEngineHostBridge {
         ] as [String: Any]
     }
 
-    static func internetIsReady(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func internetIsReady(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         host.internetManager?.isReady() ?? false
     }
 
-    static func internetIsSuperseded(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func internetIsSuperseded(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         host.internetManager?.isSessionSuperseded() ?? false
     }
 
-    static func internetMessageReceived(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func internetMessageReceived(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "internetMessageReceived")
         try host.requireProtocol().internetMessageReceived(
             senderId: try A.requireString(m, "senderId"),
@@ -520,13 +520,13 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func internetSendFailed(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func internetSendFailed(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "internetSendFailed")
         try host.requireProtocol().internetSendFailed(messageId: try A.requireString(m, "messageId"))
         return nil
     }
 
-    static func internetSendRawCommand(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func internetSendRawCommand(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "internetSendRawCommand")
         guard let manager = host.internetManager else {
             throw HostError.illegalState("Internet transport not initialized")
@@ -537,7 +537,7 @@ enum ProtocolEngineHostBridge {
         }
     }
 
-    static func internetStatusChanged(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func internetStatusChanged(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "internetStatusChanged")
         try host.requireProtocol().internetStatusChanged(isConnected: A.optionalBool(m, "isConnected") ?? false)
         return nil
@@ -545,7 +545,7 @@ enum ProtocolEngineHostBridge {
 
     // MARK: - Wi-Fi Direct
 
-    static func wifiDirectGetNextMessage(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func wifiDirectGetNextMessage(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         guard let message = try host.requireProtocol().wifiDirectGetNextMessage() else { return nil }
         return [
             "recipientId": message.recipientId,
@@ -553,7 +553,7 @@ enum ProtocolEngineHostBridge {
         ] as [String: Any]
     }
 
-    static func wifiDirectMessageReceived(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func wifiDirectMessageReceived(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "wifiDirectMessageReceived")
         try host.requireProtocol().wifiDirectMessageReceived(
             senderId: try A.requireString(m, "senderId"),
@@ -562,19 +562,19 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func wifiDirectPeerConnected(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func wifiDirectPeerConnected(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "wifiDirectPeerConnected")
         try host.requireProtocol().wifiDirectPeerConnected(peerId: try A.requireString(m, "peerId"))
         return nil
     }
 
-    static func wifiDirectPeerDisconnected(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func wifiDirectPeerDisconnected(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "wifiDirectPeerDisconnected")
         try host.requireProtocol().wifiDirectPeerDisconnected(peerId: try A.requireString(m, "peerId"))
         return nil
     }
 
-    static func wifiDirectStatusChanged(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func wifiDirectStatusChanged(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "wifiDirectStatusChanged")
         try host.requireProtocol().wifiDirectStatusChanged(isConnected: A.optionalBool(m, "isConnected") ?? false)
         return nil
@@ -582,27 +582,27 @@ enum ProtocolEngineHostBridge {
 
     // MARK: - Telemetry
 
-    static func enableTelemetry(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func enableTelemetry(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try host.enableTelemetry(config: arguments as? [String: Any], initialAppState: env.appState())
         return nil
     }
 
-    static func disableTelemetry(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func disableTelemetry(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try host.disableTelemetry()
         return nil
     }
 
-    static func flushTelemetry(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func flushTelemetry(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         host.flushTelemetry()
         return nil
     }
 
-    static func endTelemetrySession(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func endTelemetrySession(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         host.endTelemetrySession()
         return nil
     }
 
-    static func setTelemetryEnabled(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func setTelemetryEnabled(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let enabled: Bool
         if let flag = arguments as? NSNumber {
             enabled = flag.boolValue
@@ -615,37 +615,37 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func telemetryInstallId(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func telemetryInstallId(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try host.telemetryInstallId()
     }
 
-    static func telemetryStats(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func telemetryStats(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         guard let stats = host.telemetryStats() else { return nil }
         return host.telemetryStatsMap(stats)
     }
 
-    static func emitTestEvent(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func emitTestEvent(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try host.requireProtocol().emitTestEvent()
         return nil
     }
 
     // MARK: - Statistics and configuration
 
-    static func getBatteryLevel(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getBatteryLevel(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         host.protocolInstance?.getBatteryLevel().map { Int($0) }
     }
 
-    static func getIsCharging(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getIsCharging(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         host.protocolInstance?.getIsCharging() ?? false
     }
 
-    static func setBatteryLevel(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func setBatteryLevel(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "setBatteryLevel")
         try host.requireProtocol().setBatteryLevel(level: batteryPercent(try A.requireInt(m, "level")))
         return nil
     }
 
-    static func setBatteryState(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func setBatteryState(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "setBatteryState")
         try host.requireProtocol().setBatteryState(
             level: batteryPercent(try A.requireInt(m, "level")),
@@ -654,7 +654,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func getCustodyStats(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getCustodyStats(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         guard let stats = host.protocolInstance?.getCustodyStats() else { return nil }
         return [
             "held": Double(stats.held),
@@ -682,12 +682,12 @@ enum ProtocolEngineHostBridge {
         ] as [String: Any]
     }
 
-    static func eraseCustody(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func eraseCustody(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try host.requireProtocol().eraseCustody()
         return nil
     }
 
-    static func getDedupStats(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getDedupStats(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         guard let stats = host.protocolInstance?.getDedupStats() else { return nil }
         return [
             "totalTracked": Double(stats.totalTracked),
@@ -697,21 +697,21 @@ enum ProtocolEngineHostBridge {
         ] as [String: Any]
     }
 
-    static func getDeliverySuccessRate(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getDeliverySuccessRate(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         Double(try host.requireProtocol().getDeliverySuccessRate())
     }
 
-    static func getMedianHops(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getMedianHops(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let hops = Int(try host.requireProtocol().getMedianHops())
         return hops == 0 ? nil : hops
     }
 
-    static func getMedianLatency(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getMedianLatency(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let latency = try host.requireProtocol().getMedianLatency()
         return latency == 0 ? nil : Double(latency)
     }
 
-    static func getMeshRelayStats(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getMeshRelayStats(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         guard let stats = host.protocolInstance?.getMeshRelayStats() else { return nil }
         return [
             "forwarded": Double(stats.forwarded),
@@ -730,7 +730,7 @@ enum ProtocolEngineHostBridge {
         ] as [String: Any]
     }
 
-    static func getMeshRelayTunables(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getMeshRelayTunables(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         guard let tunables = host.protocolInstance?.getMeshRelayTunables() else { return nil }
         return [
             "maxTtl": Int(tunables.maxTtl),
@@ -752,33 +752,33 @@ enum ProtocolEngineHostBridge {
         ] as [String: Any]
     }
 
-    static func getMessageStats(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getMessageStats(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try TransportBridge.buildMessageStatsJson(try host.requireProtocol().getMessageStats())
     }
 
-    static func getTopology(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getTopology(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let proto = try host.requireProtocol()
         return try TransportBridge.buildTopologyJson(try proto.getTopology(), localAddress: proto.localAddress())
     }
 
-    static func getPendingAckCount(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getPendingAckCount(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         Double(host.protocolInstance?.getPendingAckCount() ?? 0)
     }
 
-    static func getRetryQueueSize(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getRetryQueueSize(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         Double(host.protocolInstance?.getRetryQueueSize() ?? 0)
     }
 
-    static func isRelay(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func isRelay(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         host.protocolInstance?.isRelay() ?? false
     }
 
-    static func getRelayPriority(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getRelayPriority(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         guard let proto = host.protocolInstance else { return "auto" }
         return InitialRuntimeConfigApplier.relayPriorityName(proto.getRelayPriority())
     }
 
-    static func setRelayPriority(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func setRelayPriority(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "setRelayPriority")
         guard let priority = InitialRuntimeConfigApplier.normalizeRelayPriority(try A.requireString(m, "priorityString")) else {
             throw HostError.invalidArgument("Invalid relay priority")
@@ -787,7 +787,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func getRelayConfig(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getRelayConfig(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let config = try host.requireProtocol().getRelayConfig()
         return try jsonString([
             "minBatteryForRelay": Int(config.minBatteryForRelay),
@@ -796,7 +796,7 @@ enum ProtocolEngineHostBridge {
         ] as [String: Any])
     }
 
-    static func updateRelayConfig(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func updateRelayConfig(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let json = try A.jsonObject(try configJsonString(arguments), "relay config")
         let proto = try host.requireProtocol()
         try proto.updateRelayConfig(
@@ -805,7 +805,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func getDorsConfig(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getDorsConfig(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let c = try host.requireProtocol().getDorsConfig()
         return try jsonString([
             "preferOnline": c.preferOnline,
@@ -829,7 +829,7 @@ enum ProtocolEngineHostBridge {
         ] as [String: Any])
     }
 
-    static func updateDorsConfig(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func updateDorsConfig(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let j = try A.jsonObject(try configJsonString(arguments), "DORS config")
         let proto = try host.requireProtocol()
         let current = proto.getDorsConfig()
@@ -859,7 +859,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func updateAckConfig(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func updateAckConfig(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let j = try A.jsonObject(try configJsonString(arguments), "ACK config")
         try host.protocolInstance?.updateAckConfig(
             config: AckConfig(
@@ -870,7 +870,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func updateDedupConfig(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func updateDedupConfig(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let j = try A.jsonObject(try configJsonString(arguments), "dedup config")
         try host.protocolInstance?.updateDedupConfig(
             config: DedupConfig(
@@ -881,7 +881,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func updateRetryConfig(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func updateRetryConfig(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let j = try A.jsonObject(try configJsonString(arguments), "retry config")
         try host.protocolInstance?.updateRetryConfig(
             config: RetryConfig(
@@ -899,32 +899,32 @@ enum ProtocolEngineHostBridge {
 
     // MARK: - Identity and signatures
 
-    static func deriveAddress(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func deriveAddress(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "deriveAddress")
         return try uniffiDeriveAddress(publicKey: try A.byteList(m, "publicKey"))
     }
 
-    static func deriveUserIdFromPublicKey(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func deriveUserIdFromPublicKey(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "deriveUserIdFromPublicKey")
         return try host.requireProtocol().deriveUserIdFromPublicKey(publicKey: try A.byteList(m, "publicKey"))
     }
 
-    static func getIdentityPublicKey(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getIdentityPublicKey(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         A.ints(try host.requireProtocol().getIdentityPublicKey())
     }
 
-    static func signData(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func signData(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "signData")
         return A.ints(try host.requireProtocol().signData(data: try A.byteList(m, "data")))
     }
 
-    static func signDataBase64(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func signDataBase64(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "signDataBase64")
         let signature = try host.requireProtocol().signData(data: try A.requireBase64(m, "dataBase64"))
         return Data(signature).base64EncodedString()
     }
 
-    static func verifySignature(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func verifySignature(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "verifySignature")
         return try host.requireProtocol().verifySignature(
             publicKey: try A.byteList(m, "publicKey"),
@@ -933,7 +933,7 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func verifySignatureBase64(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func verifySignatureBase64(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "verifySignatureBase64")
         return try host.requireProtocol().verifySignature(
             publicKey: try A.requireBase64(m, "publicKeyBase64"),
@@ -944,21 +944,21 @@ enum ProtocolEngineHostBridge {
 
     // MARK: - MLS
 
-    static func initializeMlsWithSecureStorage(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func initializeMlsWithSecureStorage(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try host.initializeMlsWithSecureStorage()
         return nil
     }
 
-    static func isMlsInitialized(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func isMlsInitialized(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         host.protocolInstance?.isMlsInitialized() ?? false
     }
 
-    static func hasPendingKeyPackage(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func hasPendingKeyPackage(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "hasPendingKeyPackage")
         return host.protocolInstance?.hasPendingKeyPackage(peerId: try A.requireString(m, "peerId")) ?? false
     }
 
-    static func getEstablishmentState(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func getEstablishmentState(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "getEstablishmentState")
         guard let proto = host.protocolInstance else { return "NoKeyPackage" }
         switch try proto.getEstablishmentState(peerId: try A.requireString(m, "peerId")) {
@@ -969,47 +969,47 @@ enum ProtocolEngineHostBridge {
         }
     }
 
-    static func establishSecureSession(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func establishSecureSession(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "establishSecureSession")
         let welcome = try host.requireProtocol().establishSecureSession(peerId: try A.requireString(m, "peerId"))
         return welcome.map { welcomeMap($0) }
     }
 
-    static func rekeySession(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func rekeySession(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "rekeySession")
         return try host.requireProtocol().rekeySession(peerId: try A.requireString(m, "peerId"))
     }
 
-    static func mlsCreateSession(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func mlsCreateSession(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "mlsCreateSession")
         return welcomeMap(try host.requireProtocol().mlsCreateSession(otherUserId: try A.requireString(m, "otherUserId")))
     }
 
-    static func mlsJoinSession(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func mlsJoinSession(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "mlsJoinSession")
         let welcome = try welcomeFromJson(try A.requireString(m, "welcomeJson"))
         return ProtocolEngineHost.groupInfoMap(try host.requireProtocol().mlsJoinSession(welcome: welcome))
     }
 
-    static func mlsProcessWelcome(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func mlsProcessWelcome(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "mlsProcessWelcome")
         let welcome = try welcomeFromJson(try A.requireString(m, "welcomeJson"))
         return ProtocolEngineHost.groupInfoMap(try host.requireProtocol().mlsProcessWelcome(welcome: welcome))
     }
 
-    static func mlsDecrypt(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func mlsDecrypt(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "mlsDecrypt")
         let encrypted = try encryptedFromJson(try A.requireString(m, "encryptedJson"))
         return try host.requireProtocol().mlsDecrypt(encrypted: encrypted).map { A.ints($0) }
     }
 
-    static func mlsDecryptFromUser(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func mlsDecryptFromUser(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "mlsDecryptFromUser")
         let encrypted = try encryptedFromJson(try A.requireString(m, "encryptedJson"))
         return try host.requireProtocol().mlsDecryptFromUser(encrypted: encrypted).map { A.ints($0) }
     }
 
-    static func mlsEncryptForUser(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func mlsEncryptForUser(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "mlsEncryptForUser")
         let encrypted = try host.requireProtocol().mlsEncryptForUser(
             otherUserId: try A.requireString(m, "otherUserId"),
@@ -1025,34 +1025,34 @@ enum ProtocolEngineHostBridge {
         ] as [String: Any]
     }
 
-    static func mlsDeleteSession(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func mlsDeleteSession(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "mlsDeleteSession")
         try host.requireProtocol().mlsDeleteSession(otherUserId: try A.requireString(m, "otherUserId"))
         return nil
     }
 
-    static func mlsHasSession(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func mlsHasSession(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "mlsHasSession")
         return host.protocolInstance?.mlsHasSession(otherUserId: try A.requireString(m, "otherUserId")) ?? false
     }
 
-    static func mlsListSessions(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func mlsListSessions(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         host.protocolInstance?.mlsListSessions() ?? [String]()
     }
 
-    static func mlsGenerateKeyPackage(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func mlsGenerateKeyPackage(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         keyPackageMap(try host.requireProtocol().mlsGenerateKeyPackage())
     }
 
-    static func mlsGetOrCreateKeyPackage(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func mlsGetOrCreateKeyPackage(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         keyPackageMap(try host.requireProtocol().mlsGetOrCreateKeyPackage())
     }
 
-    static func mlsGetPendingKeyPackages(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func mlsGetPendingKeyPackages(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try host.requireProtocol().mlsGetPendingKeyPackages().map { keyPackageMap($0) }
     }
 
-    static func mlsImportKeyPackage(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func mlsImportKeyPackage(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "mlsImportKeyPackage")
         try host.requireProtocol().mlsImportKeyPackage(
             userId: try A.requireString(m, "userId"),
@@ -1061,7 +1061,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func mlsMarkKeyPackageSynced(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func mlsMarkKeyPackageSynced(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "mlsMarkKeyPackageSynced")
         try host.requireProtocol().mlsMarkKeyPackageSynced(packageId: try A.requireString(m, "packageId"))
         return nil
@@ -1069,12 +1069,12 @@ enum ProtocolEngineHostBridge {
 
     // MARK: - Mesh groups
 
-    static func meshCreateGroup(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func meshCreateGroup(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "meshCreateGroup")
         return try host.meshCreateGroup(name: try A.requireString(m, "name"))
     }
 
-    static func meshForwardMessageToGroup(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func meshForwardMessageToGroup(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "meshForwardMessageToGroup")
         return try host.meshForwardMessageToGroup(
             originalMessageJson: try A.requireString(m, "originalMessageJson"),
@@ -1083,17 +1083,17 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func meshGetGroupInfo(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func meshGetGroupInfo(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "meshGetGroupInfo")
         return try host.meshGetGroupInfo(groupId: try A.requireString(m, "groupId"))
     }
 
-    static func meshGetGroupRoles(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func meshGetGroupRoles(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "meshGetGroupRoles")
         return try host.meshGetGroupRoles(groupId: try A.requireString(m, "groupId"))
     }
 
-    static func meshGetMemberRole(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func meshGetMemberRole(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "meshGetMemberRole")
         return try host.meshGetMemberRole(
             groupId: try A.requireString(m, "groupId"),
@@ -1101,17 +1101,17 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func meshGroupRelaySyncState(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func meshGroupRelaySyncState(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "meshGroupRelaySyncState")
         return try host.meshGroupRelaySyncState(groupId: try A.requireString(m, "groupId"))
     }
 
-    static func meshGroupRichReadiness(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func meshGroupRichReadiness(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "meshGroupRichReadiness")
         return try host.meshGroupRichReadiness(groupId: try A.requireString(m, "groupId"))
     }
 
-    static func meshInviteToGroup(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func meshInviteToGroup(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "meshInviteToGroup")
         try host.meshInviteToGroup(
             groupId: try A.requireString(m, "groupId"),
@@ -1120,17 +1120,17 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func meshLeaveGroup(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func meshLeaveGroup(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "meshLeaveGroup")
         try host.meshLeaveGroup(groupId: try A.requireString(m, "groupId"))
         return nil
     }
 
-    static func meshListGroups(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func meshListGroups(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try host.meshListGroups()
     }
 
-    static func meshRemoveFromGroup(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func meshRemoveFromGroup(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "meshRemoveFromGroup")
         try host.meshRemoveFromGroup(
             groupId: try A.requireString(m, "groupId"),
@@ -1139,7 +1139,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func meshRenameGroup(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func meshRenameGroup(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "meshRenameGroup")
         try host.meshRenameGroup(
             groupId: try A.requireString(m, "groupId"),
@@ -1148,12 +1148,12 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func meshRequestGroupRelayRegistration(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func meshRequestGroupRelayRegistration(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "meshRequestGroupRelayRegistration")
         return try host.meshRequestGroupRelayRegistration(groupId: try A.requireString(m, "groupId"))
     }
 
-    static func meshSendGroupMessage(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func meshSendGroupMessage(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "meshSendGroupMessage")
         return try host.meshSendGroupMessage(
             groupId: try A.requireString(m, "groupId"),
@@ -1163,7 +1163,7 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func meshSetMemberRole(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func meshSetMemberRole(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "meshSetMemberRole")
         try host.meshSetMemberRole(
             groupId: try A.requireString(m, "groupId"),
@@ -1175,7 +1175,7 @@ enum ProtocolEngineHostBridge {
 
     // MARK: - Mesh services
 
-    static func registerService(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func registerService(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "registerService")
         var capabilities: [String: String] = [:]
         // Capabilities the Dart side cannot encode as a string map are dropped,
@@ -1196,17 +1196,17 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func unregisterService(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func unregisterService(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "unregisterService")
         return try host.requireMeshServices().unregisterService(serviceId: try A.requireString(m, "serviceId"))
     }
 
-    static func discoverServices(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func discoverServices(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "discoverServices")
         return try host.requireMeshServices().discoverServices(serviceId: A.optionalString(m, "serviceId"))
     }
 
-    static func sendServiceRequest(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func sendServiceRequest(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "sendServiceRequest")
         return try host.requireMeshServices().sendServiceRequest(
             provider: try A.requireString(m, "provider"),
@@ -1216,7 +1216,7 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func respondToServiceRequest(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func respondToServiceRequest(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "respondToServiceRequest")
         return try host.requireMeshServices().respondToServiceRequest(
             requestId: try A.requireString(m, "requestId"),
@@ -1229,31 +1229,31 @@ enum ProtocolEngineHostBridge {
 
     // MARK: - Data store
 
-    static func dataCreateDoc(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataCreateDoc(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataCreateDoc")
         try host.dataCreateDoc(spaceId: try A.requireString(m, "spaceId"), docId: try A.requireString(m, "docId"))
         return nil
     }
 
-    static func dataDeleteDoc(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataDeleteDoc(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataDeleteDoc")
         try host.dataDeleteDoc(spaceId: try A.requireString(m, "spaceId"), docId: try A.requireString(m, "docId"))
         return nil
     }
 
-    static func dataRemoveDoc(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataRemoveDoc(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataRemoveDoc")
         try host.dataRemoveDoc(spaceId: try A.requireString(m, "spaceId"), docId: try A.requireString(m, "docId"))
         return nil
     }
 
-    static func dataRemoveSpace(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataRemoveSpace(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataRemoveSpace")
         try host.dataRemoveSpace(spaceId: try A.requireString(m, "spaceId"))
         return nil
     }
 
-    static func dataFetchAttachmentFrom(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataFetchAttachmentFrom(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataFetchAttachmentFrom")
         try host.dataFetchAttachmentFrom(
             spaceId: try A.requireString(m, "spaceId"),
@@ -1263,22 +1263,22 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func dataSetInterest(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataSetInterest(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataSetInterest")
         try host.dataSetInterest(spaceId: try A.requireString(m, "spaceId"), patterns: try A.stringList(m, "patterns"))
         return nil
     }
 
-    static func dataListDocs(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataListDocs(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataListDocs")
         return try host.dataListDocs(spaceId: try A.requireString(m, "spaceId"))
     }
 
-    static func dataListSpaces(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataListSpaces(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try host.dataListSpaces()
     }
 
-    static func dataMapSet(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataMapSet(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataMapSet")
         try host.dataMapSet(
             spaceId: try A.requireString(m, "spaceId"),
@@ -1290,7 +1290,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func dataMapDelete(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataMapDelete(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataMapDelete")
         try host.dataMapDelete(
             spaceId: try A.requireString(m, "spaceId"),
@@ -1301,7 +1301,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func dataMapGetJson(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataMapGetJson(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataMapGetJson")
         return try host.dataMapGetJson(
             spaceId: try A.requireString(m, "spaceId"),
@@ -1311,7 +1311,7 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func dataListPush(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataListPush(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataListPush")
         try host.dataListPush(
             spaceId: try A.requireString(m, "spaceId"),
@@ -1322,7 +1322,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func dataListDelete(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataListDelete(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataListDelete")
         try host.dataListDelete(
             spaceId: try A.requireString(m, "spaceId"),
@@ -1334,7 +1334,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func dataListLen(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataListLen(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataListLen")
         return try host.dataListLen(
             spaceId: try A.requireString(m, "spaceId"),
@@ -1343,7 +1343,7 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func dataTextInsert(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataTextInsert(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataTextInsert")
         try host.dataTextInsert(
             spaceId: try A.requireString(m, "spaceId"),
@@ -1355,7 +1355,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func dataTextDelete(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataTextDelete(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataTextDelete")
         try host.dataTextDelete(
             spaceId: try A.requireString(m, "spaceId"),
@@ -1367,7 +1367,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func dataTextValue(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataTextValue(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataTextValue")
         return try host.dataTextValue(
             spaceId: try A.requireString(m, "spaceId"),
@@ -1376,7 +1376,7 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func dataCounterIncrement(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataCounterIncrement(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataCounterIncrement")
         try host.dataCounterIncrement(
             spaceId: try A.requireString(m, "spaceId"),
@@ -1387,7 +1387,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func dataCounterValue(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataCounterValue(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataCounterValue")
         return try host.dataCounterValue(
             spaceId: try A.requireString(m, "spaceId"),
@@ -1396,46 +1396,46 @@ enum ProtocolEngineHostBridge {
         )
     }
 
-    static func dataDocJson(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataDocJson(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataDocJson")
         return try host.dataDocJson(spaceId: try A.requireString(m, "spaceId"), docId: try A.requireString(m, "docId"))
     }
 
-    static func dataExportRaw(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataExportRaw(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataExportRaw")
         let bytes = try host.dataExportRaw(spaceId: try A.requireString(m, "spaceId"), docId: try A.requireString(m, "docId"))
         // A `Uint8List` on the Dart side, as the Kotlin `ByteArray` is.
         return FlutterStandardTypedData(bytes: bytes)
     }
 
-    static func dataFlush(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataFlush(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataFlush")
         try host.dataFlush(spaceId: try A.requireString(m, "spaceId"), docId: try A.requireString(m, "docId"))
         return nil
     }
 
-    static func dataFlushAll(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataFlushAll(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try host.dataFlushAll()
         return nil
     }
 
-    static func dataDocSize(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataDocSize(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataDocSize")
         return try host.dataDocSize(spaceId: try A.requireString(m, "spaceId"), docId: try A.requireString(m, "docId"))
     }
 
-    static func dataAttachmentHash(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataAttachmentHash(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataAttachmentHash")
         return try host.dataAttachmentHash(bytesBase64: try A.requireString(m, "bytesBase64"))
     }
 
-    static func dataFetchAttachment(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataFetchAttachment(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataFetchAttachment")
         try host.dataFetchAttachment(spaceId: try A.requireString(m, "spaceId"), hash: try A.requireString(m, "hash"))
         return nil
     }
 
-    static func dataProvideAttachment(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataProvideAttachment(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataProvideAttachment")
         try host.dataProvideAttachment(
             spaceId: try A.requireString(m, "spaceId"),
@@ -1446,7 +1446,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func dataDeclineAttachment(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataDeclineAttachment(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         let m = try A.map(arguments, for: "dataDeclineAttachment")
         try host.dataDeclineAttachment(
             spaceId: try A.requireString(m, "spaceId"),
@@ -1456,7 +1456,7 @@ enum ProtocolEngineHostBridge {
         return nil
     }
 
-    static func dataWipeAll(host: ProtocolEngineHost, env: FlutterEngineChannel.Environment, arguments: Any?) throws -> Any? {
+    static func dataWipeAll(host: ProtocolEngineHost, env: EngineBridgeEnvironment, arguments: Any?) throws -> Any? {
         try host.dataWipeAll()
         return nil
     }
