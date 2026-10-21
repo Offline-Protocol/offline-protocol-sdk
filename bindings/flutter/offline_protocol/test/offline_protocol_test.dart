@@ -2,7 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:offline_protocol/offline_protocol.dart';
 
 void main() {
-  test('smokeTestConfig disables all transports', () {
+  test('smokeTestConfig enables Internet flag only', () {
     final config = OfflineProtocol.smokeTestConfig(
       appId: 'com.test.app',
       profile: 'user',
@@ -10,7 +10,7 @@ void main() {
     expect(config['appId'], 'com.test.app');
     expect(config['profile'], 'user');
     expect(config['bleEnabled'], isFalse);
-    expect(config['internetEnabled'], isFalse);
+    expect(config['internetEnabled'], isTrue);
     expect(config['nostrEnabled'], isFalse);
   });
 

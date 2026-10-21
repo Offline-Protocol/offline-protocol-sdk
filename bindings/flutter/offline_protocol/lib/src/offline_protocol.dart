@@ -41,8 +41,13 @@ class OfflineProtocol {
     return _eventPipeline!.stream;
   }
 
-  /// Builds a [ProtocolConfig] map with all transports disabled for local
-  /// engine smoke tests. Production apps should set transport flags explicitly.
+  /// Minimal [ProtocolConfig] for local engine smoke tests.
+  ///
+  /// The core requires at least one transport flag; Internet is enabled so the
+  /// example can boot without starting BLE (iOS needs `bluetooth-central` /
+  /// `bluetooth-peripheral` background modes before [start] may call
+  /// `BleManager.start()`). No relay is configured, so the Internet transport
+  /// is not auto-started. Production apps should set flags explicitly.
   static Map<String, dynamic> smokeTestConfig({
     required String appId,
     required String profile,
@@ -52,7 +57,7 @@ class OfflineProtocol {
       'profile': profile,
       'bleEnabled': false,
       'wifiDirectEnabled': false,
-      'internetEnabled': false,
+      'internetEnabled': true,
       'reticulumEnabled': false,
       'nostrEnabled': false,
     };

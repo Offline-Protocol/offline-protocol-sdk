@@ -48,8 +48,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         instance.installForegroundObserver()
     }
 
-    @objc
-    public func detachFromEngineForRegistrar(_ registrar: FlutterPluginRegistrar) {
+    public func detachFromEngine(for registrar: FlutterPluginRegistrar) {
         attachmentLock.lock()
         guard isPluginAttached else {
             attachmentLock.unlock()
@@ -268,9 +267,10 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
     }
 
     private func wireWifiDirectCallbackIfNeeded(proto: OfflineProtocol) {
-        guard currentConfig?.wifiDirectEnabled == true else { return }
+        guard currentConfig?.wifiDirectEnabled == true,
+              let manager = wifiDirectManager else { return }
         proto.setWifiDirectTransportCallback(
-            callback: FlutterWifiDirectTransportCallback(wifiDirectManager: wifiDirectManager)
+            callback: FlutterWifiDirectTransportCallback(wifiDirectManager: manager)
         )
     }
 
@@ -484,7 +484,6 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         try? wifiDirectManager?.stop()
         wifiDirectManager = nil
         try? protocolInstance?.stop()
-        protocolInstance?.destroy()
         protocolInstance = nil
         currentConfig = nil
         eventSeqLock.lock()

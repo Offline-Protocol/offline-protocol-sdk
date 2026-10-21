@@ -74,6 +74,15 @@ Native ([C6](README.md#c6-config-parsers-must-not-default-to-literals)). Dart
 may auto-enable transports after `start()` mirroring the React Native JS layer
 (Internet, Wi‑Fi Direct).
 
+## F5b. iOS BLE and `Info.plist`
+
+Shared `BleManager` uses CoreBluetooth state restoration. Before `BleManager.start()`
+runs, the host app must declare `NSBluetoothAlwaysUsageDescription` and
+`UIBackgroundModes` (`bluetooth-central`, `bluetooth-peripheral`). Same keys as
+[React Native iOS setup](../../bindings/react-native/README.md#ios-permissions).
+The example smoke path enables the Internet transport flag only so it can boot
+without starting BLE; enabling BLE in config requires those plist entries.
+
 ## F6. Secure storage
 
 MLS and protocol state use the same Kotlin/Swift storage adapters as React

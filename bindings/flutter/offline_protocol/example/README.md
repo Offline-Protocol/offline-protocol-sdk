@@ -31,7 +31,7 @@ flutter run -d ios
 
 ## What it does
 
-Boots the engine with all transports disabled, subscribes to core events,
+Boots the engine with the Internet flag only (core validation, no relay/BLE start), subscribes to core events,
 initializes MLS with platform secure storage, starts the core, and prints this
 device's `off1…` address.
 

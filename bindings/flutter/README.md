@@ -135,13 +135,26 @@ flutter run -d android
 ```bash
 bindings/flutter/scripts/bootstrap-example-platforms.sh
 cd bindings/flutter/offline_protocol/example
-flutter run -d ios
+flutter pub get
+flutter run -d <device-or-simulator-id>   # flutter devices
+```
+
+The iOS pod copies shared bridge sources from `bindings/react-native/ios` into
+`offline_protocol/ios/BridgeRN/` on the first `pod install` (CocoaPods does not
+follow symlinks when indexing sources). After you change RN bridge Swift, refresh
+the copy and reinstall pods:
+
+```bash
+bash bindings/flutter/offline_protocol/ios/sync_bridge_rn.sh
+cd bindings/flutter/offline_protocol/example/ios && pod install
 ```
 
 See [example/README.md](offline_protocol/example/README.md) for details.
 
-The example boots the engine with all transports disabled, subscribes to core
-events, and prints this device's `off1…` address.
+The example boots the engine with the Internet transport flag only (satisfies
+core validation without starting BLE or a relay), subscribes to core events,
+and prints this device's `off1…` address. When you enable BLE, add the iOS
+`Info.plist` entries from [React Native platform setup](../react-native/README.md#ios-permissions).
 
 ## Add to your app
 
