@@ -2,10 +2,12 @@ package com.offlineprotocol.flutter
 
 import android.app.Activity
 import android.app.Application
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
+import java.util.Collections
 import com.offlineprotocol.EventReplayRing
 import com.offlineprotocol.ForegroundReconnectPolicy
 import com.offlineprotocol.ProtocolEngineHost
@@ -67,6 +69,14 @@ class OfflineProtocolPlugin :
     private var activityBinding: ActivityPluginBinding? = null
     private var activityLifecycleCallbacks: Application.ActivityLifecycleCallbacks? = null
 
+    /** Process visibility for telemetry (C12), same edges as React Native. */
+    private val startedActivities: MutableSet<Activity> = Collections.synchronizedSet(
+        Collections.newSetFromMap(java.util.IdentityHashMap()),
+    )
+    @Volatile
+    private var sawActivityStart = false
+    private var processLifecycleCallbacks: Application.ActivityLifecycleCallbacks? = null
+
     @Volatile
     private var eventSink: EventChannel.EventSink? = null
     private val eventSeqLock = Any()
@@ -83,12 +93,13 @@ class OfflineProtocolPlugin :
             createOnEngine = { configJson -> createOnEngine(configJson) },
             startOnEngine = { startOnEngine() },
             stopOnEngine = { stopOnEngine() },
-            seedAppState = { AppState.FOREGROUND },
+            seedAppState = { seedTelemetryAppState() },
         )
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         applicationContext = binding.applicationContext
         attached.set(true)
+        installProcessLifecycleWatcher(binding.applicationContext)
         channel = MethodChannel(binding.binaryMessenger, CHANNEL_NAME)
         channel.setMethodCallHandler(this)
         eventsChannel = EventChannel(binding.binaryMessenger, EVENTS_CHANNEL_NAME).also {
@@ -100,6 +111,7 @@ class OfflineProtocolPlugin :
         if (!attached.getAndSet(false)) {
             return
         }
+        removeProcessLifecycleWatcher()
         detachActivityLifecycle()
         eventsChannel?.setStreamHandler(null)
         eventsChannel = null
@@ -183,6 +195,62 @@ class OfflineProtocolPlugin :
         }
         activityLifecycleCallbacks = null
         activityBinding = null
+    }
+
+    private fun installProcessLifecycleWatcher(context: android.content.Context) {
+        val application = context.applicationContext as? Application ?: return
+        removeProcessLifecycleWatcher()
+        val watcher = object : Application.ActivityLifecycleCallbacks {
+            override fun onActivityStarted(activity: Activity) {
+                sawActivityStart = true
+                startedActivities.add(activity)
+                runOnEngine("telemetry foreground") { notifyAppStateQuietly(AppState.ACTIVE) }
+            }
+
+            override fun onActivityStopped(activity: Activity) {
+                startedActivities.remove(activity)
+                if (startedActivities.isEmpty() && !activity.isChangingConfigurations) {
+                    runOnEngine("telemetry background") { notifyAppStateQuietly(AppState.BACKGROUND) }
+                }
+            }
+
+            override fun onActivityDestroyed(activity: Activity) {
+                startedActivities.remove(activity)
+            }
+
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
+            override fun onActivityResumed(activity: Activity) {}
+            override fun onActivityPaused(activity: Activity) {}
+            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
+        }
+        application.registerActivityLifecycleCallbacks(watcher)
+        processLifecycleCallbacks = watcher
+    }
+
+    private fun removeProcessLifecycleWatcher() {
+        val watcher = processLifecycleCallbacks ?: return
+        processLifecycleCallbacks = null
+        (applicationContext?.applicationContext as? Application)
+            ?.unregisterActivityLifecycleCallbacks(watcher)
+        startedActivities.clear()
+        sawActivityStart = false
+    }
+
+    /**
+     * Seeds telemetry the way [OfflineProtocolModule.seedAppState] does on React Native.
+     */
+    private fun seedTelemetryAppState(): AppState = when {
+        sawActivityStart -> if (startedActivities.isEmpty()) AppState.BACKGROUND else AppState.ACTIVE
+        activityBinding?.activity != null -> AppState.ACTIVE
+        else -> AppState.BACKGROUND
+    }
+
+    private fun notifyAppStateQuietly(state: AppState) {
+        try {
+            engineHost.protocol?.notifyAppState(state)
+        } catch (e: Exception) {
+            Log.d(TAG, "Telemetry lifecycle transition skipped: the protocol handle is gone", e)
+        }
     }
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {

@@ -159,7 +159,11 @@ Telemetry methods are exposed on the method channel (`enableTelemetry`,
 `endTelemetrySession`, `setTelemetryEnabled`) and in Dart via `MeshSdk`. Android
 fills platform fields in `ProtocolEngineHost.parseTelemetryConfig` ([C12](README.md#c12-telemetry-is-callback-free-and-the-binding-fills-the-platform)).
 The binding owns the session boundary off UI pause granularity and never runs
-blocking flush on the main thread.
+blocking flush on the main thread. `disableTelemetry`, `endTelemetrySession`, and
+`flushTelemetry` may block the dedicated engine thread for up to a few seconds
+(same as React Native); other method-channel calls queue behind that work. iOS
+and Android Flutter hosts seed and update `AppState` from process lifecycle
+observers so telemetry sessions follow foreground/background edges.
 
 ## F8b. Staged native artifacts (pub.dev)
 

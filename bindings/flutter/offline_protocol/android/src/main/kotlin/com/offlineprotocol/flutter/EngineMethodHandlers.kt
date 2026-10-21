@@ -479,7 +479,7 @@ internal object EngineMethodHandlers {
         env: FlutterEngineChannel.Environment,
         arguments: Any?,
     ): Any? {
-    host.requireProtocol().emitTestEvent()
+    host.requireProtocolBridge().emitTestEvent()
         return null
     }
 

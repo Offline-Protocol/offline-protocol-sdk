@@ -99,7 +99,6 @@ const FLUTTER_SHARED_SOURCES: &[&str] = &[
     "ProtocolEngineHost",
     "ProtocolEngineHostBridge",
     "TransportBridge",
-    "BridgeArgumentMaps",
     "ReticulumManager",
     "NostrManager",
     "NostrQueryTracker",

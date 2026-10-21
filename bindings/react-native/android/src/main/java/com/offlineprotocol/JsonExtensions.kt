@@ -1,5 +1,6 @@
 package com.offlineprotocol
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 /** Kotlin 2.x treats Java `optString` as nullable — this avoids `?: ""` at every call site. */
@@ -60,3 +61,12 @@ internal fun JSONObject.optStringCompat(vararg keys: String): String? {
 /** Nullable string lookup that avoids the Kotlin 2.x `Nothing?` type-mismatch warning on `optString(key, null)`. */
 internal fun JSONObject.optNullableString(key: String): String? =
     if (has(key) && !isNull(key)) getString(key) else null
+
+internal fun JSONObject.optJSONArrayCompat(vararg keys: String): JSONArray? {
+    keys.forEach { key ->
+        if (has(key) && !isNull(key)) {
+            return optJSONArray(key)
+        }
+    }
+    return null
+}

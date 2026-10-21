@@ -16691,9 +16691,8 @@ mod tests {
         "manager.configure",
     ];
 
-    // InternetTransportBootstrap is the shared home for Flutter; React Native
-    // still inlines configureAndStartInternet on Android. Until RN delegates,
-    // both must keep the same configure knobs.
+    // InternetTransportBootstrap is the shared configure path; React Native
+    // delegates through configureAndStartInternet rather than duplicating knobs.
     #[test]
     fn internet_transport_bootstrap_keeps_rn_configure_invariants() {
         let rn =
@@ -16715,15 +16714,14 @@ mod tests {
             !rn_fn.is_empty(),
             "OfflineProtocolModule.configureAndStartInternet not found: the guard needs a stable anchor"
         );
+        assert!(
+            rn_fn.contains("InternetTransportBootstrap.configureAndStart"),
+            "OfflineProtocolModule.configureAndStartInternet must delegate to InternetTransportBootstrap"
+        );
         for marker in INTERNET_CONFIGURE_MARKERS {
             assert!(
                 bootstrap.contains(marker),
                 "InternetTransportBootstrap.kt missing `{marker}`"
-            );
-            assert!(
-                rn_fn.contains(marker),
-                "OfflineProtocolModule.configureAndStartInternet missing `{marker}`: \
-                 update InternetTransportBootstrap.kt or restore RN parity"
             );
         }
     }
@@ -18377,7 +18375,7 @@ mod tests {
     #[test]
     fn react_native_android_wifi_direct_callback_does_not_wait_for_a_manager() {
         let code = rn_source_code_only(
-            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+            "android/src/main/java/com/offlineprotocol/ProtocolEngineHost.kt",
         );
         for (what, pinned) in [
             (
@@ -18389,12 +18387,12 @@ mod tests {
             ),
             (
                 "the field the callback reads",
-                "@Volatile private var wifiDirectManager: WifiDirectManager? = null",
+                "@Volatile var wifiDirectManager: WifiDirectManager? = null",
             ),
         ] {
             assert!(
                 code.contains(pinned),
-                "OfflineProtocolModule.kt: {what}. A Wi-Fi Direct callback that waits for a \
+                "ProtocolEngineHost.kt: {what}. A Wi-Fi Direct callback that waits for a \
                  manager is never registered, because the manager is built after create, and \
                  the transport falls back to its 2s poll. Expected to find:\n  {pinned}"
             );
@@ -18403,7 +18401,7 @@ mod tests {
             !code.contains(
                 "wifiDirectManager?.let { manager -> try { proto.setWifiDirectTransportCallback"
             ),
-            "OfflineProtocolModule.kt registers the Wi-Fi Direct callback only when a manager \
+            "ProtocolEngineHost.kt registers the Wi-Fi Direct callback only when a manager \
              already exists, which at create time it never does"
         );
     }

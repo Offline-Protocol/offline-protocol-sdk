@@ -198,6 +198,15 @@ object ProtocolEngineHostBridge {
         "timestampMs" to encrypted.timestampMs.toDouble(),
     )
 
+    private fun mlsKeyPackageBundleMap(bundle: MlsKeyPackageBundle): Map<String, Any?> = mapOf(
+        "packageId" to bundle.packageId,
+        "userId" to bundle.userId,
+        "keyPackageData" to bundle.keyPackageData.map { it.toInt() },
+        "createdAtMs" to bundle.createdAtMs.toDouble(),
+        "expiresAtMs" to bundle.expiresAtMs.toDouble(),
+        "synced" to bundle.synced,
+    )
+
     private fun JSONObject.optNullableString(key: String): String? =
         if (has(key) && !isNull(key)) optString(key) else null
 
@@ -454,8 +463,8 @@ object ProtocolEngineHostBridge {
             put("historyWindowSize", config.historyWindowSize.toLong())
             put("queueRecoveryRatio", config.queueRecoveryRatio.toDouble())
             put("lowBatteryThreshold", config.lowBatteryThreshold.toInt())
-            put("relayMinBattery", config.relayMinBattery.toInt())
-            put("relayPriority", InitialRuntimeConfigApplier.relayPriorityName(config.relayPriority))
+            put("relayMinBatteryLevel", config.relayMinBatteryLevel.toInt())
+            put("relayOptimalConnectionCount", config.relayOptimalConnectionCount.toInt())
         }.toString()
 
     }
@@ -480,11 +489,9 @@ object ProtocolEngineHostBridge {
             ?: return null
         return mapOf(
             "file_id" to progress.fileId,
-            "recipient" to progress.recipient,
+            "chunks_sent" to progress.chunksSent.toInt(),
             "total_chunks" to progress.totalChunks.toInt(),
-            "sent_chunks" to progress.sentChunks.toInt(),
-            "bytes_sent" to progress.bytesSent.toDouble(),
-            "total_bytes" to progress.totalBytes.toDouble(),
+            "percentage" to progress.percentage.toInt(),
         )
 
     }
@@ -757,27 +764,21 @@ object ProtocolEngineHostBridge {
     fun mlsGenerateKeyPackage(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
 
         val bundle = host.requireProtocolBridge().mlsGenerateKeyPackage()
-        return mapOf(
-            "packageId" to bundle.packageId,
-            "keyPackage" to bundle.keyPackage.map { it.toInt() },
-        )
+        return mlsKeyPackageBundleMap(bundle)
 
     }
 
     fun mlsGetOrCreateKeyPackage(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
 
         val bundle = host.requireProtocolBridge().mlsGetOrCreateKeyPackage()
-        return mapOf(
-            "packageId" to bundle.packageId,
-            "keyPackage" to bundle.keyPackage.map { it.toInt() },
-        )
+        return mlsKeyPackageBundleMap(bundle)
 
     }
 
     fun mlsGetPendingKeyPackages(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
 
         val packages = host.requireProtocolBridge().mlsGetPendingKeyPackages()
-        return packages.map { mapOf("packageId" to it.packageId, "keyPackage" to it.keyPackage.map { b -> b.toInt() }) }
+        return packages.map { mlsKeyPackageBundleMap(it) }
 
     }
 
@@ -1157,10 +1158,10 @@ object ProtocolEngineHostBridge {
             queueRecoveryRatio = json.optDouble("queueRecoveryRatio", current.queueRecoveryRatio.toDouble()).toFloat().coerceIn(0f, 1f),
             lowBatteryThreshold = json.optInt("lowBatteryThreshold", current.lowBatteryThreshold.toInt())
                 .coerceIn(Limits.MIN_BATTERY, Limits.MAX_BATTERY).toUByte(),
-            relayMinBattery = json.optInt("relayMinBattery", current.relayMinBattery.toInt())
+            relayMinBatteryLevel = json.optInt("relayMinBatteryLevel", current.relayMinBatteryLevel.toInt())
                 .coerceIn(Limits.MIN_BATTERY, Limits.MAX_BATTERY).toUByte(),
-            relayPriority = InitialRuntimeConfigApplier.normalizeRelayPriority(json.optString("relayPriority"))
-                ?: current.relayPriority,
+            relayOptimalConnectionCount = json.optInt("relayOptimalConnectionCount", current.relayOptimalConnectionCount.toInt())
+                .coerceIn(0, UByte.MAX_VALUE.toInt()).toUByte(),
         )
         proto.updateDorsConfig(dorsConfig)
         return null

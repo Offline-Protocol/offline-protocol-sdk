@@ -76,10 +76,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         set(value) {
             engineHost.internetManager = value
         }
-    // Volatile: the core's Wi-Fi Direct callback reads it from whichever
-    // thread queued the body (see wireTransportCallbacks).
-    @Volatile
-    private var wifiDirectManager: WifiDirectManager? = null
+    private var wifiDirectManager: WifiDirectManager?
+        get() = engineHost.wifiDirectManager
+        set(value) {
+            engineHost.wifiDirectManager = value
+        }
     private var reticulumManager: ReticulumManager?
         get() = engineHost.reticulumManager
         set(value) {
@@ -678,8 +679,6 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                 },
                 internetHandlers,
             )
-            syncWifiDirectManagerFromHost()
-            protocol?.let { wireTransportCallbacks(it) }
             promise.resolve(null)
         } catch (e: Exception) {
             emitDiagnostic("error", "Failed to create protocol", mapOf(
@@ -2240,17 +2239,12 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             ) {
                 stickyEvents.discard(EVENT_INTERNET_SESSION_SUPERSEDED)
             }
-            syncWifiDirectManagerFromHost()
             promise.resolve(null)
         } catch (e: ProtocolException) {
             promise.reject("ERROR_TRANSPORT_ENABLE", "Failed to enable transport: ${e.message}", e)
         } catch (e: Exception) {
             promise.reject("ERROR_TRANSPORT_ENABLE", "Failed to enable transport: ${e.message}", e)
         }
-    }
-
-    private fun syncWifiDirectManagerFromHost() {
-        wifiDirectManager = engineHost.wifiDirectManager
     }
 
     private fun internetTransportEventHandlers(): ProtocolEngineHost.InternetTransportEventHandlers =
@@ -2263,75 +2257,17 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         )
 
     /**
-     * Kept on the module for CI parity with [InternetTransportBootstrap] until
-     * every enable path delegates there. [engineHost.enableTransport] uses the
-     * bootstrap; this function pins the same configure knobs for guards.
+     * Delegates to [InternetTransportBootstrap]; kept so legacy call sites and
+     * docs that name this helper stay valid. All enable paths use the bootstrap.
      */
     private fun configureAndStartInternet(manager: InternetManager, config: ReadableMap?) {
-        val serverAddress = config?.getString("serverAddress")
-            ?: config?.getString("server_url")
-            ?: throw IllegalArgumentException("Internet transport requires a serverAddress")
-
-        var wsUrl = serverAddress.trim()
-        if (!wsUrl.startsWith("ws://") && !wsUrl.startsWith("wss://")) {
-            wsUrl = "wss://$wsUrl"
-        }
-
-        val port = when {
-            config?.hasKey("port") == true -> config.getDouble("port").toInt()
-            config?.hasKey("serverPort") == true -> config.getDouble("serverPort").toInt()
-            else -> null
-        }
-        if (port != null && port > 0) {
-            val uri = java.net.URI(wsUrl)
-            if (uri.port == -1) {
-                wsUrl = "$wsUrl:$port"
-            }
-        }
-
-        val autoReconnect = if (config?.hasKey("autoReconnect") == true) {
-            config.getBoolean("autoReconnect")
-        } else {
-            true
-        }
-        val maxRetries = if (config?.hasKey("maxReconnectAttempts") == true) {
-            config.getDouble("maxReconnectAttempts").toInt()
-        } else {
-            0
-        }
-
-        val authToken = config?.getString("authToken")
-        if (authToken != null) {
-            manager.setAuthToken(authToken)
-        }
-
-        manager.configure(wsUrl, autoReconnect, maxRetries)
-        manager.start()
-
+        val json = BridgeArgumentMaps.readableMapToJsonObject(config) ?: org.json.JSONObject()
+        InternetTransportBootstrap.configureAndStart(manager, json)
         emitDiagnostic("info", "Internet transport enabled", mapOf(
-            "serverUrl" to wsUrl,
-            "autoReconnect" to autoReconnect,
-            "hasAuthToken" to (authToken != null),
+            "serverUrl" to json.optString("serverAddress", json.optString("server_url", "")),
+            "autoReconnect" to json.optBooleanCompat("autoReconnect", "auto_reconnect"),
+            "hasAuthToken" to json.has("authToken"),
         ))
-    }
-
-    /**
-     * Wi-Fi Direct callback registration lives on the module so guards can pin
-     * the slot read ([wifiDirectManager]) without waiting for a manager instance.
-     */
-    private fun wireTransportCallbacks(proto: OfflineProtocol) {
-        if (currentConfig?.wifiDirectEnabled == true) {
-            try {
-                proto.setWifiDirectTransportCallback(object : uniffi.offline_protocol.WifiDirectTransportCallback {
-                    override fun onMessagesAvailable() {
-                        wifiDirectManager?.onMessagesAvailable()
-                    }
-                })
-            } catch (e: Throwable) {
-                android.util.Log.w(NAME, "Wi-Fi Direct transport callback not available", e)
-            }
-        }
-        engineHost.wireTransportCallbacks(proto)
     }
 
     @ReactMethod

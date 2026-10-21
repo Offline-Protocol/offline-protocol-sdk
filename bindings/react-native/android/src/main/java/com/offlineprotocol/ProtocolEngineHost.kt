@@ -40,7 +40,7 @@ class ProtocolEngineHost(
     data class InternetTransportEventHandlers(
         val serverMessageEmitter: (String) -> Unit,
         val connectionStatusEmitter: (Boolean, Boolean) -> Unit,
-        val supersededEmitter: (String) -> Unit,
+        val supersededEmitter: (String?) -> Unit,
     )
 
     fun create(
@@ -118,7 +118,7 @@ class ProtocolEngineHost(
         }
         wireTransportCallbacks(proto)
         backgroundProcessor.startProcessScheduler()
-        onDiagnostic("info", "Protocol process scheduler started")
+        onDiagnostic("info", "Protocol process scheduler started", emptyMap())
         return config
     }
 
@@ -129,32 +129,32 @@ class ProtocolEngineHost(
         teardown.step("BLE manager") {
             bleTransport?.stop()
             Log.i(logTag, "BLE Manager stopped")
-            onDiagnostic("info", "BLE manager stopped")
+            onDiagnostic("info", "BLE manager stopped", emptyMap())
         }
         teardown.step("Internet manager") {
             internetManager?.stop()
             Log.i(logTag, "Internet Manager stopped")
-            onDiagnostic("info", "Internet manager stopped")
+            onDiagnostic("info", "Internet manager stopped", emptyMap())
         }
         teardown.step("WiFi Direct manager") {
             wifiDirectManager?.stop()
             Log.i(logTag, "WiFi Direct Manager stopped")
-            onDiagnostic("info", "WiFi Direct manager stopped")
+            onDiagnostic("info", "WiFi Direct manager stopped", emptyMap())
         }
         teardown.step("Reticulum manager") {
             reticulumManager?.stop()
             Log.i(logTag, "Reticulum Manager stopped")
-            onDiagnostic("info", "Reticulum manager stopped")
+            onDiagnostic("info", "Reticulum manager stopped", emptyMap())
         }
         teardown.step("Nostr manager") {
             nostrManager?.stop()
             Log.i(logTag, "Nostr Manager stopped")
-            onDiagnostic("info", "Nostr manager stopped")
+            onDiagnostic("info", "Nostr manager stopped", emptyMap())
         }
         teardown.step("mesh foreground service") { onStopForegroundService() }
         teardown.step("protocol core") {
             protocol?.stop()
-            onDiagnostic("info", "Protocol stopped")
+            onDiagnostic("info", "Protocol stopped", emptyMap())
         }
         for (failure in teardown.failures) {
             Log.e(logTag, "Teardown step failed: ${failure.step}", failure.cause)
@@ -197,7 +197,7 @@ class ProtocolEngineHost(
 
     fun startProtocolCore() {
         requireProtocol().start()
-        onDiagnostic("info", "Protocol core started")
+        onDiagnostic("info", "Protocol core started", emptyMap())
     }
 
     fun startBleTransportIfPresent() {
@@ -253,7 +253,7 @@ class ProtocolEngineHost(
                                 manager.supersededEmitter = handlers.supersededEmitter
                             }
                         }
-                    onDiagnostic("info", "Internet manager created on demand")
+                    onDiagnostic("info", "Internet manager created on demand", emptyMap())
                 }
                 val manager = internetManager ?: throw IllegalStateException("Failed to create Internet manager")
                 if (manager.state == TransportState.RUNNING || manager.state == TransportState.STARTING) {
@@ -262,7 +262,7 @@ class ProtocolEngineHost(
                 val json = config ?: JSONObject()
                 InternetTransportBootstrap.configureAndStart(manager, json)
                 onInternetTransportEnabled?.invoke()
-                onDiagnostic("info", "Internet transport enabled")
+                onDiagnostic("info", "Internet transport enabled", emptyMap())
             }
             "wifidirect", "wifi_direct" -> {
                 if (wifiDirectManager == null) {
@@ -273,7 +273,7 @@ class ProtocolEngineHost(
                         appId = currentConfig?.appId ?: "",
                         onDiagnostic,
                     )
-                    onDiagnostic("info", "WiFi Direct manager created on demand")
+                    onDiagnostic("info", "WiFi Direct manager created on demand", emptyMap())
                 }
                 val manager = wifiDirectManager ?: throw IllegalStateException("Failed to create WiFi Direct manager")
                 val autoAccept = config?.let { json ->
@@ -285,7 +285,7 @@ class ProtocolEngineHost(
                 manager.formGroups = WifiDirectGroupFormation.formGroupsAfterEnable(manager.formGroups, autoAccept)
                 wireTransportCallbacks(proto)
                 manager.start()
-                onDiagnostic("info", "WiFi Direct transport enabled")
+                onDiagnostic("info", "WiFi Direct transport enabled", emptyMap())
             }
             "ble" -> {
                 if (bleTransport == null) {
@@ -296,31 +296,31 @@ class ProtocolEngineHost(
                         currentConfig?.appId ?: "",
                         onDiagnostic,
                     )
-                    onDiagnostic("info", "BLE manager created on demand")
+                    onDiagnostic("info", "BLE manager created on demand", emptyMap())
                 }
                 val manager = bleTransport ?: throw IllegalStateException("Failed to create BLE manager")
                 wireTransportCallbacks(proto)
                 if (manager.state != TransportState.RUNNING) {
                     manager.start()
-                    onDiagnostic("info", "BLE transport enabled")
+                    onDiagnostic("info", "BLE transport enabled", emptyMap())
                 }
             }
             "reticulum" -> {
                 if (reticulumManager == null) {
                     reticulumManager = createReticulumManager(context, proto, currentConfig?.profile ?: "unknown")
-                    onDiagnostic("info", "Reticulum manager created on demand")
+                    onDiagnostic("info", "Reticulum manager created on demand", emptyMap())
                 }
                 val manager = reticulumManager ?: throw IllegalStateException("Failed to create Reticulum manager")
                 if (manager.state == TransportState.RUNNING) {
                     manager.stop()
                 }
                 configureAndStartReticulum(manager, config)
-                onDiagnostic("info", "Reticulum transport enabled")
+                onDiagnostic("info", "Reticulum transport enabled", emptyMap())
             }
             "nostr" -> {
                 if (nostrManager == null) {
                     nostrManager = createNostrManager(context, proto)
-                    onDiagnostic("info", "Nostr manager created on demand")
+                    onDiagnostic("info", "Nostr manager created on demand", emptyMap())
                 }
                 val manager = nostrManager ?: throw IllegalStateException("Failed to create Nostr manager")
                 if (manager.state == TransportState.RUNNING) {
@@ -328,7 +328,7 @@ class ProtocolEngineHost(
                 }
                 configureAndStartNostr(manager, config)
                 wireTransportCallbacks(proto)
-                onDiagnostic("info", "Nostr transport enabled")
+                onDiagnostic("info", "Nostr transport enabled", emptyMap())
             }
             else -> throw IllegalArgumentException("Unsupported transport type: $type")
         }
@@ -348,23 +348,23 @@ class ProtocolEngineHost(
                     }
                 })
                 Log.i(logTag, "BLE transport callback registered")
-                onDiagnostic("info", "BLE transport callback wired")
+                onDiagnostic("info", "BLE transport callback wired", emptyMap())
             } catch (e: Throwable) {
                 Log.w(logTag, "BLE transport callback not available", e)
-                onDiagnostic("warning", "BLE callback wiring skipped (regenerate UniFFI bindings)")
+                onDiagnostic("warning", "BLE callback wiring skipped (regenerate UniFFI bindings)", emptyMap())
             }
         }
         if (currentConfig?.wifiDirectEnabled == true) {
             try {
-                proto.setWifiDirectTransportCallback(object : WifiDirectTransportCallback {
+                proto.setWifiDirectTransportCallback(object : uniffi.offline_protocol.WifiDirectTransportCallback {
                     override fun onMessagesAvailable() {
                         wifiDirectManager?.onMessagesAvailable()
                     }
                 })
-                onDiagnostic("info", "WiFi Direct transport callback registered")
+                onDiagnostic("info", "WiFi Direct transport callback registered", emptyMap())
             } catch (e: Throwable) {
                 Log.w(logTag, "WiFi Direct transport callback not available", e)
-                onDiagnostic("warning", "WiFi Direct callback wiring skipped (regenerate UniFFI bindings)")
+                onDiagnostic("warning", "WiFi Direct callback wiring skipped (regenerate UniFFI bindings)", emptyMap())
             }
         }
         reticulumManager?.let { manager ->
@@ -374,10 +374,10 @@ class ProtocolEngineHost(
                         manager.onMessagesAvailable()
                     }
                 })
-                onDiagnostic("info", "Reticulum transport callback wired")
+                onDiagnostic("info", "Reticulum transport callback wired", emptyMap())
             } catch (e: Throwable) {
                 Log.w(logTag, "Reticulum transport callback not available", e)
-                onDiagnostic("warning", "Reticulum callback wiring skipped (regenerate UniFFI bindings)")
+                onDiagnostic("warning", "Reticulum callback wiring skipped (regenerate UniFFI bindings)", emptyMap())
             }
         }
         nostrManager?.let { manager ->
@@ -387,10 +387,10 @@ class ProtocolEngineHost(
                         manager.onMessagesAvailable()
                     }
                 })
-                onDiagnostic("info", "Nostr transport callback wired")
+                onDiagnostic("info", "Nostr transport callback wired", emptyMap())
             } catch (e: Throwable) {
                 Log.w(logTag, "Nostr transport callback not available", e)
-                onDiagnostic("warning", "Nostr callback wiring skipped (regenerate UniFFI bindings)")
+                onDiagnostic("warning", "Nostr callback wiring skipped (regenerate UniFFI bindings)", emptyMap())
             }
         }
     }
@@ -419,7 +419,7 @@ class ProtocolEngineHost(
         protocol?.setTelemetryEnabled(enabled)
     }
 
-    fun telemetryInstallId(): String = requireProtocol().telemetryInstallId()
+    fun telemetryInstallId(): String? = requireProtocol().telemetryInstallId()
 
     fun parseTelemetryConfig(map: Map<String, Any?>?): TelemetryConfig {
         val m = map ?: emptyMap()
@@ -683,8 +683,8 @@ class ProtocolEngineHost(
 
     private fun configureAndStartReticulum(manager: ReticulumManager, config: JSONObject?) {
         val daemonAddress = config?.optStringCompat("daemonAddress", "daemon_address") ?: "localhost:4242"
-        val autoReconnect = config?.optBooleanCompat("autoReconnect") ?: true
-        val maxRetries = config?.optIntCompat("maxReconnectAttempts") ?: 0
+        val autoReconnect = config?.optBooleanCompat("autoReconnect", "auto_reconnect") ?: true
+        val maxRetries = config?.optIntCompat("maxReconnectAttempts", "max_reconnect_attempts") ?: 0
         manager.configure(daemonAddress, autoReconnect, maxRetries)
         manager.start()
         onDiagnostic(
@@ -709,34 +709,10 @@ class ProtocolEngineHost(
         if (relayUrls.isEmpty()) {
             throw IllegalArgumentException("Nostr transport requires at least one relay URL")
         }
-        val autoReconnect = config?.optBooleanCompat("autoReconnect") ?: true
-        val maxRetries = config?.optIntCompat("maxReconnectAttempts") ?: 0
+        val autoReconnect = config?.optBooleanCompat("autoReconnect", "auto_reconnect") ?: true
+        val maxRetries = config?.optIntCompat("maxReconnectAttempts", "max_reconnect_attempts") ?: 0
         manager.configure(relayUrls, autoReconnect, maxRetries)
         manager.start()
         onDiagnostic("info", "Nostr transport enabled", mapOf("relayCount" to relayUrls.size))
     }
-}
-
-private fun JSONObject.optStringCompat(vararg keys: String): String? {
-    for (key in keys) {
-        if (has(key) && !isNull(key)) {
-            return optString(key)
-        }
-    }
-    return null
-}
-
-private fun JSONObject.optBooleanCompat(key: String): Boolean? =
-    if (has(key) && !isNull(key)) getBoolean(key) else null
-
-private fun JSONObject.optIntCompat(key: String): Int? =
-    if (has(key) && !isNull(key)) optDouble(key).toInt() else null
-
-private fun JSONObject.optJSONArrayCompat(vararg keys: String): JSONArray? {
-    for (key in keys) {
-        if (has(key) && !isNull(key)) {
-            return optJSONArray(key)
-        }
-    }
-    return null
 }

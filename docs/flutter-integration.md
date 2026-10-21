@@ -4,14 +4,20 @@ How to add the Offline Protocol Flutter plugin to an app and ship it on pub.dev.
 
 ## Add the dependency
 
+Path dependency while developing in the monorepo:
+
 ```yaml
 dependencies:
   offline_protocol:
-    sdk: flutter # path dependency while developing in the monorepo
+    path: ../bindings/flutter/offline_protocol
 ```
 
-For pub.dev releases, depend on the published `offline_protocol` package version that
-matches the workspace release tag.
+For pub.dev releases:
+
+```yaml
+dependencies:
+  offline_protocol: ^0.30.0 # match the workspace release tag
+```
 
 ## Platform setup
 
