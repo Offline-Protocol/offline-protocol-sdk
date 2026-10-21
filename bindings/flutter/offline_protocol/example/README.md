@@ -1,40 +1,30 @@
 # Offline Protocol Flutter example
 
-## Android (in-repo)
+Minimal app: boot the engine, listen for core events, print this device’s
+`off1…` address.
 
-From this directory:
+Build native libraries first ([bindings/flutter/README.md](../../README.md)).
+
+## Android
 
 ```bash
 flutter pub get
 flutter run -d android
 ```
 
-Requires native libraries built first (see [bindings/flutter/README.md](../../README.md)).
-
 ## iOS
 
-The example does not commit an Xcode `Runner` project (Flutter SDK versions differ).
-Generate platform files once:
+The Xcode `Runner` project is not committed. Generate it once:
 
 ```bash
 ../../scripts/bootstrap-example-platforms.sh
-flutter run -d ios
-```
-
-Or manually:
-
-```bash
 flutter pub get
-flutter create . --platforms=ios,android --org com.offlineprotocol.flutter
-flutter run -d ios
+flutter run -d <device-or-simulator-id>
 ```
 
-## What it does
+After bootstrap, merge Bluetooth `Info.plist` keys from
+[React Native iOS permissions](../../../react-native/README.md#ios-permissions)
+if you enable BLE in your own config (the example smoke config does not start BLE).
 
-Boots the engine with the Internet flag only (core validation, no relay/BLE start), subscribes to core events,
-initializes MLS with platform secure storage, starts the core, and prints this
-device's `off1…` address.
-
-Generated plugin registrant files and `.flutter-plugins-dependencies` are not
-committed; run `flutter pub get` (and `bootstrap-example-platforms.sh` for iOS)
-locally after clone.
+For iOS pods and the `BridgeRN` copy step, see
+[bindings/flutter/README.md](../../README.md).

@@ -109,7 +109,7 @@ granularity, and never run blocking flush on the main thread.
 
 ## F9. Binary footprint
 
-PR3 links BLE and mesh bridge sources into the plugin AAR/CocoaPod. CI runs
+The plugin links BLE and mesh bridge sources into the AAR and CocoaPod. CI runs
 `bindings/flutter/scripts/measure-plugin-aar-size.sh --check` against a
 committed baseline (`bindings/flutter/baselines/`). Re-baseline intentionally
 after compile-surface or UniFFI artifact changes.
@@ -127,9 +127,9 @@ requests; full run on pushes to `main`):
   `:offline_protocol:assembleRelease` via `measure-plugin-aar-size.sh --check`
   when baselines, Flutter scripts, shared RN Android tree (Kotlin, jniLibs,
   ProGuard consumer rules, Gradle), bindgen, UniFFI ABI inputs, or root
-  `Cargo.lock` / workspace `Cargo.toml` change. Engine-only PRs (no lockfile or
-  Flutter/native path changes) skip NDK/Gradle; pushes to `main` always run
+  `Cargo.lock` / workspace `Cargo.toml` change. Changes confined to Dart or
+  guard-only tests can skip the NDK/Gradle path; pushes to `main` always run
   the full native gate.
 
-iOS pod compilation is not gated yet (requires XCFramework assembly like the
-Swift Package job); add when a macOS Flutter job is worth the runner cost.
+iOS pod compilation is not gated in CI yet (requires XCFramework assembly like
+the Swift Package job).

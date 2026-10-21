@@ -10,10 +10,8 @@ import 'offline_protocol_event.dart';
 export 'native_event_constants.dart';
 export 'offline_protocol_event.dart';
 
-/// Host for the Offline Protocol engine on iOS and Android.
-///
-/// PR3 adds BLE and Wi‑Fi Direct enablement, native event replay with Dart
-/// gap recovery, and foreground Internet reconnect on both platforms.
+/// Host for the Offline Protocol engine on iOS and Android (lifecycle, events,
+/// messaging, Internet, BLE, Wi‑Fi Direct, native event replay).
 class OfflineProtocol {
   OfflineProtocol._();
 

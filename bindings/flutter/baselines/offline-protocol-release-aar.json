@@ -4,5 +4,5 @@
   "working_directory": "bindings/flutter/offline_protocol/example/android",
   "bytes": 23843541,
   "tolerance_bytes": 1048576,
-  "description": "Flutter plugin release AAR after PR3 (Kotlin bridge + jniLibs from react-native/android). Re-baseline with bindings/flutter/scripts/measure-plugin-aar-size.sh --write-baseline after intentional native surface changes."
+  "description": "Flutter plugin release AAR (Kotlin bridge + jniLibs from react-native/android). Re-baseline with bindings/flutter/scripts/measure-plugin-aar-size.sh --write-baseline after intentional native surface changes."
 }

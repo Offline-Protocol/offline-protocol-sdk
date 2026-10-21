@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Materialize Flutter platform folders for the example app (Runner, Gradle wrapper).
 #
-# The example ships Dart and a minimal Android tree. iOS (and a full Android
-# wrapper) are generated locally because Flutter project files are toolchain-
-# versioned and are not committed in PR1.
+# The example ships Dart and a minimal Android tree. The Xcode Runner project
+# is generated locally because Flutter platform files are toolchain-versioned
+# and are not committed.
 #
 # Usage (from repository root):
 #   bindings/flutter/scripts/bootstrap-example-platforms.sh

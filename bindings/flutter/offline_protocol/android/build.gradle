@@ -23,8 +23,8 @@ rootProject.allprojects {
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
 
-// Bridge sources have one home (ADR 0025). PR3 adds BLE, Wi‑Fi Direct, event
-// replay, foreground reconnect, and teardown helpers.
+// Bridge sources have one home (ADR 0025). Compile surface: Internet, BLE,
+// Wi‑Fi Direct, event replay, foreground reconnect, teardown helpers.
 def bridgeDir = file('../../../react-native/android')
 def bridgeJava = bridgeDir.path + '/src/main/java'
 

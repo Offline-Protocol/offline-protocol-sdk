@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Measures the Flutter plugin release AAR (PR3 native surface + jniLibs).
+# Measures the Flutter plugin release AAR (shared Kotlin bridge + jniLibs).
 # CI uses this single Gradle invocation (:offline_protocol:assembleRelease) to
 # compile shared Kotlin and gate footprint; no separate compileDebugKotlin step.
 #

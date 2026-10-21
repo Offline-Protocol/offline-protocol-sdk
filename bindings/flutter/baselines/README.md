@@ -1,15 +1,15 @@
-# Flutter binding size baselines
+# Flutter plugin size baselines
 
-These files record **release artifact sizes** so PR4 CI (and local runs) can
-detect unexpected growth in the Flutter plugin native surface.
+Release artifact sizes for CI and local checks against unexpected growth in
+the Flutter plugin native surface.
 
 | File | What it measures |
 |------|------------------|
 | `offline-protocol-release-aar.json` | `offline_protocol-release.aar` from `:offline_protocol:assembleRelease` |
 
-The AAR includes shared bridge Kotlin and the UniFFI `jniLibs` copied from
-`bindings/react-native/android`. It is a direct read on PR3 compile scope, not
-the full example APK (which also pulls Flutter engine and app code).
+The AAR includes shared bridge Kotlin and UniFFI `jniLibs` from
+`bindings/react-native/android`. It measures the plugin native surface, not a
+full example APK (which also includes the Flutter engine and app code).
 
 ## Update a baseline
 

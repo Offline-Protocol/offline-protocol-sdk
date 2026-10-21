@@ -6,9 +6,9 @@ require 'json'
 rn_ios = 'BridgeRN'
 plugin_ios = File.dirname(File.realpath(__FILE__))
 
-# PR3: PR2 Internet stack + BLE, peer-stream (Wi‑Fi Direct slot), event replay,
-# foreground reconnect. Nostr / Reticulum stay on React Native until a later PR
-# expands the compile surface.
+# Flutter compile surface: Internet stack, BLE, peer-stream (Wi‑Fi Direct slot),
+# event replay, foreground reconnect. Nostr / Reticulum stay on React Native
+# until the Flutter whitelist expands.
 # Keep `pr3_bridge_swift` aligned with android/build.gradle `pr3KotlinIncludes`
 # and KotlinCompile excludes (Rust guards pin both).
 pr3_bridge_swift = [

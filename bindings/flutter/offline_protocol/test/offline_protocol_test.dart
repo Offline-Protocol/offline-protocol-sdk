@@ -65,7 +65,7 @@ void main() {
     expect(config['autoAccept'], isTrue);
   });
 
-  test('nativeMethodChannelMethods includes PR3 replay and enableTransport', () {
+  test('nativeMethodChannelMethods includes replay and enableTransport', () {
     expect(
       OfflineProtocol.nativeMethodChannelMethods,
       containsAll(['replayEvents', 'enableTransport', 'enableInternetTransport']),
