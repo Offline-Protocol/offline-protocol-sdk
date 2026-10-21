@@ -383,9 +383,12 @@ impl OfflineProtocol {
     /// Used by `forward_message`, `flush_pending_messages` (for forwarded messages),
     /// and any path that has a fully-constructed `Message` ready to send.
     fn dispatch_prepared_message(&mut self, message: Message) -> Result<MessageId> {
-        self.staged_app_send = Some(message.id.clone());
+        // Restored, not cleared: a dispatch nested inside this one would
+        // otherwise clear the outer message's staging on its way out, and the
+        // outer entry would be created as not the app's.
+        let outer = self.staged_app_send.replace(message.id.clone());
         let result = self.dispatch_prepared_message_inner(message);
-        self.staged_app_send = None;
+        self.staged_app_send = outer;
         result
     }
 
@@ -496,9 +499,10 @@ impl OfflineProtocol {
         message: Message,
         transport: TransportType,
     ) -> Result<MessageId> {
-        self.staged_app_send = Some(message.id.clone());
+        // Restored, not cleared; see `dispatch_prepared_message`.
+        let outer = self.staged_app_send.replace(message.id.clone());
         let result = self.dispatch_prepared_message_via_inner(message, transport);
-        self.staged_app_send = None;
+        self.staged_app_send = outer;
         result
     }
 

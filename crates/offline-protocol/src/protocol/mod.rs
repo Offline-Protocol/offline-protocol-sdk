@@ -184,8 +184,9 @@ pub struct OfflineProtocol {
     pending_reseal: HashMap<MessageId, OutboxReseal>,
     /// The message the app send path is dispatching right now, read by the two
     /// places an outbox entry is created so the entry carries
-    /// [`OutboxEntry::app_send`] from its first write to storage. Set and
-    /// cleared around the dispatch, so it never outlives one call.
+    /// [`OutboxEntry::app_send`] from its first write to storage. Set around
+    /// the dispatch and restored to its previous value afterwards, so it never
+    /// outlives one call and a nested dispatch cannot clear an outer one's.
     ///
     /// Staged rather than set on the entry afterwards: an entry is persisted
     /// when it is created and not again on later attempts, so a flag set after

@@ -26513,6 +26513,32 @@ fn test_app_send_flag_survives_restart_and_restored_deliveries_reach_telemetry()
     );
 }
 
+/// The staged id is restored, not cleared, when a dispatch returns, so a
+/// dispatch nested inside another cannot strip the outer message's flag.
+#[test]
+fn test_app_send_staging_is_restored_after_a_dispatch() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let outer = MessageId::new();
+    protocol.staged_app_send = Some(outer.clone());
+    let inner = protocol
+        .send_message("bob", "inner", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    assert!(protocol.outbox.get(&inner).unwrap().app_send);
+    assert_eq!(
+        protocol.staged_app_send,
+        Some(outer),
+        "the outer dispatch's staging survives the inner one"
+    );
+}
+
 #[test]
 fn test_remove_outbox_entry_clears_storage() {
     let storage = Arc::new(InMemoryStorage::new());
