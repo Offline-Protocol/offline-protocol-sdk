@@ -1103,7 +1103,19 @@ jobs:
             exit 1
           fi
 
-          echo "Workspace and Python versions ($CARGO_VERSION) match tag v$TAG_VERSION."
+          # The Flutter plugin's podspec and Gradle build read the React Native
+          # package.json, but pub has no way to read another file, so the
+          # pubspec carries the number itself and is checked here. Without
+          # this a release ships a plugin that says the previous version.
+          FLUTTER_VERSION="$(grep -m1 '^version: ' bindings/flutter/offline_protocol/pubspec.yaml \
+            | sed 's/^version: *//' || true)"
+
+          if [ "$TAG_CORE" != "$FLUTTER_VERSION" ]; then
+            echo "::error title=Flutter plugin version does not match the tag::Tag v$TAG_VERSION wants $TAG_CORE, but bindings/flutter/offline_protocol/pubspec.yaml reads '${FLUTTER_VERSION}'. It moves with the workspace version: bump it, then delete and re-push the tag (nothing has published yet)."
+            exit 1
+          fi
+
+          echo "Workspace, Python and Flutter versions ($CARGO_VERSION) match tag v$TAG_VERSION."
 
   # ---------------------------------------------------------------------------
   # Release

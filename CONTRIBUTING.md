@@ -269,7 +269,8 @@ Version files to bump together:
 | `Cargo.lock` | any `cargo` command refreshes it once the manifests change |
 | `tools/embedded-footprint/Cargo.lock`, `tools/mls-interop/Cargo.lock` | Separate workspaces that depend on the SDK crates by path, so their lockfiles pin the versions too. CI builds both with `--locked`, so a stale one fails the run. `cargo metadata --manifest-path <tool>/Cargo.toml` refreshes each |
 | `bindings/python/pyproject.toml` | `version` — release.yml gates this one against the tag too |
-| `bindings/react-native/package.json` + `package-lock.json` | `npm version X.Y.Z --no-git-tag-version --allow-same-version` from `bindings/react-native/` |
+| `bindings/react-native/package.json` + `package-lock.json` | `npm version X.Y.Z --no-git-tag-version --allow-same-version` from `bindings/react-native/`. The Flutter plugin's podspec and Gradle build read their version from this file |
+| `bindings/flutter/offline_protocol/pubspec.yaml` | `version`. Pub cannot read another file, so this one carries the number itself, and release.yml gates it against the tag |
 | `THIRD-PARTY-NOTICES.md` (×3) | `scripts/generate-third-party-notices.sh` — the notices list our own crates by version, and the CI drift gate fails on a stale copy |
 
 Then the prose: `CHANGELOG.md` (replace `## [Unreleased]` with

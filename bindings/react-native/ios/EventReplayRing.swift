@@ -57,4 +57,11 @@ final class EventReplayRing {
         defer { lock.unlock() }
         return entries.count
     }
+
+    /// Forgets everything, for a host that starts numbering from zero again.
+    func clear() {
+        lock.lock()
+        defer { lock.unlock() }
+        entries.removeAll(keepingCapacity: false)
+    }
 }

@@ -8155,6 +8155,7 @@ mod error_mapping_tests {
 #[cfg(test)]
 mod tests {
     mod file_stores;
+    mod flutter_bridge_guards;
 
     use super::*;
     use std::collections::HashMap;
@@ -8300,7 +8301,7 @@ mod tests {
              false for every app that omits the section"
         );
 
-        let swift = read(rn.join("ios/OfflineProtocolModule.swift"));
+        let swift = read(rn.join("ios/ProtocolConfigParser.swift"));
         assert!(
             swift.contains("raw[\"data\"]") && swift.contains("config.dataEnabled = dataEnabled"),
             "the Swift parser must read the data section AND apply it to the \
@@ -8376,7 +8377,7 @@ mod tests {
              high often enough to be worth honouring"
         );
 
-        let swift = read(rn.join("ios/OfflineProtocolModule.swift"));
+        let swift = read(rn.join("ios/ProtocolConfigParser.swift"));
         assert!(
             swift.contains("raw[\"security\"]")
                 && swift.contains("config.controlFreshnessEnforced = controlFreshnessEnforced"),
@@ -11712,7 +11713,7 @@ mod tests {
         };
         let udl = read(manifest.join("src/offline_protocol.udl"));
         let swift_reader = read(rn.join("ios/EncryptionConfigReader.swift"));
-        let swift_module = read(rn.join("ios/OfflineProtocolModule.swift"));
+        let swift_parser = read(rn.join("ios/ProtocolConfigParser.swift"));
         let kotlin_parser =
             read(rn.join("android/src/main/java/com/offlineprotocol/ProtocolConfigParser.kt"));
         let index = read(rn.join("src/index.ts"));
@@ -11749,8 +11750,8 @@ mod tests {
                 );
             }
             assert!(
-                swift_module.contains(&format!("encryption.{camel}")),
-                "OfflineProtocolModule.swift does not pass {camel} to the ProtocolConfig"
+                swift_parser.contains(&format!("encryption.{camel}")),
+                "ProtocolConfigParser.swift does not pass {camel} to the ProtocolConfig"
             );
             assert!(
                 kotlin_parser.contains(&format!("{camel} = {camel}")),
@@ -16391,6 +16392,85 @@ mod tests {
         );
     }
 
+    const INTERNET_CONFIGURE_MARKERS: &[&str] = &[
+        "wss://",
+        "setAuthToken",
+        "autoReconnect",
+        "maxReconnectAttempts",
+        "manager.configure",
+    ];
+
+    // InternetTransportBootstrap is the shared home for Flutter; React Native
+    // still inlines configureAndStartInternet on Android. Until RN delegates,
+    // both must keep the same configure knobs.
+    #[test]
+    fn internet_transport_bootstrap_keeps_rn_configure_invariants() {
+        let rn =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let bootstrap = std::fs::read_to_string(
+            rn.join("android/src/main/java/com/offlineprotocol/InternetTransportBootstrap.kt"),
+        )
+        .unwrap_or_else(|e| panic!("cannot read InternetTransportBootstrap.kt: {e}"));
+        let rn_module = std::fs::read_to_string(
+            rn.join("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"),
+        )
+        .unwrap_or_else(|e| panic!("cannot read OfflineProtocolModule.kt: {e}"));
+        let rn_fn = rn_module
+            .split("private fun configureAndStartInternet")
+            .nth(1)
+            .and_then(|tail| tail.split("\n    private fun ").next())
+            .unwrap_or("");
+        assert!(
+            !rn_fn.is_empty(),
+            "OfflineProtocolModule.configureAndStartInternet not found: the guard needs a stable anchor"
+        );
+        for marker in INTERNET_CONFIGURE_MARKERS {
+            assert!(
+                bootstrap.contains(marker),
+                "InternetTransportBootstrap.kt missing `{marker}`"
+            );
+            assert!(
+                rn_fn.contains(marker),
+                "OfflineProtocolModule.configureAndStartInternet missing `{marker}`: \
+                 update InternetTransportBootstrap.kt or restore RN parity"
+            );
+        }
+    }
+
+    // Same parity pin for the Swift bootstrap and RN iOS module.
+    #[test]
+    fn internet_transport_bootstrap_swift_keeps_rn_configure_invariants() {
+        let rn =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let bootstrap = std::fs::read_to_string(rn.join("ios/InternetTransportBootstrap.swift"))
+            .unwrap_or_else(|e| panic!("cannot read InternetTransportBootstrap.swift: {e}"));
+        let rn_module = std::fs::read_to_string(rn.join("ios/OfflineProtocolModule.swift"))
+            .unwrap_or_else(|e| panic!("cannot read OfflineProtocolModule.swift: {e}"));
+        let rn_fn = rn_module
+            .split("private func configureAndStartInternet")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("\n    private func configureAndStartReticulum")
+                    .next()
+            })
+            .unwrap_or("");
+        assert!(
+            !rn_fn.is_empty(),
+            "OfflineProtocolModule.configureAndStartInternet (Swift) not found: the guard needs a stable anchor"
+        );
+        for marker in INTERNET_CONFIGURE_MARKERS {
+            assert!(
+                bootstrap.contains(marker),
+                "InternetTransportBootstrap.swift missing `{marker}`"
+            );
+            assert!(
+                rn_fn.contains(marker),
+                "OfflineProtocolModule.configureAndStartInternet (Swift) missing `{marker}`: \
+                 update InternetTransportBootstrap.swift or restore RN parity"
+            );
+        }
+    }
+
     /// Every method React Native can reach on iOS is spelled the same way in
     /// both halves of the hand-written bridge, and hands over each argument
     /// the same way.
@@ -16993,7 +17073,18 @@ mod tests {
     /// and by that guard clause, not by this test.
     #[test]
     fn react_native_ios_bridge_bounds_every_byte_it_builds_from_javascript() {
-        let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        // Config parsing moved out of OfflineProtocolModule.swift (ADR 0025);
+        // every file that still narrows JavaScript numbers must stay bounded.
+        const SWIFT_JS_NUMERIC_SOURCES: &[&str] = &[
+            "ios/OfflineProtocolModule.swift",
+            "ios/ProtocolConfigParser.swift",
+            "ios/InitialRuntimeConfigApplier.swift",
+        ];
+        let swift = SWIFT_JS_NUMERIC_SOURCES
+            .iter()
+            .map(|rel| rn_source_code_only(rel))
+            .collect::<Vec<_>>()
+            .join(" ");
 
         /// Markers that bound a conversion at the point it is written.
         const BOUNDED: &[&str] = &[
@@ -17039,7 +17130,7 @@ mod tests {
 
         assert!(
             found >= 8,
-            "only found {found} UInt8 conversions in OfflineProtocolModule.swift; \
+            "only found {found} UInt8 conversions in {SWIFT_JS_NUMERIC_SOURCES:?}; \
              the scanner is broken, not the bridge"
         );
         assert!(
