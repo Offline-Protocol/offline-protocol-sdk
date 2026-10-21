@@ -91,6 +91,7 @@ const FLUTTER_SHARED_SOURCES: &[&str] = &[
     "InternetManager",
     "PresenceWatchPolicy",
     "EventReplayRing",
+    "InboundEventBuffer",
     "ForegroundReconnectPolicy",
     "WifiDirectManager",
     "ProtocolConfigParser",
@@ -504,6 +505,18 @@ fn flutter_android_hosts_mesh_foreground_keep_alive() {
         flutter_ios_plugin.contains("restateInternetSupersededIfNeeded()")
             && flutter_ios_plugin.contains("supersedeRestatementJson()"),
         "Flutter iOS must restate internet_session_superseded on foreground like React Native"
+    );
+    assert!(
+        flutter_ios_plugin.contains("holdInboundEventIfBuffered")
+            && flutter_ios_plugin.contains("flushInboundEvents()")
+            && flutter_ios_plugin.contains("InboundEventBuffer()"),
+        "Flutter iOS must buffer inbound core events like React Native"
+    );
+    assert!(
+        !std::fs::read_to_string(flutter.join("ios/offline_protocol.podspec"))
+            .unwrap_or_default()
+            .contains("InboundEventBuffer.swift"),
+        "Flutter must compile InboundEventBuffer.swift, not exclude it"
     );
     let ci_script = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

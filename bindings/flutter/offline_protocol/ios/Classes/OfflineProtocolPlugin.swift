@@ -51,6 +51,9 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
     private let eventReplay = EventReplayRing()
     private var eventSink: FlutterEventSink?
 
+    /// Inbound message events Dart could not take (shared `InboundEventBuffer`).
+    private let inboundEvents = InboundEventBuffer()
+
     /// Written on the main queue by the lifecycle observers, read on the engine
     /// queue when telemetry is enabled; the lock makes the pair safe.
     private let appStateLock = NSLock()
@@ -150,7 +153,10 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         if foregroundReconnectPolicy.shouldReconnectOnForeground(nowMs: MonotonicClock.nowMs()) {
             host.internetManager?.forceReconnect()
         }
-        restateInternetSupersededIfNeeded()
+        DispatchQueue.main.async { [weak self] in
+            self?.restateInternetSupersededIfNeeded()
+            self?.flushInboundEvents()
+        }
     }
 
     /// Re-emits `internet_session_superseded` while the internet transport latch
@@ -175,6 +181,9 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
 
     public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
         setEventSink(events)
+        DispatchQueue.main.async { [weak self] in
+            self?.flushInboundEvents()
+        }
         return nil
     }
 
@@ -260,11 +269,12 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         }
     }
 
-    private func emitEventJson(_ eventJson: String) {
+    @discardableResult
+    private func emitEventJson(_ eventJson: String) -> Bool {
         eventLock.lock()
         guard let sink = eventSink else {
             eventLock.unlock()
-            return
+            return false
         }
         let seq = eventSeq
         eventReplay.record(seq: seq, eventJson: eventJson)
@@ -275,6 +285,33 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
                 "eventJson": eventJson,
                 "seq": seq,
             ])
+        }
+        return true
+    }
+
+    private func holdInboundEventIfBuffered(_ eventJson: String, generation: Int) {
+        guard let key = inboundEvents.key(forEventJson: eventJson) else { return }
+        inboundEvents.hold(key: key, eventJson: eventJson, generation: generation)
+    }
+
+    private func flushInboundEvents() {
+        guard eventSink != nil, !inboundEvents.isEmpty else { return }
+        let drained = inboundEvents.drain()
+        var undelivered: [InboundEventBuffer.Entry] = []
+        for entry in drained {
+            guard entry.generation == inboundEvents.currentGeneration() else { continue }
+            if !emitEventJson(entry.eventJson) {
+                undelivered.append(entry)
+            }
+        }
+        inboundEvents.restore(undelivered)
+    }
+
+    /// Core `EventCallback` delivery with inbound hold when Dart is not listening.
+    fileprivate func deliverCoreEvent(_ eventJson: String) {
+        let generation = inboundEvents.currentGeneration()
+        if !emitEventJson(eventJson) {
+            holdInboundEventIfBuffered(eventJson, generation: generation)
         }
     }
 
@@ -292,11 +329,9 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         tearDownProtocol()
         try host.create(
             configJson: configJson,
-            eventCallback: FlutterEventCallback(emit: { [weak self] json in
-                self?.emitEventJson(json)
-            }),
+            eventCallback: FlutterEventCallback(plugin: self),
             emitEventJson: { [weak self] json in
-                self?.emitEventJson(json)
+                _ = self?.emitEventJson(json)
             }
         )
     }
@@ -318,17 +353,25 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         eventSeq = 0
         eventReplay.clear()
         eventLock.unlock()
+        inboundEvents.bumpGeneration()
     }
 }
 
 private final class FlutterEventCallback: EventCallback, @unchecked Sendable {
-    private let emit: (String) -> Void
+    weak var plugin: OfflineProtocolPlugin?
 
-    init(emit: @escaping (String) -> Void) {
-        self.emit = emit
+    init(plugin: OfflineProtocolPlugin) {
+        self.plugin = plugin
     }
 
     func onEvent(eventJson: String) {
-        emit(eventJson)
+        let deliver = { [weak self] in
+            self?.plugin?.deliverCoreEvent(eventJson)
+        }
+        if Thread.isMainThread {
+            deliver()
+        } else {
+            DispatchQueue.main.async(execute: deliver)
+        }
     }
 }

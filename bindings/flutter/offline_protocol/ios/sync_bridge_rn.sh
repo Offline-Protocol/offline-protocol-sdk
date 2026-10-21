@@ -13,7 +13,6 @@ rsync -a \
   --exclude OfflineProtocolModule.swift \
   --exclude OfflineProtocolModule.m \
   --exclude ProtocolEngineHostBridgeReactNative.swift \
-  --exclude InboundEventBuffer.swift \
   --exclude tests/ \
   --exclude Package.swift \
   "$RN_IOS/" "$DEST/"

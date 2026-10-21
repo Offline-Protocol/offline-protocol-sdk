@@ -123,11 +123,13 @@ Native code assigns `seq` and records to `EventReplayRing` only while an event
 sink is attached. Subscribe to `OfflineProtocol.events` **before**
 `createFromConfig` when you need contiguous `seq` values and gap replay.
 
-**Android** also holds the five inbound message tags (`message_received`,
+**Android and iOS** hold the five inbound message tags (`message_received`,
 `file_received`, `message_decryption_failed`, `message_delivered`,
-`message_failed`) in a 256-entry sticky buffer when Dart is not listening, and
-flushes on subscribe and activity start (React Native Android parity). Other
-event types still require an attached listener at emit time.
+`message_failed`) when Dart is not listening: Android uses
+`StickyEventDispatcher` (256-cap); iOS uses shared `InboundEventBuffer` (256-cap).
+Both flush on subscribe and app foreground (React Native parity). A large flush
+posts up to 256 events to the platform thread in one burst; subscribe early when
+possible. Other event types still require an attached listener at emit time.
 
 ## F5. Config parsing
 
@@ -168,11 +170,12 @@ notifications).
 These tags report state nothing else restates. Delivery is at-least-once; apps
 treat them as state, not one-time edges.
 
-**Android** holds both in `StickyEventDispatcher` when the event channel has no
-listener, flushes on subscribe and activity start, and discards held
+**Android** holds both one-shots in `StickyEventDispatcher` when the event channel
+has no listener, flushes on subscribe and activity start, and discards held
 `internet_session_superseded` when `enableTransport('internet', …)` re-enables
 the relay (same as React Native). **`mesh_stopped_by_user`** is Android-only
-(notification Stop); there is no iOS counterpart.
+(notification Stop); there is no iOS counterpart. Inbound message tags (F4) use
+a separate buffer on both mobile platforms.
 
 **iOS** re-derives `internet_session_superseded` from the live transport latch
 on each app foreground (`supersedeRestatementJson()`), matching React Native iOS.

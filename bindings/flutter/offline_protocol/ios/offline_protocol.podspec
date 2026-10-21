@@ -31,7 +31,6 @@ rn_only_swift = [
   'BridgeRN/OfflineProtocolModule.swift',
   'BridgeRN/OfflineProtocolModule.m',
   'BridgeRN/ProtocolEngineHostBridgeReactNative.swift',
-  'BridgeRN/InboundEventBuffer.swift',
 ]
 
 Pod::Spec.new do |s|

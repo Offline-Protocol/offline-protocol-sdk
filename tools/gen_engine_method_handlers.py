@@ -410,7 +410,7 @@ for m in BRIDGE_DELEGATE:
 HELPER = ""
 
 
-def main() -> None:
+def render() -> str:
     parts = [HEADER]
     for m in METHODS:
         body = CUSTOM.get(m)
@@ -419,9 +419,22 @@ def main() -> None:
         parts.append(fn(m, body))
     parts.append(HELPER)
     parts.append(FOOTER)
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text("".join(parts))
+    return "".join(parts)
+
+
+def main() -> None:
+    import sys
+
+    rendered = render()
     missing = [m for m in METHODS if m not in CUSTOM]
+    if "--check" in sys.argv:
+        if OUT.read_text() != rendered:
+            print(f"{OUT.relative_to(REPO)} is stale; run {pathlib.Path(__file__).name}", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"EngineMethodHandlers.kt: OK ({len(METHODS)} methods, {len(missing)} default-delegate)")
+        return
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    OUT.write_text(rendered)
     print(f"Wrote {OUT} ({len(METHODS)} methods, {len(missing)} default-delegate)")
 
 

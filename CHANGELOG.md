@@ -100,6 +100,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   when Dart is not listening (256-capacity sticky buffer, React Native parity).
 - **MeshSdk generator CI.** `gen_mesh_sdk_dart.py --check` in
   `check-binding-generators.sh`.
+- **Flutter iOS inbound event buffer.** Compiles shared `InboundEventBuffer` and
+  redelivers on subscribe/foreground (React Native iOS parity).
+- **EngineMethodHandlers generator CI.** `gen_engine_method_handlers.py --check`
+  in `check-binding-generators.sh`.
 - **Flutter `OfflineProtocol.minimalFootprintConfig`.** Transport flags-only create
   payload for the smallest runtime surface (F9).
 - **Flutter Android mesh foreground keep-alive.** `MeshForegroundService` ships with

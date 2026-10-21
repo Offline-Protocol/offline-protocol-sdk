@@ -26,6 +26,7 @@ if (( check )); then
   python3 tools/gen_swift_protocol_engine_host_bridge.py || failures=$((failures + 1))
   python3 tools/gen_protocol_engine_host_bridge.py --check || failures=$((failures + 1))
   python3 tools/gen_mesh_sdk_dart.py --check || failures=$((failures + 1))
+  python3 tools/gen_engine_method_handlers.py --check || failures=$((failures + 1))
   if [[ ! -f tools/rn_engine_bridge_error_manifest.json ]]; then
     echo "missing tools/rn_engine_bridge_error_manifest.json; run tools/extract_rn_bridge_error_manifest.py" >&2
     failures=$((failures + 1))
