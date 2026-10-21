@@ -137,8 +137,8 @@ HEADER = textwrap.dedent(
     /**
      * Engine operations shared by React Native and Flutter hosts. Flutter
      * reaches these through [com.offlineprotocol.flutter.ProtocolEngineHostBridge]
-     * adapters; React Native inlines or delegates here as methods migrate off
-     * [OfflineProtocolModule].
+     * adapters; React Native reaches these through [ProtocolEngineHostBridgeReactNative]
+     * (regenerate with `tools/gen_rn_protocol_engine_bridge_react_native.py`).
      */
     object ProtocolEngineHostBridge {
         private object Limits {

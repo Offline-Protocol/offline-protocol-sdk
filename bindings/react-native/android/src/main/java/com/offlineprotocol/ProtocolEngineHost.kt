@@ -315,7 +315,6 @@ class ProtocolEngineHost(
                     manager.stop()
                 }
                 configureAndStartReticulum(manager, config)
-                onDiagnostic("info", "Reticulum transport enabled", emptyMap())
             }
             "nostr" -> {
                 if (nostrManager == null) {

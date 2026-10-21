@@ -215,20 +215,6 @@ object ProtocolEngineHostBridge {
         else -> requireString(mapFromAny(arguments), "configJson")
     }
 
-    private fun JSONObject.optIntCompat(vararg keys: String): Int? {
-        for (key in keys) {
-            if (has(key) && !isNull(key)) return optDouble(key).toInt()
-        }
-        return null
-    }
-
-    private fun JSONObject.optBooleanCompat(vararg keys: String): Boolean? {
-        for (key in keys) {
-            if (has(key) && !isNull(key)) return getBoolean(key)
-        }
-        return null
-    }
-
     fun acceptConnectionRequest(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
         val map = mapFromAny(arguments)
         val proto = host.requireProtocolBridge()

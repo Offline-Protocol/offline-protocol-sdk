@@ -184,6 +184,10 @@ The script subtracts any other ABI present under the React Native `jniLibs`,
 so the local check measures what CI measures. Re-baseline intentionally after
 compile-surface or UniFFI artifact changes.
 
+Reticulum and Nostr managers compile with the Flutter Android library (F1), so
+the release AAR is larger than a BLE-and-Internet-only build. That growth is
+expected and gated by the baseline, not a silent regression.
+
 ## What CI runs
 
 The `Flutter Binding` job in `.github/workflows/ci.yml` (path-filtered on pull
@@ -203,22 +207,10 @@ requests; full run on pushes to `main`):
   `main` always run the full native gate. `flutter analyze` excludes
   `android/**`, so the plugin's own Kotlin is compiled only by this path.
 
-iOS pod compilation is not gated in CI yet (requires XCFramework assembly like
-the Swift Package job). Until it is, typecheck the plugin by hand against the
-Flutter engine framework and the shared sources, from
-`bindings/react-native/ios`:
-
-```bash
-FLUTTER_FRAMEWORK="$(dirname "$(dirname "$(readlink -f "$(command -v flutter)")")")/bin/cache/artifacts/engine/ios/Flutter.xcframework/ios-arm64_x86_64-simulator"
-FILES=()
-for f in *.swift; do
-  case "$f" in Package.swift|OfflineProtocolModule.swift|NostrManager.swift|NostrQueryTracker.swift|ReticulumManager.swift|InboundEventBuffer.swift) ;;
-  *) FILES+=("$f") ;;
-  esac
-done
-xcrun --sdk iphonesimulator swiftc -typecheck -target arm64-apple-ios13.0-simulator \
-  -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" -F "$FLUTTER_FRAMEWORK" \
-  -Xcc -fmodule-map-file=Generated/offline_protocolFFI.modulemap -Xcc -IGenerated \
-  "${FILES[@]}" ble/*.swift mesh/*.swift Generated/offline_protocol.swift \
-  ../../flutter/offline_protocol/ios/Classes/*.swift
-```
+**iOS native (slow path):** the `Flutter Binding (iOS bridge)` job runs
+`bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh` when the plugin
+iOS tree, shared React Native Swift, or UniFFI inputs change (full run on
+pushes to `main`). The script syncs `BridgeRN/`, then typechecks plugin
+`Classes/` plus shared RN Swift against the Flutter engine framework and the
+simulator UniFFI archive. Run the same script locally after editing shared Swift
+or before relying on a stale `BridgeRN/` copy (F1).

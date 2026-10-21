@@ -90,11 +90,9 @@ _m("getFileProgress", """
             ?: return null
         return mapOf(
             "file_id" to progress.fileId,
-            "recipient" to progress.recipient,
+            "chunks_sent" to progress.chunksSent.toInt(),
             "total_chunks" to progress.totalChunks.toInt(),
-            "sent_chunks" to progress.sentChunks.toInt(),
-            "bytes_sent" to progress.bytesSent.toDouble(),
-            "total_bytes" to progress.totalBytes.toDouble(),
+            "percentage" to progress.percentage.toInt(),
         )
 """)
 

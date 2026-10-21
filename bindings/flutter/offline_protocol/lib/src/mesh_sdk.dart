@@ -659,4 +659,29 @@ static Future<dynamic> wifiDirectStatusChanged([Map<String, dynamic>? args]) =>
 /// Native `wipePersistedState` (see React Native `OfflineProtocolNativeModule.wipePersistedState`).
 static Future<dynamic> wipePersistedState([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('wipePersistedState', args);
+
+  // --- Typed fast paths (avoid hand-built maps on hot calls) ---
+
+  /// Disables telemetry and waits for the engine-thread flush (may take a few seconds).
+  static Future<void> disableTelemetryAndWait() => _invoke<void>('disableTelemetry');
+
+  /// Ends the telemetry session (same blocking semantics as [disableTelemetryAndWait]).
+  static Future<void> endTelemetrySessionAndWait() =>
+      _invoke<void>('endTelemetrySession');
+
+  /// Sends a rich message with explicit fields instead of a nested options map.
+  static Future<dynamic> sendMessageRichTyped({
+    required String recipient,
+    required String content,
+    required int priority,
+    String? replyToMsg,
+    Map<String, dynamic>? options,
+  }) =>
+      _invoke<dynamic>('sendMessageRich', {
+        'recipient': recipient,
+        'content': content,
+        'priority': priority,
+        if (replyToMsg != null) 'replyToMsg': replyToMsg,
+        if (options != null) 'options': options,
+      });
 }

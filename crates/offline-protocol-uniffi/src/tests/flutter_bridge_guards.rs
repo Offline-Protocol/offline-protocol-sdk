@@ -375,6 +375,16 @@ fn flutter_binding_ci_job_is_wired_in_workflow() {
             ".github/workflows/ci.yml Flutter Binding job must reference `{needle}`"
         );
     }
+    for needle in [
+        "flutter-binding-ios:",
+        "ci-typecheck-flutter-ios-bridge.sh",
+        "flutter_ios:",
+    ] {
+        assert!(
+            ci.contains(needle),
+            ".github/workflows/ci.yml must wire Flutter iOS bridge CI (`{needle}`)"
+        );
+    }
 }
 
 #[test]

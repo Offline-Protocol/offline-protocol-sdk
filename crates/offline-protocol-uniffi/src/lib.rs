@@ -12661,11 +12661,13 @@ mod tests {
         );
 
         // --- Edge 2: the two modules that produce those strings ------------
-        let kotlin_src = read("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt");
+        let kotlin_src = read(
+            "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt",
+        );
         let kotlin = code_only(slice_between(
             &kotlin_src,
             "fun getState(",
-            "promise.resolve(stateString)",
+            "fun getTopology(",
         ));
         let swift_src = read("ios/OfflineProtocolModule.swift");
         let swift = code_only(slice_between(
@@ -12680,7 +12682,7 @@ mod tests {
             let kotlin_arm = format!("ProtocolState.{} -> \"{name}\"", kotlin_spelling(name));
             assert!(
                 kotlin.contains(&kotlin_arm),
-                "OfflineProtocolModule.kt getState must resolve `{kotlin_arm}`; \
+                "ProtocolEngineHostBridge.kt getState must resolve `{kotlin_arm}`; \
                  a name that disagrees with types.ts is invisible to tsc and to a bindings regen"
             );
 
@@ -12697,7 +12699,7 @@ mod tests {
         // and the two modules disagreeing would make it platform-dependent.
         assert!(
             kotlin.contains("else -> \"Stopped\""),
-            "OfflineProtocolModule.kt getState must fall back to \"Stopped\""
+            "ProtocolEngineHostBridge.kt getState must fall back to \"Stopped\""
         );
         assert!(
             swift.contains("@unknown default: stateString = \"Stopped\""),
@@ -18372,6 +18374,43 @@ mod tests {
     /// callback resolves the manager when it fires, so a manager that
     /// `enableTransport` replaces needs no second registration, and the field
     /// it reads from the core's thread is volatile.
+
+    /// Names listed in `tools/gen_protocol_engine_host_bridge.py` (shared with Flutter).
+    fn rn_protocol_engine_host_bridge_method_names() -> Vec<String> {
+        let gen = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tools/gen_protocol_engine_host_bridge.py"),
+        )
+        .expect("gen_protocol_engine_host_bridge.py");
+        let body = gen
+            .split("METHODS = [")
+            .nth(1)
+            .and_then(|s| s.split(']').next())
+            .expect("METHODS list in gen_protocol_engine_host_bridge.py");
+        body.lines()
+            .filter_map(|line| {
+                let line = line.trim().trim_end_matches(',');
+                line.strip_prefix('"')?.strip_suffix('"').map(str::to_string)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn react_native_android_engine_bridge_methods_delegate_through_shared_bridge() {
+        let module = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+        );
+        for name in rn_protocol_engine_host_bridge_method_names() {
+            let needle = format!("ProtocolEngineHostBridgeReactNative.{name}(");
+            assert!(
+                module.contains(&needle),
+                "OfflineProtocolModule.kt must delegate `{name}` through \
+                 ProtocolEngineHostBridgeReactNative (found neither `{needle}`): \
+                 RN-only edits would drift from Flutter's shared bridge"
+            );
+        }
+    }
+
     #[test]
     fn react_native_android_wifi_direct_callback_does_not_wait_for_a_manager() {
         let code = rn_source_code_only(
@@ -19920,8 +19959,11 @@ mod tests {
     #[test]
     fn react_native_transport_name_mappers_know_every_transport() {
         let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
-        let kotlin = rn_source_code_only(
-            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+        let kotlin_bridge = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt",
+        );
+        let kotlin_transport = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/TransportBridge.kt",
         );
 
         let region = |label: &str, code: &str, from: &str, to: &str| -> String {
@@ -19966,7 +20008,7 @@ mod tests {
                 "Kotlin",
                 region(
                     "Kotlin mapTransportType",
-                    &kotlin,
+                    &kotlin_transport,
                     "fun mapTransportType(",
                     "fun buildTopologyJson(",
                 ),
@@ -19974,18 +20016,18 @@ mod tests {
                 [
                     region(
                         "Kotlin getTransportMetrics",
-                        &kotlin,
+                        &kotlin_bridge,
                         "fun getTransportMetrics(",
-                        "protocol?.getTransportMetrics(",
+                        "fun hasPendingKeyPackage(",
                     ),
                     region(
                         "Kotlin forceTransport",
-                        &kotlin,
+                        &kotlin_bridge,
                         "fun forceTransport(",
-                        "protocol?.forceTransport(",
+                        "fun forwardMessage(",
                     ),
                 ],
-                "mapTransportType(transportType)",
+                "TransportBridge.mapTransportType(",
             ),
         ];
 
@@ -20097,9 +20139,6 @@ mod tests {
         }
 
         let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
-        let kotlin = rn_source_code_only(
-            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
-        );
         for (label, code, from, to, read) in [
             (
                 "Swift sendMessageRich",
@@ -20117,17 +20156,21 @@ mod tests {
             ),
             (
                 "Kotlin sendMessageRich",
-                &kotlin,
+                &rn_source_code_only(
+                    "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt",
+                ),
                 "fun sendMessageRich(",
-                "proto.sendMessageRich(",
-                "appId = options?.getString(\"app_id\")",
+                "host.sendMessageRich(",
+                "appId = optionsMap?.get(\"app_id\")",
             ),
             (
                 "Kotlin sendMediaRich",
-                &kotlin,
+                &rn_source_code_only(
+                    "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt",
+                ),
                 "fun sendMediaRich(",
-                "proto.sendMediaRich(",
-                "appId = options?.getString(\"app_id\")",
+                "host.requireProtocolBridge().sendMediaRich(",
+                "appId = options?.get(\"app_id\")",
             ),
         ] {
             assert_has(label, &region(label, code, from, to), read);
@@ -21049,9 +21092,9 @@ mod tests {
         );
 
         let kotlin = code_only(slice_between(
-            &read("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"),
+            &read("android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt"),
             "fun getMeshRelayStats(",
-            "promise.resolve(map)",
+            "fun getMessageStats(",
         ));
         let swift = code_only(slice_between(
             &read("ios/OfflineProtocolModule.swift"),
@@ -21067,7 +21110,7 @@ mod tests {
         for field in FIELDS {
             assert!(
                 kotlin.contains(&format!("\"{field}\"")),
-                "OfflineProtocolModule.kt getMeshRelayStats must report `{field}`"
+                "ProtocolEngineHostBridge.kt getMeshRelayStats must report `{field}`"
             );
             assert!(
                 swift.contains(&format!("\"{field}\"")),
@@ -21600,9 +21643,9 @@ mod tests {
         assert_eq!(fields[fields.len() - 1], "refusedBattery");
 
         let kotlin = code_only(slice_between(
-            &read("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"),
+            &read("android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt"),
             "fun getCustodyStats(",
-            "promise.resolve(map)",
+            "fun getDedupStats(",
         ));
         let swift = code_only(slice_between(
             &read("ios/OfflineProtocolModule.swift"),
@@ -21618,7 +21661,7 @@ mod tests {
         for field in &fields {
             assert!(
                 kotlin.contains(&format!("\"{field}\"")),
-                "OfflineProtocolModule.kt getCustodyStats must report `{field}`"
+                "ProtocolEngineHostBridge.kt getCustodyStats must report `{field}`"
             );
             assert!(
                 swift.contains(&format!("\"{field}\"")),
@@ -21824,7 +21867,7 @@ mod tests {
             "try proto.updateDorsConfig(config: dorsConfig)",
         ));
         let kotlin = code_only(slice_between(
-            &read("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"),
+            &read("android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt"),
             "fun updateDorsConfig(",
             "proto.updateDorsConfig(dorsConfig)",
         ));
@@ -21835,7 +21878,7 @@ mod tests {
         );
         assert!(
             kotlin.contains("val current = proto.getDorsConfig()"),
-            "OfflineProtocolModule.kt updateDorsConfig must read the live config to merge onto"
+            "ProtocolEngineHostBridge.kt updateDorsConfig must read the live config to merge onto"
         );
 
         for field in FIELDS {
@@ -21848,7 +21891,7 @@ mod tests {
             );
             assert!(
                 kotlin.contains(&needle),
-                "OfflineProtocolModule.kt updateDorsConfig must fall back to `{needle}` for an \
+                "ProtocolEngineHostBridge.kt updateDorsConfig must fall back to `{needle}` for an \
                  absent `{field}`. A literal fallback there resets the field on every update \
                  that does not restate it"
             );
