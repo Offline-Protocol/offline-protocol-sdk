@@ -16,7 +16,8 @@ import uniffi.offline_protocol.RelayPriority
  */
 internal object InitialRuntimeConfigApplier {
 
-    private object Limits {
+    /** Bounds shared with the React Native module's own config paths. */
+    internal object Limits {
         const val MIN_BATTERY_LEVEL = 0
         const val MAX_BATTERY_LEVEL = 100
         const val MIN_HISTORY_WINDOW = 1L
@@ -123,6 +124,9 @@ internal object InitialRuntimeConfigApplier {
             }
         }
 
+        // The whole relay section, not just the priority: allowRelay and
+        // minBatteryForRelay used to be parsed by nothing, leaving
+        // `config.relay` on mobile permanently at its defaults.
         json.optJSONObject("relay")?.let { relayJson ->
             try {
                 val current = proto.getRelayConfig()
@@ -151,6 +155,11 @@ internal object InitialRuntimeConfigApplier {
         }
     }
 
+    /**
+     * Accepts both the current vocabulary and the pre-0.22 `low`/`medium`/`high`
+     * spelling of the same three values, so an app that has not migrated its
+     * config keeps working.
+     */
     internal fun normalizeRelayPriority(priority: String?): RelayPriority? {
         if (priority.isNullOrBlank()) {
             return null

@@ -7,33 +7,15 @@ import java.net.URI
 /**
  * Shared Internet transport wiring for host wrappers (Flutter, and optionally RN).
  *
- * Mirrors the enable/configure path in [OfflineProtocolModule.configureAndStartInternet]
- * and the config extraction done during create on iOS. ADR 0025: one home for
- * bridge behaviour that must stay aligned across wrappers. React Native still
- * inlines its path today; a follow-up should delegate here. CI guard:
+ * Mirrors the enable/configure path in [OfflineProtocolModule.configureAndStartInternet].
+ * ADR 0025: one home for bridge behaviour that must stay aligned across
+ * wrappers. React Native still inlines its path today; a follow-up should
+ * delegate here. CI guard:
  * `internet_transport_bootstrap_keeps_rn_configure_invariants` in
  * `offline-protocol-uniffi`.
  */
 internal object InternetTransportBootstrap {
     private const val TAG = "InternetTransportBootstrap"
-
-    data class StoredInternetConfig(
-        val serverAddress: String?,
-        val autoReconnect: Boolean = true,
-    )
-
-    /**
-     * Reads `transports.internet` (and legacy flat keys) from a create() JSON blob.
-     */
-    fun readStoredConfig(raw: JSONObject): StoredInternetConfig {
-        val internet = raw.optJSONObject("transports")?.optJSONObject("internet")
-        val server = internet?.optStringCompat("serverAddress", "server_address")
-            ?: raw.optStringCompat("internetServerAddress", "internet_server_address")
-        val autoReconnect = internet?.optBooleanCompat("autoReconnect", "auto_reconnect")
-            ?: raw.optBooleanCompat("internetAutoReconnect", "internet_auto_reconnect")
-            ?: true
-        return StoredInternetConfig(server?.trim()?.takeIf { it.isNotEmpty() }, autoReconnect)
-    }
 
     fun createManager(
         context: android.content.Context,
@@ -117,16 +99,5 @@ internal object InternetTransportBootstrap {
 
         manager.configure(wsUrl, autoReconnect, maxRetries)
         manager.start()
-    }
-
-    /**
-     * Starts Internet when [stored] carries a server URL (same gate as iOS start()).
-     */
-    fun startIfConfigured(manager: InternetManager, stored: StoredInternetConfig) {
-        val url = stored.serverAddress ?: return
-        val config = JSONObject()
-        config.put("serverAddress", url)
-        config.put("autoReconnect", stored.autoReconnect)
-        configureAndStart(manager, config)
     }
 }

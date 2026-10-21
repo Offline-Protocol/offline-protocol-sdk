@@ -16422,7 +16422,7 @@ mod tests {
             .unwrap_or("");
         assert!(
             !rn_fn.is_empty(),
-            "OfflineProtocolModule.configureAndStartInternet not found — guard needs a stable anchor"
+            "OfflineProtocolModule.configureAndStartInternet not found: the guard needs a stable anchor"
         );
         for marker in INTERNET_CONFIGURE_MARKERS {
             assert!(
@@ -16431,7 +16431,7 @@ mod tests {
             );
             assert!(
                 rn_fn.contains(marker),
-                "OfflineProtocolModule.configureAndStartInternet missing `{marker}` — \
+                "OfflineProtocolModule.configureAndStartInternet missing `{marker}`: \
                  update InternetTransportBootstrap.kt or restore RN parity"
             );
         }
@@ -16456,7 +16456,7 @@ mod tests {
             .unwrap_or("");
         assert!(
             !rn_fn.is_empty(),
-            "OfflineProtocolModule.configureAndStartInternet (Swift) not found — guard needs a stable anchor"
+            "OfflineProtocolModule.configureAndStartInternet (Swift) not found: the guard needs a stable anchor"
         );
         for marker in INTERNET_CONFIGURE_MARKERS {
             assert!(
@@ -16465,7 +16465,7 @@ mod tests {
             );
             assert!(
                 rn_fn.contains(marker),
-                "OfflineProtocolModule.configureAndStartInternet (Swift) missing `{marker}` — \
+                "OfflineProtocolModule.configureAndStartInternet (Swift) missing `{marker}`: \
                  update InternetTransportBootstrap.swift or restore RN parity"
             );
         }

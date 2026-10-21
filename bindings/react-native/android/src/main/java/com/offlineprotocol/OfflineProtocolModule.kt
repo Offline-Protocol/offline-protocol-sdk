@@ -264,10 +264,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
     
     private object Constants {
-        const val MIN_BATTERY_LEVEL = 0
-        const val MAX_BATTERY_LEVEL = 100
-        const val MIN_HISTORY_WINDOW = 1L
-        const val MAX_HISTORY_WINDOW = 100L
+        // One definition, in the applier both bridges share.
+        const val MIN_BATTERY_LEVEL = InitialRuntimeConfigApplier.Limits.MIN_BATTERY_LEVEL
+        const val MAX_BATTERY_LEVEL = InitialRuntimeConfigApplier.Limits.MAX_BATTERY_LEVEL
+        const val MIN_HISTORY_WINDOW = InitialRuntimeConfigApplier.Limits.MIN_HISTORY_WINDOW
+        const val MAX_HISTORY_WINDOW = InitialRuntimeConfigApplier.Limits.MAX_HISTORY_WINDOW
         const val BLE_RESTART_DELAY_MS = 1000L
         // Matches iOS 100ms tick. Handles retries, ACK timeouts, welcome
         // processing, and DORS. Latency-sensitive work is also event-driven.

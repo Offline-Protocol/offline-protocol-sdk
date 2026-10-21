@@ -7,30 +7,6 @@ import Foundation
 /// `internet_transport_bootstrap_swift_keeps_rn_configure_invariants` and the
 /// Android counterpart in `offline-protocol-uniffi`.
 enum InternetTransportBootstrap {
-    struct StoredInternetConfig {
-        var serverAddress: String?
-        var autoReconnect: Bool = true
-    }
-
-    static func readStoredConfig(raw: [String: Any]) -> StoredInternetConfig {
-        var stored = StoredInternetConfig()
-        if let transports = raw["transports"] as? [String: Any],
-           let internet = transports["internet"] as? [String: Any] {
-            stored.serverAddress = (internet["serverAddress"] as? String)
-                ?? (internet["server_address"] as? String)
-            if let auto = internet["autoReconnect"] as? Bool {
-                stored.autoReconnect = auto
-            } else if let auto = internet["auto_reconnect"] as? Bool {
-                stored.autoReconnect = auto
-            }
-        }
-        if stored.serverAddress == nil {
-            stored.serverAddress = raw["internetServerAddress"] as? String
-                ?? raw["internet_server_address"] as? String
-        }
-        return stored
-    }
-
     static func attachEmitters(
         manager: InternetManager,
         emitEventJson: @escaping (String) -> Void
@@ -100,16 +76,5 @@ enum InternetTransportBootstrap {
 
         try manager.configure(serverUrl: wsUrl, autoReconnect: autoReconnect, maxReconnectAttempts: maxRetries)
         try manager.start()
-    }
-
-    static func startIfConfigured(manager: InternetManager, stored: StoredInternetConfig) throws {
-        guard let url = stored.serverAddress, !url.isEmpty else { return }
-        try configureAndStart(
-            manager: manager,
-            config: [
-                "serverAddress": url,
-                "autoReconnect": stored.autoReconnect,
-            ]
-        )
     }
 }

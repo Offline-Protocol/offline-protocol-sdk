@@ -525,7 +525,9 @@ class OfflineProtocolModule: RCTEventEmitter {
 
     private func applyInitialRuntimeConfig(_ proto: OfflineProtocol, rawConfig: [String: Any]) {
         InitialRuntimeConfigApplier.apply(proto: proto, rawConfig: rawConfig) { [weak self] level, message, context in
-            self?.emitDiagnostic(level: level, message: message, context: context ?? [:])
+            // Passed through as optional: emitDiagnostic omits the key for nil,
+            // and an empty object would change what React Native apps receive.
+            self?.emitDiagnostic(level: level, message: message, context: context)
         }
     }
     

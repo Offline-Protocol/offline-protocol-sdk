@@ -58,6 +58,10 @@ enum InitialRuntimeConfigApplier {
             let historyWindowRaw = UInt64((dorsDict["historyWindowSize"] as? NSNumber)?.uint64Value
                                           ?? (dorsDict["history_window_size"] as? NSNumber)?.uint64Value
                                           ?? 10)
+            // Clamped in the unsigned domain, never through `Int`: a negative
+            // `historyWindowSize` from JavaScript reaches `uint64Value` as
+            // `UInt64.max`, and narrowing that to `Int` traps and aborts the
+            // application before the clamp around it can run.
             let historyWindow = max(1, min(100, historyWindowRaw))
             let rawQueueRecovery = Float((dorsDict["queueRecoveryRatio"] as? NSNumber)?.floatValue
                                          ?? (dorsDict["queue_recovery_ratio"] as? NSNumber)?.floatValue
@@ -104,6 +108,9 @@ enum InitialRuntimeConfigApplier {
             }
         }
 
+        // The whole relay section, not just the priority: allowRelay and
+        // minBatteryForRelay used to be parsed by nothing, leaving
+        // `config.relay` on mobile permanently at its defaults.
         if let relayDict = rawConfig["relay"] as? [String: Any] {
             do {
                 let updated = mergedRelayConfig(current: proto.getRelayConfig(), from: relayDict)
@@ -142,6 +149,9 @@ enum InitialRuntimeConfigApplier {
         )
     }
 
+    /// Accepts both the current vocabulary and the pre-0.22 `low`/`medium`/`high`
+    /// spelling of the same three values, so an app that has not migrated its
+    /// config keeps working.
     static func normalizeRelayPriority(_ priority: String?) -> RelayPriority? {
         guard let value = priority?.lowercased(), !value.isEmpty else {
             return nil
