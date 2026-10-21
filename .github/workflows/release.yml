@@ -1138,7 +1138,7 @@ jobs:
           fetch-depth: 0
 
       # Pre-built binary — no Rust toolchain needed
-      - uses: taiki-e/install-action@26e9283f268b880168bdbd2c545dfcd60ec2c6ab # v2.87.13
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: git-cliff
 
