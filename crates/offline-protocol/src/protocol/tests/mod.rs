@@ -26539,6 +26539,90 @@ fn test_app_send_staging_is_restored_after_a_dispatch() {
     );
 }
 
+/// Restore settles three kinds of outbox record at launch, and each follows
+/// the live rule once `start()` drains them: an absolutely-expired app
+/// message reaches telemetry, an absolutely-expired internal frame does not,
+/// and a record that would not open (origin unknown) does not. The app hears
+/// all three. This is the path that lost the flag before it was persisted
+/// with the entry.
+#[test]
+fn test_restored_outbox_settlements_reach_telemetry_only_for_app_sends() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let now = Utc::now();
+    let lifetime_ms = 1000;
+
+    let expired = |content: &str, app_send: bool| OutboxEntry {
+        message: test_message(&id("bob"), content),
+        attempt_count: 2,
+        first_sent_at: now - ChronoDuration::seconds(60),
+        last_sent_at: now - ChronoDuration::seconds(30),
+        last_transport: None,
+        reseal: None,
+        relay_pushed: false,
+        app_send,
+    };
+    let app = expired("app message", true);
+    let internal = expired("internal frame", false);
+    store_outbox_entry(&storage, &app);
+    store_outbox_entry(&storage, &internal);
+    // Not a seal envelope, so the read destroys it; the key is a message id,
+    // so its loss is settled as that message's failure.
+    let unreadable = MessageId::new();
+    storage
+        .store(storage_keys::OUTBOX, &unreadable.as_str(), b"garbage")
+        .unwrap();
+
+    let mut config = create_test_config();
+    config.reliability.retry.outbox_max_lifetime_ms = lifetime_ms;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+    assert!(
+        events.lock().unwrap().is_empty(),
+        "restore settlements wait for start()"
+    );
+
+    let transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport));
+    protocol.start().unwrap();
+
+    let mut failed: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    failed.sort();
+    let mut expected = vec![
+        app.message.id.as_str(),
+        internal.message.id.as_str(),
+        unreadable.as_str(),
+    ];
+    expected.sort();
+    assert_eq!(failed, expected, "the app hears every settlement");
+    assert_eq!(
+        failed_records(&sink.take()),
+        1,
+        "telemetry counts the restored app message only"
+    );
+}
+
 #[test]
 fn test_remove_outbox_entry_clears_storage() {
     let storage = Arc::new(InMemoryStorage::new());

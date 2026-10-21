@@ -4176,12 +4176,18 @@ impl OfflineProtocol {
             self.settle_restored_outbox_failures(capacity_settlements);
         }
 
-        self.settle_restored_message_failures(unrecoverable.iter().map(|key| {
-            Self::unrecoverable_message_settlement(
+        // The record would not open, so whether the app sent it is unknown:
+        // its `message_failed` reaches the app and not telemetry, the rule the
+        // live path applies to a message missing from the outbox. Anything
+        // else this yields (a diagnostic for an unparseable key) is unchanged.
+        self.settle_restored_outbox_failures(unrecoverable.iter().map(|key| {
+            let event = Self::unrecoverable_message_settlement(
                 key,
                 "Outbox entry could not be recovered from protocol-state storage",
                 0,
-            )
+            );
+            let telemetry = !matches!(event, Event::MessageFailed { .. });
+            (event, telemetry)
         }));
         if listed > OUTBOX_RESTORE_KEY_CAP {
             warn!(
