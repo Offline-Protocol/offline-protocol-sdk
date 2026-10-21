@@ -18506,6 +18506,28 @@ mod tests {
     }
 
     #[test]
+    fn react_native_js_harness_covers_engine_bridge_poll_smoke() {
+        let package = rn_source_code_only("package.json");
+        assert!(
+            package.contains("js-ci-harness/engine-bridge-smoke.test.js"),
+            "engine-bridge poll smoke must run under npm run test:js"
+        );
+        let smoke = rn_source_code_only("js-ci-harness/engine-bridge-smoke.test.js");
+        assert!(
+            smoke.contains("isMlsInitialized") && smoke.contains("internetIsReady"),
+            "engine-bridge smoke must exercise MLS and Internet readiness polls"
+        );
+        let android_smoke = rn_source_code_only(
+            "android/src/test/java/com/offlineprotocol/ProtocolEngineHostBridgeSmokeTest.kt",
+        );
+        assert!(
+            android_smoke.contains("ProtocolEngineHostBridge.internetIsReady")
+                && android_smoke.contains("ProtocolEngineHostBridge.isMlsInitialized"),
+            "Android bridge smoke must call shared poll methods on an empty host"
+        );
+    }
+
+    #[test]
     fn react_native_android_wifi_direct_callback_does_not_wait_for_a_manager() {
         let code = rn_source_code_only(
             "android/src/main/java/com/offlineprotocol/ProtocolEngineHost.kt",

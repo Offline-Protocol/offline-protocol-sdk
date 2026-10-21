@@ -165,6 +165,12 @@ blocking flush on the main thread. `disableTelemetry`, `endTelemetrySession`, an
 and Android Flutter hosts seed and update `AppState` from process lifecycle
 observers so telemetry sessions follow foreground/background edges.
 
+On shutdown or before tearing down the engine, prefer `MeshSdk.disableTelemetryAndWait`,
+`endTelemetrySessionAndWait`, or `flushTelemetryAndWait` so your Dart `await`
+matches the engine-thread flush. Calling other channel methods while a flush is
+in flight is safe but queues behind it; avoid overlapping polls you rely on for
+UI gating until the wait completes.
+
 ## F8b. Staged native artifacts (pub.dev)
 
 Release workflow runs `bindings/flutter/scripts/stage-plugin-native-artifacts.sh`
@@ -189,7 +195,9 @@ the release AAR is larger than a BLE-and-Internet-only build. That growth is
 expected and gated by the baseline, not a silent regression. Runtime footprint
 still follows `ProtocolConfig`: disable transports and mesh features you do not
 ship so the engine does not start managers you never use (same guidance as React
-Native).
+Native). [OfflineProtocol.minimalFootprintConfig](../flutter/offline_protocol/lib/src/offline_protocol.dart)
+builds a create payload with only the transport flags you enable; pair it with
+narrow nested sections for mesh and data features you actually ship.
 
 ## What CI runs
 

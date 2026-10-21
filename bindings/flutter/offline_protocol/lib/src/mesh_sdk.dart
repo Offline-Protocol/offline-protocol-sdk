@@ -662,12 +662,17 @@ static Future<dynamic> wipePersistedState([Map<String, dynamic>? args]) =>
 
   // --- Typed fast paths (avoid hand-built maps on hot calls) ---
 
-  /// Disables telemetry and waits for the engine-thread flush (may take a few seconds).
+  /// Disables telemetry and **awaits** the engine-thread flush (may take a few
+  /// seconds). Use on lifecycle shutdown; do not call other engine methods until
+  /// this future completes if you need a clean boundary (F8).
   static Future<void> disableTelemetryAndWait() => _invoke<void>('disableTelemetry');
 
   /// Ends the telemetry session (same blocking semantics as [disableTelemetryAndWait]).
   static Future<void> endTelemetrySessionAndWait() =>
       _invoke<void>('endTelemetrySession');
+
+  /// Flushes buffered telemetry on the engine thread (same blocking semantics).
+  static Future<void> flushTelemetryAndWait() => _invoke<void>('flushTelemetry');
 
   /// Sends a rich message with explicit fields instead of a nested options map.
   static Future<dynamic> sendMessageRichTyped({
@@ -713,5 +718,26 @@ static Future<dynamic> wipePersistedState([Map<String, dynamic>? args]) =>
   static Future<bool> isMlsInitializedTyped() async {
     final value = await _invoke<dynamic>('isMlsInitialized');
     return value == true;
+  }
+
+  /// Whether this device is acting as a mesh relay (false when not initialized).
+  static Future<bool> isRelayTyped() async {
+    final value = await _invoke<dynamic>('isRelay');
+    return value == true;
+  }
+
+  /// Whether a key package for [peerId] is queued locally.
+  static Future<bool> hasPendingKeyPackageTyped(String peerId) async {
+    final value = await _invoke<dynamic>('hasPendingKeyPackage', {'peerId': peerId});
+    return value == true;
+  }
+
+  /// Device battery level when the platform exposes it; null otherwise.
+  static Future<int?> getBatteryLevelTyped() async {
+    final value = await _invoke<dynamic>('getBatteryLevel');
+    if (value == null) return null;
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    return int.tryParse(value.toString());
   }
 }

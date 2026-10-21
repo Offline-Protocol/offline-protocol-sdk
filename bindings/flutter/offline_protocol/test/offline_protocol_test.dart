@@ -2,6 +2,17 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:offline_protocol/offline_protocol.dart';
 
 void main() {
+  test('minimalFootprintConfig defaults to BLE-only transports', () {
+    final config = OfflineProtocol.minimalFootprintConfig(
+      appId: 'app',
+      profile: 'profile',
+    );
+    expect(config['bleEnabled'], isTrue);
+    expect(config['internetEnabled'], isFalse);
+    expect(config['reticulumEnabled'], isFalse);
+    expect(config['nostrEnabled'], isFalse);
+  });
+
   test('smokeTestConfig enables Internet flag only', () {
     final config = OfflineProtocol.smokeTestConfig(
       appId: 'com.test.app',

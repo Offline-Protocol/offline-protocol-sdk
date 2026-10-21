@@ -86,8 +86,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   CI and Rust guards hold the Swift and Kotlin adapters to that file; resolve-only
   queries use domain codes when the shared bridge throws.
 - **Flutter `MeshSdk` typed read helpers.** `getStateTyped`, `internetIsReadyTyped`,
-  `internetIsSupersededTyped`, `isBluetoothEnabledTyped`, and `isMlsInitializedTyped`
-  avoid hand-built maps on common polling paths.
+  `internetIsSupersededTyped`, `isBluetoothEnabledTyped`, `isMlsInitializedTyped`,
+  `isRelayTyped`, `hasPendingKeyPackageTyped`, and `getBatteryLevelTyped` avoid
+  hand-built maps on common polling paths; `flushTelemetryAndWait` names the
+  blocking telemetry flush explicitly (F8).
+- **Flutter `OfflineProtocol.minimalFootprintConfig`.** Transport flags-only create
+  payload for the smallest runtime surface (F9).
+- **Engine-bridge poll smoke tests.** `js-ci-harness/engine-bridge-smoke.test.js`
+  (MLS and Internet readiness through the RN SDK) and
+  `ProtocolEngineHostBridgeSmokeTest` on Android complement Rust delegation guards.
 
 - **A Flutter plugin (preview).** `bindings/flutter/offline_protocol` hosts
   the engine on iOS and Android from Dart: create, MLS with the platform

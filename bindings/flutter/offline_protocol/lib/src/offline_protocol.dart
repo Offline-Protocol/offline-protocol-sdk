@@ -61,6 +61,29 @@ class OfflineProtocol {
     };
   }
 
+  /// Smallest transport surface for production builds (F9): only enabled flags
+  /// start native managers. Disable mesh features you do not ship in nested
+  /// config sections the same way as on React Native.
+  static Map<String, dynamic> minimalFootprintConfig({
+    required String appId,
+    required String profile,
+    bool bleEnabled = true,
+    bool wifiDirectEnabled = false,
+    bool internetEnabled = false,
+    bool reticulumEnabled = false,
+    bool nostrEnabled = false,
+  }) {
+    return {
+      'appId': appId,
+      'profile': profile,
+      'bleEnabled': bleEnabled,
+      'wifiDirectEnabled': wifiDirectEnabled,
+      'internetEnabled': internetEnabled,
+      'reticulumEnabled': reticulumEnabled,
+      'nostrEnabled': nostrEnabled,
+    };
+  }
+
   /// Creates the Rust engine from a JSON config object (camelCase or snake_case).
   ///
   /// Optional top-level `dors` and `relay` sections are applied the same way as
