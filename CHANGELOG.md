@@ -11,7 +11,66 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
-## [Unreleased]
+## [0.30.0] — 2026-10-21
+
+> **Update if you enable telemetry.** The telemetry uploader in 0.26.0 to
+> 0.29.0 trusted every root in the bundled Mozilla set, one of them an
+> eMudhra root withdrawn after the October 2026 key compromise, so a holder
+> of those keys on the network path could read the telemetry API key and
+> the batches. It now trusts only the sixteen roots the ingest's issuers use.
+>
+> **Three new ways in: C, Java and Flutter.** A C header over the native
+> library every release already ships, a Java binding generated from the
+> interface definition (JDK 22+, on Maven Central), and a preview Flutter
+> plugin for iOS and Android. React Native gains `sendFileFromPath` and
+> `signDataBytes` for large payloads.
+>
+> **Bluetooth LE holds a saturated link.** A 10,000-message two-phone volume
+> test found a link offered more than it carries collapsing into mass
+> retries, a full acknowledgement table stopping the engine, and a receiver
+> falling permanently behind its sender's ratchet. Sends to one nearby peer
+> are now windowed at sixteen in flight, acknowledgements jump the queue and
+> coalesce, and a full outbox refuses the newest message instead of failing
+> the oldest.
+>
+> **Smaller libraries, newer toolchains.** Link-time optimisation now
+> reaches every shipped library, and iOS and Android build for size. UniFFI
+> moves to 0.32: building the native library from source needs Rust 1.91,
+> and the iOS bridge needs Swift 5.10 (Xcode 15.3).
+>
+> **Dashboards read lower.** Telemetry counts only the application's own
+> messages as delivered or failed, so the delivered count stops including
+> media chunks and internal frames.
+>
+> [§28](docs/UPGRADING.md#28-behaviour-that-changes-without-a-compile-error-v0300)
+> lists what changes without a compile error.
+
+### Security
+
+- **The telemetry uploader trusts only the ingest's issuers.** Until now it
+  trusted the whole Mozilla root set bundled through `webpki-roots` 1.0.9,
+  which still carried emSign ECC Root CA - G3, one of the roots withdrawn
+  after eight eMudhra intermediates were found with weak keys in October 2026.
+  Anyone holding one of those keys on the network path could have presented
+  a certificate for the ingest and read the telemetry API key and the
+  batches. The uploader now trusts sixteen roots, the server roots of the
+  four authorities the ingest's edge issues from (Let's Encrypt, Google Trust
+  Services, SSL.com, and Sectigo for Cloudflare's backup certificate), pinned
+  by SHA-256 in a test, so a compromise of any other authority no longer
+  reaches the SDK. They include Let's Encrypt's Generation Y roots, ISRG Root
+  YE and YR, which issue the ingest's certificate today, so the chain still
+  validates if the edge stops sending the cross-signs to the older ISRG roots.
+  `webpki-roots` leaves the dependency graph, `ureq` drops to
+  `rustls-no-provider`, and the uploader names the ring crypto provider
+  instead of taking a process default. `rustls-webpki` moves to 0.103.16,
+  which rejects any path through the compromised eMudhra intermediates' keys
+  whatever root it ends at, closing the cross-signed path through Sectigo's
+  AAA Certificate Services as well. Nothing
+  changes for an application: the endpoint, the proxy handling and the
+  device-store exclusion are as before. Applications on 0.26.0 to 0.29.0 that
+  enable telemetry should update. See
+  [ADR 0031](docs/adr/0031-telemetry-trusts-only-the-ingests-issuers.md).
+
 
 ### Added
 
@@ -111,6 +170,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   is how 0.29.0 is published. It never pushes `X.Y.Z` a second time unless
   told to, for an image that failed its checks.
 
+
 ### Changed
 
 - **`MessageDelivered.latency_ms` runs from the first send.** An app that shows or logs
@@ -123,7 +183,6 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   accepted; time spent before that, while every transport refused the
   message, is still not included. Transport scoring still uses the last
   attempt's round trip.
-
 - **The iOS and Android libraries are built for size, and still unwind.** A
   new `mobile` profile, `release` at opt-level "s", builds both, in the
   release workflow, the React Native scripts and CI; the desktop libraries
@@ -174,6 +233,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   0.32.2 and askama 0.16.1 are the latest releases. The waiver is in both
   `deny.toml` and `.cargo/audit.toml`, and is dropped once an askama release
   replaces the crate and uniffi takes it.
+
 
 ### Fixed
 
@@ -306,7 +366,6 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   phone on an indication-paced link. They now stop at 32 fragments, a few
   seconds of link time, and the rest waits in the core where the extension
   sees it. The 768 cap is unchanged.
-
 - **Link-time optimisation reaches the libraries the release ships.** The
   release profile has always asked for it, but cargo runs it on a library
   only when every crate type in the library's list can take it, and the FFI
@@ -315,14 +374,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   desktop libraries and the Python wheels) was built without it, and no
   build said so. Measured on the macOS arm64 build: the static library the
   iOS framework is made from falls from 137,949,536 to 23,393,288 bytes, the
-  shared library from 11,534,416 to 10,932,208, with the same 482 exported
+  shared library from 11,534,416 to 10,932,208, with the same exported
   functions. The npm package carries the iOS static libraries, so it should
   lose most of its size; the iOS and Android numbers are measured on the
   first release artifacts built this way. A release build of the crate takes about a
   minute longer and peaks near 2.1 GB of memory.
   `the_ffi_crate_builds_no_rust_library` refuses a crate type that would
   turn it off again.
-
 - **Python: type checkers read the package's annotations.** The package
   shipped no PEP 561 `py.typed` marker, so mypy skipped it as untyped
   ("missing library stubs or py.typed marker") and every value it returned
@@ -366,18 +424,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   0% to the application. A reassembly drop is no longer a delivery sample,
   and BLE and Wi-Fi Direct always take their delivery ratio from
   acknowledgements; Internet, Reticulum and Nostr keep the counts their
-  confirmation loops report (#557).
+  confirmation loops report.
 - **DORS needs five delivery observations, not five sends, before the
   low-success-rate rule applies.** The selector took a success-ratio sample
   from the transport's cumulative counts on every selection, so one early
   failure became five identical 0.0 samples after five sends and met
   `min_ble_samples_before_success_rate_escalation` with no new evidence. It
-  now samples only when the delivery counts change (#559).
+  now samples only when the delivery counts change.
 - **React Native recovers an event lost on the way to JavaScript instead of
   only reporting it.** A device test saw a sender get a receipt for a
   message whose recipient app never got `message_received`, and a sender
   whose app never got `message_delivered` although the message stopped
-  retrying (#514). In both cases the core had already acted: the message was
+  retrying. In both cases the core had already acted: the message was
   acknowledged and its id marked, or its outbox entry and retry removed, so
   nothing would ever restate the event. Each native module now keeps the
   last 256 events it handed over, by the `seq` number 0.28.0 added, and
@@ -394,516 +452,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   it used to become a panic in the core that only a filtered log target
   recorded.
 
+
 ### Removed
 
 - **`BleTransport::record_send_success` and `record_send_failure`.** They had
   no caller outside their own test, and the failure half was the cause of the
-  fix above. BLE has no send confirmation loop to feed them (#557).
-
-### Security
-
-- **The telemetry uploader trusts only the ingest's issuers.** Until now it
-  trusted the whole Mozilla root set bundled through `webpki-roots` 1.0.9,
-  which still carried emSign ECC Root CA - G3, one of the roots withdrawn
-  after eight eMudhra intermediates were found with weak keys in October 2026.
-  Anyone holding one of those keys on the network path could have presented
-  a certificate for the ingest and read the telemetry API key and the
-  batches. The uploader now trusts sixteen roots, the server roots of the
-  four authorities the ingest's edge issues from (Let's Encrypt, Google Trust
-  Services, SSL.com, and Sectigo for Cloudflare's backup certificate), pinned
-  by SHA-256 in a test, so a compromise of any other authority no longer
-  reaches the SDK. They include Let's Encrypt's Generation Y roots, ISRG Root
-  YE and YR, which issue the ingest's certificate today, so the chain still
-  validates if the edge stops sending the cross-signs to the older ISRG roots.
-  `webpki-roots` leaves the dependency graph, `ureq` drops to
-  `rustls-no-provider`, and the uploader names the ring crypto provider
-  instead of taking a process default. `rustls-webpki` moves to 0.103.16,
-  which rejects any path through the compromised eMudhra intermediates' keys
-  whatever root it ends at, closing the cross-signed path through Sectigo's
-  AAA Certificate Services as well. Nothing
-  changes for an application: the endpoint, the proxy handling and the
-  device-store exclusion are as before. Applications on 0.26.0 to 0.29.0 that
-  enable telemetry should update. See
-  [ADR 0031](docs/adr/0031-telemetry-trusts-only-the-ingests-issuers.md).
-
-## [0.29.0] — 2026-10-13
-
-> **Service bodies are sealed end to end.** A service request or response
-> crosses the mesh inside the 1:1 MLS session once the recipient advertises
-> support and the session is confirmed, so the devices that carry it can no
-> longer read it (threat model R9). Rust code that names every field of the
-> two service events needs the new `encrypted` field or a `..`.
->
-> **Two devices that have never met start a session through a third.** The
-> key package and the Welcome now cross the mesh like every other frame, so a
-> message to a peer only reachable through another device is delivered instead
-> of waiting out its lifetime.
->
-> **Android and iOS meet on a shared Wi-Fi network.** The Android
-> peer-stream slot now finds iPhones and Python hosts on the Wi-Fi network
-> it is on, and they find it, with no Wi-Fi Direct group.
->
-> **The service is usable without the SDK.** An application calls a service
-> on another device with a plain HTTP request through the HTTP front, a
-> container image runs the service, and `offline-protocol-verify` drives a
-> service and reports what it proved.
->
-> [§27](docs/UPGRADING.md#27-behaviour-that-changes-without-a-compile-error-v0290)
-> lists what changes without a compile error.
-
-### Added
-
-- **Service request and response bodies are sealed end to end.** A body sent
-  with `send_service_request` or `respond_to_service_request` used to cross
-  every hop as signed plaintext, readable by each device that carried it
-  (threat model R9). It is now sealed inside the recipient's 1:1 MLS session
-  when the recipient advertises the new `svc_versions` capability in a signed
-  key package (or has already sent a sealed service frame) and the session
-  with it is confirmed, and the provider's `service_request_received.sender`
-  is then the MLS-authenticated requester. Toward an older peer, and before
-  the session confirms, the body still leaves as signed plaintext, so the
-  first request to a provider this device has never met is readable by the
-  hops that carry it; the attempt to seal it starts the session, as a direct
-  message does, and the next request is sealed. The automatic `not_found`
-  answer to a sealed request is sealed too, and a sealed request retried
-  after a session re-key is sealed again rather than replayed as dead
-  ciphertext. Discovery stays signed plaintext, because every hop reads it to
-  forward it. A peer that has sent a sealed service frame stays sealed
-  through any later or replayed key package, by a durable ratchet beside the
-  control-freshness one. A seal failure on a confirmed session is returned as
-  an error rather than sent in plaintext. `service_request_received` and
-  `service_response_received` carry a new `encrypted` field, so an
-  application can tell which form arrived; Rust code naming every field of
-  either variant needs it or a `..`. A new switch,
-  `encryption.encryptServiceMessages` (`encrypt_service_messages`, default
-  on), turns sealing off without a release; routing an inbound sealed frame
-  does not depend on it
-  ([capability negotiation](docs/spec/capability-negotiation.md#the-exception-svc_versions)).
-
-- **Android peer streams on the Wi-Fi network.** With
-  `wifiDirect: { enabled: true }`, the Android manager advertises and browses
-  DNS-SD `_offlineprotocol._tcp` through `NsdManager` on the Wi-Fi network it
-  is on, with the record iOS and Python publish (`txtvers=1`, `addr`, the same
-  instance name), and dials what it finds on iOS's policy: the lower address
-  at once, the higher after five seconds, a redial ladder up to a minute, and
-  a record whose dial is answered by another address left out. Dials are bound
-  to the Wi-Fi network (a socket left to the default network goes out over
-  cellular on a Wi-Fi with no internet) and carry the record's `addr` as the
-  address the preamble must prove. A Wi-Fi network with no internet counts.
-  The slot stays up while either the group or the network is, and Wi-Fi P2P
-  going off, or leaving the group, ends only the group's streams. It needs
-  `ACCESS_NETWORK_STATE` and `CHANGE_WIFI_MULTICAST_STATE` (a multicast lock
-  while advertising or browsing on Android 12 and lower, where mDNS needs one), which the
-  module declares, and no runtime grant until the app targets Android 17
-  (API 37), so it also runs on a phone that has not granted
-  `NEARBY_WIFI_DEVICES`. From API 37 the app must declare
-  `ACCESS_LOCAL_NETWORK` and request it before `start()`, or the LAN carrier
-  stays off with a warning diagnostic; the SDK does not declare it, because a
-  declaration revokes the grant apps targeting 36 and lower hold by default. A network
-  that blocks multicast or isolates clients (many guest and office networks)
-  finds nothing, and Android to iOS with no shared network still goes over
-  Bluetooth LE or the relays
-  ([ADR 0028](docs/adr/0028-android-peer-streams-join-the-lan.md)).
-
-- **The service starts every transport its configuration enables.**
-  `offline-protocol-service` started only the peer stream and the gateway
-  client, so a configuration with `ble_enabled` built both Bluetooth LE
-  managers and never ran either, and `internet_enabled` had no way to name a
-  relay. The server now starts the Bluetooth LE central and peripheral where
-  the platform has a backend, and the internet transport once `--relay URL`
-  names one (the token from `OFFLINE_PROTOCOL_RELAY_TOKEN`, or the variable
-  `--relay-token-env` names). A transport that fails to start is logged and
-  left stopped while the others run, and the server fails only when none
-  starts: a Bluetooth adapter another process holds no longer takes the LAN
-  path down with it.
-- **`--lan` finds the other hosts on the LAN.** The peer-stream transport's
-  DNS-SD advertising and discovery existed in the library and could not be
-  switched on from the command; `--lan` switches on both (it needs the `lan`
-  extra and fails at start, naming it, without).
-
-- **The HTTP front.** An application that does not use the SDK can call a
-  service on another device with a plain HTTP request to
-  `<service>.<device>.offline.protocol.internal`. `offline-protocol-service
-  --http HOST:PORT` (with the new `http` extra) starts the front in the
-  service's process, as a client of the local API; `offline-protocol-http-front`
-  runs it apart. A request and its response travel as the content of an end
-  to end encrypted direct message, never on the service request path, which
-  still sends a body as signed plaintext to a provider it has no confirmed
-  session with, and a front acts only on a message the engine
-  reports as encrypted, so the provider's callback is told the caller's
-  MLS-authenticated address in `X-Offline-Protocol-Sender`. A device is named
-  by its address, which is a DNS label as it stands, or by an operator alias,
-  never by one learned from the LAN. `PUT /services/<name>` registers a
-  callback (kept across restarts, and registered with the engine so signed
-  discovery finds it), and `GET /browse/<name>` streams the devices that
-  offer a service. Bodies are limited to 128 KiB each way, and a request
-  waits 30 seconds by default and at most 300. Off loopback the front
-  requires a per-launch token, and on any binding it refuses a request
-  carrying `Origin`, so a web page cannot send a body or register a callback
-  through it by DNS rebinding; a page can still make a blind `GET` by loading
-  a resource, which only a token stops, so a host where a browser runs
-  should use one. A request path with a `.` or `..` segment is refused, so a
-  peer cannot reach a path outside the one a provider registered, and
-  forwarding headers such as `X-Forwarded-For` never cross. A carried
-  header value that is not UTF-8 is a `400`, and a token that is not UTF-8
-  a `401`. A callback answer the requester would refuse, such as a status
-  past 599, is `callback_failed` at once rather than a wait for the
-  deadline. A provider runs
-  at most 32 callbacks at once. Run one front per service. The front does
-  not authorize: any device with a session can call every registered
-  service, and with `auto_key_exchange` any device running the SDK that
-  reaches the host forms one. The provider authorizes on
-  `X-Offline-Protocol-Sender`, which it can trust only when nothing but the
-  front reaches its callback, and a `504 deadline_exceeded` does not mean
-  the request did not run: it is not withdrawn, and a provider that receives
-  it within 60 s past its deadline still serves it.
-  `docs/spec/http-front.md` is the contract;
-  the threat model gains R23 (the front trusts every process that can reach
-  it) and the Python bridge rules gain P13.
-
-- **A container image for the service, and an HTTP demo.**
-  `bindings/python/docker` builds one service per host on `python:3.12-slim`
-  with the `lan` and `http` extras, configured from environment variables;
-  an argument after the image name wins over the variable for that flag. A
-  wheel built from a checkout is installed in place of PyPI's, and the build
-  fails when the installed service has no HTTP front. Its README lists what
-  a host's container manifest must grant (host networking for multicast DNS,
-  inbound TCP 7878, a persistent volume, the store key from a secret store,
-  and the system D-Bus socket for Bluetooth LE) and the failure each grant
-  prevents. `examples/http-front` has a provider with no SDK import (with
-  `--allow` for an allowlist of caller addresses), a client in Python's
-  standard library for a container with no `curl`, and a `curl` client.
-  Its `compose.yml` runs two boxes with the provider and the client each
-  sharing a box's network namespace, which is how an application container
-  reaches a front on the box's loopback, and its README says when the
-  sender header can be trusted. The Python README says how to build a
-  Linux wheel from a checkout in a container, which the image needs until
-  a release has the front. Two containers from
-  the image, on one bridge network, found each other over multicast DNS with
-  no peer list and served a request through the front, and the address and
-  registrations survived a restart. Bluetooth LE from a container is
-  untested on hardware.
-
-- **Two devices that have never been in range of each other start a session
-  through a third.** With encryption required, a message to a peer the
-  sender had never been next to waited in the pending queue for its whole
-  lifetime when the only path ran through another device: the key package and
-  the Welcome were the two frames that never crossed the mesh, and every frame
-  after them is sealed. While a message waits for a peer that no carrier
-  reaches directly, the sender now hands its key package to its neighbours to
-  carry, and the recipient's Welcome takes the same route back; confirmation,
-  the message and its acknowledgement already did. Both are offered to the
-  mesh even when the relay accepted them for a peer it has said is not on it,
-  and a Welcome that expired while the path was down is sent again on the
-  peer's next key package. The device in between carries frames it cannot
-  read. The threat model gains R24 (a session can be started from anywhere
-  the mesh reaches, and what bounds it).
-- **`offline-protocol-verify`: drive a service and read the proof.** A
-  command for the device a service runs on: `send` a message, `await` its
-  delivery receipt on the sender or its arrival on the recipient, `pair`
-  (wait for the session with a peer), `ping` (a message on a cadence, each
-  reported with the carrier it arrived over), `watch` (every event as a JSON
-  line, across restarts of the service) and `state` (address, carriers,
-  queues, relay counters, sessions). Each prints JSON lines and
-  exits 0 when what it waited for happened, 2 when its time ran out and 1
-  when the engine gave the message up. It matches events by the identifier
-  they carry, so it works on a sender restarted since the send. A receipt
-  the engine emits while no client of the application is connected is not
-  held, so `send --await` waits for it on the connection it sent on, and a
-  separate `await` or `watch` on the sender must start before the recipient
-  can answer; both print `subscribed` on standard error once they are
-  listening, which a script waits for instead of sleeping. New scenario
-  tests run the networking properties end to end over loopback peer streams
-  with encryption on: a message to a device that is off arrives when it
-  returns and the sender gets the receipt; a queued
-  message survives the sender restarting (and is lost when the saved state
-  is removed, the control); a message crosses a middle device to one the
-  sender cannot hear, and the recipient's receipt comes back the same way.
-
-- **An offline-first demo on three devices.** `examples/offline-first` runs
-  three services from the container image on two bridge networks, so the
-  middle one is the only way between the other two, and `run.py` runs the
-  scenarios with `offline-protocol-verify` and prints a table: store and
-  forward, the sender killed and restarted while its message is queued, a
-  message carried through the middle device to one the sender has never
-  met, and a message the middle device delivers while the sender is off.
-  Its README is the runbook for
-  the legs that need hardware (the LAN between hosts, the carrier changing
-  under a stream of messages, the relay, a gateway daemon, a phone), with a
-  record of what has been run: scenarios 1, 2, 4 and 5 in containers on one
-  machine, nothing on hardware yet. Scenario 4 fails unless the sender's
-  receipt comes back across the hop. The image gains `OP_GATEWAY` (the
-  gateway daemon, for a configuration with `reticulum_enabled`), two baked
-  configurations beside the default (`config-ble.json`, `config-relay.json`),
-  and the verifier, and its build fails when the installed package has none.
-  Found while running it, and fixed before release (#541, #540): a message
-  that a direct stream took and then lost (a device that went away without
-  closing the stream) was retried over direct carriers only and never
-  handed to the mesh.
-- **`message_decryption_failed` says how old the frame is.** Two new fields,
-  `sealed_at_ms` (when the sender sealed the frame, sender clock, from the
-  cleartext envelope) and `session_established_at_ms` (when this device's
-  current 1:1 session with the sender was created or adopted, local clock),
-  both `null` when unknown. A frame sealed before the session existed cannot
-  have been sealed under it, so its failure is not evidence that the two sides
-  hold different sessions; an app's split-brain breaker can now leave it out.
-  The session time is recorded from this version on; a session established
-  earlier reports `null` until it is rebuilt.
-- **Key packages advertise `ack_versions`.** A new capability list on the
-  key package payload, persisted per peer with the others. Entry 1
-  (`ACK_UNDECRYPTABLE_V1`) says the sender reads `ack_status:
-  "undecryptable"` as "not delivered"; this version advertises it
-  unconditionally, and answers an undecryptable frame only to a peer that
-  advertised it, because an older SDK reads any ACK as a delivery. A peer
-  learns it from our next key package, which this SDK pushes on the first
-  discovery of each peer per launch (any inbound frame from them, a BLE
-  sighting, or a presence edge). Leaf devices do not advertise it. See
-  [Capability negotiation](docs/spec/capability-negotiation.md).
-
-### Changed
-
-- **Android keeps the stream the lower address opened.** Of two streams for
-  one address, Android kept the newer; iOS and Python keep the one the lower
-  address opened, and the newer of two such. On a shared network both ends
-  dial, and two different rules keep opposite streams and reconnect forever.
-  Android now computes the same rule, comparing addresses by their UTF-8
-  bytes, and `every_peer_stream_manager_keeps_the_same_stream` (renamed from
-  `ios_and_python_peer_streams_keep_the_same_stream`) pins all three copies.
-  Inside a Wi-Fi Direct group a client that is the higher address can no
-  longer supersede its own half-open stream: its reconnect waits for keepalive,
-  about thirty seconds on Android 10 and later.
-- **Android peer streams use the iOS and Python keepalive** on Android 10 and
-  later: 15 seconds idle, 5 between probes, 3 probes, and 30 seconds for
-  unacknowledged data, where the OS defaults were two hours and about fifteen
-  minutes.
-- **A peer-stream redial ladder starts over only after a stream that carried
-  its peer**, on iOS and Android: a body after the preamble, or the address
-  held for thirty seconds, not the proof alone. A stream the peer refused for its own stale one proved the address
-  too, so the dialer was announced and lost every second until that stream
-  died, and a Wi-Fi Direct client whose owner was held by a LAN stream
-  redialed it every second. Such a client now waits for that stream to end.
-- **Android's peer-stream listener bounds inbound streams.** It binds every
-  interface, so any device on a shared network could take all sixteen slots.
-  At most twelve are inbound now, and four from one remote address, iOS's
-  bounds.
-
-- **A peer-stream or relay flag the configuration cannot honour is refused.**
-  `--listen` and `--peer` without `wifi_direct_enabled` were ignored, which
-  left a service that reached nobody and said nothing; they, `--lan`, and
-  `--relay` without `internet_enabled`, now stop the command at start with
-  the configuration field named. A `--relay` that is not a `ws://` or
-  `wss://` URL with a host is refused too: the internet transport retries a
-  failed connect for as long as it runs, so a mis-typed relay was a service
-  that reported the relay running and passed `/health`. A variable named
-  with `--relay-token-env` and left unset is refused rather than read as
-  "no token", and each transport has 30 seconds to start before it counts
-  as failed and is stopped.
-
-### Fixed
-
-- **An Android dial that never connects is closed and redialed, and the
-  connection cap counts links rather than entries.** A dial that got no
-  callback held its address and its slot for the life of the process: the
-  scan answered every later advertisement with "already
-  connected/connecting", so the device never completed its own link to that
-  peer (#549). A dial that has not connected after 20 seconds is now closed,
-  and the scan dials the address again. Android also reports a client link
-  of ours to the GATT server as a central connecting, and the cap summed
-  both, so two dials filled a cap of four and the cap check then cancelled
-  the server-side half of the link one of them was waiting on. The cap now
-  counts each peer address once, the server-side report of our own dial is
-  neither refused nor counted, a peer connecting to us is turned away only
-  for completed links, and a dial to a peer already connected to our GATT
-  server is not refused by the cap.
-- **Android gives back the client slot of a dropped Bluetooth LE link.**
-  When a client link dropped, Android redialed the peer through a fresh
-  connection but never closed the old one, and Android frees a client slot
-  only on close. A device has about 32, so an app that ran long enough on
-  links that come and go used them all, and every new connection failed
-  after that. The old connection is now closed when it drops, whether the
-  peer is redialed, its address has gone stale, or the device gives up on it
-  (#547).
-- **The demo app keeps its identity across restarts, and keeps a linked peer
-  in People.** The app minted a new `profile` on every launch, and the SDK
-  keeps the identity per profile, so a restart gave the device a new address
-  and every peer a new contact. The profile and the display name are now
-  kept in AsyncStorage, so only a reinstall mints a new identity. People also
-  dropped any peer whose last `neighbor_discovered` was a minute old, while
-  the link to it was up and messages crossed it; the list now follows
-  `neighbor_discovered` and `neighbor_lost`, the link's own up and down
-  edges (#549).
-- **The demo app shows a group's name and every member.** The app kept
-  groups in screen memory only, and no event carries a group's name and full
-  member list: a group message carries neither, and an invited device hears
-  only the add that named it. So after a restart a group read as "Group"
-  with one member, and an invitee counted three members of a group of four,
-  while the SDK held the whole group. The app now reads the SDK's own record
-  (`meshListGroups` at start, `meshGetGroupInfo` for a group it has not read
-  yet and on every membership change), and names this device "You" in it.
-- **A mesh forwarder carries the sender's own retransmission again.** A
-  device that had forwarded a frame ignored every later copy of its id for
-  ten minutes, the sender's own re-send included. A recipient whose
-  acknowledgement went nowhere (the sender was off when it answered) only
-  answers again when a re-send reaches it, so the sender retried into the
-  device between them until the window lapsed, with a retry entry and no
-  pending acknowledgement. A copy that arrives over the link that proved its
-  sender, with no hop spent, is now forwarded again, subject to the
-  neighbour's own rate; every other copy is still suppressed, and a re-send
-  refused for rate or queue space leaves the id suppressed. The exception
-  reaches one hop: a second forwarder that already carried the frame still
-  suppresses the copy the first passes on. Found on two
-  Raspberry Pis and a Mac: offline-first scenario 5 left the sender's queue
-  undrained for over ten minutes, and now drains in seconds.
-- **A peer stream proved while its layer is still starting gets a session
-  without waiting for traffic.** A host's listener accepts before the host
-  reports the peer-stream layer up (the Python manager starts DNS-SD in
-  between, about three seconds on a Raspberry Pi), so the first key package
-  push to a peer that connected in that window failed, and the layer coming
-  up revealed the link without the second discovery that retries it. Where
-  the other side's push was lost too, on a superseded stream, the pair formed
-  no session until an application sent something. The engine now announces
-  every link the layer reveals to discovery. First pairing between a Pi and a
-  Mac dropped from 14 to 17 seconds, and once past 90, to 1 to 6 seconds.
-
-- **A frame that can never decrypt gets an answer, and is not redelivered
-  forever.** A frame that failed with a spent ratchet generation or a dead
-  epoch, or that the pending-decryption queue gave up on, was left
-  unacknowledged so the sender would resend it re-sealed. A relay holding the
-  frame for an offline recipient read the silence as "not delivered yet" and
-  redelivered the same dead ciphertext on every connect, where it failed
-  again. The recipient now answers it with a delivery ACK carrying
-  `metadata["ack_status"] = "undecryptable"`, which a relay settles like any
-  ACK, but only when the frame arrived over the internet relay (these
-  failures are unauthenticated, so an answer on a mesh link would confirm
-  liveness to an injector in range) and the sender advertised `ack_versions: [1]` in its key
-  package (see Added). A sender that has not, or whose key package this
-  device has not seen since it upgraded, is answered with nothing, exactly as
-  before. The sender never reports such a message delivered: it re-seals the DM
-  under its current session and resends it once with the same id (verbatim
-  when the plaintext is gone, as for an outbox entry restored after a restart,
-  since a frame the recipient's queue dropped unattempted still decrypts); a
-  second answer for the same id resends nothing and leaves the entry to its
-  retry ladder, which ends in `message_failed` at max retries. Media chunks and frames whose envelope does not
-  parse keep their old handling. See
-  [Reserved metadata keys](docs/spec/wire-format.md#reserved-metadata-keys).
-- **Frames the SDK sends on its own no longer push "new message" to an
-  offline peer.** A data-sync offer, a key package or a typing frame is the
-  same MLS ciphertext to the relay as a user's text, so a device that
-  reconnected or heard from a peer sent pushes with nothing behind them.
-  Every engine-originated frame now carries `metadata["no_alert"] = "1"` in
-  the cleartext envelope for the relay to honour. User messages (plain, rich,
-  forwarded, media), connection requests and accepts, group chat messages and
-  group invites do not. A document carried over the media path is the SDK's
-  own, so every one of its chunks carries it. A 1:1 Welcome carries it only
-  when no user message is waiting on the session, decided again on every
-  resend, and never for a session a document transfer opens. The key is
-  unsigned and receivers ignore it. See
-  [Reserved metadata keys](docs/spec/wire-format.md#reserved-metadata-keys).
-- **A message the mesh carried settles when its recipient answers.** A direct
-  message to a peer no carrier could reach was handed to neighbours to carry,
-  but registered no pending acknowledgement, and an acknowledgement with none
-  to match settled only a message the relay had declared unreachable. So a
-  message to a peer two hops away arrived, was read, and stayed in the
-  sender's outbox, retried on its backoff, until the outbox lifetime failed it
-  with `message_failed` seven days later; `message_delivered` never fired. The
-  recipient's acknowledgement now settles any direct message still in the
-  outbox, parked or not, with `message_delivered`.
-- **The local API keeps a parked message's events with the client that
-  sent it.** The service forgot a message id on `message_undeliverable`,
-  which the engine emits when a recipient is away and repeats on every
-  reachability probe while it keeps the message. Every later event for that
-  message, its delivery receipt included, was broadcast to every connected
-  application. A connection request had the same fault on
-  `connection_request_undeliverable`, and the one the engine emits right
-  after the `message_failed` of a request it gives up on was broadcast
-  too. The id is now kept until `message_delivered` or `message_failed`,
-  and a settled id still reaches its client for the next 1024
-  settlements, so an event that trails the settling one is not
-  broadcast. Both example clients (`examples/local_api_client.py`
-  and `examples/local-api/client.mjs`) print a `message_undeliverable` as a
-  status line and keep waiting for the delivery, where they used to stop at
-  it; each takes `--deliver-timeout SECONDS` (30 by default).
-- **The Python Bluetooth LE peripheral knows its centrals on Linux.** It
-  read the list of subscribed centrals from a structure only bless's macOS
-  backend has, so on BlueZ it never announced a central to the core,
-  attributed every inbound fragment to the placeholder `ble-peer`, and gave
-  the core no route back to a phone that had connected to it. It now reads
-  the device BlueZ names in each read and write of its characteristics and
-  asks BlueZ when that device disconnects. A peripheral our own central
-  connected to is not counted, since it never calls into our server. With
-  several centrals connected, each write is attributed to its writer;
-  notifications still reach every subscribed central, which bless offers no
-  way around.
-- **The two Bluetooth LE roles no longer split a message between them.**
-  The central and the peripheral took fragments from the core's one queue
-  at the same time, so a message's fragments could leave on two links and
-  never reassemble. With both roles running, one drain now takes each
-  fragment and gives it to the central's link to that peer, else to the
-  peripheral when a central is subscribed. The peripheral alone takes
-  nothing while no central is subscribed, where a notification reached no
-  one. No board run has been done yet.
-- **An Android phone and a Mac running the Python service start a session
-  over Bluetooth LE.** They found and verified each other and never formed a
-  session: the Mac rotates its Bluetooth address, the phone kept a link to
-  each address, the Mac's peripheral then saw two centrals and attributed
-  every write to the placeholder `ble-peer`, and the core refused the phone's
-  key package as a transport identity mismatch (`TRANSPORT_IDENTITY_MISMATCH`).
-  The Python peripheral now names the central behind each write on macOS too,
-  serves the optional Hello characteristic, binds a central to the address its
-  hello proves and hands the core that central's fragments under that address.
-  The Python central writes its hello to a peer that serves one, bounded by
-  the characteristic's one-packet payload (bleak's BlueZ client reports a
-  23-byte MTU, which skipped every hello from Linux), and announces the peer
-  only once the hello is answered, so the key package the announce pushes
-  never reaches the peer ahead of it. The iOS central now writes its hello
-  too, once per connection, after its Message subscription and before its
-  handshake reads (`BleHelloPolicy`). Without it an iPhone could
-  verify a Python box and never start a session through the link it opened. A
-  link bound by a hello is never rebound, and a message's `sender` field never
-  replaces the binding. The iOS hello is written only when it fits one ATT
-  packet, since iOS sends a longer with-response write as a prepared write,
-  which a peripheral refuses for a hello. A central that says hello and never
-  subscribes has its binding dropped after 5 seconds, and its peer reported
-  lost unless another link reaches it. Two Macs and a Galaxy M36 (Android 16)
-  were run; no iPhone was.
-- **Android and the Python central keep one client link per peer.** A second
-  link that verifies as a peer already held (a peripheral advertising under an
-  old and a new address) is closed unannounced, and both leave that address
-  undialed for a minute, or until the kept link is gone. Kept, two such peers
-  filled Android's four connection slots, and the cap then refused every
-  inbound central.
-- **On macOS a peripheral notification reaches its recipient, and survives a
-  full transmit queue.** A fragment for a peer whose central said hello goes to
-  that central alone rather than to every subscriber, and a notification
-  CoreBluetooth refuses because its queue is full is retried once the stack
-  says it is ready. bless ignored the refusal, so a burst (a message, its
-  receipt, a key package) lost fragments and waited for the core's next retry.
-- **A dead Bluetooth LE link is dropped within about 20 seconds.**
-  CoreBluetooth kept a link to a Mac whose service had restarted "connected"
-  for over five minutes, and every frame written into it vanished. The Python
-  central now reads each link's Device id back every 15 seconds and drops a
-  link whose read fails, takes more than 5 seconds, or names another address,
-  reporting the peer lost unless its central is still bound on our own
-  peripheral, which still reaches it.
-- **A Mac that may not use Bluetooth no longer wedges the service.** Started
-  where macOS cannot grant Bluetooth (over ssh), the Bluetooth LE peripheral
-  blocked the service inside bless's constructor for good: no API socket, and
-  the 30 second transport start deadline never fired, because the block was on
-  the event loop itself. The peripheral now refuses to start when macOS reports
-  Bluetooth denied or restricted, builds its server off the loop with a 20
-  second deadline otherwise, and the service runs on its other transports.
-- **A resend is offered to the mesh when no carrier reaches the recipient.**
-  Only a message's first send was handed to neighbours when no carrier took
-  it. A message whose first attempt went into a direct link that had already
-  died (a half-open stream accepts frames until its keepalive notices) was
-  therefore never carried: by the time its acknowledgement timed out the link
-  was gone, every resend was refused and went back on the retry queue, and a
-  neighbour that could reach the recipient was never asked, for the life of
-  the outbox entry. The retry queue and both outbox flushes now make the same
-  offer the first send does, when no carrier takes the frame and when a
-  carrier takes it for a recipient it cannot reach. A resend over a link that
-  still reaches the recipient is not offered, so an ordinary retransmission
-  costs one copy.
+  fix above. BLE has no send confirmation loop to feed them.
 
 ## Archived releases
 
@@ -912,6 +466,7 @@ its own release table.
 
 | Series | Releases |
 |--------|----------|
+| [0.29.x](docs/changelog/0.29.md) | 0.29.0 |
 | [0.28.x](docs/changelog/0.28.md) | 0.28.0 |
 | [0.27.x](docs/changelog/0.27.md) | 0.27.0 |
 | [0.26.x](docs/changelog/0.26.md) | 0.26.0 |
