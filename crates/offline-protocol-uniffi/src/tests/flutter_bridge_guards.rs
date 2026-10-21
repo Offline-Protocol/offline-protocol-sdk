@@ -472,6 +472,13 @@ fn flutter_android_hosts_mesh_foreground_keep_alive() {
         "Flutter must sticky-deliver one-shot events like React Native"
     );
     assert!(
+        plugin_kt.contains("holdInboundEventIfBuffered")
+            && plugin_kt.contains("INBOUND_EVENT_BUFFER_CAPACITY = 256")
+            && plugin_kt.contains("message_received")
+            && plugin_kt.contains("inboundEvents.flush()"),
+        "Flutter Android must buffer inbound core events like React Native"
+    );
+    assert!(
         std::fs::read_to_string(
             flutter.join("android/src/main/kotlin/com/offlineprotocol/flutter/FlutterEngineChannel.kt"),
         )

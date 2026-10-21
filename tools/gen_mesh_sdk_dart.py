@@ -210,13 +210,26 @@ def method_fn(name: str) -> str:
     )
 
 
-def main() -> None:
+def render() -> str:
     parts = [HEADER]
     for m in METHODS:
         if m not in SKIP:
             parts.append(method_fn(m))
     parts.append(FOOTER)
-    OUT.write_text("".join(parts))
+    return "".join(parts)
+
+
+def main() -> None:
+    import sys
+
+    rendered = render()
+    if "--check" in sys.argv:
+        if OUT.read_text() != rendered:
+            print(f"{OUT.relative_to(REPO)} is stale; run {pathlib.Path(__file__).name}", file=sys.stderr)
+            raise SystemExit(1)
+        print(f"{OUT.name}: OK ({len(METHODS) - len(SKIP)} wrappers + typed helpers)")
+        return
+    OUT.write_text(rendered)
     print(f"Wrote {OUT}")
 
 

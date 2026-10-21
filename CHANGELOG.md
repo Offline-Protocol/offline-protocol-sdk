@@ -96,6 +96,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   `internet_session_superseded` from the transport latch (React Native iOS parity).
 - **Flutter Android one-shot redelivery.** Sticky `mesh_stopped_by_user` and
   `internet_session_superseded` with discard on internet re-enable.
+- **Flutter Android inbound event buffer.** Holds the five core message tags
+  when Dart is not listening (256-capacity sticky buffer, React Native parity).
+- **MeshSdk generator CI.** `gen_mesh_sdk_dart.py --check` in
+  `check-binding-generators.sh`.
 - **Flutter `OfflineProtocol.minimalFootprintConfig`.** Transport flags-only create
   payload for the smallest runtime surface (F9).
 - **Flutter Android mesh foreground keep-alive.** `MeshForegroundService` ships with

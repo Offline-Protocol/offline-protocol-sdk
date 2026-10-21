@@ -31,6 +31,7 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Flutter host for the Offline Protocol engine.
@@ -95,6 +96,22 @@ class OfflineProtocolPlugin :
             true
         },
     )
+
+    /**
+     * Inbound message events the core will not restate (same tags as React Native
+     * `BUFFERED_INBOUND_EVENT_TYPES` in `OfflineProtocolModule.kt`).
+     */
+    private val inboundEvents = StickyEventDispatcher(
+        buffer = StickyEventBuffer(maxEntries = INBOUND_EVENT_BUFFER_CAPACITY),
+        canEmit = { eventSink != null },
+        emit = { eventJson -> emitEventJsonForSticky(eventJson) },
+        schedule = { runnable ->
+            mainHandler.post(runnable)
+            true
+        },
+    )
+
+    private val inboundEventSequence = AtomicInteger(0)
 
     private val channelEnvironment: FlutterEngineChannel.Environment
         get() = FlutterEngineChannel.Environment(
@@ -219,6 +236,7 @@ class OfflineProtocolPlugin :
                 sawActivityStart = true
                 startedActivities.add(activity)
                 oneShotEvents.flush()
+                inboundEvents.flush()
                 runOnEngine("telemetry foreground") { notifyAppStateQuietly(AppState.ACTIVE) }
             }
 
@@ -271,6 +289,7 @@ class OfflineProtocolPlugin :
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
         eventSink = events
         oneShotEvents.flush()
+        inboundEvents.flush()
     }
 
     override fun onCancel(arguments: Any?) {
@@ -349,6 +368,27 @@ class OfflineProtocolPlugin :
         oneShotEvents.send(typeKey, eventJson)
     }
 
+    private fun holdInboundEventIfBuffered(eventJson: String): Boolean {
+        val json = try {
+            JSONObject(eventJson)
+        } catch (_: Exception) {
+            return false
+        }
+        val type = json.optString("type", "")
+        if (type !in BUFFERED_INBOUND_EVENT_TYPES) return false
+        val id = json.optString("message_id", "")
+            .ifEmpty { json.optString("file_id", "") }
+            .ifEmpty { "seq-${inboundEventSequence.incrementAndGet()}" }
+        inboundEvents.send("$type:$id", eventJson)
+        return true
+    }
+
+    private fun eventTypeOf(eventJson: String): String = try {
+        JSONObject(eventJson).optString("type", "unknown")
+    } catch (_: Exception) {
+        "unparseable"
+    }
+
     private fun replayEventsOnEngine(fromSeq: Int, toSeq: Int): List<Map<String, Any>> =
         eventReplay.replay(fromSeq, toSeq).map { entry ->
             mapOf(
@@ -366,9 +406,16 @@ class OfflineProtocolPlugin :
             object : EventCallback {
                 override fun onEvent(eventJson: String) {
                     try {
-                        emitEventJson(eventJson)
+                        if (!emitEventJsonForSticky(eventJson)) {
+                            holdInboundEventIfBuffered(eventJson)
+                        }
                     } catch (e: Throwable) {
-                        Log.e(TAG, "Core event not handed to Dart", e)
+                        Log.e(TAG, "Core event not handed to Dart: ${eventTypeOf(eventJson)}", e)
+                        try {
+                            holdInboundEventIfBuffered(eventJson)
+                        } catch (held: Exception) {
+                            Log.e(TAG, "Core event could not be held either", held)
+                        }
                     }
                 }
             },
@@ -407,6 +454,7 @@ class OfflineProtocolPlugin :
 
     private fun startOnEngine() {
         oneShotEvents.beginSession()
+        inboundEvents.beginSession()
         engineHost.startProtocolCore()
         engineHost.startBleTransportIfPresent()
         val ctx = applicationContext
@@ -449,6 +497,7 @@ class OfflineProtocolPlugin :
 
     private fun tearDownProtocol() {
         oneShotEvents.endSession()
+        inboundEvents.endSession()
         applicationContext?.let { FlutterMeshForegroundKeepAlive.stop(it) }
         engineHost.backgroundProcessor.stopProcessScheduler()
         val teardown = TeardownSequence()
@@ -476,6 +525,17 @@ class OfflineProtocolPlugin :
         private const val EVENTS_CHANNEL_NAME = "com.offlineprotocol/offline_protocol_events"
         private const val ENGINE_IDLE_SECONDS = 30L
         private const val NATIVE_LIBRARY_ERROR = "NATIVE_LIBRARY_UNAVAILABLE"
+
+        private const val INBOUND_EVENT_BUFFER_CAPACITY = 256
+
+        /** Must match `bindings/react-native/src/constants.ts` `BUFFERED_INBOUND_EVENT_TYPES`. */
+        private val BUFFERED_INBOUND_EVENT_TYPES: Set<String> = setOf(
+            "message_received",
+            "file_received",
+            "message_decryption_failed",
+            "message_delivered",
+            "message_failed",
+        )
 
         private val engineExecutor: ThreadPoolExecutor =
             ThreadPoolExecutor(1, 1, ENGINE_IDLE_SECONDS, TimeUnit.SECONDS, LinkedBlockingQueue()) { runnable ->

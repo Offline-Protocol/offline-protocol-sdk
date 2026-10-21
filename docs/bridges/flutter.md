@@ -120,8 +120,14 @@ implements the same gap-detection and `replayEvents` contract as React Native
 `admitNativeEvent`.
 
 Native code assigns `seq` and records to `EventReplayRing` only while an event
-sink is attached. Apps must subscribe to `OfflineProtocol.events` **before**
-`createFromConfig` if they need every event or replay recovery.
+sink is attached. Subscribe to `OfflineProtocol.events` **before**
+`createFromConfig` when you need contiguous `seq` values and gap replay.
+
+**Android** also holds the five inbound message tags (`message_received`,
+`file_received`, `message_decryption_failed`, `message_delivered`,
+`message_failed`) in a 256-entry sticky buffer when Dart is not listening, and
+flushes on subscribe and activity start (React Native Android parity). Other
+event types still require an attached listener at emit time.
 
 ## F5. Config parsing
 

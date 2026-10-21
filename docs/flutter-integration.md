@@ -41,8 +41,10 @@ full method-channel surface pinned in `method_channel_methods.txt` (React Native
 
 ### Events and one-shots
 
-Subscribe to `OfflineProtocol.events` before `createFromConfig` if you need the full
-stream and sequence replay. **`internet_session_superseded`**: Android sticky-delivers
+Subscribe to `OfflineProtocol.events` before `createFromConfig` for contiguous
+sequence numbers and gap replay. On **Android**, core inbound message events are
+also held in a native buffer when Dart is not listening (same five tags as React
+Native). **`internet_session_superseded`**: Android sticky-delivers
 when Dart is not listening; iOS re-emits on app foreground while the latch is set.
 **`mesh_stopped_by_user`**: Android only (mesh notification Stop). See
 [F7b](bridges/flutter.md#f7b-one-shot-events-internet_session_superseded-mesh_stopped_by_user).
