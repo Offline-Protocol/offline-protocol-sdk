@@ -389,7 +389,26 @@ pub(crate) fn user_agent(os_token: &str, os_major: u16) -> String {
     format!("offline-protocol-sdk/{SDK_VERSION} ({os_token}/{os_major})")
 }
 
-/// The production client: TLS through rustls with the bundled Mozilla roots,
+/// The roots the uploader trusts, as PEM: the server roots of the
+/// certificate authorities the ingest's edge can be issued from, and no
+/// others. See the file's header for the list and why.
+const INGEST_ROOTS_PEM: &[u8] = include_bytes!("ingest-roots.pem");
+
+/// [`INGEST_ROOTS_PEM`] as the agent's root store. The file is a constant the
+/// tests parse in full, so nothing is dropped here in practice; were a root
+/// ever unreadable, the upload would fail validation and back off rather than
+/// take the uploader thread down.
+fn ingest_roots() -> ureq::tls::RootCerts {
+    let roots: Vec<_> = ureq::tls::parse_pem(INGEST_ROOTS_PEM)
+        .filter_map(|item| match item {
+            Ok(ureq::tls::PemItem::Certificate(cert)) => Some(cert),
+            _ => None,
+        })
+        .collect();
+    ureq::tls::RootCerts::new_with_certs(&roots)
+}
+
+/// The production client: TLS through rustls with the ingest's pinned roots,
 /// no redirect followed, an HTTP CONNECT proxy when the environment names
 /// one, a connection pool that outlives the flush cadence, and bounded
 /// timeouts so a stalled socket cannot hold the uploader thread past its
@@ -432,12 +451,19 @@ impl UreqClient {
             // accepted. At zero every 3xx comes back as an answer, and
             // `classify_response` drops it.
             .max_redirects(0)
-            // The Mozilla roots compiled into the SDK, never the device's
-            // trust store, so an interception certificate installed only on
-            // the device fails validation.
+            // Only the roots that can issue the ingest's certificate, compiled
+            // into the SDK, never the device's trust store: an interception
+            // certificate installed only on the device fails validation, and
+            // so does one from any other authority in the Mozilla set,
+            // including one later found compromised. The crypto provider is
+            // named too, rather than taken from a process default another
+            // library may have installed.
             .tls_config(
                 ureq::tls::TlsConfig::builder()
-                    .root_certs(ureq::tls::RootCerts::WebPki)
+                    .root_certs(ingest_roots())
+                    .unversioned_rustls_crypto_provider(std::sync::Arc::new(
+                        rustls::crypto::ring::default_provider(),
+                    ))
                     .disable_verification(false)
                     .build(),
             )
@@ -1207,17 +1233,17 @@ pub(crate) mod tests {
         }
     }
 
-    /// A certificate nothing in the bundled roots issued is refused, as an
+    /// A certificate nothing in the pinned roots issued is refused, as an
     /// interception proxy's is, even when it names the host that was dialled.
     ///
     /// The server stands in for a TLS-intercepting proxy whose root a user
     /// installed in the device trust store: its certificate is valid for
     /// `127.0.0.1` and self-issued. The client must abort the handshake, so
     /// no request byte reaches the server. The accepting half would need a
-    /// certificate the Mozilla set trusts, so it is pinned on the agent's
+    /// certificate a pinned root issued, so it is pinned on the agent's
     /// configuration instead, by the test below.
     #[test]
-    fn a_certificate_the_bundled_roots_do_not_trust_is_refused() {
+    fn a_certificate_the_pinned_roots_do_not_trust_is_refused() {
         use rustls::pki_types::pem::PemObject;
         use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
@@ -1263,7 +1289,7 @@ pub(crate) mod tests {
                 headers: vec![("Content-Type", "application/json")],
                 body: r#"{"events":[]}"#,
             })
-            .expect_err("a certificate the bundled roots do not trust was accepted");
+            .expect_err("a certificate the pinned roots do not trust was accepted");
         assert!(
             refused.contains("invalid peer certificate") && refused.contains("UnknownIssuer"),
             "{refused}"
@@ -1274,14 +1300,79 @@ pub(crate) mod tests {
         );
     }
 
-    /// The trust anchor has no cheap behaviour test (it would need a
-    /// certificate authority of its own), so the setting itself is pinned.
+    /// SHA-256 of each root in `ingest-roots.pem`, in file order: ISRG Root
+    /// X1 and X2 (Let's Encrypt); GTS Root R1 to R4 (Google Trust Services);
+    /// SSL.com TLS RSA and ECC Root CA 2022, SSL.com Root Certification
+    /// Authority RSA and ECC; Sectigo Public Server Authentication Root R46
+    /// and E46, USERTrust RSA and ECC Certification Authority (Sectigo).
+    const INGEST_ROOT_FINGERPRINTS: [&str; 14] = [
+        "96bcec06264976f37460779acf28c5a7cfe8a3c0aae11a8ffcee05c0bddf08c6",
+        "69729b8e15a86efc177a57afb7171dfc64add28c2fca8cf1507e34453ccb1470",
+        "d947432abde7b7fa90fc2e6b59101b1280e0e1c7e4e40fa3c6887fff57a7f4cf",
+        "8d25cd97229dbf70356bda4eb3cc734031e24cf00fafcfd32dc76eb5841c7ea8",
+        "34d8a73ee208d9bcdb0d956520934b4e40e69482596e8b6f73c8426b010a6f48",
+        "349dfa4058c5e263123b398ae795573c4e1313c83fe68f93556cd5e8031b3c7d",
+        "8faf7d2e2cb4709bb8e0b33666bf75a5dd45b5de480f8ea8d4bfe6bebc17f2ed",
+        "c32ffd9f46f936d16c3673990959434b9ad60aafbb9e7cf33654f144cc1ba143",
+        "85666a562ee0be5ce925c1d8890a6f76a87ec16d4d7d5f29ea7419cf20123b69",
+        "3417bb06cc6007da1b961c920b8ab4ce3fad820e4aa30b9acbc4a74ebdcebc65",
+        "7bb647a62aeeac88bf257aa522d01ffea395e0ab45c73f93f65654ec38f25a06",
+        "c90f26f0fb1b4018b22227519b5ca2b53e2ca5b3be5cf18efe1bef47380c5383",
+        "e793c9b02fd8aa13e21c31228accb08119643b749c898964b1746d46c3d4cbd2",
+        "4ff460d54b9c86dabfbcfc5712e0400d2bed3fbc4d4fbdaa86e06adcd2a9ad7a",
+    ];
+
+    /// The trust anchors have no cheap behaviour test (it would need a
+    /// certificate authority of its own), so the setting itself is pinned:
+    /// exactly the fourteen roots in `ingest-roots.pem`, byte for byte, with
+    /// verification on and the crypto provider named.
     #[test]
-    fn the_agent_validates_against_the_bundled_roots_only() {
+    fn the_agent_validates_against_the_pinned_ingest_roots_only() {
+        use sha2::Digest;
+
         let client = UreqClient::new();
         let tls = client.agent.config().tls_config();
-        assert!(matches!(tls.root_certs(), ureq::tls::RootCerts::WebPki));
+        let ureq::tls::RootCerts::Specific(roots) = tls.root_certs() else {
+            panic!("the agent trusts a root set other than the pinned one");
+        };
+        let fingerprints: Vec<String> = roots
+            .iter()
+            .map(|cert| hex::encode(sha2::Sha256::digest(cert.der())))
+            .collect();
+        assert_eq!(fingerprints, INGEST_ROOT_FINGERPRINTS);
         assert!(!tls.disable_verification());
+        assert!(tls.unversioned_rustls_crypto_provider().is_some());
+    }
+
+    /// Every PEM block in the file is a certificate the agent takes, so a
+    /// malformed block cannot silently shrink the set the test above pins.
+    #[test]
+    fn every_block_in_the_roots_file_is_a_certificate() {
+        let blocks = std::str::from_utf8(INGEST_ROOTS_PEM)
+            .expect("ASCII")
+            .matches("-----BEGIN CERTIFICATE-----")
+            .count();
+        let parsed = ureq::tls::parse_pem(INGEST_ROOTS_PEM)
+            .map(|item| item.expect("a well-formed PEM block"))
+            .filter(|item| matches!(item, ureq::tls::PemItem::Certificate(_)))
+            .count();
+        assert_eq!((blocks, parsed), (14, 14));
+    }
+
+    /// The real ingest's chain validates against the pinned roots. Needs the
+    /// network, so it runs only on request:
+    /// `cargo test -p offline-protocol -- --ignored the_ingest_chain`.
+    /// Any HTTP answer passes (an unauthenticated batch is refused with a
+    /// 4xx); only a TLS or connection failure fails it.
+    #[test]
+    #[ignore = "needs the network"]
+    fn the_ingest_chain_validates_against_the_pinned_roots() {
+        let answer = UreqClient::new().post(&Request {
+            url: TELEMETRY_INGEST_URL,
+            headers: vec![("Content-Type", "application/json")],
+            body: r#"{"events":[]}"#,
+        });
+        assert!(answer.is_ok(), "{answer:?}");
     }
 
     #[test]

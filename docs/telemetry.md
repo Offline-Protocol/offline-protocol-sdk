@@ -234,14 +234,20 @@ has to know which client wrote the row. The counters beside it are unaffected.
 ## Where it goes and how
 
 Every batch is `POST`ed to one endpoint, fixed at build time, over TLS 1.2 or
-1.3 through `rustls` with the Mozilla root set compiled into the SDK. The
-device's own trust store is not consulted, and the uploader follows no
-redirect, so that endpoint is the only destination a batch is sent to.
+1.3 through `rustls`, trusting only the roots that can issue the ingest's
+certificate, compiled into the SDK. The ingest is served through Cloudflare,
+whose edge certificates come from Let's Encrypt, Google Trust Services or
+SSL.com, with a backup from one of those or Sectigo that Cloudflare deploys
+on its own; the SDK trusts those four authorities' server roots, fourteen in
+all, and nothing else. Neither the device's own trust store nor the rest of
+the Mozilla root set is consulted, so a compromise of any other authority
+cannot vouch for the ingest, and the uploader follows no redirect, so that
+endpoint is the only destination a batch is sent to.
 
 The telemetry uploader can use an HTTP CONNECT proxy selected through the HTTP
 client's supported environment configuration, read when telemetry is enabled.
 TLS remains between the SDK and the destination server and is validated
-against the bundled Mozilla root certificates. Installing an interception
+against the pinned ingest roots. Installing an interception
 certificate only in the device trust store does not make that certificate
 trusted by the SDK. Such an interception attempt fails certificate validation;
 queued telemetry remains subject to retry, capacity, and expiry limits.
@@ -253,10 +259,11 @@ is not used, and a system proxy setting that never reaches the process
 environment is not read. The debug tap below is the way to inspect what is
 sent.
 
-The bundled root set also ages with the SDK release. The ingest stays on a
-mainstream certificate authority; a change of CA is an SDK release event, and
-an SDK too old to trust the ingest's chain reports it as a network error in
-`telemetryStats().lastError` and backs off, sending nothing.
+The pinned root set also ages with the SDK release. The ingest stays behind
+an edge whose authorities are all in the set; a move to an authority outside
+it is an SDK release event, and an SDK too old to trust the ingest's chain
+reports it as a network error in `telemetryStats().lastError` and backs off,
+sending nothing.
 
 Requests carry `Authorization: Bearer <apiKey>`, `X-Mesh-Analytics-App-Id`,
 `Content-Type: application/json`, `Idempotency-Key: <batch_id>` and

@@ -351,6 +351,26 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   no caller outside their own test, and the failure half was the cause of the
   fix above. BLE has no send confirmation loop to feed them (#557).
 
+### Security
+
+- **The telemetry uploader trusts only the ingest's issuers.** Until now it
+  trusted the whole Mozilla root set bundled through `webpki-roots` 1.0.9,
+  which still carried emSign ECC Root CA - G3, one of the roots withdrawn
+  after eight eMudhra intermediates were found with weak keys in October 2026.
+  Anyone holding one of those keys on the network path could have presented
+  a certificate for the ingest and read the telemetry API key and the
+  batches. The uploader now trusts fourteen roots, the server roots of the
+  four authorities the ingest's edge issues from (Let's Encrypt, Google Trust
+  Services, SSL.com, and Sectigo for Cloudflare's backup certificate), pinned
+  by SHA-256 in a test, so a compromise of any other authority no longer
+  reaches the SDK. `webpki-roots` leaves the dependency graph, `ureq` drops to
+  `rustls-no-provider`, the uploader names the ring crypto provider instead of
+  taking a process default, and `rustls-webpki` moves to 0.103.16. Nothing
+  changes for an application: the endpoint, the proxy handling and the
+  device-store exclusion are as before. Applications on 0.26.0 to 0.29.0 that
+  enable telemetry should update. See
+  [ADR 0031](docs/adr/0031-telemetry-trusts-only-the-ingests-issuers.md).
+
 ## [0.29.0] — 2026-10-13
 
 > **Service bodies are sealed end to end.** A service request or response

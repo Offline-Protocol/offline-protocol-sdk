@@ -740,21 +740,27 @@ avoids.
 from the portal, which is the response to a leaked one. Rotation is a portal
 feature; the SDK carries whatever key the application passes.
 
-### R14. The bundled root set ages with the SDK
+### R14. The pinned root set ages with the SDK
 
-The pipe trusts the Mozilla root set compiled into the SDK release, never the
-device's trust store. If the ingest's certificate chain ever moves to a root
-absent from a shipped SDK, that SDK's telemetry stops: a network error,
-backoff, and `last_error` in the stats.
+The pipe trusts only the roots that can issue the ingest's certificate,
+compiled into the SDK release: the server roots of the four authorities the
+ingest's edge (Cloudflare) issues from, never the device's trust store and
+never the rest of the Mozilla set. If the ingest's certificate chain ever
+moves to a root absent from a shipped SDK, that SDK's telemetry stops: a
+network error, backoff, and `last_error` in the stats.
 
 **Why it stands:** consulting the device store would make an interception
 certificate installed on the device a trusted one, and redirection by a
-compromised device is exactly what the fixed endpoint and bundled roots exist
-to close.
+compromised device is exactly what the fixed endpoint and pinned roots exist
+to close. Trusting the whole Mozilla set instead would let any of its roots
+vouch for the ingest, so a compromise of one authority the ingest never uses
+(the eMudhra intermediates in October 2026) would reach every shipped SDK
+until it was rebuilt ([ADR 0031](../adr/0031-telemetry-trusts-only-the-ingests-issuers.md)).
 
-**What bounds it:** the ingest stays on a mainstream authority, a change of
-authority is treated as an SDK release event, and the failure is loud in the
-stats rather than silent.
+**What bounds it:** the set covers every authority the edge issues from,
+including the one its backup certificate uses, so a rotation the edge makes
+on its own stays inside it; a move outside the set is treated as an SDK
+release event, and the failure is loud in the stats rather than silent.
 
 ### R15. The Bluetooth LE app tag is unsigned and readable
 
@@ -1165,13 +1171,14 @@ is the one exception, and its egress is bounded as follows.
   no host callback that could repoint the stream, and no redirect the uploader
   follows. A build for a different ingest says so in its environment, and only
   `https://` is accepted.
-- **TLS 1.2 or 1.3 through rustls**, with the Mozilla root set compiled in.
-  The device's trust store is not consulted (R14).
+- **TLS 1.2 or 1.3 through rustls**, trusting only the ingest's issuers'
+  roots, compiled in. Neither the device's trust store nor the rest of the
+  Mozilla set is consulted (R14).
 - **An HTTP CONNECT proxy, when the environment names one.** The telemetry
   uploader can use an HTTP CONNECT proxy selected through the HTTP client's
   supported environment configuration, read when telemetry is enabled. TLS
   remains between the SDK and the destination server and is validated against
-  the bundled Mozilla root certificates. Installing an interception
+  the pinned ingest roots. Installing an interception
   certificate only in the device trust store does not make that certificate
   trusted by the SDK. Such an interception attempt fails certificate
   validation; queued telemetry remains subject to retry, capacity, and expiry
