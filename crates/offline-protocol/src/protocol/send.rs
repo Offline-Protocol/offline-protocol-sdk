@@ -6099,11 +6099,7 @@ impl OfflineProtocol {
                             hop_count,
                             transport,
                         );
-                        if app_send {
-                            state.emit_event(event);
-                        } else {
-                            state.emit_event_to_app(event);
-                        }
+                        state.emit_settlement(event, app_send);
                         drop(state);
                     } else {
                         error!(
@@ -6329,11 +6325,7 @@ impl OfflineProtocol {
             // Reported to telemetry only for the app's own messages, as on
             // the pending-ACK path; see [`OutboxEntry::app_send`].
             let event = Event::message_delivered(message_id.clone(), latency, hop_count, transport);
-            if app_send {
-                state.emit_event(event);
-            } else {
-                state.emit_event_to_app(event);
-            }
+            state.emit_settlement(event, app_send);
             drop(state);
         } else {
             error!("Failed to lock shared state for an ACK event, skipping event emission");

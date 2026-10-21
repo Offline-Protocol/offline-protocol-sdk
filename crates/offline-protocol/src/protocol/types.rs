@@ -2486,6 +2486,17 @@ impl SharedState {
         self.notify_handlers(&event);
     }
 
+    /// A message's terminal event (`MessageDelivered` or `MessageFailed`):
+    /// always to the app's handlers, and to telemetry only when `telemetry`
+    /// is set, which callers derive from [`OutboxEntry::app_send`]. One
+    /// method so every settle site applies the rule the same way.
+    pub(crate) fn emit_settlement(&self, event: Event, telemetry: bool) {
+        self.notify_handlers(&event);
+        if telemetry {
+            self.forward_to_telemetry(&event);
+        }
+    }
+
     fn notify_handlers(&self, event: &Event) {
         // Legacy `EventCallback` handlers run first and receive the raw
         // event. This preserves the pre-telemetry contract — any app that

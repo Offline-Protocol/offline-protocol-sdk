@@ -4230,11 +4230,7 @@ impl OfflineProtocol {
         })?;
         let failed = Event::message_failed(message_id.clone(), "Max retries exceeded", retry_count);
         // Telemetry counts the app's own messages only; see `emit_settlement`.
-        if app_send {
-            state.emit_event(failed);
-        } else {
-            state.emit_event_to_app(failed);
-        }
+        state.emit_settlement(failed, app_send);
         if let Some(recipient) = undeliverable_recipient {
             warn!(
                 recipient = %recipient,
@@ -4304,11 +4300,7 @@ impl OfflineProtocol {
     /// [`OutboxEntry::app_send`].
     pub(crate) fn emit_settlement(&self, event: Event, telemetry: bool) {
         if let Ok(state) = lock_shared_state(&self.shared_state) {
-            if telemetry {
-                state.emit_event(event);
-            } else {
-                state.emit_event_to_app(event);
-            }
+            state.emit_settlement(event, telemetry);
         }
     }
 
