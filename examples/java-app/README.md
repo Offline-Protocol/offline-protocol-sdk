@@ -1,15 +1,24 @@
 # Java example
 
 Two devices, Alice and Bob, in one JVM: they pair, establish an end-to-end
-encrypted session and exchange two messages, using the
+encrypted session, use conversation signals, transfer a file, and create an
+MLS group, using the
 [Java binding](../../bindings/java/README.md).
 
 ```
 alice off1q89jrev...
 bob   off1q9jxmhy...
   ok: bob and alice are paired
+  ok: bob sees alice online
+  ok: bob sees alice typing
   ok: bob received "hello bob" (encrypted end to end)
-  ok: alice received "hello alice"
+  ok: alice received a read receipt
+  ok: alice received a threaded reply
+  ok: bob received the original file bytes
+  ok: bob joined the MLS group
+  ok: bob received the group message
+alice transport [Internet]
+group members [off1..., off1...]
 done
 ```
 
@@ -23,11 +32,23 @@ done
 - Pairing from events: the app reads `pollEvent()`, and answers
   `connection_request_received` and `connection_accepted` with the key package
   exchange.
+- Presence and typing indicators, followed by a normal encrypted message, a
+  read receipt tied to its message ID, and a high-priority rich reply threaded
+  to the original message.
+- `sendFile` with byte-for-byte verification of the reassembled `file_received`
+  event. That event contains base64-encoded data for the host to save or use.
+- Creating an MLS group, inviting the paired peer, and sending a group message.
+- Reading active transports and group membership back from the SDK.
 - A transport's job, in a dozen lines: take what an engine wants to send
   (`internetGetNextMessage`) and hand it to the engine it is addressed to
-  (`internetMessageReceived`). A real app does this over a radio or a socket.
+  (`internetMessageReceived`), then acknowledge the successful carrier write
+  (`internetConfirmSent`). A real app does this over a radio or a socket.
   Everything else here, the pairing, the MLS session and the encryption, is the
   engine's own.
+
+The in-process carrier delivers frames directly between the two engines. It
+does not act as an internet relay or record transport metrics; the event checks
+show that the SDK processed each feature end to end.
 
 ## Run it
 

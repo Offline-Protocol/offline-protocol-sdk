@@ -2,22 +2,29 @@ package com.example.offlineprotocol;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.offlineprotocol.sdk.ContentType;
 import com.offlineprotocol.sdk.InternetMessage;
 import com.offlineprotocol.sdk.MessagePriority;
 import com.offlineprotocol.sdk.OfflineProtocol;
 import com.offlineprotocol.sdk.OverflowPolicy;
+import com.offlineprotocol.sdk.PresenceStatus;
 import com.offlineprotocol.sdk.ProtocolConfig;
 import com.offlineprotocol.sdk.ProtocolException;
+import com.offlineprotocol.sdk.SendMessageOptions;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Base64;
 import java.util.List;
 import java.util.function.BooleanSupplier;
+import java.util.function.Predicate;
 
 /**
  * Two devices, Alice and Bob, in one JVM. They pair, establish an end-to-end
- * encrypted session and exchange two messages.
+ * encrypted session, exchange conversation signals, and transfer a file.
  *
  * <p>A real app moves bytes over a radio or a socket. Here the "network" is a
  * loop that takes what one engine wants to send ({@code internetGetNextMessage})
@@ -109,6 +116,18 @@ public final class Main {
             return seen.stream().anyMatch(e -> type.equals(e.path("type").asText()));
         }
 
+        boolean saw(String type, Predicate<JsonNode> matches) {
+            return seen.stream().anyMatch(e -> type.equals(e.path("type").asText()) && matches.test(e));
+        }
+
+        boolean inGroup(String groupId) {
+            try {
+                return engine.listGroups().contains(groupId);
+            } catch (ProtocolException e) {
+                throw new IllegalStateException(e);
+            }
+        }
+
         String received(String content) {
             return seen.stream()
                     .filter(e -> "message_received".equals(e.path("type").asText()))
@@ -140,6 +159,9 @@ public final class Main {
                 for (Device to : devices) {
                     if (to.address.equals(message.recipientId())) {
                         to.engine.internetMessageReceived(from.address, message.data());
+                        // The carrier accepted the frame. A real socket bridge
+                        // confirms only after its write succeeds.
+                        from.engine.internetConfirmSent(message.messageId());
                     }
                 }
             }
@@ -162,6 +184,12 @@ public final class Main {
         System.out.println("  ok: " + what);
     }
 
+    private static List<Byte> bytes(byte[] data) {
+        List<Byte> result = new ArrayList<>(data.length);
+        for (byte value : data) result.add(value);
+        return result;
+    }
+
     public static void main(String[] args) throws Exception {
         Path root = Files.createTempDirectory("offline-protocol-java-example");
         Device alice = new Device("alice", Files.createDirectory(root.resolve("alice")));
@@ -177,13 +205,63 @@ public final class Main {
             until(devices, "bob and alice are paired",
                     () -> alice.saw("connection_accepted") && alice.engine.hasPendingKeyPackage(bob.address));
 
-            alice.engine.sendMessage(bob.address, "hello bob", MessagePriority.MEDIUM, null);
+            alice.engine.sendPresenceUpdate(bob.address, PresenceStatus.ONLINE);
+            until(devices, "bob sees alice online",
+                    () -> bob.saw("presence_updated", e ->
+                            alice.address.equals(e.path("peer_id").asText())
+                                    && "online".equalsIgnoreCase(e.path("status").asText())));
+
+            alice.engine.sendTypingIndicator(bob.address, bob.address, true);
+            until(devices, "bob sees alice typing",
+                    () -> bob.saw("typing_indicator_received", e ->
+                            alice.address.equals(e.path("sender").asText())
+                                    && e.path("is_typing").asBoolean()));
+
+            String greetingId = alice.engine.sendMessage(bob.address, "hello bob", MessagePriority.MEDIUM, null);
             until(devices, "bob received \"hello bob\" (encrypted end to end)",
                     () -> bob.received("hello bob") != null);
 
-            bob.engine.sendMessage(alice.address, "hello alice", MessagePriority.MEDIUM, null);
-            until(devices, "alice received \"hello alice\"",
-                    () -> alice.received("hello alice") != null);
+            bob.engine.sendReadReceipt(alice.address, List.of(greetingId));
+            until(devices, "alice received a read receipt",
+                    () -> alice.saw("read_receipt_received", e ->
+                            e.path("message_ids").isArray()
+                                    && e.path("message_ids").size() == 1
+                                    && greetingId.equals(e.path("message_ids").get(0).asText())));
+
+            // Reply by message ID so the recipient can thread the conversation.
+            bob.engine.sendMessageRich(alice.address, "hello alice",
+                    new SendMessageOptions(MessagePriority.HIGH, greetingId, ContentType.TEXT,
+                            null, null, null, "com.example.java"));
+            until(devices, "alice received a threaded reply",
+                    () -> alice.saw("message_received", e ->
+                            "hello alice".equals(e.path("content").asText())
+                                    && greetingId.equals(e.path("reply_to_msg").asText())));
+
+            // sendFile chunks and encrypts the bytes; file_received carries
+            // reassembled data as base64 for the host to save or display.
+            byte[] attachment = "Offline Protocol Java attachment\n".getBytes(StandardCharsets.UTF_8);
+            String fileId = alice.engine.sendFile(bob.address, bytes(attachment), "note.txt");
+            until(devices, "bob received the original file bytes",
+                    () -> bob.saw("file_received", e ->
+                            fileId.equals(e.path("file_id").asText())
+                                    && "note.txt".equals(e.path("file_name").asText())
+                                    && Arrays.equals(attachment, Base64.getDecoder().decode(
+                                            e.path("file_data").asText()))));
+
+            // MLS groups use the same carrier, but maintain their own group
+            // membership and encryption state.
+            String groupId = alice.engine.createGroup("Project team").groupId();
+            alice.engine.inviteToGroup(groupId, bob.address);
+            until(devices, "bob joined the MLS group",
+                    () -> bob.inGroup(groupId));
+            alice.engine.sendGroupMessage(groupId, "team update", MessagePriority.HIGH, null);
+            until(devices, "bob received the group message",
+                    () -> bob.saw("group_message_received", e ->
+                            groupId.equals(e.path("group_id").asText())
+                                    && "team update".equals(e.path("content").asText())));
+
+            System.out.println("alice transport " + alice.engine.getActiveTransports());
+            System.out.println("group members " + alice.engine.getGroupInfo(groupId).members());
 
             System.out.println("done");
         } finally {
