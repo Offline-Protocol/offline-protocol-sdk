@@ -416,6 +416,37 @@ fn flutter_aar_baseline_json_is_well_formed() {
 }
 
 #[test]
+fn flutter_docs_describe_ios_bridge_ci() {
+    let changelog = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../CHANGELOG.md"),
+    )
+    .unwrap_or_else(|e| panic!("cannot read CHANGELOG.md: {e}"));
+    assert!(
+        !changelog.contains("nothing in CI compiles the iOS plugin yet"),
+        "CHANGELOG must describe the Flutter iOS bridge CI job, not claim iOS is unchecked"
+    );
+    assert!(
+        changelog.contains("ci-typecheck-flutter-ios-bridge.sh"),
+        "CHANGELOG must name the iOS bridge typecheck script"
+    );
+    let readme = std::fs::read_to_string(
+        flutter_plugin_dir()
+            .parent()
+            .expect("flutter plugin parent")
+            .join("README.md"),
+    )
+    .unwrap_or_else(|e| panic!("cannot read bindings/flutter/README.md: {e}"));
+    assert!(
+        !readme.contains("No CI job compiles the iOS plugin yet"),
+        "bindings/flutter/README.md must describe Flutter Binding (iOS bridge)"
+    );
+    assert!(
+        readme.contains("Flutter Binding (iOS bridge)"),
+        "bindings/flutter/README.md must name the iOS CI job"
+    );
+}
+
+#[test]
 fn flutter_plugin_refuses_reticulum_and_nostr_at_create() {
     let flutter = flutter_plugin_dir();
     let dart = std::fs::read_to_string(flutter.join("lib/src/flutter_create_config_policy.dart"))

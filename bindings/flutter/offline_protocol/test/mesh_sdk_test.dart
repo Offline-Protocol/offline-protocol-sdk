@@ -61,4 +61,29 @@ void main() {
   test('getBatteryLevelTyped returns nullable int', () async {
     expect(await MeshSdk.getBatteryLevelTyped(), 87);
   });
+
+  test('sendMessageTyped forwards fields and returns message id', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (MethodCall call) async {
+      if (call.method == 'sendMessage') {
+        expect(call.arguments, {
+          'recipient': 'peer',
+          'content': 'hi',
+          'priority': 2,
+          'replyToMsg': 'msg-1',
+        });
+        return 'out-id';
+      }
+      return null;
+    });
+    expect(
+      await MeshSdk.sendMessageTyped(
+        recipient: 'peer',
+        content: 'hi',
+        priority: 2,
+        replyToMsg: 'msg-1',
+      ),
+      'out-id',
+    );
+  });
 }

@@ -194,6 +194,9 @@ static Future<dynamic> enableTelemetry([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('enableTelemetry', args);
 
 /// Native `endTelemetrySession` (see React Native `OfflineProtocolNativeModule.endTelemetrySession`).
+///
+/// Same engine-thread blocking semantics as [disableTelemetry]. Prefer
+/// [endTelemetrySessionAndWait] before engine teardown (F8).
 static Future<dynamic> endTelemetrySession([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('endTelemetrySession', args);
 
@@ -210,6 +213,9 @@ static Future<dynamic> finalizeFile([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('finalizeFile', args);
 
 /// Native `flushTelemetry` (see React Native `OfflineProtocolNativeModule.flushTelemetry`).
+///
+/// Same engine-thread blocking semantics as [disableTelemetry]. Prefer
+/// [flushTelemetryAndWait] when the next engine call must not queue behind flush (F8).
 static Future<dynamic> flushTelemetry([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('flushTelemetry', args);
 
@@ -678,6 +684,26 @@ static Future<dynamic> wipePersistedState([Map<String, dynamic>? args]) =>
 
   /// Flushes buffered telemetry on the engine thread (same blocking semantics).
   static Future<void> flushTelemetryAndWait() => _invoke<void>('flushTelemetry');
+
+  /// Plain send with explicit fields (same method-channel shape as `OfflineProtocol.sendMessage`).
+  static Future<String> sendMessageTyped({
+    required String recipient,
+    required String content,
+    int priority = 1,
+    String? replyToMsg,
+  }) async {
+    final id = await _invoke<dynamic>('sendMessage', {
+      'recipient': recipient,
+      'content': content,
+      'priority': priority,
+      if (replyToMsg != null) 'replyToMsg': replyToMsg,
+    });
+    final messageId = id?.toString() ?? '';
+    if (messageId.isEmpty) {
+      throw StateError('sendMessage returned no message id');
+    }
+    return messageId;
+  }
 
   /// Sends a rich message with explicit fields instead of a nested options map.
   static Future<dynamic> sendMessageRichTyped({

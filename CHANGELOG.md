@@ -107,9 +107,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   compile the React Native bridge sources where they are, less a named list
   of the ones that need React, so a transport fix reaches both. Nostr and
   Reticulum are not hosted yet, and a config that enables either is refused
-  at create. Until it is on pub.dev it is a path dependency. CI runs the Dart
-  tests and assembles the Android plugin against a size baseline; nothing in
-  CI compiles the iOS plugin yet. The contract is `docs/bridges/flutter.md`.
+  at create. Until it is on pub.dev it is a path dependency. CI runs Dart tests
+  and analysis, gates the Android release AAR against a size baseline, and
+  typechecks the iOS plugin plus shared Swift via
+  `ci-typecheck-flutter-ios-bridge.sh` (see `docs/bridges/flutter.md`).
 - **A Java binding.** `bindings/java` is a typed Java API generated from the
   interface definition by `uniffi-bindgen-java`, the fourth member of the
   artifact set that `scripts/generate-bindings.sh` writes with Swift, Kotlin

@@ -31,7 +31,9 @@ React (the module, its package, the mesh foreground and wake services, the
 sticky event dispatcher). Reticulum and Nostr **sources** compile with the
 plugin so the shared `ProtocolEngineHost` type-checks, but **create** and
 `enableTransport` / `forceTransport` refuse configs that turn those transports
-on until the Flutter plugin hosts them (use React Native today).
+on until the Flutter plugin hosts them (use React Native today). Release AAR
+size is gated in CI ([F9](#f9-binary-footprint)); use
+`OfflineProtocol.minimalFootprintConfig` when you ship a subset of transports.
 
 A new shared source reaches the plugin without being registered. A list of
 what to take would not: the Kotlin plugin ignores `java { include }`, so such

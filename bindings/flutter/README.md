@@ -170,14 +170,15 @@ start), subscribes to events, and prints the device `off1…` address. Details:
 
 ## Maintainers
 
-- **CI:** GitHub Actions job `Flutter Binding` (`.github/workflows/ci.yml`):
-  `flutter test`, `flutter analyze`, arm64 UniFFI into jniLibs, release AAR
-  assembly, and `measure-plugin-aar-size.sh --check`. Path filters skip the
-  native gate when only Dart or guard tests change; pushes to `main` run the
-  full job. No CI job compiles the iOS plugin yet; the manual typecheck is in
-  [docs/bridges/flutter.md](../../docs/bridges/flutter.md#what-ci-runs).
+- **CI:** GitHub Actions jobs `Flutter Binding` and `Flutter Binding (iOS bridge)`
+  (`.github/workflows/ci.yml`): `flutter test`, `flutter analyze`, arm64 UniFFI
+  into jniLibs, release AAR assembly with `measure-plugin-aar-size.sh --check`,
+  and iOS bridge typecheck via `scripts/ci-typecheck-flutter-ios-bridge.sh`.
+  Path filters skip native gates when only Dart or guard tests change; pushes to
+  `main` run the full paths. Details: [docs/bridges/flutter.md](../../docs/bridges/flutter.md#what-ci-runs).
+- **Footprint (F9):** prefer [OfflineProtocol.minimalFootprintConfig](offline_protocol/lib/src/offline_protocol.dart)
+  for production-shaped create payloads; see [baselines/README.md](baselines/README.md).
 - **Version:** the podspec and the Gradle build read it from
   `bindings/react-native/package.json`. Bump `offline_protocol/pubspec.yaml`
   with it; the release refuses a tag the pubspec does not match.
-- **AAR footprint:** [baselines/README.md](baselines/README.md).
 - **Rust guards:** `crates/offline-protocol-uniffi/src/tests/flutter_bridge_guards.rs`.
