@@ -103,8 +103,21 @@ pub const CHUNK_SIZE_BLE: usize = 4 * 1024;
 pub const CHUNK_SIZE_INTERNET: usize = 256 * 1024;
 
 /// Maximum chunks in flight for BLE media transfers.
-/// BLE's low bandwidth means fewer concurrent chunks to avoid congestion.
-pub const MEDIA_WINDOW_SIZE_BLE: usize = 2;
+///
+/// Sized to the ratchet-out-of-order budget rather than to BLE link capacity.
+/// At `MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER` (2) concurrent transfers,
+/// this ceiling times that cap must stay inside
+/// `SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE` (32) so a delayed chunk's
+/// decryption key is still held when it finally arrives. 8 x 2 = 16 keeps
+/// the headroom and matches the Internet-transport sibling. The compile-time
+/// assertion below pins the invariant.
+///
+/// A window of 1 or 2 serialises per-chunk ACK round-trips on BLE and makes a
+/// multi-megabyte transfer take minutes to tens of minutes against a healthy
+/// link whose MTU and connection interval would otherwise support an order of
+/// magnitude more throughput; measured on an iPhone 12 + Pixel pair with a
+/// 2.9 MB CRDT training delta at window=2 ran \~0.7 chunks/sec per file.
+pub const MEDIA_WINDOW_SIZE_BLE: usize = 8;
 
 /// Maximum chunks in flight for Internet media transfers.
 pub const MEDIA_WINDOW_SIZE_INTERNET: usize = 8;
@@ -127,17 +140,36 @@ pub const MAX_MEDIA_DESCRIPTORS: usize = 16;
 ///
 /// Encrypted chunks share the recipient's 1:1 session ratchet with text, and
 /// the receiver retains out-of-order message keys for only
-/// `SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE` (32) generations. Each transfer
-/// keeps up to `MEDIA_WINDOW_SIZE_INTERNET` (8) chunks in flight, so two
-/// concurrent transfers bound the media-side in-flight gap at 16
-/// generations, leaving room for up to 16 further messages interleaved on
-/// the same ratchet before a delayed chunk's key is deleted. That residual
-/// is not a guarantee: text sends are unbounded, and a chunk delayed while
-/// 32+ interleaved messages decrypt first is permanently undecryptable (the
-/// receiver surfaces this as `MessageDecryptionFailed`). Without this cap,
-/// concurrent transfers alone could push a delayed chunk beyond the
-/// tolerance and permanently stall its transfer.
+/// `SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE` (32) generations. BLE and Internet
+/// transfers now share the same window (`MEDIA_WINDOW_SIZE_BLE` =
+/// `MEDIA_WINDOW_SIZE_INTERNET` = 8), so under either transport two
+/// concurrent transfers bound the media-side in-flight gap at 16 generations,
+/// leaving room for up to 16 further messages interleaved on the same ratchet
+/// before a delayed chunk's key is deleted. That residual is not a guarantee:
+/// text sends are unbounded, and a chunk delayed while 32+ interleaved
+/// messages decrypt first is permanently undecryptable (the receiver surfaces
+/// this as `MessageDecryptionFailed`). Without this cap, concurrent transfers
+/// alone could push a delayed chunk beyond the tolerance and permanently
+/// stall its transfer.
 pub const MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER: usize = 2;
+
+/// Pins the per-transport in-flight budget inside the ratchet's out-of-order
+/// tolerance. Each transport's `window * MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER`
+/// is the worst-case number of ratchet generations a stalled chunk can be
+/// behind the current message. Raising any term past
+/// `SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE` makes that chunk's key eligible for
+/// deletion and the whole transfer permanently undecryptable. Stated at
+/// compile time so a future tweak to any of the three fails the build.
+const _: () = assert!(
+    MEDIA_WINDOW_SIZE_BLE * MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER
+        <= offline_protocol_mls::group::SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE as usize,
+    "BLE media in-flight product must fit the ratchet out-of-order tolerance",
+);
+const _: () = assert!(
+    MEDIA_WINDOW_SIZE_INTERNET * MAX_CONCURRENT_MEDIA_TRANSFERS_PER_PEER
+        <= offline_protocol_mls::group::SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE as usize,
+    "Internet media in-flight product must fit the ratchet out-of-order tolerance",
+);
 
 /// The receiver's forward window has to sit well above the number of
 /// messages this engine keeps in flight to one peer.
