@@ -12661,9 +12661,8 @@ mod tests {
         );
 
         // --- Edge 2: the two modules that produce those strings ------------
-        let kotlin_src = read(
-            "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt",
-        );
+        let kotlin_src =
+            read("android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt");
         let kotlin = code_only(slice_between(
             &kotlin_src,
             "fun getState(",
@@ -18392,7 +18391,9 @@ mod tests {
         body.lines()
             .filter_map(|line| {
                 let line = line.trim().trim_end_matches(',');
-                line.strip_prefix('"')?.strip_suffix('"').map(str::to_string)
+                line.strip_prefix('"')?
+                    .strip_suffix('"')
+                    .map(str::to_string)
             })
             .collect()
     }
@@ -18445,12 +18446,12 @@ mod tests {
             let entry = manifest
                 .get(name)
                 .unwrap_or_else(|| panic!("manifest missing `{name}`"));
-            let code = entry["code"].as_str().unwrap_or_else(|| {
-                panic!("manifest `{name}` code must be a string")
-            });
-            let message = entry["message"].as_str().unwrap_or_else(|| {
-                panic!("manifest `{name}` message must be a string")
-            });
+            let code = entry["code"]
+                .as_str()
+                .unwrap_or_else(|| panic!("manifest `{name}` code must be a string"));
+            let message = entry["message"]
+                .as_str()
+                .unwrap_or_else(|| panic!("manifest `{name}` message must be a string"));
             let swift = std::fs::read_to_string(
                 rn_dir.join("ios/ProtocolEngineHostBridgeReactNative.swift"),
             )
@@ -18461,11 +18462,9 @@ mod tests {
                 "ProtocolEngineHostBridgeReactNative.swift must pin `{name}` to \
                  `{swift_needle}`"
             );
-            let kotlin = std::fs::read_to_string(
-                rn_dir.join(
-                    "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridgeReactNative.kt",
-                ),
-            )
+            let kotlin = std::fs::read_to_string(rn_dir.join(
+                "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridgeReactNative.kt",
+            ))
             .expect("read kotlin adapter");
             let kotlin_needle = format!(r#"run(module, promise, "{code}", "{message}""#);
             assert!(
@@ -18529,9 +18528,8 @@ mod tests {
 
     #[test]
     fn react_native_android_wifi_direct_callback_does_not_wait_for_a_manager() {
-        let code = rn_source_code_only(
-            "android/src/main/java/com/offlineprotocol/ProtocolEngineHost.kt",
-        );
+        let code =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/ProtocolEngineHost.kt");
         for (what, pinned) in [
             (
                 "the registration, gated on the slot",
@@ -20079,9 +20077,8 @@ mod tests {
         let kotlin_bridge = rn_source_code_only(
             "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt",
         );
-        let kotlin_transport = rn_source_code_only(
-            "android/src/main/java/com/offlineprotocol/TransportBridge.kt",
-        );
+        let kotlin_transport =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/TransportBridge.kt");
 
         let region = |label: &str, code: &str, from: &str, to: &str| -> String {
             let start = code

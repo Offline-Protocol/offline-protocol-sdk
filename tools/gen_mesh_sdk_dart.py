@@ -31,11 +31,7 @@ SKIP = {
 
 HEADER = textwrap.dedent(
     """
-    import 'dart:convert';
-
     import 'package:flutter/services.dart';
-
-    import 'offline_protocol.dart';
 
     /// Typed wrappers for every native method-channel entry point (React Native parity).
     class MeshSdk {

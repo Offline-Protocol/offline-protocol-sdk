@@ -457,7 +457,8 @@ fn flutter_android_hosts_mesh_foreground_keep_alive() {
         "Flutter must compile MeshForegroundService, not exclude it"
     );
     let plugin_kt = std::fs::read_to_string(
-        flutter.join("android/src/main/kotlin/com/offlineprotocol/flutter/OfflineProtocolPlugin.kt"),
+        flutter
+            .join("android/src/main/kotlin/com/offlineprotocol/flutter/OfflineProtocolPlugin.kt"),
     )
     .unwrap_or_else(|e| panic!("cannot read OfflineProtocolPlugin.kt: {e}"));
     assert!(
@@ -481,7 +482,9 @@ fn flutter_android_hosts_mesh_foreground_keep_alive() {
     );
     assert!(
         std::fs::read_to_string(
-            flutter.join("android/src/main/kotlin/com/offlineprotocol/flutter/FlutterEngineChannel.kt"),
+            flutter.join(
+                "android/src/main/kotlin/com/offlineprotocol/flutter/FlutterEngineChannel.kt"
+            ),
         )
         .unwrap_or_else(|e| panic!("cannot read FlutterEngineChannel.kt: {e}"))
         .contains("discardOneShotEvent"),
@@ -497,10 +500,9 @@ fn flutter_android_hosts_mesh_foreground_keep_alive() {
         manifest.contains("MeshForegroundService"),
         "Flutter plugin manifest must declare MeshForegroundService"
     );
-    let flutter_ios_plugin = std::fs::read_to_string(
-        flutter.join("ios/Classes/OfflineProtocolPlugin.swift"),
-    )
-    .unwrap_or_else(|e| panic!("cannot read OfflineProtocolPlugin.swift: {e}"));
+    let flutter_ios_plugin =
+        std::fs::read_to_string(flutter.join("ios/Classes/OfflineProtocolPlugin.swift"))
+            .unwrap_or_else(|e| panic!("cannot read OfflineProtocolPlugin.swift: {e}"));
     assert!(
         flutter_ios_plugin.contains("restateInternetSupersededIfNeeded()")
             && flutter_ios_plugin.contains("supersedeRestatementJson()"),
