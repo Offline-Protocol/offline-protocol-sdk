@@ -318,9 +318,11 @@ class OfflineProtocolPlugin :
     private fun createOnEngine(arguments: Any?) {
         val configJson = arguments as? String
             ?: throw IllegalArgumentException("create expects a JSON string")
-        tearDownProtocol()
+        // Validated before the running engine is torn down: a config this
+        // plugin refuses must leave the current session as it was.
         val parsed = ProtocolConfigParser.parse(configJson)
         refuseUnhostedTransports(parsed.coreConfig)
+        tearDownProtocol()
         val proto = OfflineProtocol(parsed.coreConfig)
         proto.setEventCallback(object : EventCallback {
             override fun onEvent(eventJson: String) {

@@ -167,7 +167,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
                     try self.startOnEngine()
                     DispatchQueue.main.async { result(nil) }
                 case "stop":
-                    self.stopOnEngine()
+                    try self.stopOnEngine()
                     DispatchQueue.main.async { result(nil) }
                 case "destroy":
                     self.tearDownProtocol()
@@ -267,9 +267,11 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
                 userInfo: [NSLocalizedDescriptionKey: "create expects a JSON string"]
             )
         }
-        tearDownProtocol()
+        // Validated before the running engine is torn down: a config this
+        // plugin refuses must leave the current session as it was.
         let parsed = try ProtocolConfigParser.parse(configJson)
         try refuseUnhostedTransports(parsed.config)
+        tearDownProtocol()
         let proto = try OfflineProtocol(config: parsed.config)
         proto.setEventCallback(callback: FlutterEventCallback(emit: { [weak self] json in
             self?.emitEventJson(json)
@@ -360,11 +362,13 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         }
     }
 
-    private func stopOnEngine() {
+    /// The transports stop first and cannot fail; the core's failure reaches
+    /// Dart, as Android's `TeardownSequence` reports the first failure.
+    private func stopOnEngine() throws {
         bleManager?.stop()
         internetManager?.stop()
         wifiDirectManager?.stop()
-        try? protocolInstance?.stop()
+        try protocolInstance?.stop()
     }
 
     private func enableTransportOnEngine(type: String, configJson: String?) throws {
