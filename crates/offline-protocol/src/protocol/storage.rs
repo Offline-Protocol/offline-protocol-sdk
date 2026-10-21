@@ -4094,7 +4094,7 @@ impl OfflineProtocol {
         // application anything about it, so a later launch restores it, re-ages
         // it, and owns both halves of the settlement then — the same deferral
         // the walk's own early break relies on.
-        let mut expiry_settlements: Vec<Event> = Vec::new();
+        let mut expiry_settlements: Vec<(Event, bool)> = Vec::new();
         for entry in &absolutely_expired {
             if budget.is_spent() {
                 prune_bound_reached = true;
@@ -4119,16 +4119,19 @@ impl OfflineProtocol {
                 repair_action = "absolute_lifetime_exceeded",
                 "outbox_entry_dropped"
             );
-            expiry_settlements.push(Event::message_failed(
-                entry.message.id.clone(),
-                "Outbox lifetime exceeded",
-                entry.attempt_count,
+            expiry_settlements.push((
+                Event::message_failed(
+                    entry.message.id.clone(),
+                    "Outbox lifetime exceeded",
+                    entry.attempt_count,
+                ),
+                entry.app_send,
             ));
         }
         // Batched: this is one of the two loops `settle_restored_message_failures`
         // exists for. A store past its cap drives it into the hundreds, and the
         // per-event form takes the shared-state lock once each.
-        self.settle_restored_message_failures(expiry_settlements);
+        self.settle_restored_outbox_failures(expiry_settlements);
 
         // Prune to capacity BEFORE refreshing TTLs, keeping the newest by
         // last_sent_at. Delete the pruned overflow from storage so it can't
@@ -4150,7 +4153,7 @@ impl OfflineProtocol {
             // launch — the very figure this walk's old budget exemption was
             // argued from. Counted, never refused mid-entry, stopped between
             // entries: see the absolute-expiry drop above.
-            let mut capacity_settlements: Vec<Event> = Vec::new();
+            let mut capacity_settlements: Vec<(Event, bool)> = Vec::new();
             for entry in restored.drain(MAX_OUTBOX_ENTRIES..) {
                 if budget.is_spent() {
                     prune_bound_reached = true;
@@ -4160,22 +4163,31 @@ impl OfflineProtocol {
                 self.delete_outbox_key(&entry.message.id.as_str());
                 // Terminal, like the pending queue's capacity eviction: the app
                 // holds this id and nothing will ever resolve it otherwise.
-                capacity_settlements.push(Event::message_failed(
-                    entry.message.id.clone(),
-                    "Outbox capacity exceeded",
-                    entry.attempt_count,
+                capacity_settlements.push((
+                    Event::message_failed(
+                        entry.message.id.clone(),
+                        "Outbox capacity exceeded",
+                        entry.attempt_count,
+                    ),
+                    entry.app_send,
                 ));
             }
             // Batched for the same reason as the expiry settlements above.
-            self.settle_restored_message_failures(capacity_settlements);
+            self.settle_restored_outbox_failures(capacity_settlements);
         }
 
-        self.settle_restored_message_failures(unrecoverable.iter().map(|key| {
-            Self::unrecoverable_message_settlement(
+        // The record would not open, so whether the app sent it is unknown:
+        // its `message_failed` reaches the app and not telemetry, the rule the
+        // live path applies to a message missing from the outbox. Anything
+        // else this yields (a diagnostic for an unparseable key) is unchanged.
+        self.settle_restored_outbox_failures(unrecoverable.iter().map(|key| {
+            let event = Self::unrecoverable_message_settlement(
                 key,
                 "Outbox entry could not be recovered from protocol-state storage",
                 0,
-            )
+            );
+            let telemetry = !matches!(event, Event::MessageFailed { .. });
+            (event, telemetry)
         }));
         if listed > OUTBOX_RESTORE_KEY_CAP {
             warn!(

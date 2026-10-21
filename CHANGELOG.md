@@ -113,6 +113,17 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Changed
 
+- **`MessageDelivered.latency_ms` runs from the first send.** An app that shows or logs
+  this value now sees the wait since a carrier first accepted the message,
+  not the last attempt. On the usual path it ran from when the pending
+  acknowledgement was registered, so a message re-sent after its
+  acknowledgement timed out, or parked after the relay took it, reported only
+  its last attempt, while a parked message settled by a neighbour reported the
+  whole wait. Both paths now measure from the first transmit a carrier
+  accepted; time spent before that, while every transport refused the
+  message, is still not included. Transport scoring still uses the last
+  attempt's round trip.
+
 - **The iOS and Android libraries are built for size, and still unwind.** A
   new `mobile` profile, `release` at opt-level "s", builds both, in the
   release workflow, the React Native scripts and CI; the desktop libraries
@@ -166,6 +177,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **Telemetry counts a delivered message once, and only the application's.**
+  Every acknowledged frame reported `protocol.message.delivered` to the
+  telemetry pipe: each chunk of a media transfer, and internal frames such as
+  connection requests, key packages, Welcomes and data-sync frames. None of
+  them is ever reported as sent, so the dashboard's delivered count, success
+  rate, hop count and latency were inflated against its sent count, most for
+  apps that send media. The pipe now hears a delivery only for a message sent
+  through the app send path (`send_message`, `forward_message`, a rich send).
+  `MessageFailed` follows the same rule, so the success rate (delivered over
+  delivered plus failed) is no longer lowered by internal frames that failed.
+  `on_event` is unchanged: the app still receives every `MessageDelivered` and
+  `MessageFailed` it did before.
 - **A phone no longer loses a Bluetooth peer it is still linked to.** In the
   2026-10-19 volume test an iPhone and an Android phone held two Bluetooth LE
   links between them; the one that stalled was torn down, the iPhone's redial

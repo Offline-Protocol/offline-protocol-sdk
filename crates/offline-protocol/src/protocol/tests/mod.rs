@@ -4380,6 +4380,255 @@ fn test_delivery_ack_settles_pending_connection_request() {
     );
 }
 
+fn ack_from_bob(acked: &MessageId) -> Message {
+    Message::builder(
+        UserId::new("bob").unwrap(),
+        UserId::new("user123").unwrap(),
+        AppId::new("test-app").unwrap(),
+    )
+    .content(String::new())
+    .metadata(ACK_FOR_KEY, acked.as_str())
+    .build()
+}
+
+fn delivered_ids(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageDelivered { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn delivered_records(records: &[TelemetryRecord]) -> usize {
+    records
+        .iter()
+        .filter(|r| {
+            matches!(r, TelemetryRecord::Protocol(e) if e.telemetry_name() == "protocol.message.delivered")
+        })
+        .count()
+}
+
+/// Telemetry's delivered count is read against its sent count, so it counts
+/// the application's messages only. An acknowledged internal frame (here a
+/// connection request) still reaches `on_event` exactly as before, and never
+/// reaches the sink; before, it counted as a delivered message that was never
+/// sent.
+#[test]
+fn test_delivery_of_an_internal_frame_reaches_the_app_but_not_telemetry() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+
+    let app_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let request_id = protocol
+        .send_connection_request("bob", "Alice", None, None)
+        .unwrap();
+    assert!(protocol.outbox.get(&app_id).unwrap().app_send);
+    assert!(!protocol.outbox.get(&request_id).unwrap().app_send);
+    sink.take();
+
+    protocol.handle_ack_message(&ack_from_bob(&app_id));
+    protocol.handle_ack_message(&ack_from_bob(&request_id));
+
+    assert_eq!(
+        delivered_ids(&events.lock().unwrap()),
+        vec![app_id.as_str(), request_id.as_str()],
+        "the app hears about both deliveries, as it always has"
+    );
+    assert_eq!(
+        delivered_records(&sink.take()),
+        1,
+        "telemetry counts the app's message and not the connection request"
+    );
+}
+
+/// The settle path with no pending ACK (a parked DM a neighbour carried)
+/// applies the same rule.
+#[test]
+fn test_delivery_without_a_pending_ack_reaches_telemetry_only_for_an_app_send() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+
+    let ids: Vec<_> = (0..2)
+        .map(|i| {
+            protocol
+                .send_message(
+                    "bob",
+                    &format!("hello {i}"),
+                    None::<MessagePriority>,
+                    None::<String>,
+                )
+                .unwrap()
+        })
+        .collect();
+    for id in &ids {
+        protocol
+            .on_transport_send_failed(
+                &id.as_str(),
+                Some("recipient_unreachable: peer offline".to_string()),
+            )
+            .unwrap();
+        assert!(!protocol.ack_manager.is_waiting_for_ack(id));
+    }
+    // Stand in for an entry the app did not send.
+    protocol.outbox.get_mut(&ids[1]).unwrap().app_send = false;
+    sink.take();
+
+    protocol.handle_ack_message(&ack_from_bob(&ids[0]));
+    protocol.handle_ack_message(&ack_from_bob(&ids[1]));
+
+    assert_eq!(delivered_records(&sink.take()), 1);
+}
+
+/// A delivery reports how long it took from the first send, on the pending-ACK
+/// path as on the other one. Before, a message whose ACK was registered after
+/// its first send (a deferral, a re-send after an ACK timeout) reported only
+/// its last attempt.
+#[test]
+fn test_delivered_latency_runs_from_the_first_send() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+
+    let id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    assert!(protocol.ack_manager.is_waiting_for_ack(&id));
+    protocol.outbox.get_mut(&id).unwrap().first_sent_at =
+        Utc::now() - chrono::Duration::seconds(30);
+
+    protocol.handle_ack_message(&ack_from_bob(&id));
+
+    let latency = events
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|e| match e {
+            Event::MessageDelivered { latency_ms, .. } => Some(*latency_ms),
+            _ => None,
+        })
+        .expect("delivered");
+    assert!(
+        latency >= 30_000,
+        "latency {latency} ms is the last attempt only"
+    );
+}
+
+fn failed_records(records: &[TelemetryRecord]) -> usize {
+    records
+        .iter()
+        .filter(|r| {
+            matches!(r, TelemetryRecord::Protocol(e) if e.telemetry_name() == "protocol.message.failed")
+        })
+        .count()
+}
+
+/// Failures follow the rule deliveries do: telemetry's success rate divides
+/// delivered by delivered plus failed, so a failed internal frame counted
+/// there would lower the rate of messages the app never sent. Retry
+/// exhaustion and outbox expiry both apply it; the app hears every failure.
+#[test]
+fn test_failure_of_an_internal_frame_reaches_the_app_but_not_telemetry() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+
+    let app_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let request_id = protocol
+        .send_connection_request("bob", "Alice", None, None)
+        .unwrap();
+    sink.take();
+
+    protocol.handle_max_retries_exceeded(&app_id, 10).unwrap();
+    protocol
+        .handle_max_retries_exceeded(&request_id, 10)
+        .unwrap();
+
+    let failed: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed, vec![app_id.as_str(), request_id.as_str()]);
+    assert_eq!(failed_records(&sink.take()), 1, "only the app's message");
+
+    // Outbox expiry, for an internal frame and an app message.
+    let expired_app = protocol
+        .send_message("bob", "later", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let expired_request = protocol
+        .send_connection_request("carol", "Alice", None, None)
+        .unwrap();
+    for id in [&expired_app, &expired_request] {
+        protocol.ack_manager.remove_ack(id);
+        let entry = protocol.outbox.get_mut(id).unwrap();
+        entry.first_sent_at = Utc::now() - chrono::Duration::days(30);
+        entry.last_sent_at = entry.first_sent_at;
+    }
+    sink.take();
+    protocol.cleanup_outbox();
+    assert!(!protocol.outbox.contains_key(&expired_app));
+    assert!(!protocol.outbox.contains_key(&expired_request));
+    assert_eq!(failed_records(&sink.take()), 1, "only the app's message");
+}
+
 /// An authenticated answer from the peer settles every request tracked
 /// toward them (the accept/reject frame carries no request id, so
 /// settlement is recipient-keyed): accept clears bob's entry while
@@ -8713,6 +8962,7 @@ fn test_unreachable_media_chunk_resolves_file_id() {
             last_transport: Some(TransportType::BLE),
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
     protocol
@@ -10076,6 +10326,7 @@ fn test_unreachable_media_chunk_is_not_parked() {
             last_transport: Some(TransportType::Internet),
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
     protocol
@@ -10554,6 +10805,7 @@ fn test_unreachable_media_chunk_is_offered_to_the_mesh() {
             last_transport: Some(TransportType::Internet),
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
     protocol
@@ -10975,6 +11227,7 @@ fn test_unpark_cancel_spares_connection_request_ack() {
             last_transport: Some(TransportType::Internet),
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
     protocol
@@ -11154,6 +11407,7 @@ fn test_unpark_cancel_spares_welcome_ack() {
             last_transport: Some(TransportType::Internet),
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
     protocol
@@ -11365,6 +11619,7 @@ fn test_cleanup_outbox_absolute_lifetime_cap_is_terminal_in_process() {
                 last_transport: None,
                 reseal: None,
                 relay_pushed: false,
+                app_send: false,
             },
         )
     };
@@ -19324,6 +19579,7 @@ fn test_pending_decrypt_record_past_persisted_max_age_is_dropped_with_event() {
     let expired: Vec<_> = bob
         .deferred_restore_settlements
         .iter()
+        .map(|(event, _)| event)
         .filter_map(|event| match event {
             Event::MessageDecryptionFailed {
                 message_id,
@@ -19944,7 +20200,12 @@ fn test_pending_decrypt_restore_overflow_is_settled_after_start() {
             "drop_oldest={drop_oldest}: nothing may reach the app during initialize_mls"
         );
         assert_eq!(
-            dropped_ids(&bob.deferred_restore_settlements),
+            dropped_ids(
+                &bob.deferred_restore_settlements
+                    .iter()
+                    .map(|(event, _)| event.clone())
+                    .collect::<Vec<_>>()
+            ),
             vec![dropped.id.as_str()],
             "drop_oldest={drop_oldest}: the drop waits for start()"
         );
@@ -19997,6 +20258,7 @@ fn test_pending_decrypt_restore_drops_are_budgeted_and_reported_with_their_delet
     let reported = |bob: &OfflineProtocol| -> HashSet<String> {
         bob.deferred_restore_settlements
             .iter()
+            .map(|(event, _)| event)
             .filter_map(|event| match event {
                 Event::MessageDecryptionFailed {
                     message_id,
@@ -22409,6 +22671,7 @@ fn test_outbox_capacity_prune_stays_inside_the_launch_budget() {
                 last_transport: None,
                 reseal: None,
                 relay_pushed: false,
+                app_send: false,
             },
         );
     }
@@ -22489,6 +22752,7 @@ fn test_outbox_absolute_expiry_prune_stays_inside_the_launch_budget() {
                 last_transport: None,
                 reseal: None,
                 relay_pushed: false,
+                app_send: false,
             },
         );
     }
@@ -26179,6 +26443,304 @@ fn test_outbox_persisted_and_restored_after_restart() {
     assert_eq!(restored.content, "durable");
 }
 
+/// `OutboxEntry::app_send` is on the entry from its first write to storage,
+/// on both creation paths: a deferred send (`ensure_outbox_entry`) and an
+/// accepted one (`mark_message_sent`). Entries are not re-persisted on later
+/// attempts, so a flag set after creation stayed in memory and every app
+/// message restored after a restart dropped out of telemetry.
+#[test]
+fn test_app_send_flag_survives_restart_and_restored_deliveries_reach_telemetry() {
+    let storage = Arc::new(InMemoryStorage::new());
+
+    let (deferred_id, sent_id, request_id);
+    {
+        let mut protocol = OfflineProtocol::new(outbox_persistence_config()).unwrap();
+        protocol
+            .enable_message_persistence_for_test(storage.clone())
+            .unwrap();
+        let flaky = FlakyTransport::fail_first(TransportType::BLE, 1);
+        protocol
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(flaky));
+        protocol.start().unwrap();
+
+        // The first send fails and is deferred; the second is accepted.
+        deferred_id = protocol
+            .send_message("bob", "deferred", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        sent_id = protocol
+            .send_message("bob", "accepted", None::<MessagePriority>, None::<String>)
+            .unwrap();
+        request_id = protocol
+            .send_connection_request("carol", "Alice", None, None)
+            .unwrap();
+        assert!(
+            protocol.staged_app_send.is_none(),
+            "staging never outlives a dispatch"
+        );
+    }
+
+    let mut protocol = OfflineProtocol::new(outbox_persistence_config()).unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+    assert!(protocol.outbox.get(&deferred_id).unwrap().app_send);
+    assert!(protocol.outbox.get(&sent_id).unwrap().app_send);
+    assert!(!protocol.outbox.get(&request_id).unwrap().app_send);
+
+    let mock_transport = MockTransport::new(TransportType::BLE);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(mock_transport));
+    protocol.start().unwrap();
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+
+    for id in [&deferred_id, &sent_id] {
+        let entry = protocol.outbox.get(id).unwrap().message.clone();
+        protocol.ensure_ack_registration(&entry).unwrap();
+    }
+    sink.take();
+    protocol.handle_ack_message(&ack_from_bob(&deferred_id));
+    protocol.handle_ack_message(&ack_from_bob(&sent_id));
+    assert_eq!(
+        delivered_records(&sink.take()),
+        2,
+        "both restored app messages are counted when delivered"
+    );
+}
+
+/// The staged id is restored, not cleared, when a dispatch returns, so a
+/// dispatch nested inside another cannot strip the outer message's flag.
+#[test]
+fn test_app_send_staging_is_restored_after_a_dispatch() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let outer = MessageId::new();
+    protocol.staged_app_send = Some(outer.clone());
+    let inner = protocol
+        .send_message("bob", "inner", None::<MessagePriority>, None::<String>)
+        .unwrap();
+
+    assert!(protocol.outbox.get(&inner).unwrap().app_send);
+    assert_eq!(
+        protocol.staged_app_send,
+        Some(outer),
+        "the outer dispatch's staging survives the inner one"
+    );
+}
+
+/// Restore settles three kinds of outbox record at launch, and each follows
+/// the live rule once `start()` drains them: an absolutely-expired app
+/// message reaches telemetry, an absolutely-expired internal frame does not,
+/// and a record that would not open (origin unknown) does not. The app hears
+/// all three. This is the path that lost the flag before it was persisted
+/// with the entry.
+#[test]
+fn test_restored_outbox_settlements_reach_telemetry_only_for_app_sends() {
+    let storage = Arc::new(InMemoryStorage::new());
+    let now = Utc::now();
+    let lifetime_ms = 1000;
+
+    let expired = |content: &str, app_send: bool| OutboxEntry {
+        message: test_message(&id("bob"), content),
+        attempt_count: 2,
+        first_sent_at: now - ChronoDuration::seconds(60),
+        last_sent_at: now - ChronoDuration::seconds(30),
+        last_transport: None,
+        reseal: None,
+        relay_pushed: false,
+        app_send,
+    };
+    let app = expired("app message", true);
+    let internal = expired("internal frame", false);
+    store_outbox_entry(&storage, &app);
+    store_outbox_entry(&storage, &internal);
+    // Not a seal envelope, so the read destroys it; the key is a message id,
+    // so its loss is settled as that message's failure.
+    let unreadable = MessageId::new();
+    storage
+        .store(storage_keys::OUTBOX, &unreadable.as_str(), b"garbage")
+        .unwrap();
+
+    let mut config = create_test_config();
+    config.reliability.retry.outbox_max_lifetime_ms = lifetime_ms;
+    let mut protocol = OfflineProtocol::new(config).unwrap();
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+    protocol
+        .enable_message_persistence_for_test(storage.clone())
+        .unwrap();
+    assert!(
+        events.lock().unwrap().is_empty(),
+        "restore settlements wait for start()"
+    );
+
+    let transport = MockTransport::new(TransportType::BLE);
+    transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::BLE, Box::new(transport));
+    protocol.start().unwrap();
+
+    let mut failed: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    failed.sort();
+    let mut expected = vec![
+        app.message.id.as_str(),
+        internal.message.id.as_str(),
+        unreadable.as_str(),
+    ];
+    expected.sort();
+    assert_eq!(failed, expected, "the app hears every settlement");
+    assert_eq!(
+        failed_records(&sink.take()),
+        1,
+        "telemetry counts the restored app message only"
+    );
+}
+
+/// Live eviction reads the flag from the entry it retires: an evicted
+/// internal frame reaches the app and not telemetry, an evicted app message
+/// reaches both.
+#[test]
+fn test_outbox_eviction_reaches_telemetry_only_for_an_app_send() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+
+    let app_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let request_id = protocol
+        .send_connection_request("carol", "Alice", None, None)
+        .unwrap();
+    // An entry awaiting its acknowledgement is never evicted.
+    for id in [&app_id, &request_id] {
+        protocol.ack_manager.remove_ack(id);
+    }
+    sink.take();
+
+    assert!(protocol.make_outbox_room(None));
+    assert!(protocol.make_outbox_room(None));
+    assert!(protocol.outbox.is_empty());
+
+    let failed: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageFailed {
+                message_id, reason, ..
+            } if reason == "Outbox capacity exceeded" => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed.len(), 2, "the app hears both evictions: {failed:?}");
+    assert_eq!(failed_records(&sink.take()), 1, "only the app's message");
+}
+
+/// A message queued for session establishment and flushed later still
+/// creates its entry inside the app dispatch, so it is the app's.
+#[test]
+fn test_a_flushed_pending_message_is_an_app_send() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = MessageId::new();
+    let mut pending = PendingMessage {
+        content: "queued for a session".to_string(),
+        priority: MessagePriority::Medium,
+        message_id: message_id.clone(),
+        reply_to_msg: None,
+        forwarded_from: None,
+        content_type: ContentType::Text,
+        media_metadata: None,
+        rich: None,
+        queued_at: Utc::now(),
+        serialized_bytes: 0,
+        app_id: None,
+    };
+    pending.measure();
+    protocol
+        .pending_encrypted_messages
+        .insert("bob".to_string(), vec![pending]);
+
+    protocol.flush_pending_messages("bob").unwrap();
+
+    assert!(
+        protocol
+            .outbox
+            .get(&message_id)
+            .expect("the flushed message is in the outbox")
+            .app_send
+    );
+}
+
+/// A record written before `app_send` existed restores as not the app's,
+/// which keeps a delivery restored across the upgrade out of telemetry and
+/// in `on_event`.
+#[test]
+fn test_a_legacy_outbox_record_restores_as_not_an_app_send() {
+    let entry = OutboxEntry {
+        message: test_message(&id("bob"), "written by an older version"),
+        attempt_count: 1,
+        first_sent_at: Utc::now(),
+        last_sent_at: Utc::now(),
+        last_transport: None,
+        reseal: None,
+        relay_pushed: false,
+        app_send: true,
+    };
+    let mut legacy = serde_json::to_value(&entry).unwrap();
+    assert!(legacy.as_object_mut().unwrap().remove("app_send").is_some());
+
+    let restored: OutboxEntry = serde_json::from_value(legacy).unwrap();
+    assert!(!restored.app_send);
+}
+
 #[test]
 fn test_remove_outbox_entry_clears_storage() {
     let storage = Arc::new(InMemoryStorage::new());
@@ -26262,6 +26824,7 @@ fn test_restore_outbox_skips_corrupted_entries() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
     storage
@@ -26310,6 +26873,7 @@ fn test_restore_outbox_prunes_overflow() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         };
         if i == 0 {
             oldest_id = Some(entry.message.id.as_str());
@@ -26355,6 +26919,7 @@ fn test_restore_outbox_refreshes_expired_ttl_carrier_relative() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
 
@@ -26506,6 +27071,7 @@ fn test_restore_outbox_prune_keeps_fresh_over_refreshed_stale() {
                 last_transport: None,
                 reseal: None,
                 relay_pushed: false,
+                app_send: false,
             },
         );
     }
@@ -26520,6 +27086,7 @@ fn test_restore_outbox_prune_keeps_fresh_over_refreshed_stale() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         };
         lapsed_ids.push(entry.message.id.as_str().to_string());
         store_outbox_entry(&storage, &entry);
@@ -27358,6 +27925,7 @@ fn test_cleanup_outbox_media_expiry_does_not_emit_message_failed() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
 
@@ -27395,6 +27963,7 @@ fn test_restore_outbox_drops_absolutely_expired() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
 
@@ -27410,6 +27979,7 @@ fn test_restore_outbox_drops_absolutely_expired() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
 
@@ -27515,6 +28085,7 @@ fn test_flush_outbox_for_peer_includes_media_outbox() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
 
@@ -27581,6 +28152,7 @@ fn test_flush_outbox_all_includes_media_outbox() {
             last_transport: None,
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
 
@@ -35096,6 +35668,7 @@ fn test_restore_settlements_survive_an_initialization_rollback() {
     let settled: Vec<_> = protocol
         .deferred_restore_settlements
         .iter()
+        .map(|(event, _)| event)
         .filter_map(|event| match event {
             Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
             _ => None,
@@ -35396,13 +35969,17 @@ fn test_restore_settles_an_unreadable_outbox_record_whose_key_is_not_a_message_i
         .unwrap();
 
     assert!(
-        protocol.deferred_restore_settlements.iter().any(|event| {
-            matches!(
-                event,
-                Event::ConvergenceDiag { stage, peer_id, .. }
-                    if stage == "pending_state_lost" && peer_id == "not-a-uuid"
-            )
-        }),
+        protocol
+            .deferred_restore_settlements
+            .iter()
+            .map(|(event, _)| event)
+            .any(|event| {
+                matches!(
+                    event,
+                    Event::ConvergenceDiag { stage, peer_id, .. }
+                        if stage == "pending_state_lost" && peer_id == "not-a-uuid"
+                )
+            }),
         "a destroyed outbox record with an unparseable key must not vanish silently: {:?}",
         protocol.deferred_restore_settlements
     );
@@ -36336,6 +36913,7 @@ fn test_migration_whose_writes_fail_keeps_the_legacy_record_and_settles_nothing(
     let settled: Vec<String> = protocol
         .deferred_restore_settlements
         .iter()
+        .map(|(event, _)| event)
         .filter_map(|event| match event {
             Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
             _ => None,
@@ -36419,6 +36997,7 @@ fn test_settlement_is_withheld_while_a_surviving_legacy_record_can_refile_the_id
     let settled: Vec<String> = protocol
         .deferred_restore_settlements
         .iter()
+        .map(|(event, _)| event)
         .filter_map(|event| match event {
             Event::MessageFailed { message_id, .. } => Some(message_id.clone()),
             _ => None,
@@ -36451,6 +37030,7 @@ fn test_settlement_is_withheld_while_a_surviving_legacy_record_can_refile_the_id
         later
             .deferred_restore_settlements
             .iter()
+            .map(|(event, _)| event)
             .all(|event| !matches!(event, Event::MessageFailed { .. })),
         "nothing may settle on the launch that recovers the queue"
     );
@@ -38911,6 +39491,7 @@ fn test_relay_unreachable_reason_is_classified_and_still_parks_the_dm() {
             last_transport: Some(TransportType::BLE),
             reseal: None,
             relay_pushed: false,
+            app_send: false,
         },
     );
 
@@ -41757,6 +42338,7 @@ fn a_persisted_confirmation_probe_is_not_restored() {
         last_transport: None,
         reseal: None,
         relay_pushed: false,
+        app_send: false,
     };
     let probe = test_message("bob", internal_prefixes::SESSION_CONFIRM_PROBE);
     let real = test_message("bob", "hello");
@@ -41798,6 +42380,7 @@ fn an_outbox_full_of_legacy_probes_clears_in_one_launch() {
         last_transport: None,
         reseal: None,
         relay_pushed: false,
+        app_send: false,
     };
     for _ in 0..crate::constants::MAX_OUTBOX_ENTRIES {
         store_outbox_entry(
@@ -42324,6 +42907,7 @@ fn outbox_entry_at(
         last_transport: None,
         reseal: None,
         relay_pushed,
+        app_send: false,
     }
 }
 

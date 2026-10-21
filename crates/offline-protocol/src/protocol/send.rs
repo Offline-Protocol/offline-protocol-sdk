@@ -383,6 +383,25 @@ impl OfflineProtocol {
     /// Used by `forward_message`, `flush_pending_messages` (for forwarded messages),
     /// and any path that has a fully-constructed `Message` ready to send.
     fn dispatch_prepared_message(&mut self, message: Message) -> Result<MessageId> {
+        // Restored, not cleared: a dispatch nested inside this one would
+        // otherwise clear the outer message's staging on its way out, and the
+        // outer entry would be created as not the app's.
+        let outer = self.staged_app_send.replace(message.id.clone());
+        let result = self.dispatch_prepared_message_inner(message);
+        self.staged_app_send = outer;
+        result
+    }
+
+    /// Whether an outbox entry being created for `message` belongs to the app
+    /// send in progress; see `staged_app_send`. Every outcome of an app send
+    /// that keeps the message (sent, deferred, held for a window, parked for
+    /// capacity) creates its entry inside the dispatch, so the flag is on the
+    /// entry before its first write to storage.
+    fn is_staged_app_send(&self, message: &Message) -> bool {
+        self.staged_app_send.as_ref() == Some(&message.id)
+    }
+
+    fn dispatch_prepared_message_inner(&mut self, message: Message) -> Result<MessageId> {
         let message_id = message.id.clone();
 
         if self.deduplicator.is_duplicate(&message_id) {
@@ -476,6 +495,18 @@ impl OfflineProtocol {
     /// Unlike `TransportManager::send`, `send_via_transport` does not record
     /// retry failures internally, so the failure arm records one explicitly.
     fn dispatch_prepared_message_via(
+        &mut self,
+        message: Message,
+        transport: TransportType,
+    ) -> Result<MessageId> {
+        // Restored, not cleared; see `dispatch_prepared_message`.
+        let outer = self.staged_app_send.replace(message.id.clone());
+        let result = self.dispatch_prepared_message_via_inner(message, transport);
+        self.staged_app_send = outer;
+        result
+    }
+
+    fn dispatch_prepared_message_via_inner(
         &mut self,
         message: Message,
         transport: TransportType,
@@ -3292,22 +3323,33 @@ impl OfflineProtocol {
         // Retired, not just removed: the retry and flush paths re-create a
         // missing entry before resending, so a retry entry left behind would
         // bring the message back.
-        let attempt_count = self
+        let (attempt_count, app_send) = self
             .retire_undeliverable_message(&victim, "outbox eviction")
-            .map_or(0, |entry| entry.attempt_count);
-        self.emit_outbox_capacity_failure(&victim, attempt_count);
+            .map_or((0, false), |entry| (entry.attempt_count, entry.app_send));
+        self.emit_outbox_capacity_failure(&victim, attempt_count, app_send);
         true
     }
 
     /// The terminal events a message dropped for outbox capacity owes the
     /// app: `message_failed`, and for a connection request its typed
     /// undeliverable event. Shared by eviction and by a refused send.
-    fn emit_outbox_capacity_failure(&mut self, message_id: &MessageId, attempt_count: u32) {
-        self.emit_event(Event::message_failed(
-            message_id.clone(),
-            "Outbox capacity exceeded",
-            attempt_count,
-        ));
+    ///
+    /// `app_send` decides whether the failure reaches telemetry; see
+    /// [`Self::emit_settlement`].
+    fn emit_outbox_capacity_failure(
+        &mut self,
+        message_id: &MessageId,
+        attempt_count: u32,
+        app_send: bool,
+    ) {
+        self.emit_settlement(
+            Event::message_failed(
+                message_id.clone(),
+                "Outbox capacity exceeded",
+                attempt_count,
+            ),
+            app_send,
+        );
         if let Some(recipient) = self.take_undeliverable_connection_request(message_id) {
             warn!(
                 recipient = %recipient,
@@ -3357,7 +3399,8 @@ impl OfflineProtocol {
             recipient = %message.recipient,
             "Outbox full and this recipient holds the largest backlog; send refused"
         );
-        self.emit_outbox_capacity_failure(&message.id, 0);
+        // Only the app send path refuses at capacity, so this is an app send.
+        self.emit_outbox_capacity_failure(&message.id, 0, true);
         true
     }
 
@@ -3403,6 +3446,7 @@ impl OfflineProtocol {
         // (non-media) entry here (the failure/retry path); later calls find the
         // entry already present and leave its `reseal` intact.
         let staged_reseal = self.take_staged_reseal(message, is_media);
+        let app_send = !is_media && self.is_staged_app_send(message);
         let outbox = if is_media {
             &mut self.media_outbox
         } else {
@@ -3419,6 +3463,7 @@ impl OfflineProtocol {
                 last_transport: None,
                 reseal: staged_reseal,
                 relay_pushed: false,
+                app_send,
             });
         // Persist newly-created main-outbox entries so they survive a restart.
         // media entries are intentionally not persisted.
@@ -3455,6 +3500,7 @@ impl OfflineProtocol {
         // (non-media) outbox entry; on later attempts the entry already carries
         // it. Staging for media is never populated.
         let staged_reseal = self.take_staged_reseal(message, is_media);
+        let app_send = !is_media && self.is_staged_app_send(message);
         let outbox = if is_media {
             &mut self.media_outbox
         } else {
@@ -3471,6 +3517,7 @@ impl OfflineProtocol {
                 last_transport: transport,
                 reseal: staged_reseal,
                 relay_pushed: false,
+                app_send,
             });
 
         entry.message = message.clone();
@@ -3845,9 +3892,14 @@ impl OfflineProtocol {
             {
                 continue;
             }
-            expired_from_outbox.push((message_id.clone(), entry.attempt_count, entry.relay_pushed));
+            expired_from_outbox.push((
+                message_id.clone(),
+                entry.attempt_count,
+                entry.relay_pushed,
+                entry.app_send,
+            ));
         }
-        for (message_id, attempt_count, relay_pushed) in expired_from_outbox {
+        for (message_id, attempt_count, relay_pushed, app_send) in expired_from_outbox {
             self.retire_undeliverable_message(&message_id, "outbox lifetime exceeded");
 
             // Outcome unknown, so nothing app-facing: the push may already
@@ -3867,11 +3919,14 @@ impl OfflineProtocol {
             // Expiry is terminal: without an event the app shows the message
             // as pending forever. Mirrors handle_max_retries_exceeded, which
             // settles the same way when the retry budget runs out.
-            self.emit_event(Event::message_failed(
-                message_id.clone(),
-                "Outbox lifetime exceeded",
-                attempt_count,
-            ));
+            self.emit_settlement(
+                Event::message_failed(
+                    message_id.clone(),
+                    "Outbox lifetime exceeded",
+                    attempt_count,
+                ),
+                app_send,
+            );
             if let Some(recipient) = self.take_undeliverable_connection_request(&message_id) {
                 warn!(
                     recipient = %recipient,
@@ -6024,14 +6079,31 @@ impl OfflineProtocol {
                         .map(|label| Self::transport_from_label(label))
                         .unwrap_or(TransportType::BLE);
 
+                    // `latency` above is this attempt's round trip, which is
+                    // what DORS scores a carrier on. The event reports how long
+                    // delivery took, from the first send, as the settle path
+                    // without a pending ACK already does: a message that was
+                    // deferred, or re-sent after its ACK timed out, otherwise
+                    // reported only its last attempt, and the two paths gave
+                    // the same delivery two different latencies.
+                    let outbox_entry = self.outbox.get(&message_id);
+                    let delivery_latency = outbox_entry.map_or(latency, |entry| {
+                        Utc::now()
+                            .signed_duration_since(entry.first_sent_at)
+                            .num_milliseconds()
+                            .max(0) as u64
+                    });
+                    let app_send = outbox_entry.is_some_and(|entry| entry.app_send);
+
                     // Emit event if we can lock the state, but don't fail if we can't
                     if let Ok(state) = lock_shared_state(&self.shared_state) {
-                        state.emit_event(Event::message_delivered(
+                        let event = Event::message_delivered(
                             message_id.clone(),
-                            latency,
+                            delivery_latency,
                             hop_count,
                             transport,
-                        ));
+                        );
+                        state.emit_settlement(event, app_send);
                         drop(state);
                     } else {
                         error!(
@@ -6217,6 +6289,7 @@ impl OfflineProtocol {
             return;
         };
         let recipient = entry.message.recipient.as_str().to_string();
+        let app_send = entry.app_send;
 
         let latency = Utc::now()
             .signed_duration_since(entry.first_sent_at)
@@ -6253,12 +6326,10 @@ impl OfflineProtocol {
             })
         });
         if let Ok(state) = lock_shared_state(&self.shared_state) {
-            state.emit_event(Event::message_delivered(
-                message_id.clone(),
-                latency,
-                hop_count,
-                transport,
-            ));
+            // Reported to telemetry only for the app's own messages, as on
+            // the pending-ACK path; see [`OutboxEntry::app_send`].
+            let event = Event::message_delivered(message_id.clone(), latency, hop_count, transport);
+            state.emit_settlement(event, app_send);
             drop(state);
         } else {
             error!("Failed to lock shared state for an ACK event, skipping event emission");
@@ -6280,7 +6351,10 @@ impl OfflineProtocol {
             );
             e
         })?;
-        state.emit_event(Event::message_failed(
+        // No entry, so no record of whether the app sent it: the app hears
+        // about it and telemetry does not, the rule for a delivery whose
+        // origin is unknown too.
+        state.emit_event_to_app(Event::message_failed(
             message_id.clone(),
             "Message missing from outbox (cannot retry)",
             retry_count,

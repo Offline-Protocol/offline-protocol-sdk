@@ -698,7 +698,9 @@ pub enum Event {
     MessageDelivered {
         /// ID of the delivered message.
         message_id: String,
-        /// Latency in milliseconds.
+        /// Milliseconds from the first transmit a carrier accepted to the
+        /// acknowledgement, including any time the message then waited for
+        /// the peer. Time before any carrier accepted it is not included.
         latency_ms: u64,
         /// Number of hops traversed.
         hop_count: u8,
