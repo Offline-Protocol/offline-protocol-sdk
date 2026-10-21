@@ -123,6 +123,19 @@ if [ "$HAVE_ZLIB" = 1 ]; then
 else
   echo "  skip - no zlib headers to build the refusal fixture"
 fi
+# The PEP 561 marker: setuptools wheels a package without it happily, so the
+# required-files check at the end of the script is the only thing that
+# notices, and this is the only place that proves it does.
+copy_package "$WORK/nomarker"
+rm "$WORK/nomarker/bindings/python/offline_protocol_sdk/py.typed"
+if (cd "$WORK/nomarker" && bash bindings/python/scripts/build-wheel.sh "linux-$ARCH" "$WORK/libfixture.so" 1.2.3) >"$WORK/nomarker.log" 2>&1; then
+  fail "a package without the PEP 561 marker was wheeled"
+elif grep -q "is missing \['offline_protocol_sdk/py.typed'\]" "$WORK/nomarker.log"; then
+  pass "a package without the PEP 561 marker is refused"
+else
+  fail "a package without the PEP 561 marker was refused for another reason"
+  cat "$WORK/nomarker.log" >&2
+fi
 copy_package "$WORK/badversion"
 if (cd "$WORK/badversion" && bash bindings/python/scripts/build-wheel.sh "linux-$ARCH" "$WORK/libfixture.so" 1.2.3+local) >/dev/null 2>&1; then
   fail "a version with no Python spelling was wheeled"

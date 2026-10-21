@@ -2,7 +2,7 @@
 
 use super::custody::CUSTODY_META_KEY;
 use super::{
-    base64_encode, internal_prefixes, lifetime_expired, lock_shared_state,
+    base64_encode, internal_prefixes, lifetime_expired, lock_shared_state, CoalescedAcks,
     ConnectionAcceptedPayload, ConnectionRequestPayload, KeyPackagePayload, MediaSendOptions,
     MediaTransferDescriptor, OfflineProtocol, OutboundMediaTransfer, OutboundSendPreparation,
     OutboxEntry, OutboxReseal, PendingConnectionRequest, PendingMessage, PendingProvenance,
@@ -11,15 +11,18 @@ use super::{
     MAX_KEY_PACKAGE_SENT_TO, MAX_MESSAGE_CONTENT_BYTES, MAX_PENDING_CONNECTION_REQUESTS,
     MAX_PENDING_EXPIRIES_PER_PASS, MAX_PENDING_MESSAGES_GLOBAL, MAX_PENDING_MESSAGES_PER_PEER,
     MAX_PENDING_MESSAGE_BYTES_GLOBAL, MAX_PENDING_MESSAGE_BYTES_PER_PEER, MAX_READ_RECEIPT_IDS,
-    MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PENDING_CONNECTION_REQUEST_TTL,
-    RICH_PAYLOAD_V1, SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, SEND_FAIL_REASON_RELAY_PUSHED,
+    MAX_RICH_EXTRAS_BYTES, MLS_ENVELOPE_COMPACT_V1, PEER_SEND_WINDOW,
+    PENDING_CONNECTION_REQUEST_TTL, RESEAL_GAP_BUDGET, RESEAL_HARD_LIMIT, RICH_PAYLOAD_V1,
+    SEND_DEFER_REASON_ACK_CAPACITY, SEND_DEFER_REASON_PEER_WINDOW,
+    SEND_FAIL_REASON_RECIPIENT_UNREACHABLE, SEND_FAIL_REASON_RELAY_PUSHED,
     SEND_FAIL_REASON_RELAY_PUSHED_STORED, SEND_FAIL_REASON_RELAY_STORED,
     SEND_FAIL_REASON_TRANSPORT, WELCOME_NO_CARRIER_RETRY_SECS, WELCOME_UNREACHABLE_RETRY_CAP_SECS,
 };
 use super::{classify_transport_send_error, send_failure_token};
 use crate::constants::{
-    ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_STATUS_KEY, ACK_STATUS_UNDECRYPTABLE, ACK_TRANSPORT_KEY,
-    MAX_FORWARD_COUNT, MAX_OUTBOX_ENTRIES,
+    ACK_COALESCE_MAX, ACK_COALESCE_WINDOW, ACK_FOR_KEY, ACK_HOP_COUNT_KEY, ACK_MORE_KEY,
+    ACK_STATUS_KEY, ACK_STATUS_UNDECRYPTABLE, ACK_TRANSPORT_KEY, MAX_FORWARD_COUNT,
+    MAX_OUTBOX_ENTRIES,
 };
 use crate::events::{DecryptionFailureCode, Event, PresenceStatus};
 use crate::file_transfer::{FileChunk, OutboundTransferState};
@@ -35,7 +38,7 @@ use offline_protocol_core::{
 };
 use offline_protocol_mls::{EncryptedMessage, MlsManager};
 use offline_protocol_transport::TransportType;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration as StdDuration, Instant};
 use tracing::{debug, error, info, warn};
@@ -217,6 +220,7 @@ impl OfflineProtocol {
         if message.content.starts_with(internal_prefixes::ENCRYPTED) {
             self.stage_outbox_reseal(
                 &message.id,
+                &recipient_str,
                 OutboxReseal {
                     content: content_str,
                     priority,
@@ -225,6 +229,7 @@ impl OfflineProtocol {
                     content_type: message.content_type,
                     media_metadata: None,
                     rich: Some(rich).filter(|r| r.is_any()),
+                    seal_mark: None,
                 },
             );
         }
@@ -356,6 +361,7 @@ impl OfflineProtocol {
         if message.content.starts_with(internal_prefixes::ENCRYPTED) {
             self.stage_outbox_reseal(
                 &message.id,
+                &recipient_str,
                 OutboxReseal {
                     content: original_message.content.clone(),
                     priority,
@@ -364,6 +370,7 @@ impl OfflineProtocol {
                     content_type: message.content_type,
                     media_metadata: message.media_metadata.clone(),
                     rich: Some(rich).filter(|r| r.is_any()),
+                    seal_mark: None,
                 },
             );
         }
@@ -383,6 +390,13 @@ impl OfflineProtocol {
         }
 
         self.deduplicator.mark_seen_local(message_id.clone());
+
+        if self.refuse_app_message_at_capacity(&message)
+            || self.defer_app_message_for_ack_capacity(&message)
+            || self.defer_app_message_for_peer_window(&message)
+        {
+            return Ok(message_id);
+        }
 
         let previous_transport = self.transport_manager.current_transport();
 
@@ -473,6 +487,13 @@ impl OfflineProtocol {
         }
 
         self.deduplicator.mark_seen_local(message_id.clone());
+
+        if self.refuse_app_message_at_capacity(&message)
+            || self.defer_app_message_for_ack_capacity(&message)
+            || self.defer_app_message_for_peer_window(&message)
+        {
+            return Ok(message_id);
+        }
 
         let previous_transport = self.transport_manager.current_transport();
         let send_result = self
@@ -580,7 +601,7 @@ impl OfflineProtocol {
 
         let message = self.create_message(recipient, sealed, Some(priority), None)?;
         if let Some(reseal) = reseal {
-            self.stage_outbox_reseal(&message.id, reseal);
+            self.stage_outbox_reseal(&message.id, recipient, reseal);
         }
         self.dispatch_internal_message(message)
     }
@@ -598,6 +619,11 @@ impl OfflineProtocol {
         }
 
         self.deduplicator.mark_seen_local(message_id.clone());
+
+        // Internal frames owe the app no event: the retry queue sends it.
+        if self.defer_for_ack_capacity(&message).is_some() {
+            return Ok(message_id);
+        }
 
         let previous_transport = self.transport_manager.current_transport();
         let send_result = self.transport_manager.send(&message);
@@ -750,6 +776,10 @@ impl OfflineProtocol {
             return;
         }
         self.deduplicator.mark_seen_local(message.id.clone());
+
+        if self.defer_for_ack_capacity(&message).is_some() {
+            return;
+        }
 
         let previous_transport = self.transport_manager.current_transport();
         match self.transport_manager.send(&message) {
@@ -2366,6 +2396,7 @@ impl OfflineProtocol {
                 if message.content.starts_with(internal_prefixes::ENCRYPTED) {
                     self.stage_outbox_reseal(
                         &message.id,
+                        recipient,
                         OutboxReseal {
                             content: msg.content.clone(),
                             priority: msg.priority,
@@ -2374,6 +2405,7 @@ impl OfflineProtocol {
                             content_type: msg.content_type,
                             media_metadata: msg.media_metadata.clone(),
                             rich: msg.rich.clone(),
+                            seal_mark: None,
                         },
                     );
                 }
@@ -3004,17 +3036,25 @@ impl OfflineProtocol {
                 .insert(message.id.clone(), (file_id.to_string(), chunk_index));
 
             let previous_transport = self.transport_manager.current_transport();
-            let send_result = self
-                .transport_manager
-                .send_via_transport(&message, pinned_transport);
+            // A chunk held for a slot is sent by the retry queue, pinned to
+            // the same carrier; the transfer's window counts it as in flight.
+            let send_result = if self.defer_for_ack_capacity(&message).is_some() {
+                None
+            } else {
+                Some(
+                    self.transport_manager
+                        .send_via_transport(&message, pinned_transport),
+                )
+            };
             let current_transport = Some(pinned_transport);
 
             match send_result {
-                Ok(()) => {
+                None => {}
+                Some(Ok(())) => {
                     self.handle_send_success(&message, current_transport)?;
                     self.emit_transport_switch_event(previous_transport, current_transport)?;
                 }
-                Err(err) => {
+                Some(Err(err)) => {
                     let _ = self
                         .handle_send_failure(&message, current_transport.or(previous_transport))?;
                     // send_via_transport does not record retry failures internally.
@@ -3132,6 +3172,195 @@ impl OfflineProtocol {
     // OUTBOX
     // ========================================================================
 
+    /// Whether a full outbox may give up `entry` to make room.
+    ///
+    /// Never a message awaiting its acknowledgement: it is on the wire, and
+    /// under load on a live link evicting it turned every new send into the
+    /// failure of a frame already sent, whose acknowledgement then settled
+    /// nothing.
+    ///
+    /// A message the per-peer window holds has not been sent, so it may go,
+    /// but last in its recipient's line ([`Self::eviction_order_key`]). It was
+    /// once never evictable on a live link, and then one slow peer whose held
+    /// line filled the outbox made every send to every other recipient a
+    /// refusal.
+    fn outbox_entry_evictable(&self, id: &MessageId, entry: &OutboxEntry) -> bool {
+        !(entry.message.requires_ack && self.ack_manager.is_waiting_for_ack(id))
+    }
+
+    /// Each message the per-peer window holds for a recipient this device
+    /// has a live mesh link to, with its place in that recipient's line
+    /// (0 is the front, the next to be sent).
+    fn held_line_positions(&self) -> HashMap<MessageId, usize> {
+        self.window_held
+            .iter()
+            .filter(|(recipient, _)| {
+                self.transport_manager
+                    .mesh_transport_for(recipient)
+                    .is_some()
+            })
+            .flat_map(|(_, held)| held.iter().cloned().enumerate().map(|(at, id)| (id, at)))
+            .collect()
+    }
+
+    /// Orders the evictable entries of one recipient: lower goes first.
+    ///
+    /// Held messages for a live peer go first, from the back of the line,
+    /// so what survives is the front, the part about to be sent, and the
+    /// conversation stays contiguous. Their place in the line decides, not a
+    /// timestamp: a burst is held within one millisecond. Everything else
+    /// goes oldest first: a message to an unreachable peer that has waited
+    /// longest is the least likely to land.
+    fn eviction_order_key(held: &HashMap<MessageId, usize>, entry: &OutboxEntry) -> (u8, i64) {
+        match held.get(&entry.message.id) {
+            Some(&at) => (0, -(at as i64)),
+            None => (1, entry.first_sent_at.timestamp_millis()),
+        }
+    }
+
+    /// Evicts one entry from a full outbox, choosing from the recipient with
+    /// the largest backlog, oldest first, and only entries
+    /// [`Self::outbox_entry_evictable`] allows. With `newcomer` set, an
+    /// app send is asking: only a recipient with a strictly larger backlog
+    /// than the newcomer's own may pay, so a message never displaces another
+    /// to the same recipient and a tie refuses the newcomer. Returns whether
+    /// an entry was evicted.
+    ///
+    /// The failure this replaces: the outbox evicted the least recently sent
+    /// entry to admit any new one, whatever either was. In run 5 of the
+    /// 2026-10-19 volume test a ten-minute outage failed about 2,500 queued
+    /// messages per phone this way, each one so that a newer message to the
+    /// same unreachable peer could take its slot.
+    pub(super) fn make_outbox_room(&mut self, newcomer: Option<&Message>) -> bool {
+        let mut backlog: HashMap<&str, usize> = HashMap::new();
+        for entry in self.outbox.values() {
+            *backlog.entry(entry.message.recipient.as_str()).or_default() += 1;
+        }
+        let floor = newcomer.map(|message| {
+            (
+                message.recipient.as_str(),
+                backlog
+                    .get(message.recipient.as_str())
+                    .copied()
+                    .unwrap_or(0),
+            )
+        });
+        let held = self.held_line_positions();
+        let victim = self
+            .outbox
+            .iter()
+            .filter(|(id, entry)| {
+                let recipient = entry.message.recipient.as_str();
+                let heavier = match floor {
+                    Some((own, own_count)) => {
+                        recipient != own && backlog.get(recipient).copied().unwrap_or(0) > own_count
+                    }
+                    None => true,
+                };
+                heavier && self.outbox_entry_evictable(id, entry)
+            })
+            .min_by(|(_, left), (_, right)| {
+                let left_backlog = backlog
+                    .get(left.message.recipient.as_str())
+                    .copied()
+                    .unwrap_or(0);
+                let right_backlog = backlog
+                    .get(right.message.recipient.as_str())
+                    .copied()
+                    .unwrap_or(0);
+                right_backlog
+                    .cmp(&left_backlog)
+                    .then_with(|| {
+                        Self::eviction_order_key(&held, left)
+                            .cmp(&Self::eviction_order_key(&held, right))
+                    })
+                    .then_with(|| left.message.id.as_str().cmp(&right.message.id.as_str()))
+            })
+            .map(|(id, _)| id.clone());
+        let Some(victim) = victim else {
+            if newcomer.is_none() {
+                // Every entry is being delivered, so the outbox runs over
+                // its cap by internal frames until acknowledgements free
+                // room. Bounded by the pending-acknowledgement table.
+                warn!(
+                    entries = self.outbox.len(),
+                    "Outbox full of messages in delivery; admitting an internal frame over the cap"
+                );
+            }
+            return false;
+        };
+        // Retired, not just removed: the retry and flush paths re-create a
+        // missing entry before resending, so a retry entry left behind would
+        // bring the message back.
+        let attempt_count = self
+            .retire_undeliverable_message(&victim, "outbox eviction")
+            .map_or(0, |entry| entry.attempt_count);
+        self.emit_outbox_capacity_failure(&victim, attempt_count);
+        true
+    }
+
+    /// The terminal events a message dropped for outbox capacity owes the
+    /// app: `message_failed`, and for a connection request its typed
+    /// undeliverable event. Shared by eviction and by a refused send.
+    fn emit_outbox_capacity_failure(&mut self, message_id: &MessageId, attempt_count: u32) {
+        self.emit_event(Event::message_failed(
+            message_id.clone(),
+            "Outbox capacity exceeded",
+            attempt_count,
+        ));
+        if let Some(recipient) = self.take_undeliverable_connection_request(message_id) {
+            warn!(
+                recipient = %recipient,
+                message_id = %message_id,
+                "Connection request undeliverable: outbox capacity exceeded"
+            );
+            self.emit_event(Event::connection_request_undeliverable(
+                recipient,
+                message_id.as_str(),
+                "outbox_capacity_exceeded",
+            ));
+        }
+    }
+
+    /// Admission for a message the app sent, before anything is sealed again,
+    /// held or transmitted. Returns false when the outbox is full and the
+    /// message is refused; the caller then owes the app the terminal event
+    /// (`message_failed`, "Outbox capacity exceeded", no attempts).
+    ///
+    /// A full outbox refuses the newest message for the recipient with the
+    /// largest backlog rather than failing an older one, so a queued
+    /// conversation stays contiguous and the app hears at the moment of
+    /// sending. A message to a recipient with a smaller backlog is admitted by
+    /// evicting from the largest one, so a week of messages to one
+    /// unreachable peer cannot block a message to a reachable one.
+    pub(super) fn admit_app_message(&mut self, message: &Message) -> bool {
+        if !message.requires_ack
+            || Self::is_media_outbox_message(message)
+            || self.outbox.contains_key(&message.id)
+            || self.outbox.len() < MAX_OUTBOX_ENTRIES
+        {
+            return true;
+        }
+        self.make_outbox_room(Some(message))
+    }
+
+    /// [`Self::admit_app_message`] with the refusal settled: staged re-seal
+    /// provenance dropped (it holds plaintext) and the terminal event emitted.
+    /// Returns true when the caller should stop, having returned the id.
+    fn refuse_app_message_at_capacity(&mut self, message: &Message) -> bool {
+        if self.admit_app_message(message) {
+            return false;
+        }
+        self.pending_reseal.remove(&message.id);
+        warn!(
+            message_id = %message.id,
+            recipient = %message.recipient,
+            "Outbox full and this recipient holds the largest backlog; send refused"
+        );
+        self.emit_outbox_capacity_failure(&message.id, 0);
+        true
+    }
+
     pub(super) fn ensure_outbox_entry(&mut self, message: &Message) {
         if !message.requires_ack {
             return;
@@ -3146,42 +3375,27 @@ impl OfflineProtocol {
         };
 
         if !outbox.contains_key(&message.id) && outbox.len() >= capacity {
-            let oldest_id = outbox
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_sent_at)
-                .map(|(id, _)| id.clone());
-            if let Some(oldest_id) = oldest_id {
-                // Retired, not just removed: this function is also how the
-                // retry and flush paths re-create an entry before resending,
-                // so a retry entry left behind here would bring the message
-                // back and evict another in its place.
-                let attempt_count = self
-                    .retire_undeliverable_message(&oldest_id, "outbox eviction")
-                    .map_or(0, |entry| entry.attempt_count);
-                if !is_media {
-                    // Capacity eviction is as terminal as expiry: the entry
-                    // and its persisted copy are gone, so without an event
-                    // the app shows the message as pending forever. (Media
-                    // chunks surface through the transfer abort above.)
-                    self.emit_event(Event::message_failed(
-                        oldest_id.clone(),
-                        "Outbox capacity exceeded",
-                        attempt_count,
-                    ));
-                    if let Some(recipient) = self.take_undeliverable_connection_request(&oldest_id)
-                    {
-                        warn!(
-                            recipient = %recipient,
-                            message_id = %oldest_id,
-                            "Connection request undeliverable: outbox capacity exceeded"
-                        );
-                        self.emit_event(Event::connection_request_undeliverable(
-                            recipient,
-                            oldest_id.as_str(),
-                            "outbox_capacity_exceeded",
-                        ));
-                    }
+            if is_media {
+                // Media keeps its own cap and its oldest-first eviction: a
+                // transfer has its own window, and an evicted chunk surfaces
+                // through the transfer abort rather than a message event.
+                let oldest_id = outbox
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.last_sent_at)
+                    .map(|(id, _)| id.clone());
+                if let Some(oldest_id) = oldest_id {
+                    // Retired, not just removed: this function is also how the
+                    // retry and flush paths re-create an entry before resending,
+                    // so a retry entry left behind here would bring the message
+                    // back and evict another in its place.
+                    self.retire_undeliverable_message(&oldest_id, "outbox eviction");
                 }
+            } else {
+                // Reached only by frames that never passed app admission
+                // (internal frames, and the defensive re-creation on the
+                // resend paths): an app send made its room up front in
+                // `admit_app_message`, or was refused there.
+                self.make_outbox_room(None);
             }
         }
 
@@ -3227,6 +3441,16 @@ impl OfflineProtocol {
 
         let now = Utc::now();
         let is_media = Self::is_media_outbox_message(message);
+        // The success path creates the entry here, not in
+        // `ensure_outbox_entry`, so it honours the cap here too. An app send
+        // already made its room in `admit_app_message`; this is for internal
+        // frames, which are never refused.
+        if !is_media
+            && !self.outbox.contains_key(&message.id)
+            && self.outbox.len() >= MAX_OUTBOX_ENTRIES
+        {
+            self.make_outbox_room(None);
+        }
         // Consume the staged re-seal provenance only when first creating a
         // (non-media) outbox entry; on later attempts the entry already carries
         // it. Staging for media is never populated.
@@ -3275,8 +3499,25 @@ impl OfflineProtocol {
     /// outbox entry created during dispatch carries it. Callers gate on the
     /// content being a sealed encrypted DM (`__MLS_ENC__`); media and plaintext
     /// never stage and thus always replay verbatim.
-    pub(super) fn stage_outbox_reseal(&mut self, id: &MessageId, reseal: OutboxReseal) {
+    /// Stages `reseal` for message `id`, just sealed for `recipient`. Called
+    /// straight after the seal, before anything else is sealed, so the
+    /// session's latest seal is this message's.
+    pub(super) fn stage_outbox_reseal(
+        &mut self,
+        id: &MessageId,
+        recipient: &str,
+        mut reseal: OutboxReseal,
+    ) {
+        reseal.seal_mark = self.last_seal_mark(recipient);
         self.pending_reseal.insert(id.clone(), reseal);
+    }
+
+    fn last_seal_mark(&self, recipient: &str) -> Option<offline_protocol_mls::SealMark> {
+        self.mls_manager
+            .as_ref()?
+            .read()
+            .ok()?
+            .last_seal_mark(recipient)
     }
 
     /// Consumes any staged re-seal provenance for `message`, attaching it to a
@@ -3325,6 +3566,47 @@ impl OfflineProtocol {
             return None;
         }
         let reseal = self.outbox.get(&message.id)?.reseal.as_ref()?.clone();
+        // Every re-seal spends a ratchet generation the receiver has to
+        // fast-forward over, and one it drops as a duplicate is never
+        // decrypted at all. Past the budget, a resend goes out verbatim: it
+        // costs nothing, and it still decrypts unless the receiver has since
+        // moved more than the out-of-order tolerance past it. Without this, a
+        // link that stops carrying acknowledgements turns the retry ladder
+        // into a key-burner: in the 2026-10-19 rerun one phone re-sealed
+        // 20,919 resends during a 17-minute stall and left its peer past even
+        // the widened forward window.
+        let unacknowledged = self
+            .mls_manager
+            .as_ref()
+            .and_then(|mls| mls.read().ok())
+            .map_or(0, |mls| mls.unacknowledged_seals(&recipient));
+        // A verbatim copy this far behind cannot decrypt any more, so past
+        // the budget it is still re-sealed, up to the hard limit (see
+        // `RESEAL_HARD_LIMIT`).
+        let verbatim_is_dead = match (reseal.seal_mark, self.last_seal_mark(&recipient)) {
+            (Some(sealed_at), Some(newest)) => {
+                sealed_at.incarnation == newest.incarnation
+                    && newest.index.saturating_sub(sealed_at.index)
+                        > u64::from(
+                            offline_protocol_mls::group::SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
+                        )
+            }
+            _ => false,
+        };
+        let budget_spent = if verbatim_is_dead {
+            unacknowledged >= RESEAL_HARD_LIMIT
+        } else {
+            unacknowledged >= RESEAL_GAP_BUDGET
+        };
+        if budget_spent {
+            debug!(
+                message_id = %message.id,
+                recipient = %recipient,
+                unacknowledged,
+                "Re-seal budget spent; resending verbatim until the peer acknowledges"
+            );
+            return None;
+        }
         match self.prepare_outbound_content(
             &recipient,
             &reseal.content,
@@ -3338,7 +3620,17 @@ impl OfflineProtocol {
             Some(PendingProvenance::for_id(message.id.clone())),
             "resend_reseal",
         ) {
-            Ok(OutboundSendPreparation::Ready(sealed)) if sealed != message.content => Some(sealed),
+            Ok(OutboundSendPreparation::Ready(sealed)) if sealed != message.content => {
+                let mark = self.last_seal_mark(&recipient);
+                if let Some(provenance) = self
+                    .outbox
+                    .get_mut(&message.id)
+                    .and_then(|entry| entry.reseal.as_mut())
+                {
+                    provenance.seal_mark = mark;
+                }
+                Some(sealed)
+            }
             // Identical bytes, or an error: replay verbatim this round. Tier 1
             // keeps the sender retrying until the session heals.
             //
@@ -3648,6 +3940,21 @@ impl OfflineProtocol {
         message.content_type == ContentType::FileChunk
     }
 
+    /// A frame that sets up or confirms a 1:1 session: a key package, a
+    /// Welcome, or a confirmation probe or its answer. Never windowed (see
+    /// [`Self::peer_window_governs`]).
+    pub(super) fn is_session_control_frame(message: &Message) -> bool {
+        let content = message.content.as_str();
+        [
+            internal_prefixes::KEY_PACKAGE,
+            internal_prefixes::WELCOME,
+            internal_prefixes::SESSION_CONFIRM_PROBE,
+            internal_prefixes::SESSION_CONFIRM_ACK,
+        ]
+        .iter()
+        .any(|prefix| content.starts_with(prefix))
+    }
+
     /// A session confirmation probe lives in memory only. It carries no user
     /// data, and a restarted process does not know which probe was the last,
     /// so a restored one could never be superseded; the next scan asks the
@@ -3697,13 +4004,171 @@ impl OfflineProtocol {
         infrastructure_reaches_peer || self.transport_manager.mesh_can_address(peer_id)
     }
 
+    /// Holds `message` back when the pending-ACK table has no slot for it,
+    /// returning when the retry queue will try it again; `None` means it has a
+    /// slot and the caller transmits as usual.
+    ///
+    /// The check runs **before** the transmit, because nothing honest is left
+    /// to do after it. A frame sent without a slot is either untracked (its
+    /// loss is never noticed) or reported to the app as a failed send while it
+    /// is on the wire, which is what the 2026-10-19 volume test saw: the
+    /// receiver got 4,626 messages from a sender whose API had accepted 2,748,
+    /// and the retry path's copy of the same error aborted every later
+    /// `process()` tick, so the step that frees slots never ran again.
+    ///
+    /// A held message goes to the outbox and the retry queue at its first
+    /// attempt, so holding it spends nothing from its retry budget, and it is
+    /// not offered to the mesh: it was not sent, so nothing failed.
+    pub(super) fn defer_for_ack_capacity(&mut self, message: &Message) -> Option<DateTime<Utc>> {
+        if !message.requires_ack || self.ack_manager.has_capacity_for(&message.id) {
+            return None;
+        }
+        self.ensure_outbox_entry(message);
+        let next_retry_at = self
+            .retry_queue
+            .enqueue(message.clone(), 0)
+            .unwrap_or_else(Utc::now);
+        debug!(
+            message_id = %message.id,
+            pending_acks = self.ack_manager.pending_count(),
+            "Pending-ACK table full; message held for the retry queue"
+        );
+        Some(next_retry_at)
+    }
+
+    /// [`Self::defer_for_ack_capacity`] for a message the app sent, which is
+    /// owed a `message_deferred` so it does not read as stuck.
+    fn defer_app_message_for_ack_capacity(&mut self, message: &Message) -> bool {
+        let Some(next_retry_at) = self.defer_for_ack_capacity(message) else {
+            return false;
+        };
+        self.emit_event(Event::message_deferred(
+            message.id.clone(),
+            message.recipient.as_str().to_string(),
+            SEND_DEFER_REASON_ACK_CAPACITY,
+            0,
+            Some(next_retry_at.timestamp_millis()),
+        ));
+        true
+    }
+
+    // ------------------------------------------------------------------------
+    // Per-peer send window (see `PEER_SEND_WINDOW`)
+    // ------------------------------------------------------------------------
+
+    /// Frames to `recipient` that went out over a mesh carrier and still
+    /// await its acknowledgement. Derived from the outbox rather than kept as
+    /// a count, so no settle, expiry or eviction path can leak a slot.
+    pub(super) fn mesh_frames_in_flight_to(&self, recipient: &str) -> usize {
+        self.outbox
+            .values()
+            .filter(|entry| {
+                entry.attempt_count > 0
+                    && entry.message.recipient.as_str() == recipient
+                    && matches!(
+                        entry.last_transport,
+                        Some(TransportType::BLE | TransportType::WiFiDirect)
+                    )
+            })
+            .count()
+    }
+
+    /// Whether `message` is one the window governs: a frame that waits for an
+    /// acknowledgement, is not a media chunk (transfers have their own
+    /// window), is not session control, and goes to a peer this device holds
+    /// a live mesh link to.
+    ///
+    /// Session control is exempt because it is what heals the session the
+    /// window's frames are sealed under. A key package or Welcome held behind
+    /// sixteen frames the peer cannot decrypt waits for acknowledgements that
+    /// never come, and the window then stays full of frames that are only
+    /// retried, never answered.
+    fn peer_window_governs(&self, message: &Message) -> bool {
+        message.requires_ack
+            && !Self::is_media_outbox_message(message)
+            && !Self::is_session_control_frame(message)
+            && self
+                .transport_manager
+                .mesh_transport_for(message.recipient.as_str())
+                .is_some()
+    }
+
+    /// Whether `message` may be transmitted now. A frame already in flight
+    /// always may (its resend is not a new slot); a new one only while the
+    /// peer has fewer than [`PEER_SEND_WINDOW`] frames in flight.
+    pub(super) fn peer_window_admits(&self, message: &Message) -> bool {
+        if !self.peer_window_governs(message) {
+            return true;
+        }
+        if self
+            .outbox
+            .get(&message.id)
+            .is_some_and(|entry| entry.attempt_count > 0)
+        {
+            return true;
+        }
+        self.mesh_frames_in_flight_to(message.recipient.as_str()) < PEER_SEND_WINDOW
+    }
+
+    /// Parks `message` in the outbox, out of the retry queue, at the back of
+    /// its recipient's held line. No attempt is counted and nothing is
+    /// sealed again: being held is not an attempt.
+    pub(super) fn hold_for_peer_window(&mut self, message: &Message) {
+        self.ensure_outbox_entry(message);
+        self.retry_queue.remove(&message.id.as_str());
+        let held = self
+            .window_held
+            .entry(message.recipient.as_str().to_string())
+            .or_default();
+        if !held.contains(&message.id) {
+            held.push_back(message.id.clone());
+        }
+    }
+
+    /// The window gate for a message the app just sent. Holds it when the
+    /// peer's window is full, or when earlier messages to that peer are
+    /// already held, so a new message never overtakes them. Emits
+    /// `message_deferred` so the app can show it as queued.
+    fn defer_app_message_for_peer_window(&mut self, message: &Message) -> bool {
+        if !self.peer_window_governs(message) {
+            return false;
+        }
+        let held_ahead = self
+            .window_held
+            .get(message.recipient.as_str())
+            .is_some_and(|held| !held.is_empty());
+        if !held_ahead && self.peer_window_admits(message) {
+            return false;
+        }
+        self.hold_for_peer_window(message);
+        debug!(
+            message_id = %message.id,
+            recipient = %message.recipient,
+            "Peer send window full; message held until an acknowledgement frees it"
+        );
+        self.emit_event(Event::message_deferred(
+            message.id.clone(),
+            message.recipient.as_str().to_string(),
+            SEND_DEFER_REASON_PEER_WINDOW,
+            0,
+            None,
+        ));
+        true
+    }
+
     pub(super) fn handle_send_success(
         &mut self,
         message: &Message,
         transport: Option<TransportType>,
     ) -> Result<()> {
         self.mark_message_sent(message, transport, Some(1));
-        self.ensure_ack_registration(message)?;
+        // Never `?`: the frame is already on the wire, so an error here would
+        // report a transmitted message as failed. Every transmit path asks
+        // `defer_for_ack_capacity` first, so this is only reachable through a
+        // priority eviction race, and a warning is the honest outcome.
+        if let Err(err) = self.ensure_ack_registration(message) {
+            warn!(message_id = %message.id, error = %err, "ACK registration failed after transmit");
+        }
 
         // A transport reporting success is not always evidence the frame can
         // arrive. The internet transport and Reticulum accept any recipient
@@ -5126,8 +5591,113 @@ impl OfflineProtocol {
         inbound_transport: TransportType,
         status: Option<&str>,
     ) -> Result<()> {
+        if status.is_none() && self.try_coalesce_ack(message, inbound_transport) {
+            return Ok(());
+        }
         let ack = self.build_ack(message, inbound_transport, status)?;
         self.route_ack(&ack, inbound_transport)
+    }
+
+    /// Holds the delivery ACK for `message` to go out with others to the same
+    /// peer, when that peer reads coalesced ACKs and the frame came over a
+    /// mesh link. Returns `false` when the ACK must go on its own.
+    ///
+    /// Only the mesh carriers: they are where a phone's ACKs were a third of
+    /// the frames it sent, on a link carrying less than it was offered (the
+    /// 2026-10-19 volume test). A relay frame costs a round trip to a server,
+    /// not a share of a radio link. An `undecryptable` answer is never held:
+    /// it is not a delivery, and only a delivery may share a frame.
+    fn try_coalesce_ack(&mut self, message: &Message, inbound_transport: TransportType) -> bool {
+        if !matches!(
+            inbound_transport,
+            TransportType::BLE | TransportType::WiFiDirect
+        ) || !self.peer_coalesced_ack.contains(message.sender.as_str())
+        {
+            return false;
+        }
+        let peer = message.sender.as_str().to_string();
+        if self
+            .coalesced_acks_out
+            .get(&peer)
+            .is_some_and(|batch| batch.transport != inbound_transport)
+        {
+            self.flush_coalesced_acks_for(&peer);
+        }
+        let batch = self
+            .coalesced_acks_out
+            .entry(peer.clone())
+            .or_insert_with(|| CoalescedAcks {
+                transport: inbound_transport,
+                since: Instant::now(),
+                hop_count: message.hop_count.value().to_string(),
+                ids: Vec::new(),
+            });
+        let id = message.id.as_str();
+        if !batch.ids.contains(&id) {
+            batch.ids.push(id);
+        }
+        if batch.ids.len() >= ACK_COALESCE_MAX {
+            self.flush_coalesced_acks_for(&peer);
+        }
+        true
+    }
+
+    /// Sends every held ACK batch older than [`ACK_COALESCE_WINDOW`].
+    /// Called each tick.
+    pub(super) fn flush_due_coalesced_acks(&mut self) {
+        if self.coalesced_acks_out.is_empty() {
+            return;
+        }
+        let due: Vec<String> = self
+            .coalesced_acks_out
+            .iter()
+            .filter(|(_, batch)| batch.since.elapsed() >= ACK_COALESCE_WINDOW)
+            .map(|(peer, _)| peer.clone())
+            .collect();
+        for peer in due {
+            self.flush_coalesced_acks_for(&peer);
+        }
+    }
+
+    /// Sends the ACK batch held for `peer` as one frame: the first id in
+    /// [`ACK_FOR_KEY`], so even a peer that ignores [`ACK_MORE_KEY`] settles
+    /// one, and the rest in [`ACK_MORE_KEY`].
+    fn flush_coalesced_acks_for(&mut self, peer: &str) {
+        let Some(batch) = self.coalesced_acks_out.remove(peer) else {
+            return;
+        };
+        let Some((first, more)) = batch.ids.split_first() else {
+            return;
+        };
+        let built = (|| -> Result<Message> {
+            let ttl = TTL::new(self.config.initial_ttl).unwrap_or_else(|_| TTL::default());
+            let mut builder = Message::builder(
+                UserId::new(&self.local_id)?,
+                UserId::new(peer)?,
+                AppId::new(&self.config.app_id)?,
+            )
+            .content(String::new())
+            .priority(MessagePriority::Low)
+            .ttl(ttl)
+            .requires_ack(false)
+            .metadata(ACK_FOR_KEY, first.as_str())
+            .metadata(ACK_HOP_COUNT_KEY, batch.hop_count.as_str())
+            .metadata(ACK_TRANSPORT_KEY, Self::transport_label(batch.transport));
+            if !more.is_empty() {
+                builder = builder.metadata(ACK_MORE_KEY, more.join(","));
+            }
+            Ok(builder.build())
+        })();
+        let ack = match built {
+            Ok(ack) => ack,
+            Err(err) => {
+                warn!(peer = %peer, error = %err, "Failed to build a coalesced delivery ACK");
+                return;
+            }
+        };
+        if let Err(err) = self.route_ack(&ack, batch.transport) {
+            debug!(peer = %peer, error = %err, "Coalesced delivery ACK not routed");
+        }
     }
 
     /// Builds the acknowledgement for `message`, optionally carrying
@@ -5334,6 +5904,30 @@ impl OfflineProtocol {
     }
 
     pub(super) fn handle_ack_message(&mut self, message: &Message) {
+        // A coalesced ACK is settled as the single ACKs it stands for, so
+        // each id passes every check below on its own, the sender-equality
+        // check first. Never on an `undecryptable` answer, which is not a
+        // delivery and is never coalesced; and no more ids than a sender
+        // coalesces, so a forged one reaches no further than five frames
+        // could.
+        if message.metadata.contains_key(ACK_MORE_KEY) {
+            let mut single = message.clone();
+            let more = single.metadata.remove(ACK_MORE_KEY).unwrap_or_default();
+            self.handle_ack_message(&single);
+            if !single.metadata.contains_key(ACK_STATUS_KEY) {
+                for id in more
+                    .split(',')
+                    .filter(|id| !id.is_empty())
+                    .take(ACK_COALESCE_MAX - 1)
+                {
+                    single
+                        .metadata
+                        .insert(ACK_FOR_KEY.to_string(), id.to_string());
+                    self.handle_ack_message(&single);
+                }
+            }
+            return;
+        }
         if let Some(ack_for) = message.metadata.get(ACK_FOR_KEY) {
             if let Ok(message_id) = MessageId::from_str(ack_for) {
                 // Whoever answers has to be whoever we sent it to. An
@@ -5386,6 +5980,22 @@ impl OfflineProtocol {
                 {
                     self.handle_undecryptable_ack(&message_id);
                     return;
+                }
+
+                // The peer decrypted this frame, so it has reached at least
+                // its place in the session, which re-opens the re-seal budget
+                // up to there. Unauthenticated like the rest of this path: a
+                // forged acknowledgement can only give back re-seals, which is
+                // where every sender was before the budget existed.
+                if let Some(mark) = self
+                    .outbox
+                    .get(&message_id)
+                    .and_then(|entry| entry.reseal.as_ref())
+                    .and_then(|provenance| provenance.seal_mark)
+                {
+                    if let Some(mls) = self.mls_manager.as_ref().and_then(|m| m.read().ok()) {
+                        mls.note_acknowledged_seal(message.sender.as_str(), mark);
+                    }
                 }
 
                 // A delivery ack settles an outbound connection request:
@@ -6082,8 +6692,12 @@ impl OfflineProtocol {
             // downgrade the peer's traffic to the bootstrap key as a side
             // effect of a local setting.
             // Read unconditionally: an `undecryptable` ACK is settled as "not
-            // delivered" whatever our config, so a peer may always send us one.
-            ack_versions: vec![offline_protocol_sealed::ACK_UNDECRYPTABLE_V1],
+            // delivered" whatever our config, so a peer may always send us one,
+            // and a coalesced one settles every id it names.
+            ack_versions: vec![
+                offline_protocol_sealed::ACK_UNDECRYPTABLE_V1,
+                offline_protocol_sealed::ACK_COALESCED_V1,
+            ],
             nostr_pubkey: self.transport_manager.nostr_public_key(),
         }
     }

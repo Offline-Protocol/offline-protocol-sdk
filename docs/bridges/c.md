@@ -111,9 +111,10 @@ foregrounding with `notify_app_state`, and never call `disable_telemetry`,
 Every entry point catches a panic and answers
 `OfflineProtocolStatus_Internal`. A panic reaching an `extern "C"` boundary
 aborts the process, which for a library embedded in someone else's program
-is a crash in their program. A build under `panic = "abort"` (the `minisize`
-profile) aborts before anything can be caught; the desktop libraries the
-release ships use the unwinding `release` profile.
+is a crash in their program. A build under `panic = "abort"` aborts before
+anything can be caught. Every library the release ships unwinds: the desktop
+libraries use `release` and the iOS and Android libraries `mobile`
+([ADR 0029](../adr/0029-mobile-libraries-are-sized-not-aborting.md)).
 
 ## K5. What `offline_protocol_call` does not reach
 
@@ -217,8 +218,12 @@ Each layer catches a failure the others cannot:
 | `scripts/check-c-library.sh` | The library a release ships, used as its archive's README says: the quick start beside the library and the header, linked with the archive's own line (`scripts/c-link-line.sh`, which the packager also writes into the README), run from another directory after the directory moved | The release, before anything publishes, on macOS, Linux and Windows; CI on Windows against a debug build |
 | `tools/capi-fuzz` | Arbitrary method names and parameters through `Engine::call`. A panic, `Internal`, or a success that is not JSON is a crash: K4 holds only for a build that unwinds | Nightly (`fuzz.yml`), and on demand |
 
-To fuzz locally, on Linux or in a Linux container (nightly toolchain,
-`cargo install cargo-fuzz`; on macOS the build does not link):
+To fuzz locally, on Linux or macOS (nightly toolchain,
+`cargo install cargo-fuzz`). The fuzzer compiles the FFI crate's source as
+its own library rather than depending on the crate, which builds only the
+shipped `cdylib` and `staticlib` so that link-time optimisation reaches them
+(`the_ffi_crate_builds_no_rust_library`). On macOS keep `--sanitizer none`:
+the nightly AddressSanitizer runtime deadlocks there before `main`.
 
 ```bash
 cargo +nightly fuzz run --sanitizer none --fuzz-dir tools/capi-fuzz call \

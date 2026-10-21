@@ -279,6 +279,23 @@ epoch-disagreement decrypt failure. This is a dedicated recoverable class, kept
 strictly separate from ordinary decryption failure. See
 [Delivery and acknowledgements](delivery-and-acks.md#classifying-decrypt-failures).
 
+**A receiver that has fallen past its forward window is in the same class.**
+A frame more than the sender-ratchet forward distance (8192 generations) ahead
+of what the receiver last decrypted can never decrypt, and neither can any
+later frame from that sender, including every re-sealed resend, because each is
+further ahead still. Classified as an ordinary failure, that waited forever for
+a resend that could not succeed: the 2026-10-19 volume test lost a whole
+direction this way, as thousands of per-frame `INVALID_CIPHERTEXT` failures
+with nothing ever healing them. It is classified as a desync and heals the same
+way. A frame too far *behind* (past the out-of-order tolerance) stays an
+ordinary failure: the session is healthy, and the sender's re-sealed resend
+recovers it.
+
+Unlike the epoch checks, this trigger is authenticated. MLS decrypts the
+sender data under AEAD before it reads the generation, so only a holder of the
+epoch's sender-data secret can produce it. It widens nothing in the
+unauthenticated surface described below.
+
 ### Tier 1: honest failure and heal (receiver side)
 
 On a desync the receiver:

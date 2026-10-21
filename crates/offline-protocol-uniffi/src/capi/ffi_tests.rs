@@ -791,6 +791,119 @@ fn the_builds_without_the_c_binding_turn_off_only_the_c_binding() {
     }
 }
 
+/// The `key = value` lines of one top-level `[section]` of a manifest, keyed
+/// by the key, with the value as written. Comments and blank lines skipped.
+fn manifest_section(text: &str, section: &str) -> BTreeMap<String, String> {
+    let header = format!("[{section}]");
+    let mut inside = false;
+    let mut out = BTreeMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            inside = line == header;
+            continue;
+        }
+        if !inside || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            out.insert(key.trim().to_owned(), value.trim().to_owned());
+        }
+    }
+    out
+}
+
+#[test]
+fn the_ffi_crate_builds_no_rust_library() {
+    // Cargo runs link-time optimisation on a library only when every crate
+    // type in its list can take it (`bin`, `cdylib`, `staticlib`). One more
+    // type, `lib` or `rlib` above all, and `lto = true` in the profile stops
+    // reaching the libraries the release ships, with no warning: the build
+    // succeeds and the artifacts are simply larger and slower. That was the
+    // state of every release from the UniFFI migration to 0.29.0.
+    let manifest = read(&crate_dir().join("Cargo.toml"));
+    let lib = manifest_section(&manifest, "lib");
+    let list = lib
+        .get("crate-type")
+        .expect("the manifest names its crate types");
+    let types: BTreeSet<&str> = list
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+        .map(|t| t.trim().trim_matches('"'))
+        .filter(|t| !t.is_empty())
+        .collect();
+    assert!(
+        types.contains("cdylib") && types.contains("staticlib"),
+        "the shipped libraries are the cdylib and the staticlib: {types:?}"
+    );
+    for t in &types {
+        assert!(
+            ["bin", "cdylib", "staticlib"].contains(t),
+            "crate type `{t}` turns link-time optimisation off for every crate type \
+             in the list, the shipped libraries included. A Rust consumer of this \
+             source compiles it under its own package, as tools/capi-fuzz does."
+        );
+    }
+}
+
+#[test]
+fn the_fuzzer_compiles_the_ffi_crate_with_its_dependencies() {
+    // tools/capi-fuzz compiles this crate's source as its own library, since
+    // this crate builds none (`the_ffi_crate_builds_no_rust_library`). A
+    // dependency or a feature added here and not there breaks the fuzz build,
+    // which runs nightly rather than on a pull request, so it is held here.
+    let ours = read(&crate_dir().join("Cargo.toml"));
+    let fuzz_dir = crate_dir().join("../../tools/capi-fuzz");
+    let theirs = read(&fuzz_dir.join("Cargo.toml"));
+
+    let lib = manifest_section(&theirs, "lib");
+    assert_eq!(
+        lib.get("name").map(String::as_str),
+        Some("\"offline_protocol_uniffi\"")
+    );
+    assert_eq!(
+        lib.get("path").map(String::as_str),
+        Some("\"../../crates/offline-protocol-uniffi/src/lib.rs\""),
+        "the fuzzer compiles this crate's own lib.rs"
+    );
+
+    let fuzz_deps = manifest_section(&theirs, "dependencies");
+    for (name, value) in manifest_section(&ours, "dependencies") {
+        let mirrored = fuzz_deps
+            .get(&name)
+            .unwrap_or_else(|| panic!("tools/capi-fuzz/Cargo.toml lacks the dependency `{name}`"));
+        if value.contains("features") {
+            for feature in value
+                .split_once("features")
+                .and_then(|(_, rest)| rest.split_once('['))
+                .and_then(|(_, rest)| rest.split_once(']'))
+                .map(|(list, _)| list)
+                .unwrap_or_default()
+                .split(',')
+                .map(|f| f.trim().trim_matches('"'))
+                .filter(|f| !f.is_empty())
+            {
+                assert!(
+                    mirrored.contains(&format!("\"{feature}\"")),
+                    "tools/capi-fuzz takes `{name}` without its `{feature}` feature"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        manifest_section(&theirs, "features"),
+        manifest_section(&ours, "features"),
+        "tools/capi-fuzz declares different features from this crate"
+    );
+
+    let build = read(&fuzz_dir.join("build.rs"));
+    assert!(
+        build.contains("\"../../crates/offline-protocol-uniffi/src/offline_protocol.udl\""),
+        "the fuzzer generates its scaffolding from this crate's definition"
+    );
+}
+
 #[test]
 fn every_c_entry_point_is_declared_in_the_committed_header() {
     let mut files = Vec::new();

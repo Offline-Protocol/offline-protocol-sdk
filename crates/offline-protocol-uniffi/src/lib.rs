@@ -11,6 +11,8 @@
 #![allow(unsafe_code)] // Required for UniFFI generated scaffolding
 #![allow(missing_docs)] // Types are documented in offline_protocol.udl
 
+#[cfg(test)]
+mod build_profile_tests;
 #[cfg(feature = "capi")]
 pub mod capi;
 mod host_log;
@@ -13794,6 +13796,234 @@ mod tests {
     ///    GATT read later, together; if a refactor separates them,
     ///    `fragment_fallback_count` starts ticking in production and nothing
     ///    fails at compile time.
+    /// The two outbound fragment queues share one cap and one backed-up mark,
+    /// the cap holds a whole maximum-size message, and the mark sits below it.
+    ///
+    /// The drain checks the mark before every pop, so a peer never holds more
+    /// than the mark and the overflow discard stays unreachable. With a cap of
+    /// 100 the 2026-10-19 volume test never delivered a 16 KB or 30 KB message
+    /// from Android. The mark is small because the core sees only what it
+    /// still holds: at 3/4 of the cap the bridge pulled 576 fragments ahead of
+    /// the link and the core resent everything behind them. The values are
+    /// hand-mirrored (C5), so a drifted copy would leave one platform tearing
+    /// or resending what the other delivers. iOS also has to hand the cap to
+    /// both of its outbound queues, since it constructs them explicitly.
+    #[test]
+    fn the_outbound_fragment_queue_cap_holds_a_maximum_message_on_both_platforms() {
+        fn value_after(source: &str, marker: &str) -> usize {
+            let rest = &source[source
+                .find(marker)
+                .unwrap_or_else(|| panic!("`{marker}` is gone"))
+                + marker.len()..];
+            rest.trim_start()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap_or_else(|_| panic!("`{marker}` is not followed by a number"))
+        }
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/OutboundFragmentQueue.kt",
+        );
+        let swift = rn_source_code_only("ios/OutboundFragmentQueue.swift");
+        let manager = rn_source_code_only("ios/BleManager.swift");
+
+        let android = value_after(&kotlin, "const val DEFAULT_MAX_PER_PEER: Int =");
+        let ios = value_after(&swift, "static let defaultMaxPerPeer =");
+        assert_eq!(
+            android, ios,
+            "the two outbound fragment queue caps must match"
+        );
+        let largest = offline_protocol_transport::constants::BLE_MAX_FRAGMENT_COUNT;
+        assert!(
+            android >= largest,
+            "the cap ({android}) must hold a whole {largest}-fragment message"
+        );
+        let android_mark = value_after(&kotlin, "const val DEFAULT_BACKPRESSURE_MARK: Int =");
+        let ios_mark = value_after(&swift, "static let defaultBackpressureMark =");
+        assert_eq!(
+            android_mark, ios_mark,
+            "the two outbound fragment queue marks must match"
+        );
+        assert!(
+            0 < android_mark && android_mark < android,
+            "the backed-up mark ({android_mark}) must sit below the cap ({android})"
+        );
+        assert!(
+            manager.contains(
+                "private let MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER = OutboundFragmentQueue.defaultMaxPerPeer"
+            ) && manager.matches("maxPerPeer: MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER,").count() == 2,
+            "both iOS outbound queues must be built with the shared outbound cap"
+        );
+    }
+
+    /// The bridge wiring the 2026-10-19 volume-test fixes depend on, which CI
+    /// only type-checks. Each line below names the failure its absence
+    /// brought back:
+    ///
+    /// - Both drains stop before the destructive pop only for a recipient with
+    ///   a link. Counting every recipient stopped every peer's egress behind
+    ///   one whose link had closed; checking after the pop overflowed the cap.
+    /// - The iOS connect timeout cancels only the attempt that armed it.
+    ///   Capturing only the peripheral cancelled a healthy redial armed after
+    ///   a failed dial, and the cancel was reported as the peer lost.
+    /// - iOS forgets a link's write stall on connect and disconnect, so a
+    ///   reconnected link is not torn down by the clock of the dead one.
+    /// - iOS retires a dropped identifier, instead of reporting the peer lost,
+    ///   on both connect-failure callbacks while the peer is linked elsewhere,
+    ///   and only a write the link took ends a stall.
+    /// - Android's forced refresh restarts the advertisement only through the
+    ///   policy that keeps a linked peer's address pair stable (ADR 0030).
+    #[test]
+    fn the_ble_bridges_keep_the_volume_test_wiring() {
+        fn swift_body<'a>(source: &'a str, signature: &str) -> &'a str {
+            let start = source
+                .find(signature)
+                .unwrap_or_else(|| panic!("BleManager.swift lost `{signature}`"));
+            let rest = &source[start + signature.len()..];
+            let end = [" func ", " private func ", " public func "]
+                .iter()
+                .filter_map(|marker| rest.find(marker))
+                .min()
+                .unwrap_or(rest.len());
+            &rest[..end]
+        }
+        let swift = rn_source_code_only("ios/BleManager.swift");
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+
+        // Stop before the pop, for linked recipients only.
+        let pop = swift
+            .find("self.protocolInstance.bleGetNextFragment()")
+            .expect("the iOS drain pops from the core");
+        let stop = swift
+            .find("self.outboundFragments.anyBackedUp(deliverable: deliverable) || self.notifyFragments.anyBackedUp(deliverable: deliverable)")
+            .expect("the iOS drain must stop on backed-up recipients that have a link, in both queues");
+        assert!(
+            stop < pop,
+            "the iOS drain must stop before the pop, not after it"
+        );
+        assert_eq!(swift.matches("bleGetNextFragment()").count(), 1);
+        assert!(
+            !swift.contains("anyBackedUp() ||"),
+            "an unfiltered anyBackedUp() is back in the iOS drain"
+        );
+
+        let kotlin_pops: Vec<usize> = kotlin
+            .match_indices("protocol.bleGetNextFragment()")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            kotlin_pops.len(),
+            2,
+            "the Android drain and the poll floor are the two pops"
+        );
+        let kotlin_stops: Vec<usize> = kotlin
+            .match_indices("outboundQueue.anyBackedUp { hasDeliverableLink(it) }")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            kotlin_stops.len(),
+            2,
+            "each Android pop needs its own linked-only stop"
+        );
+        for (stop, pop) in kotlin_stops.iter().zip(&kotlin_pops) {
+            assert!(stop < pop, "an Android pop runs before its backed-up stop");
+        }
+        assert!(
+            !kotlin.contains("anyBackedUp()"),
+            "an unfiltered anyBackedUp() is back on Android"
+        );
+
+        // The connect timeout belongs to its attempt.
+        let attempt = swift_body(&swift, "private func performConnectionAttempt(");
+        assert!(
+            attempt.contains("connectTimeoutTokens[peripheral.identifier] = attempt")
+                && attempt.contains("self.connectTimeoutTokens[peripheral.identifier] == attempt,"),
+            "the iOS connect timeout must be bound to the attempt that armed it"
+        );
+
+        // The stall clock and the timeout token do not outlive a link.
+        let did_connect = swift_body(&swift, "func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {");
+        let did_fail = swift_body(&swift, "func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {");
+        let did_disconnect = swift_body(&swift, "func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {");
+        for (name, body) in [
+            ("didConnect", did_connect),
+            ("didDisconnectPeripheral", did_disconnect),
+        ] {
+            assert!(
+                body.contains("writeStallPolicy.forget(peripheral.identifier)"),
+                "{name} must forget the link's write stall"
+            );
+            assert!(
+                body.contains("connectTimeoutTokens.removeValue(forKey: peripheral.identifier)"),
+                "{name} must drop the link's connect timeout"
+            );
+        }
+        assert!(
+            did_fail.contains("connectTimeoutTokens.removeValue(forKey: peripheral.identifier)")
+        );
+
+        // A peer linked elsewhere is retired, not lost, on both callbacks, and
+        // the check runs before anything reports or redials.
+        for (name, body, before) in [
+            (
+                "didFailToConnect",
+                did_fail,
+                "guard retryCount <= MAX_CONNECTION_RETRIES",
+            ),
+            (
+                "didDisconnectPeripheral",
+                did_disconnect,
+                "if wasConnected {",
+            ),
+        ] {
+            let retire = body
+                .find("if retireIfLinkedElsewhere(peripheral.identifier, wasConnected:")
+                .unwrap_or_else(|| {
+                    panic!("{name} must retire an identifier of a peer linked elsewhere")
+                });
+            let next = body
+                .find(before)
+                .unwrap_or_else(|| panic!("{name} lost `{before}`"));
+            assert!(
+                retire < next,
+                "{name} must retire before it reports or redials"
+            );
+        }
+        // A dial that never connected unmaps the identifier, so the monitor
+        // does not redial a departed peer forever.
+        assert!(
+            did_disconnect
+                .contains("connections.removePeripheralDeviceId(for: peripheral.identifier)"),
+            "the never-connected branch must unmap the identifier"
+        );
+
+        // Only a write the link took, or a ready callback, ends a stall.
+        let ready = swift_body(
+            &swift,
+            "public func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {",
+        );
+        assert!(ready.contains("writeStallPolicy.noteWritable(peripheral.identifier)"));
+        assert!(swift.contains(
+            "peripheral.writeValue(data, for: characteristic, type: .withoutResponse) writeStallPolicy.noteWritable(peripheral.identifier)"
+        ));
+        assert_eq!(swift.matches("writeStallPolicy.noteRefused(").count(), 1);
+        assert!(
+            swift.contains("writeStallPolicy.reset()"),
+            "stop must reset every link's stall"
+        );
+
+        // Android's forced refresh goes through the policy.
+        assert!(
+            kotlin.contains(
+                "if (AdvertisingRefreshPolicy.restartsAdvertising(identifiedLinks, leAdvertiser.isAdvertising)) { refreshAdvertising(\"forced_refresh\")"
+            ),
+            "the forced refresh must restart the advertisement only through AdvertisingRefreshPolicy"
+        );
+    }
+
     #[test]
     fn react_native_ble_announces_only_cross_checked_addresses() {
         let swift = rn_source_code_only("ios/BleManager.swift");
@@ -14161,8 +14391,13 @@ mod tests {
             .find("is PeerIdentityBinding.Outcome.Verified ->")
             .expect("handleIdentityRead must have a verified arm");
         let check = identity
-            .find("if (host.connections.hasOtherClientLink(outcome.peerId, address)) {")
-            .expect("the verified arm must check for another client link to the peer");
+            .find(
+                "if (host.connections.hasOtherUsableLink(outcome.peerId, address, host::isCentralSubscribed)) {",
+            )
+            .expect(
+                "the verified arm must check for another usable link to the peer: a client \
+                 link, or its subscribed link to our server (ADR 0030)",
+            );
         let refuse = identity
             .find("refuseDuplicateLink(gatt, outcome.peerId)")
             .expect("a duplicate must be refused through refuseDuplicateLink");
@@ -15011,8 +15246,19 @@ mod tests {
         let drain = &facade[drain_start..];
         let drain = &drain[..rn_kotlin_body_end(drain)];
         assert!(
-            drain.contains(
-                "val hasConnection = address?.let { connections.getGatt(it) } != null || \
+            drain.contains("if (!hasDeliverableLink(recipientId, address)) {"),
+            "the drain must decide a peer is linked through hasDeliverableLink"
+        );
+        let link_decl = "private fun hasDeliverableLink(";
+        let link_start = facade
+            .find(link_decl)
+            .expect("the facade decides deliverability in one place")
+            + link_decl.len();
+        let link = &facade[link_start..];
+        let link = &link[..rn_kotlin_body_end(link)];
+        assert!(
+            link.contains(
+                "address?.let { connections.getGatt(it) } != null || \
                  subscribedNotifyAddressFor(recipientId) != null"
             ),
             "the drain must treat a notify-subscribed peer as connected"

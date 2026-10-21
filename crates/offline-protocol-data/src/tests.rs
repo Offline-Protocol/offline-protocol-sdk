@@ -628,8 +628,8 @@ fn a_redelivered_delta_never_reaches_a_compacted_document() {
     // The ladder promises at-least-once, so this redelivery is ordinary
     // traffic and not an attack. It is also the exact shape that refers to
     // history the compaction trimmed away, which the engine answers with a
-    // panic rather than an error (loro #1068) and which `panic = "abort"`
-    // turns into a dead process on mobile.
+    // panic rather than an error (loro #1068) and which a host built with
+    // `panic = "abort"` turns into a dead process.
     let meta = replica.inspect(&deltas[1]).expect("inspect");
     assert!(
         meta.already_applied(),
@@ -822,8 +822,8 @@ fn a_branch_forked_below_the_trim_point_never_reaches_the_engine() {
     // The shape loro #1068 names, and the reason this gate is structural
     // rather than defensive. Verified on 1.13.9 by removing the refusal:
     // the engine panics in `pending_changes.rs` and the retry panics again
-    // on the mutex that first panic poisoned. Under the `minisize` profile
-    // the SDK ships with `panic = "abort"`, so there is no catch to reach.
+    // on the mutex that first panic poisoned. Under `panic = "abort"`
+    // there is no catch to reach at all.
     let (_source, deltas) = source_with_commits(2);
 
     // A replica that saw only the first change, then edited concurrently.

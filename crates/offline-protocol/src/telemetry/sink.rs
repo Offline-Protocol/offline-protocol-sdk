@@ -35,9 +35,9 @@ use crate::events::Event;
 /// panicking sink is logged at `error!`, the offending record is dropped,
 /// and the protocol continues. A panicking sink therefore loses telemetry
 /// and degrades observability but does not corrupt SDK state. Panic
-/// isolation only applies under `panic = unwind` — release profiles that
-/// set `panic = abort` (including the `minisize` profile used for mobile)
-/// abort the process on any panic, including one from a sink.
+/// isolation only applies under `panic = unwind`, which every library the
+/// SDK ships uses (ADR 0029). A host built with `panic = abort` aborts the
+/// process on any panic, including one from a sink.
 ///
 /// # Record passing
 ///

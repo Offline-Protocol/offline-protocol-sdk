@@ -2,9 +2,10 @@ name: Fuzz
 
 # The C binding's JSON boundary (tools/capi-fuzz): arbitrary method names
 # and parameters, the input a C host controls. A panic there is a status in
-# the release build and a crash in a host built with `panic = "abort"`, so
-# the target treats a panic, `Internal` and a non-JSON result alike as a
-# crash. Nightly and on demand rather than on every pull request: a run is
+# the shipped libraries, which unwind, and a crash in a host built with
+# `panic = "abort"`, so the target treats a panic, `Internal` and a non-JSON
+# result alike as a crash. Nightly and on demand rather than on every pull
+# request: a run is
 # minutes of nightly-toolchain compute, and what it finds does not depend on
 # the change that triggered it.
 
@@ -48,10 +49,11 @@ jobs:
           restore-keys: capi-fuzz-corpus-
 
       # No sanitizer: the target calls safe Rust only, and what it looks for
-      # is a panic, which libFuzzer catches without one. Linux only: on
-      # macOS the nightly ASan runtime deadlocks before main, and without it
-      # the linker refuses the library's dylib, whose coverage hooks only
-      # the fuzz binary defines.
+      # is a panic, which libFuzzer catches without one. The fuzz package
+      # compiles the FFI crate's source as its own Rust library (that crate
+      # builds only the shipped cdylib and staticlib), so no library with
+      # unresolved coverage hooks is linked, and the same command runs on
+      # macOS for a local session.
       - name: Fuzz
         run: |
           mkdir -p tools/capi-fuzz/corpus/call

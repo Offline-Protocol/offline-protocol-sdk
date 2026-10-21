@@ -119,13 +119,35 @@ class MeshConnectionRegistry {
         }
 
     /**
-     * True when we hold a client link to [deviceId] at an address other than
-     * [excluding]. Server links do not count: a peer may hold one link per
-     * direction, and only a second link in the SAME direction is a duplicate.
+     * True when we hold a usable link to [deviceId] at an address other than
+     * [excluding]: a client link of ours, or a central connected to our server
+     * and subscribed to it ([isSubscribed]), which is the path the peer's
+     * writes and our notifications already take.
+     *
+     * A client link beside such a server link is a second Link Layer
+     * connection between the same two radios, and two devices hold one
+     * (Core 5.4, Vol 6 Part B, 1.1.1). It forms only when one side's address
+     * has rotated, and once it exists neither side can reconnect after the
+     * other link drops: every dial is from an address the peer already has a
+     * link with. In run 5 of the 2026-10-19 volume test that kept the phones
+     * apart for ten minutes.
+     *
+     * A server link is seen only through [addressToDevice], which the hello
+     * handler sets for a central's address. A subscribed central that writes
+     * no hello (a Mac, a leaf, a service without it) is invisible here, so the
+     * second client link beside it is kept (ADR 0030 names that case). A dial
+     * still in flight counts as the kept link: [gattClients] holds it from
+     * registration, and the duplicate is the one that verified second.
      */
-    fun hasOtherClientLink(deviceId: String, excluding: String): Boolean =
+    fun hasOtherUsableLink(
+        deviceId: String,
+        excluding: String,
+        isSubscribed: (String) -> Boolean,
+    ): Boolean =
         addressToDevice.any { (address, id) ->
-            id == deviceId && address != excluding && gattClients.containsKey(address)
+            id == deviceId && address != excluding &&
+                (gattClients.containsKey(address) ||
+                    (serverConnections.contains(address) && isSubscribed(address)))
         }
 
     /**
@@ -139,14 +161,18 @@ class MeshConnectionRegistry {
     /**
      * Whether a dial to [address] is still inside a duplicate refusal.
      *
-     * Lapses early once the client link it duplicated is gone: otherwise a
+     * Lapses early once the link it duplicated is gone: otherwise a
      * peer whose kept link died just after the refusal stayed undialed at the
      * address it still advertises for the rest of the window.
      */
-    fun isSuppressedDuplicate(address: String, nowMs: Long): Boolean {
+    fun isSuppressedDuplicate(
+        address: String,
+        nowMs: Long,
+        isSubscribed: (String) -> Boolean = { false },
+    ): Boolean {
         val entry = duplicateUntil[address] ?: return false
         val (deviceId, until) = entry
-        if (nowMs < until && hasOtherClientLink(deviceId, address)) return true
+        if (nowMs < until && hasOtherUsableLink(deviceId, address, isSubscribed)) return true
         duplicateUntil.remove(address, entry)
         return false
     }
@@ -215,6 +241,15 @@ class MeshConnectionRegistry {
      * complete, and a peer connecting to us must not be refused for it.
      */
     fun establishedLinkCount(): Int = (establishedClients + serverConnections).size
+
+    /**
+     * [establishedLinkCount] restricted to links whose peer has proved who it
+     * is (an address mapped to a device id). An unverified inbound central, or
+     * the server's echo of a dial still being verified, may be closed in a
+     * moment; the forced refresh must not keep the advertisement for it.
+     */
+    fun identifiedLinkCount(): Int =
+        (establishedClients + serverConnections).count { addressToDevice.containsKey(it) }
 
     fun clear() {
         gattClients.clear()

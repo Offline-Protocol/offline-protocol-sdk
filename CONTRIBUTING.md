@@ -8,7 +8,7 @@ Thank you for your interest in contributing! This document provides guidelines f
 
 - Rust 1.87+ for the library crates, and Rust 1.91+ to build `offline-protocol-uniffi` (every binding, and the C library from source) or to install `uniffi-bindgen`, whose build dependencies need it (`rustup default stable` covers both)
 - For mobile bindings: Android NDK, Xcode
-- For regenerating UniFFI bindings: `cargo install uniffi --version 0.32.2 --features cli --locked` (the CLI version must match the workspace `uniffi = "0.32"` pin; CI runs this command with `--force`, and so should you when replacing an older install)
+- For regenerating UniFFI bindings: `cargo install uniffi --version 0.32.2 --features cli --locked` (the CLI version must match the workspace `uniffi = "0.32"` pin; CI runs this command with `--force`, and so should you when replacing an older install), and `cargo install uniffi-bindgen-java --version 0.5.2 --locked` for the Java binding
 
 ### Clone and Build
 
@@ -103,7 +103,7 @@ test(dors): add tests for transport switching
 2. **Tests**: Add comprehensive unit tests
 3. **UniFFI**: Expose via UDL if needed for mobile platforms
 4. **Regenerate**: After any UDL change run `./scripts/generate-bindings.sh` and commit
-   **all three** generated files (Swift, Kotlin, Python). They are one artifact set off one
+   **all four** generated sets (Swift, Kotlin, Python, Java). They are one artifact set off one
    UDL and carry the FFI checksums of the library they were generated against — committing a
    subset leaves the rest describing a different ABI, which no build catches; the app fails
    at its first FFI call instead.

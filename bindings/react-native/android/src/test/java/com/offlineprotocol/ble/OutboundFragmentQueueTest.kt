@@ -139,6 +139,90 @@ class OutboundFragmentQueueTest {
     }
 
     @Test
+    fun `anyBackedUp trips when any one recipient reaches the mark`() {
+        // The drain checks this before every destructive pop, so it has to see
+        // a backed-up peer even when the fragment about to be popped is for
+        // someone else: the pop is one FIFO across all of them.
+        val h = Harness(maxPerPeer = 8)
+        assertFalse(h.queue.anyBackedUp())
+        repeat(5) { h.queue.enqueue("alice", byteArrayOf(it.toByte())) }
+        h.queue.enqueue("bob", byteArrayOf(9))
+        assertFalse("5 of 8 is below the 3/4 mark", h.queue.anyBackedUp())
+        h.queue.enqueue("alice", byteArrayOf(6))
+        assertTrue(h.queue.anyBackedUp())
+        assertTrue(h.queue.isBackedUp("alice"))
+        assertFalse(h.queue.isBackedUp("bob"))
+    }
+
+    @Test
+    fun `a recipient with no link does not stop the pull for others`() {
+        // Counting a linkless recipient parked every other peer's fragments
+        // in the core until its queue expired.
+        val h = Harness(maxPerPeer = 8)
+        repeat(6) { h.queue.enqueue("gone", byteArrayOf(it.toByte())) }
+        assertTrue(h.queue.anyBackedUp())
+        assertFalse(h.queue.anyBackedUp { it != "gone" })
+        repeat(6) { h.queue.enqueue("bob", byteArrayOf(it.toByte())) }
+        assertTrue(h.queue.anyBackedUp { it != "gone" })
+    }
+
+    @Test
+    fun `the pull resumes after a flush or a removal`() {
+        val h = Harness(maxPerPeer = 8)
+        repeat(6) { h.queue.enqueue("bob", byteArrayOf(it.toByte())) }
+        assertTrue(h.queue.anyBackedUp())
+        h.queue.flush { _, _ -> true }
+        assertFalse(h.queue.anyBackedUp())
+        repeat(6) { h.queue.enqueue("bob", byteArrayOf(it.toByte())) }
+        assertTrue(h.queue.anyBackedUp())
+        h.queue.removeAll("bob")
+        assertFalse(h.queue.anyBackedUp())
+    }
+
+    @Test
+    fun `a cap of one still has a mark of at least one`() {
+        // A mark of zero read every created queue, even an empty one, as
+        // backed up.
+        val h = Harness(maxPerPeer = 1)
+        h.queue.enqueue("bob", byteArrayOf(0))
+        h.queue.flush { _, _ -> true }
+        assertFalse(h.queue.anyBackedUp())
+    }
+
+    @Test
+    fun `a whole maximum-size message fits under the default cap with nothing discarded`() {
+        val h = Harness(maxPerPeer = OutboundFragmentQueue.DEFAULT_MAX_PER_PEER)
+        repeat(512) { h.queue.enqueue("bob", byteArrayOf(it.toByte())) }
+        assertTrue(h.drops.isEmpty())
+        assertEquals(512, h.queue.totalCount())
+    }
+
+    @Test
+    fun `the default cap holds a whole maximum-size message and the mark sits below it`() {
+        // The core fragments a message into at most 512 pieces, and the drain
+        // stops pulling at the mark, so the overflow discard that tore 16 KB
+        // messages stays out of reach only while the mark is below the cap.
+        assertTrue(OutboundFragmentQueue.DEFAULT_MAX_PER_PEER >= 512)
+        assertTrue(OutboundFragmentQueue.DEFAULT_BACKPRESSURE_MARK < OutboundFragmentQueue.DEFAULT_MAX_PER_PEER)
+    }
+
+    @Test
+    fun `the default queue backs up after a few seconds of link time, not three quarters of the cap`() {
+        // The core counts a message as queued, and defers its retry, only
+        // until its first fragment is pulled. A mark at 3/4 of the cap let the
+        // drain pull 576 fragments ahead of the link, so the core resent
+        // everything behind them.
+        val h = Harness(maxPerPeer = OutboundFragmentQueue.DEFAULT_MAX_PER_PEER)
+        repeat(OutboundFragmentQueue.DEFAULT_BACKPRESSURE_MARK - 1) {
+            h.queue.enqueue("alice", byteArrayOf(it.toByte()))
+        }
+        assertFalse(h.queue.anyBackedUp())
+        h.queue.enqueue("alice", byteArrayOf(0))
+        assertTrue(h.queue.isBackedUp("alice"))
+        assertTrue(h.queue.anyBackedUp())
+    }
+
+    @Test
     fun `per-peer cap overflow does not affect other recipients`() {
         val h = Harness(maxPerPeer = 2)
         h.queue.enqueue("alice", byteArrayOf(1))

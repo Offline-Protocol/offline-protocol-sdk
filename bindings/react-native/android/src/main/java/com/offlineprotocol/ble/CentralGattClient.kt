@@ -119,6 +119,11 @@ internal class CentralGattClient(
          *  fragment. Called on the BLE thread. */
         fun onWriteCompleted(address: String)
 
+        /** Whether the central at [address] is subscribed to our GATT server.
+         *  A subscribed server link to a peer makes a client link to it a
+         *  duplicate ([MeshConnectionRegistry.hasOtherUsableLink]). */
+        fun isCentralSubscribed(address: String): Boolean = false
+
         /** Hand a received fragment to the facade (either via client
          *  notify or via central-side write). Called on the BLE thread. */
         fun handleInboundFragment(address: String, data: ByteArray)
@@ -1260,7 +1265,7 @@ internal class CentralGattClient(
                 return
             }
             is PeerIdentityBinding.Outcome.Verified -> {
-                if (host.connections.hasOtherClientLink(outcome.peerId, address)) {
+                if (host.connections.hasOtherUsableLink(outcome.peerId, address, host::isCentralSubscribed)) {
                     refuseDuplicateLink(gatt, outcome.peerId)
                     return
                 }
@@ -1354,15 +1359,21 @@ internal class CentralGattClient(
     }
 
     /**
-     * Closes a client link that proved an identity we already hold a client
-     * link to at another address.
+     * Closes a client link that proved an identity we already hold a usable
+     * link to at another address: a client link of ours, or the peer's own
+     * subscribed link to our server.
      *
      * A macOS peripheral rotates its address and advertises under the old and
      * the new one at once, so the scanner dials both and both verify as the
      * same peer. Kept, the pair spends two of [BleTransportFacade]'s four
      * connection slots on one peer, and with two such peers the cap refuses
      * every inbound central, which is how such a peripheral's own central
-     * would have learned who we are. The first link to verify stays; this one
+     * would have learned who we are. And a phone that rotates its address
+     * while subscribed to our server reappears as a new device: dialled and
+     * kept, that was a second Link Layer connection between the same two
+     * radios, after which neither side could reconnect when the other link
+     * dropped (run 5 of the 2026-10-19 volume test, ten minutes apart).
+     * The first link to verify stays; this one
      * is closed unannounced, and its address is not redialed for
      * [DUPLICATE_LINK_SUPPRESS_MS].
      */

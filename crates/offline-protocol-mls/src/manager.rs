@@ -1085,6 +1085,25 @@ impl MlsManager {
             .encrypt_message(other_user_id, plaintext, &signature_keys)
     }
 
+    /// The position of the most recent frame sealed for `other_user_id` (see
+    /// [`crate::session::SessionManager::last_seal_mark`]).
+    pub fn last_seal_mark(&self, other_user_id: &str) -> Option<crate::session::SealMark> {
+        self.session_manager.last_seal_mark(other_user_id)
+    }
+
+    /// Records that the peer received the frame at `mark` (see
+    /// [`crate::session::SessionManager::note_acknowledged_seal`]).
+    pub fn note_acknowledged_seal(&self, other_user_id: &str, mark: crate::session::SealMark) {
+        self.session_manager
+            .note_acknowledged_seal(other_user_id, mark);
+    }
+
+    /// Frames sealed for `other_user_id` past the last one it acknowledged
+    /// (see [`crate::session::SessionManager::unacknowledged_seals`]).
+    pub fn unacknowledged_seals(&self, other_user_id: &str) -> u64 {
+        self.session_manager.unacknowledged_seals(other_user_id)
+    }
+
     /// Encrypts a message for a 1:1 session that is known to exist.
     ///
     /// Unlike `encrypt_for_user`, this skips the `has_session()` storage check
@@ -4080,6 +4099,98 @@ mod tests {
             !matches!(res, Ok(Some(_))),
             "generation beyond the tolerance must not decrypt"
         );
+    }
+
+    /// A receiver that falls more than the forward window behind its sender
+    /// never decrypts from that sender again: every later frame, and every
+    /// re-sealed resend, is further ahead still. That must surface as the
+    /// recoverable `SessionDesync`, which the protocol layer answers with a
+    /// re-key, not as `Decryption`, which it answers by waiting for a resend
+    /// that can never decrypt either. The 2026-10-19 volume test lost a whole
+    /// direction this way.
+    ///
+    /// The gap inside the window still fast-forwards, so a receiver is not
+    /// re-keyed for an ordinary burst of lost frames.
+    #[test]
+    fn test_a_receiver_past_the_forward_window_classifies_as_session_desync() {
+        let (alice, bob) = create_test_session();
+
+        // Inside the window: skip far ahead and still decrypt.
+        let mut last = None;
+        for i in 0..100 {
+            last = Some(
+                alice
+                    .encrypt_for_user(&addr("bob"), format!("in window {i}").as_bytes())
+                    .unwrap(),
+            );
+        }
+        let pt = bob
+            .decrypt_from_user(&last.unwrap(), &addr("alice"))
+            .unwrap();
+        assert_eq!(pt.as_deref(), Some(&b"in window 99"[..]));
+
+        // Past it: the next frame lands more than the window ahead of bob.
+        let gap = crate::group::SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE + 1;
+        for _ in 0..gap {
+            alice.encrypt_for_user(&addr("bob"), b"lost").unwrap();
+        }
+        let ahead = alice.encrypt_for_user(&addr("bob"), b"too far").unwrap();
+        let err = bob.decrypt_from_user(&ahead, &addr("alice")).unwrap_err();
+        assert!(
+            matches!(err, MlsError::SessionDesync(_)),
+            "a frame past the forward window must classify as SessionDesync, got {err:?}"
+        );
+    }
+
+    /// The other side of the window stays a plain decryption failure: a frame
+    /// more than the out-of-order tolerance behind means the session is
+    /// healthy and only that frame is lost, which the sender's re-sealed
+    /// resend recovers. Re-keying there would tear down a working session.
+    #[test]
+    fn test_a_frame_past_the_out_of_order_tolerance_is_not_a_desync() {
+        let (alice, bob) = create_test_session();
+        let old = alice.encrypt_for_user(&addr("bob"), b"old").unwrap();
+        let mut newest = None;
+        for _ in 0..=crate::group::SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE + 1 {
+            newest = Some(alice.encrypt_for_user(&addr("bob"), b"newer").unwrap());
+        }
+        bob.decrypt_from_user(&newest.unwrap(), &addr("alice"))
+            .unwrap();
+        let err = bob.decrypt_from_user(&old, &addr("alice")).unwrap_err();
+        assert!(
+            matches!(err, MlsError::Decryption(_)),
+            "a frame behind the tolerance must stay Decryption, got {err:?}"
+        );
+    }
+
+    /// The seal count is what bounds a sender's re-seals, so it must move
+    /// with seals and acknowledgements, and an acknowledgement for a frame of
+    /// a session that has since been rebuilt must not vouch for the new one.
+    #[test]
+    fn test_unacknowledged_seals_track_seals_acks_and_session_rebuilds() {
+        let (alice, _bob) = create_test_session();
+        let bob = addr("bob");
+        assert_eq!(alice.unacknowledged_seals(&bob), 0);
+
+        alice.encrypt_for_user(&bob, b"one").unwrap();
+        let first = alice.last_seal_mark(&bob).unwrap();
+        alice.encrypt_for_user(&bob, b"two").unwrap();
+        alice.encrypt_for_user(&bob, b"three").unwrap();
+        assert_eq!(alice.unacknowledged_seals(&bob), 3);
+
+        alice.note_acknowledged_seal(&bob, first);
+        assert_eq!(alice.unacknowledged_seals(&bob), 2);
+        // An older acknowledgement never moves the mark back.
+        alice.note_acknowledged_seal(&bob, crate::session::SealMark { index: 0, ..first });
+        assert_eq!(alice.unacknowledged_seals(&bob), 2);
+
+        alice.delete_session(&bob).unwrap();
+        assert_eq!(alice.unacknowledged_seals(&bob), 0);
+        assert!(alice.last_seal_mark(&bob).is_none());
+        // A mark from before the rebuild is ignored, so it cannot hide seals
+        // of the new session.
+        alice.note_acknowledged_seal(&bob, crate::session::SealMark { index: 99, ..first });
+        assert_eq!(alice.unacknowledged_seals(&bob), 0);
     }
 
     /// RFC 8032 §7.1 TEST 1 Ed25519 public key.

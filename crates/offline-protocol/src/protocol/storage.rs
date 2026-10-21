@@ -550,8 +550,9 @@ pub(crate) const PENDING_DECRYPT_PERSISTED_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 
 
 /// Restore-walk bound for the outbox.
 ///
-/// The live insert path hard-caps the outbox at [`MAX_OUTBOX_ENTRIES`]
-/// (`ensure_outbox_entry` evicts before admitting), so a durable store can
+/// The live insert path caps the outbox at [`MAX_OUTBOX_ENTRIES`] (an app send
+/// is admitted or refused, and internal frames evict before inserting, over
+/// the cap only while every entry awaits delivery), so a durable store can
 /// never legitimately hold more than that plus what a merge restored. Four
 /// times the cap is ample headroom and avoids walking — and transiently
 /// allocating up to [`MAX_PROTOCOL_STATE_RECORD_BYTES`] for — thirty times more
@@ -3226,6 +3227,12 @@ impl OfflineProtocol {
                 .contains(&offline_protocol_sealed::ACK_UNDECRYPTABLE_V1)
             {
                 self.peer_undecryptable_ack.insert(peer_id.clone());
+            }
+            if caps
+                .ack_versions
+                .contains(&offline_protocol_sealed::ACK_COALESCED_V1)
+            {
+                self.peer_coalesced_ack.insert(peer_id.clone());
             }
             if self.config.encryption.rich_payload_enabled
                 && caps.attested_rich_versions.contains(&RICH_PAYLOAD_V1)

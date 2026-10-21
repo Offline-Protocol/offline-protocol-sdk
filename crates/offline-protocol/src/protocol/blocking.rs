@@ -145,6 +145,7 @@ impl OfflineProtocol {
         // protection back, requestable by anyone who can get a user to do it.
         self.peer_ctrl_freshness.remove(user_id);
         self.peer_undecryptable_ack.remove(user_id);
+        self.peer_coalesced_ack.remove(user_id);
         self.peer_rich_payload.remove(user_id);
         self.peer_rich_attested.remove(user_id);
         // Advertised half only, as above: `svc_sealed_proved_peers` is a
@@ -492,6 +493,58 @@ mod tests {
             "Messages should be received after unblocking"
         );
         assert_eq!(received.unwrap().id, msg_id);
+    }
+
+    /// A message sent while its sender was blocked is never delivered, even
+    /// when the sender's retry arrives after the block is lifted. The retry is
+    /// answered instead, so the sender stops. Before, a ladder still running
+    /// at unblock delivered everything sent during the block.
+    #[test]
+    fn test_a_message_sent_during_a_block_is_not_delivered_after_unblock() {
+        use offline_protocol_core::{AppId, Message, UserId};
+        use offline_protocol_transport::{mock::MockTransport, TransportType};
+
+        let mut proto = make_protocol("alice");
+        let mock = MockTransport::new(TransportType::BLE);
+        mock.start().unwrap();
+        let handle = mock.clone();
+        proto
+            .transport_manager_mut()
+            .add_transport(TransportType::BLE, Box::new(mock));
+        proto.start().unwrap();
+        proto.block_user("bob").unwrap();
+
+        let msg = Message::new(
+            UserId::new("bob").unwrap(),
+            UserId::new("alice").unwrap(),
+            AppId::new("test-app").unwrap(),
+            "sent while blocked",
+        );
+        assert!(
+            msg.requires_ack,
+            "precondition: the sender is waiting for an answer"
+        );
+        handle.queue_message(msg.clone());
+        assert!(proto.receive_message().is_none());
+        assert!(
+            handle.sent_messages().is_empty(),
+            "nothing is answered while the block lasts"
+        );
+
+        proto.unblock_user("bob").unwrap();
+        handle.clear_sent_messages();
+        handle.queue_message(msg.clone());
+        assert!(
+            proto.receive_message().is_none(),
+            "a retry of a message sent during the block must not be delivered"
+        );
+        assert!(
+            handle.sent_messages().iter().any(|m| m
+                .metadata
+                .get(offline_protocol_sealed::ACK_FOR_KEY)
+                .is_some_and(|id| *id == msg.id.as_str())),
+            "the retry is answered so the sender stops retrying"
+        );
     }
 
     #[test]

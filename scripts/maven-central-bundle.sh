@@ -18,6 +18,12 @@
 #     bash scripts/maven-central-bundle.sh <maven repository> <bundle.zip> <version>
 #
 # Prints the signing key's fingerprint, so the log says which key signed.
+#
+# Two libraries are published this way: the Android library (the default,
+# offline-protocol-sdk as an aar) and the Java binding
+# (MAVEN_ARTIFACT_ID=offline-protocol-java MAVEN_PACKAGING=jar). They are
+# separate bundles and separate deployments, so one failing cannot hold the
+# other back.
 
 set -euo pipefail
 
@@ -32,17 +38,19 @@ BUNDLE="$2"
 VERSION="$3"
 : "${SIGNING_KEY:?SIGNING_KEY must hold the armored private signing key}"
 
-COORDINATE="com/offlineprotocol/offline-protocol-sdk"
-ARTIFACT="offline-protocol-sdk-$VERSION"
+ARTIFACT_ID="${MAVEN_ARTIFACT_ID:-offline-protocol-sdk}"
+PACKAGING="${MAVEN_PACKAGING:-aar}"
+COORDINATE="com/offlineprotocol/$ARTIFACT_ID"
+ARTIFACT="$ARTIFACT_ID-$VERSION"
 SOURCE="$REPOSITORY/$COORDINATE/$VERSION"
 
 [ -d "$SOURCE" ] || die "no $VERSION in the repository: $SOURCE"
 VERSIONS="$(find "$REPOSITORY/$COORDINATE" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
 [ "$VERSIONS" = 1 ] || die "the repository holds $VERSIONS versions; a bundle is one release"
 
-# What Central requires of an Android library: the artifact, its POM, sources
+# What Central requires of a library: the artifact, its POM, sources
 # and javadoc. The Gradle module file goes too, for Gradle consumers.
-FILES=("$ARTIFACT.aar" "$ARTIFACT.pom" "$ARTIFACT.module" "$ARTIFACT-sources.jar" "$ARTIFACT-javadoc.jar")
+FILES=("$ARTIFACT.$PACKAGING" "$ARTIFACT.pom" "$ARTIFACT.module" "$ARTIFACT-sources.jar" "$ARTIFACT-javadoc.jar")
 for file in "${FILES[@]}"; do
   [ -s "$SOURCE/$file" ] || die "missing or empty: $file"
 done

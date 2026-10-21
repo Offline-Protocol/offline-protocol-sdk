@@ -15,6 +15,23 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **A Java binding.** `bindings/java` is a typed Java API generated from the
+  interface definition by `uniffi-bindgen-java`, the fourth member of the
+  artifact set that `scripts/generate-bindings.sh` writes with Swift, Kotlin
+  and Python. It reaches the native library through the Java foreign function
+  API, so it needs JDK 22 or later and brings no dependency: no JNA, no JNI,
+  no glue of its own, and it does not go through the C API. `OfflineProtocol`,
+  `MeshServices`, `DataStore`, every record and enum, the callback interfaces
+  a host implements (events, transports, storage providers) and a
+  `ProtocolException` subclass per engine refusal. The generated records have
+  no defaults, so a `ProtocolConfig` is spelled out in full. CI regenerates
+  and diffs the Java with the rest, and builds and tests it against the
+  library on Linux, macOS and Windows. The generator is versioned apart from UniFFI, so
+  the script refuses any series but 0.5. The jar is published to Maven
+  Central as `com.offlineprotocol:offline-protocol-java` by the release, beside
+  the Android library and under the same switch; it holds no native code, so the
+  host supplies the library from the release's assets. The contract is
+  `docs/bridges/java.md`.
 - **A C API.** `bindings/c/include/offline_protocol.h` declares about a
   dozen functions over the native library every release already ships:
   create an engine from a JSON configuration, call any method of the
@@ -70,6 +87,24 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Changed
 
+- **The iOS and Android libraries are built for size, and still unwind.** A
+  new `mobile` profile, `release` at opt-level "s", builds both, in the
+  release workflow, the React Native scripts and CI; the desktop libraries
+  and the wheels stay on `release`. On the macOS arm64 build, with the
+  link-time optimisation 0.30.0 also turns on, the shared library is
+  8,538,400 bytes at "s" against 10,932,208 at opt-level 3. The cost, on the
+  benches: MLS sealing and opening about 40% slower, other paths at most a
+  third. Opt-level "z" was measured too and rejected: a quarter smaller
+  again, but MLS twice as slow and small-message serialization three times.
+  The `minisize` profile is deleted. No build ever used it, and ADR 0018,
+  ADR 0019, threat model R11, the C guide and CLAUDE.md, which said the
+  mobile library shipped with its `panic = "abort"`, now say what ships: every
+  library unwinds, so a panic still reaches Swift and Kotlin as an exception
+  and a document whose import panics in the engine's apply step is marked
+  unusable rather than ending the app. A panic in the decode before it is not
+  caught there and unwinds out of the frame's handling; the in-flight marker
+  quarantines that blob
+  ([ADR 0029](docs/adr/0029-mobile-libraries-are-sized-not-aborting.md)).
 - **UniFFI is now 0.32** (was 0.30). The Swift, Kotlin and Python bindings are
   regenerated together from the unchanged interface definition, and the
   `uniffi-bindgen` the build scripts and CI install is `0.32.2`. No API a
@@ -88,9 +123,169 @@ archived by series under [docs/changelog/](docs/changelog/); see the
     JavaScript, and the bridge's diagnostics, as the error's own case and
     message (`ProtocolError.SendFailed(message: ...)`) instead of the
     generic Foundation description.
+- **`offline-protocol-uniffi` no longer builds a Rust library.** Its crate
+  types are `cdylib` and `staticlib`, the two the bindings and the C API
+  ship, so the crate can no longer be named as a dependency from Rust. Nothing
+  in the workspace or on crates.io did. The C binding's fuzzer compiles the
+  crate's source under its own package instead, which also lets it run on
+  macOS.
+- **The dependency audit waives RUSTSEC-2026-0374**, an unmaintained-crate
+  notice (not a vulnerability) for `basic-toml`. It reaches the workspace only
+  through the FFI crate's build script, beneath `uniffi_bindgen` and
+  `askama_derive`, which read template configuration with it at compile time,
+  so it never links into a shipped library. No upgrade removes it: uniffi
+  0.32.2 and askama 0.16.1 are the latest releases. The waiver is in both
+  `deny.toml` and `.cargo/audit.toml`, and is dropped once an askama release
+  replaces the crate and uniffi takes it.
 
 ### Fixed
 
+- **A phone no longer loses a Bluetooth peer it is still linked to.** In the
+  2026-10-19 volume test an iPhone and an Android phone held two Bluetooth LE
+  links between them; the one that stalled was torn down, the iPhone's redial
+  of its address timed out and reported Android lost, and the core refused
+  every send to Android for ten minutes while the second link sat idle. No
+  reconnect could succeed, because the radios complete one connection between
+  two devices. Now iOS retires the dropped identifier instead of reporting the
+  peer lost while another link to it is up, and skips dials to a peer it is
+  linked to; Android closes a client link to a peer already subscribed to its
+  server, and restarts its advertisement (which gives it a new address) on its
+  two-minute refresh only while no identified peer is linked, or when the
+  advertisement has stopped. Evicting a peer on iOS now drops every
+  identifier it maps from, so a second link no longer survives a peer the
+  core was told is lost. See ADR 0030.
+- **A full outbox refuses the newest message instead of failing the oldest.**
+  At 500 entries the outbox failed its least recently sent entry to admit any
+  new one, so the same outage failed about 2,500 queued messages per phone,
+  each to make room for a newer message to the same peer. Now a message to the
+  recipient with the largest backlog is refused (`message_failed`, "Outbox
+  capacity exceeded", no attempts, while `send` returns its id); a message to
+  a recipient with a smaller backlog evicts from the largest one (its newest
+  message held by the per-peer window, else its oldest entry); and a message
+  awaiting its acknowledgement is never evicted.
+- **A link carrying less than it is offered no longer collapses.** Two phones
+  sending 5 messages a second each way over Bluetooth LE delivered 70.5%: the
+  Android phone's indication path carried 12 to 16 frames a second against 15
+  offered, acknowledgements queued behind data until every message timed out,
+  each resend cost the receiver one more acknowledgement on the saturated
+  link, and both phones retried 50,000 times and failed 6,000 messages as
+  "Outbox capacity exceeded". Four changes:
+  - A sender keeps at most 16 frames awaiting acknowledgement in flight to
+    one peer over a mesh link. Further messages wait in the outbox, are
+    reported as `message_deferred` with reason `peer_window`, and go out
+    oldest first as acknowledgements return. The relay is not windowed, and
+    neither is session control (key packages, Welcomes, confirmation
+    probes), which heals the session the held frames are sealed under.
+  - The Bluetooth LE carrier queues an acknowledgement ahead of data.
+  - Delivery acknowledgements to a peer that advertises `ack_versions` entry 2
+    are coalesced, up to five per frame within 500 ms, in a new `ack_more`
+    metadata key. Older peers get one acknowledgement per frame.
+  - On Android, the indication path sends the next fragment as soon as the
+    peer confirms the last, instead of 20 ms later.
+- **A resend the receiver can no longer decrypt is re-sealed.** Past the
+  re-seal budget a resend went out verbatim, and a verbatim copy sealed more
+  than 32 generations before the newest was refused by the receiver,
+  unanswered on a mesh link, until its retries ran out. It is now re-sealed,
+  up to 512 generations past the last acknowledgement.
+- **A full acknowledgement table no longer stops the engine.** Once 1,000
+  messages were waiting for acknowledgements, a retry with no slot returned
+  an error out of `process()` before the step that frees slots, on every
+  tick, and the engine never recovered: every later send failed and nothing
+  more was retried. A frame is now never transmitted without a slot to track
+  it. At the ceiling a send is held for the retry queue, reported as
+  `message_deferred` with reason `ack_capacity`, and sent once an
+  acknowledgement frees a slot; `process()` runs every step on every tick.
+  Two leaks that kept the table full are fixed with it: a refused
+  registration orphaned every timed-out entry so it was never retried, and
+  the prune of timed-out entries ran at exactly the retry ladder's maximum
+  delay, so a ninth retry found its slot gone.
+- **`sendMessage` no longer reports a failure for a message it sent.** The
+  capacity error used to surface after the frame was on the wire, so an
+  application showed messages as failed that the recipient had received.
+- **A receiver that falls far behind a sender re-keys instead of going
+  deaf.** A frame more than the forward window ahead of the receiver's
+  ratchet failed as an ordinary decryption error, and so did every later
+  frame and every resend from that sender, permanently. It now triggers the
+  same rate-limited re-key as an epoch desync. The trigger is authenticated:
+  it needs the epoch's sender-data secret. The window is also raised from
+  1,000 to 8,192 generations, pinned at four times the in-flight ceiling.
+- **A frame still waiting in the BLE queue is not retried.** Its
+  acknowledgement timeout is extended, for up to a minute, instead of
+  queueing a second re-sealed copy behind it. On a link carrying less than it
+  was offered, those copies grew the queue, the round trip and the
+  receiver's ratchet gap together.
+- **Large BLE messages are no longer torn under load.** The Android and iOS
+  outbound fragment queues discarded everything queued for a peer when they
+  filled, and they could fill: Android's periodic poll pulled fragments from
+  the core with no backpressure check, and both drains checked only after a
+  fragment had been pulled. With a cap of 100, one 16 KB message was enough.
+  Both drains now stop before pulling while any peer with a link is backed
+  up, and the cap is 768, above the largest message the core fragments. A
+  peer with no link does not stop the pull, so its undeliverable fragments
+  no longer hold back every other peer's.
+- **Resends stop burning encryption keys while nothing is acknowledged.**
+  Each resend used to be re-sealed under a fresh ratchet generation, so a
+  link that stopped carrying acknowledgements walked the receiver past its
+  forward window: one phone re-sealed 20,919 resends during a 17-minute
+  stall. A sender now re-seals only while it has sealed fewer than 256
+  frames past the peer's last acknowledgement, and resends verbatim beyond
+  that until the next one arrives. 256 is a quarter of 1,024, the receiver
+  window of a leaf node, which mls-rs fixes and which is smaller than a
+  phone's; `tools/mls-interop` pins it.
+- **An iOS central link whose write buffer never drains is torn down and
+  reconnected.** CoreBluetooth kept refusing every write on such a link for
+  as long as it lived while still delivering the peer's notifications, so
+  nothing reported it down. After 15 s with no accepted write the link is
+  cancelled. A connect that has not completed in 10 s in the foreground is
+  cancelled too: CoreBluetooth never times one out, and the pending connect
+  refused every reconnect attempt as "already connecting".
+- **A message sent while its sender was blocked is never delivered.** Its id
+  is now remembered, so a retry arriving after an unblock is answered rather
+  than delivered.
+- **An iOS phone keeps talking to a peer that changed its Bluetooth
+  address.** The peer reappears under a new identifier, and the old one still
+  mapped to it, so the send path could pick the old, disconnected one and
+  report "no connected peripheral" indefinitely while the verified link to
+  the same peer sat idle: 25 minutes in one test. Sends now go to the
+  connected link, verifying a peer retires its other disconnected
+  identifiers, and the connection monitor stops dialling a peripheral it
+  never identified once it stops advertising.
+- **The BLE bridges stop pulling far ahead of the link.** Both outbound
+  fragment queues pulled from the core until a peer held 576 fragments, so
+  the core saw nothing queued, could not extend the acknowledgement timeout
+  of what was still waiting, and resent it: 19,404 resends from one Android
+  phone on an indication-paced link. They now stop at 32 fragments, a few
+  seconds of link time, and the rest waits in the core where the extension
+  sees it. The 768 cap is unchanged.
+
+- **Link-time optimisation reaches the libraries the release ships.** The
+  release profile has always asked for it, but cargo runs it on a library
+  only when every crate type in the library's list can take it, and the FFI
+  crate also listed `lib`, which cannot. So every native library from the
+  UniFFI migration to 0.29.0 (the iOS framework, the Android libraries, the
+  desktop libraries and the Python wheels) was built without it, and no
+  build said so. Measured on the macOS arm64 build: the static library the
+  iOS framework is made from falls from 137,949,536 to 23,393,288 bytes, the
+  shared library from 11,534,416 to 10,932,208, with the same 482 exported
+  functions. The npm package carries the iOS static libraries, so it should
+  lose most of its size; the iOS and Android numbers are measured on the
+  first release artifacts built this way. A release build of the crate takes about a
+  minute longer and peaks near 2.1 GB of memory.
+  `the_ffi_crate_builds_no_rust_library` refuses a crate type that would
+  turn it off again.
+
+- **Python: type checkers read the package's annotations.** The package
+  shipped no PEP 561 `py.typed` marker, so mypy skipped it as untyped
+  ("missing library stubs or py.typed marker") and every value it returned
+  was `Any` in the application, although nearly every public function is
+  annotated. The wheel now carries the marker, and the wheel build fails
+  if it goes missing. The root package also names its public surface in
+  `__all__`: under PEP 561 a type checker treats a bare `from .x import Y`
+  in `__init__.py` as private, so with the marker alone pyright (and so
+  Pylance) refused the README's own `from offline_protocol_sdk import
+  ProtocolManager`, and `mypy --strict` reported that the module "does not
+  explicitly export" it. A test pins the list to the attributes the package
+  exposes, and the wheel harness refuses a wheel without the marker.
 - **Python: a Linux box that could no longer advertise recovers on its own.**
   Linux loses track of the controller's advertising when a central-role
   connection completes while advertising is on: the controller keeps

@@ -192,15 +192,26 @@ impl OfflineProtocol {
                     }
 
                     // Block filter: silently drop messages from blocked users
-                    // addressed to us. No ACK, no event, no side-effects.
-                    // Checked before mark_seen so that if the user is later
-                    // unblocked, retransmissions can still be delivered.
+                    // addressed to us. No ACK and no event, so the block
+                    // reveals nothing to the sender while it lasts.
+                    //
+                    // The id IS remembered. A message sent during a block is
+                    // never delivered, whenever the block ends: that is what a
+                    // user who blocked someone expects, and it is the inbound
+                    // half of the post-unblock reset, which already drops our
+                    // own queued messages to that peer. Without this, a sender
+                    // whose retry ladder was still running when the block was
+                    // lifted delivered everything it had sent meanwhile. Now
+                    // such a resend meets the duplicate path above, which
+                    // answers it once the block is gone, so the sender stops
+                    // retrying.
                     if sender_blocked {
                         debug!(
                             sender = %message.sender,
                             message_id = %message.id,
                             "Dropping message from blocked user"
                         );
+                        self.mark_seen_persisted(message.id.clone());
                         continue;
                     }
 

@@ -597,10 +597,11 @@ impl OfflineProtocol {
                 );
             }
             Err(err) => {
-                // The send can fail after the probe entered the outbox (a
-                // full ACK tracker refuses it), and then no id comes back to
-                // track. Any probe still queued for this peer is such an
-                // orphan, since the tracked one was withdrawn above.
+                // The send can fail after the probe entered the outbox, and
+                // then no id comes back to track. Any probe still queued for
+                // this peer is such an orphan, since the tracked one was
+                // withdrawn above. (A full ACK tracker no longer lands here:
+                // it holds the probe and returns its id.)
                 let orphans: Vec<_> = self
                     .outbox
                     .values()

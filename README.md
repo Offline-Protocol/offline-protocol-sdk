@@ -36,6 +36,7 @@ Every channel carries the version number of the release it came from.
 | Android, Kotlin (preview) | A download on each [GitHub release](https://github.com/Offline-Protocol/offline-protocol-sdk/releases); not on Maven Central yet | See below |
 | C, and any language that calls C | `offline_protocol.h` and the native library in each [GitHub release](https://github.com/Offline-Protocol/offline-protocol-sdk/releases)'s desktop archives | See [bindings/c](bindings/c/README.md) |
 | Flutter (iOS, Android, preview) | [`offline_protocol`](bindings/flutter/README.md) plugin in this repository | Path dependency; see [bindings/flutter](bindings/flutter/README.md) |
+| Java (JVM 22+, desktop and server) | Generated sources in [bindings/java](bindings/java/README.md), over the native library in each release's desktop archives; not on Maven Central yet | See [bindings/java](bindings/java/README.md) |
 
 **Python.** Wheels are published for Python 3.10 or later on macOS arm64
 (macOS 14 or later), Linux x86_64 and aarch64 (`manylinux_2_34`, so glibc
@@ -185,6 +186,7 @@ each plaintext send then emits a `security_warning` event with the
 ### Prerequisites
 - Rust (via rustup)
 - uniffi-bindgen: `cargo install uniffi --version 0.32.2 --features cli --locked` (must match the workspace `uniffi = "0.32"` pin)
+- uniffi-bindgen-java: `cargo install uniffi-bindgen-java --version 0.5.2 --locked` (the 0.5 series generates for UniFFI 0.32)
 - For Android: the Android NDK (set `ANDROID_NDK_HOME`); for iOS: Xcode
 
 ### Build Mobile UniFFI Libraries
@@ -206,12 +208,12 @@ npm run build:uniffi:android  # Android only
 ./scripts/generate-bindings.sh
 ```
 
-One script generates all three languages — Swift, Kotlin and Python — because
+One script generates all four languages — Swift, Kotlin, Python and Java — because
 they are one artifact set produced from one UDL and carry the FFI checksums of
 the library they were generated against. Regenerating a subset leaves the rest
 describing a different ABI, which no build catches; the app fails at the first
 call instead. `npm run generate:bindings` and the platform build scripts
-delegate here, so every path produces the whole set. Commit all three together.
+delegate here, so every path produces the whole set. Commit all four together.
 
 ### Build Python Desktop Bindings
 
@@ -222,7 +224,7 @@ pip install -e .
 ```
 
 The desktop build produces the native `.dylib`, `.so`, or `.dll` for the host
-platform and regenerates the bindings (all three languages, via the shared
+platform and regenerates the bindings (all four languages, via the shared
 script above).
 
 

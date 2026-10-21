@@ -193,6 +193,14 @@ pub struct OfflineProtocol {
     /// to prevent large file transfers from evicting regular messages.
     media_outbox: HashMap<MessageId, OutboxEntry>,
 
+    /// Outbox ids held back by the per-peer send window, per recipient, in
+    /// the order the app sent them. Sent oldest first as the peer's
+    /// acknowledgements free the window (`flush_peer_windows`). An id whose
+    /// outbox entry is gone (settled, expired, evicted) is skipped and dropped
+    /// there, so no removal path has to know about this. In-memory only: a
+    /// restart re-drives the outbox, and the gate holds it again.
+    window_held: HashMap<String, VecDeque<MessageId>>,
+
     /// Consecutive unreachable-park counter per recipient for plain DMs,
     /// driving the escalating reachability-probe interval on every carrier
     /// (see `handle_recipient_unreachable_for_message` —
@@ -389,6 +397,21 @@ pub struct OfflineProtocol {
     ///
     /// [`ACK_UNDECRYPTABLE_V1`]: offline_protocol_sealed::ACK_UNDECRYPTABLE_V1
     pub(crate) peer_undecryptable_ack: std::collections::HashSet<String>,
+
+    /// Peers that read `ack_more` on a delivery ACK ([`ACK_COALESCED_V1`] in
+    /// `ack_versions`), so several of their frames may be answered by one ACK
+    /// frame. Same lifecycle as `peer_undecryptable_ack` above.
+    ///
+    /// [`ACK_COALESCED_V1`]: offline_protocol_sealed::ACK_COALESCED_V1
+    pub(crate) peer_coalesced_ack: std::collections::HashSet<String>,
+
+    /// Delivery ACKs waiting to be coalesced, per peer: the carrier the
+    /// answered frames arrived on, when the first was held, and the answered
+    /// ids with the first one's hop count. Sent as one frame once
+    /// `ACK_COALESCE_MAX` are held or `ACK_COALESCE_WINDOW` has passed
+    /// (`flush_coalesced_acks`). In-memory only: an ACK lost with it is
+    /// answered again when the resend arrives as a duplicate.
+    coalesced_acks_out: HashMap<String, CoalescedAcks>,
 
     /// Peers that have presented a control-frame signature over the
     /// freshness-bound payload, so their frames under the older one are
@@ -1192,6 +1215,7 @@ impl OfflineProtocol {
             pending_reseal: HashMap::new(),
             undecryptable_resent: HashSet::new(),
             media_outbox: HashMap::new(),
+            window_held: HashMap::new(),
             dm_unreachable_parks: HashMap::new(),
             unrouted_acks: VecDeque::new(),
             reachability: reachability::ReachabilityFacts::default(),
@@ -1209,6 +1233,8 @@ impl OfflineProtocol {
             peer_compact_envelope: std::collections::HashSet::new(),
             peer_ctrl_freshness: std::collections::HashSet::new(),
             peer_undecryptable_ack: std::collections::HashSet::new(),
+            peer_coalesced_ack: std::collections::HashSet::new(),
+            coalesced_acks_out: HashMap::new(),
             control_freshness_peers: std::collections::HashSet::new(),
             control_reset_watermark: std::collections::HashMap::new(),
             peer_rich_payload: std::collections::HashSet::new(),
@@ -1418,6 +1444,7 @@ impl OfflineProtocol {
         let previous_peer_compact_envelope = self.peer_compact_envelope.clone();
         let previous_peer_ctrl_freshness = self.peer_ctrl_freshness.clone();
         let previous_peer_undecryptable_ack = self.peer_undecryptable_ack.clone();
+        let previous_peer_coalesced_ack = self.peer_coalesced_ack.clone();
         // Snapshotted with its siblings so a failed re-initialize restores it
         // too. It is a ratchet, so the direction that matters is that a
         // rollback must not *lose* it: a peer we hold to the newer payload has
@@ -1590,6 +1617,7 @@ impl OfflineProtocol {
             self.peer_compact_envelope = previous_peer_compact_envelope;
             self.peer_ctrl_freshness = previous_peer_ctrl_freshness;
             self.peer_undecryptable_ack = previous_peer_undecryptable_ack;
+            self.peer_coalesced_ack = previous_peer_coalesced_ack;
             self.control_freshness_peers = previous_control_freshness_peers;
             self.control_reset_watermark = previous_control_reset_watermark;
             self.peer_rich_payload = previous_peer_rich_payload;
@@ -2836,6 +2864,19 @@ impl OfflineProtocol {
         attempt_count: u32,
         transport_override: Option<TransportType>,
     ) -> Option<TransportType> {
+        // No slot to track it: leave the send to the retry queue, which waits
+        // for one, instead of transmitting a frame nobody tracks.
+        if message.requires_ack && !self.ack_manager.has_capacity_for(&message.id) {
+            self.ensure_outbox_entry(&message);
+            let _ = self.retry_queue.enqueue(message, attempt_count);
+            return None;
+        }
+        // A full peer window holds a frame that has not gone out yet; the
+        // window flush sends it when an acknowledgement frees a slot.
+        if !self.peer_window_admits(&message) {
+            self.hold_for_peer_window(&message);
+            return None;
+        }
         self.ensure_outbox_entry(&message);
         // Tier 2: re-seal against the peer's current session before flushing, so
         // a post-re-key epoch change no longer leaves the bytes undecryptable.
@@ -2872,6 +2913,58 @@ impl OfflineProtocol {
                 let _ = self.retry_queue.enqueue(message.clone(), attempt_count);
                 debug!(message_id = %message.id, error = %e, "Flush send failed, re-enqueued");
                 None
+            }
+        }
+    }
+
+    /// Sends held messages into each peer's free window slots, oldest first,
+    /// at most a flush batch per peer per tick.
+    ///
+    /// Runs every tick rather than from the acknowledgement handler alone,
+    /// because a slot is also freed by give-up, expiry and eviction, and a
+    /// peer whose mesh link went away stops being governed by the window, so
+    /// everything held for it goes to transport selection.
+    fn flush_peer_windows(&mut self) {
+        if self.window_held.is_empty() {
+            return;
+        }
+        let peers: Vec<String> = self.window_held.keys().cloned().collect();
+        for peer in peers {
+            let mut budget = crate::constants::FLUSH_BATCH_LIMIT;
+            while budget > 0 {
+                let Some(message_id) = self
+                    .window_held
+                    .get(&peer)
+                    .and_then(|held| held.front().cloned())
+                else {
+                    break;
+                };
+                let Some((message, attempt_count)) = self
+                    .outbox
+                    .get(&message_id)
+                    .map(|entry| (entry.message.clone(), entry.attempt_count))
+                else {
+                    // Settled, expired or evicted while held.
+                    if let Some(held) = self.window_held.get_mut(&peer) {
+                        held.pop_front();
+                    }
+                    continue;
+                };
+                if !self.peer_window_admits(&message) {
+                    break;
+                }
+                if let Some(held) = self.window_held.get_mut(&peer) {
+                    held.pop_front();
+                }
+                budget -= 1;
+                let _ = self.try_flush_send_via(message, attempt_count, None);
+            }
+            if self
+                .window_held
+                .get(&peer)
+                .is_some_and(|held| held.is_empty())
+            {
+                self.window_held.remove(&peer);
             }
         }
     }
@@ -3621,11 +3714,27 @@ impl OfflineProtocol {
         // end. Throttled inside; hours-long holds need no per-tick walk.
         self.sweep_custody();
 
-        self.process_retry_queue()?;
-        self.process_welcome_retry_queue()?;
+        // One step's failure never starves another. Every fallible step runs
+        // on every tick and the first error is reported once they all have.
+        // The steps are coupled: the retry queue fills the pending-ACK table
+        // and the timeout sweep is what empties it, so a retry error that
+        // returned early used to stop the sweep for good.
+        let mut first_error: Option<crate::Error> = None;
+        let mut note = |step: &'static str, result: Result<()>| {
+            if let Err(err) = result {
+                warn!(step, error = %err, "process() step failed; continuing the tick");
+                first_error.get_or_insert(err);
+            }
+        };
+        // Before the retry ladder, so a frame the app sent first is not
+        // overtaken by one that only reached the retry queue later.
+        self.flush_peer_windows();
+        self.flush_due_coalesced_acks();
+        note("retry_queue", self.process_retry_queue());
+        note("welcome_retry_queue", self.process_welcome_retry_queue());
         self.process_relay_register_retries();
         self.process_relay_broadcast_report_timeouts();
-        self.process_timed_out_acks()?;
+        note("timed_out_acks", self.process_timed_out_acks());
 
         // Throttle session reconciliation to avoid expensive storage I/O
         // (list_sessions → Keychain/Keystore) on every tick. Only run when
@@ -3649,7 +3758,10 @@ impl OfflineProtocol {
         self.evaluate_relay_role();
         self.tick_telemetry_categories();
 
-        Ok(())
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 
     /// Reports this device's condition to the forwarding governor and announces
@@ -3893,6 +4005,31 @@ impl OfflineProtocol {
             };
 
             processed += 1;
+
+            // No slot to track this resend: put it back unchanged and try
+            // again shortly. Checked before the re-seal, so a held resend
+            // burns no ratchet generation, and before the send, so nothing
+            // goes out that cannot be tracked. The retry count is not
+            // advanced: being held is not an attempt, so the wait is the
+            // ladder's first rung rather than this entry's next one.
+            if entry.message.requires_ack && !self.ack_manager.has_capacity_for(&entry.message.id) {
+                let recheck_ms = self.config.reliability.retry.initial_delay_ms;
+                let _ = self.retry_queue.enqueue_with_delay(
+                    entry.message,
+                    entry.retry_count,
+                    recheck_ms,
+                );
+                continue;
+            }
+
+            // A frame that has not gone out yet waits for the peer's window
+            // instead, out of this queue: re-checking it every second would
+            // spend the batch on frames that cannot move.
+            if !self.peer_window_admits(&entry.message) {
+                self.hold_for_peer_window(&entry.message);
+                continue;
+            }
+
             let previous_transport = self.transport_manager.current_transport();
             // Normally finds the entry already there: a retry entry outlives
             // its outbox entry only if a give-up path skipped
@@ -3917,7 +4054,23 @@ impl OfflineProtocol {
 
             match send_result {
                 Ok(()) => {
-                    let ack_registered_now = self.ensure_ack_registration(&entry.message)?;
+                    // Never `?`. This propagated once, and `process()` then
+                    // returned before `process_timed_out_acks` on every tick:
+                    // the step that frees slots never ran again, so the table
+                    // stayed full and the engine never recovered. The capacity
+                    // check above makes a failure here a priority-eviction
+                    // race at most.
+                    let ack_registered_now = match self.ensure_ack_registration(&entry.message) {
+                        Ok(registered) => registered,
+                        Err(err) => {
+                            warn!(
+                                message_id = %entry.message.id,
+                                error = %err,
+                                "ACK registration failed after a retry send"
+                            );
+                            false
+                        }
+                    };
 
                     if ack_registered_now {
                         // The resend registered a brand-new ACK (the prior one
@@ -4002,8 +4155,25 @@ impl OfflineProtocol {
     /// Processes timed out ACKs and handles retry or failure.
     fn process_timed_out_acks(&mut self) -> Result<()> {
         let timed_out = self.ack_manager.drain_timed_out();
+        if timed_out.is_empty() {
+            return Ok(());
+        }
+        // A frame still waiting in a local queue has not been answered because
+        // it has not been sent. Retrying it would queue a second, re-sealed
+        // copy behind the first: on a congested link that is what grew the
+        // queue, the round trip and the receiver's ratchet gap together in the
+        // 2026-10-19 volume test. It gets a bounded extension instead.
+        let queued = self.transport_manager.queued_message_ids();
         for pending in timed_out {
             let message_id = pending.message_id.clone();
+
+            if queued.contains(&message_id.as_str())
+                && self
+                    .ack_manager
+                    .extend_while_queued(&message_id, QUEUED_ACK_GRACE_MAX)
+            {
+                continue;
+            }
 
             if pending.retry_count >= self.config.reliability.retry.max_retries {
                 self.handle_max_retries_exceeded(&message_id, pending.retry_count)?;

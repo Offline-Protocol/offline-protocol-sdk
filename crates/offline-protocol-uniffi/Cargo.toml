@@ -67,7 +67,15 @@ offline-protocol-sealed = { workspace = true }
 uniffi = { version = "0.32", features = ["build"] }
 
 [lib]
-crate-type = ["cdylib", "staticlib", "lib"]
+# No `lib` (rlib) here, on purpose. Cargo runs link-time optimisation on a
+# library only when every crate type in its list can take it, and an rlib
+# cannot, so with `lib` in this list `lto = true` in the release profile
+# never reached the libraries the release ships, and nothing said so: every
+# release from the UniFFI migration to 0.29.0 was built that way. Nothing
+# links this crate as Rust. The fuzzer compiles its source under its own
+# package (`tools/capi-fuzz`). `the_ffi_crate_builds_no_rust_library` holds
+# the list.
+crate-type = ["cdylib", "staticlib"]
 name = "offline_protocol_uniffi"
 
 [features]

@@ -43,17 +43,17 @@ echo "Building for iOS $IOS_DEPLOYMENT_TARGET and later"
 echo "Building UniFFI library for iOS architectures..."
 for arch in "${IOS_ARCHS[@]}"; do
   echo "Building for $arch..."
-  cargo build --release --target "$arch" --package offline-protocol-uniffi
+  cargo build --profile mobile --target "$arch" --package offline-protocol-uniffi
 done
 
 # Create output directories
 mkdir -p "$OUTPUT_DIR"
 mkdir -p "$GENERATED_DIR"
 
-# Cargo may put the staticlib in release/ or release/deps/ depending on version
+# Cargo may put the staticlib in mobile/ or mobile/deps/ depending on version
 static_lib_for() {
   local arch=$1
-  local root="$PROJECT_ROOT/target/$arch/release"
+  local root="$PROJECT_ROOT/target/$arch/mobile"
   if [[ -f "$root/liboffline_protocol_uniffi.a" ]]; then
     echo "$root/liboffline_protocol_uniffi.a"
   else

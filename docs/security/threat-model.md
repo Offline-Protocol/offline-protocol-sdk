@@ -230,6 +230,14 @@ sealed to an epoch the recipient has left is withheld like any other desync.
 Custody widens nobody's view of the acknowledgement channel in this version,
 because acknowledgements are not carried.
 
+A coalesced acknowledgement (`ack_more`, see
+[Delivery and acknowledgements](../state-machines/delivery-and-acks.md#acknowledgements-on-a-mesh-link))
+does not widen this. Each id it names is settled as a single acknowledgement,
+including the check that it comes from the frame's recipient, and a receiver
+settles at most five, so a forged one does what five forged single
+acknowledgements could already do. Acknowledgements are unauthenticated either
+way; binding one to its sender needs signed acknowledgements.
+
 ## Known residual risks
 
 Stated plainly, because a threat model that lists only what it defeats is
@@ -276,6 +284,13 @@ framing header (group identifier, then epoch) **before** any AEAD, sender-data,
 or signature check; and a 1:1 slot identifier is a public function of two public
 addresses. The MLS credential that would authenticate the sender exists only
 once decryption **succeeds**.
+
+The desync class has one member this does not apply to: a frame more than the
+forward window ahead of the receiver's ratchet. MLS decrypts the sender data
+under AEAD before it reads the generation from it, so reaching that check takes
+the epoch's sender-data secret, which only a group member holds. It was added
+so a receiver that fell that far behind re-keys instead of failing every later
+frame, and it leaves the unauthenticated surface exactly as described.
 
 **Why it is tolerable:** the mitigation is that acting on the trigger is
 **harmless**, not that the trigger is trusted.
@@ -575,18 +590,29 @@ provides; it is the same open problem as relay-side metadata.
 Replicated documents merge changes that arrive from peers, and merging means
 handing bytes to a CRDT engine. The engine has open defects where a malformed
 or causally impossible change panics rather than returning an error, and one of
-them poisons the document's lock so the retry panics too. The mobile artifact
-ships with `panic = "abort"`, so there is no unwinding to catch.
+them poisons the document's lock so the retry panics too. The shipped
+libraries unwind, and what a panic does depends on where it happens. The
+engine decodes a peer's blob before applying it, to judge it, and that
+decode runs outside any catch: a panic there unwinds out of the frame's
+handling, the document is untouched, and the in-flight marker left behind
+quarantines the blob, so the next frame for the space or the next launch
+refuses it. A panic in the apply step is caught by the import's
+`catch_unwind`, which turns it into an error and marks the document unusable
+for the process. A host built with `panic = "abort"` loses the process in
+either case.
 
 MLS does not help here, and the reason is worth being precise about:
 authentication establishes who sent the bytes, and the question the engine is
 about to ask is what shape they are. A peer can be exactly who they claim and
 still send a blob that ends the process.
 
-**Impact:** a member of a space can abort the application on a device it
-replicates with. Not silent, not remote-code-execution, and not available to
-anyone outside the space: it requires someone the user has already accepted
-into a shared document, and it is attributable to them.
+**Impact:** a member of a space can, on a device it replicates with, make a
+shared document unusable for the rest of the process, or raise a panic out
+of the handling of its frame, once per unique blob; and abort the
+application where the host is built with `panic = "abort"`. Not silent, not
+remote-code-execution, and not available to anyone outside the space: it
+requires someone the user has already accepted into a shared document, and
+it is attributable to them.
 
 **Group spaces widen who this is, not what it does.** A 1:1 space has exactly
 one other member; a group space has as many as the roster, and every one of

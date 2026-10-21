@@ -357,9 +357,28 @@ impl OfflineProtocol {
         self.cleanup_stale_media_state(StdDuration::from_secs(MEDIA_TRANSFER_STALE_TIMEOUT_SECS));
         #[cfg(feature = "data")]
         self.expire_attachment_fetches();
-        // Prune old timed-out ACKs that weren't cleaned up by normal retry flow
+        // Prune old timed-out ACKs that weren't cleaned up by normal retry flow.
+        //
+        // A timed-out entry still holds a slot its scheduled resend will
+        // reuse, so it must outlive the longest wait the retry ladder can
+        // schedule. A fixed five minutes equalled the default ladder's cap
+        // exactly: the slot of a message on its ninth retry was pruned just
+        // before that resend fired, the resend needed a fresh slot, and at
+        // capacity there was none.
         self.ack_manager
-            .prune_old_timeouts(std::time::Duration::from_secs(300)); // 5 minutes
+            .prune_old_timeouts(self.timed_out_ack_retention());
+    }
+
+    /// How long a timed-out pending ACK is kept before the prune drops it:
+    /// twice the longest gap between a timeout and its resend (the ACK timeout
+    /// plus the retry ladder's maximum delay).
+    pub(crate) fn timed_out_ack_retention(&self) -> std::time::Duration {
+        let reliability = &self.config.reliability;
+        let longest_gap_ms = reliability
+            .ack
+            .default_timeout_ms
+            .saturating_add(reliability.retry.max_delay_ms);
+        std::time::Duration::from_millis(longest_gap_ms.saturating_mul(2))
     }
 
     /// Evicts known peers not re-seen within `KNOWN_PEER_TTL_SECS`.

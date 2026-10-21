@@ -59,6 +59,9 @@ public class BleManager: NSObject, TransportManager {
     // been reported yet. Keeping the constant here would duplicate the
     // floor and go stale the first time Rust changes it.
     private let CONNECTION_TIMEOUT: TimeInterval = 10.0
+    // Tears down a central link whose write buffer never drains again (see
+    // BleWriteStallPolicy). Without it such a link is never reported down.
+    private let writeStallPolicy = BleWriteStallPolicy()
     private let MAX_CONNECTIONS_PER_DEVICE = 4
     private let ADVERTISE_RESTART_MIN: TimeInterval = 0.2
     private let ADVERTISE_RESTART_MAX: TimeInterval = 1.2
@@ -101,6 +104,16 @@ public class BleManager: NSObject, TransportManager {
         return centralManager?.state ?? .unknown
     }
     private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
+    /// When each peripheral last passed the mesh filter in a scan. The
+    /// connection monitor reads it to stop dialling a peripheral it never
+    /// identified once it stops advertising (`PeerLinkResolution`). Main only.
+    private var lastAdvertisedAt: [UUID: Date] = [:]
+    /// The connect attempt each pending connect timeout belongs to. A timer
+    /// cancels only the attempt that armed it: it captured only the
+    /// peripheral before, so a timer from a dial that had already failed
+    /// cancelled a healthy redial armed after it, and the cancel was then
+    /// reported as the peer lost. Main only.
+    private var connectTimeoutTokens: [UUID: UUID] = [:]
     private var peripheralRSSI: [UUID: Int16] = [:]
     
     // Peripheral (advertiser/server) components
@@ -280,11 +293,17 @@ public class BleManager: NSObject, TransportManager {
     private let PENDING_FRAGMENT_TIMEOUT: TimeInterval = 15.0
     private let PENDING_OUTBOUND_FRAGMENT_TIMEOUT: TimeInterval = 30.0 // For outbound fragments that failed to send
     private let MAX_PENDING_FRAGMENTS_PER_PEER = 100
+    // The outbound queues' cap. Not the inbound one above: that buffer only
+    // holds fragments while a central's device id resolves, but an outbound
+    // queue must hold a whole maximum-size message below its mark (see the
+    // overflow note on OutboundFragmentQueue). At 100, one 16 KB message
+    // overran it.
+    private let MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER = OutboundFragmentQueue.defaultMaxPerPeer
     // Outbound fragments that could not be sent immediately — same contract as
     // `inboundFragments` above.
     private lazy var outboundFragments = OutboundFragmentQueue(
         queueCheck: { [weak self] in self?.assertOnFragmentQueue() },
-        maxPerPeer: MAX_PENDING_FRAGMENTS_PER_PEER,
+        maxPerPeer: MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER,
         timeout: PENDING_OUTBOUND_FRAGMENT_TIMEOUT,
         onDropped: { [weak self] recipientId, reason, count in
             guard let self = self else { return }
@@ -297,7 +316,7 @@ public class BleManager: NSObject, TransportManager {
             } else {
                 self.emitDiagnostic("warning", "Pending outbound fragment queue capped, discarding queue",
                                     context: ["recipientId": recipientId, "dropped": count,
-                                              "max": self.MAX_PENDING_FRAGMENTS_PER_PEER])
+                                              "max": self.MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER])
             }
         }
     )
@@ -319,7 +338,7 @@ public class BleManager: NSObject, TransportManager {
     /// fragments from both: the drain would pull past the mark and the next
     /// `enqueue` would discard the lot. See `OutboundFragmentQueue`.
     private lazy var notifyFragments = OutboundFragmentQueue(
-        maxPerPeer: MAX_PENDING_FRAGMENTS_PER_PEER,
+        maxPerPeer: MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER,
         timeout: PENDING_OUTBOUND_FRAGMENT_TIMEOUT,
         onDropped: { [weak self] recipientId, reason, count in
             guard let self = self else { return }
@@ -331,7 +350,7 @@ public class BleManager: NSObject, TransportManager {
             } else {
                 self.emitDiagnostic("warning", "NOTIFY outbound queue capped, discarding queue",
                                     context: ["recipientId": recipientId, "dropped": count,
-                                              "max": self.MAX_PENDING_FRAGMENTS_PER_PEER])
+                                              "max": self.MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER])
             }
         }
     )
@@ -368,6 +387,11 @@ public class BleManager: NSObject, TransportManager {
     // `notifyFragments` and hands the send to the main-queue pump.
     private let notifyLock = NSLock()
     private var subscribedCentralsById: [UUID: CBCentral] = [:]
+    /// When each subscribed central last subscribed or wrote to our server.
+    /// Guarded by `notifyLock` with the map above. A subscription counts as a
+    /// live link in `otherLiveLinks` only while this is recent
+    /// (`PeerLinkResolution.subscriptionIsLive`).
+    private var centralLastHeardAt: [UUID: Date] = [:]
     private var lastMeshAdvertisement: MeshAdvertisementData?
 
     // Logging & monitoring
@@ -798,6 +822,7 @@ public class BleManager: NSObject, TransportManager {
         // The mesh counts the same links; without this it stays full.
         meshController.registerAllDisconnected()
         discoveredPeripherals.removeAll()
+        lastAdvertisedAt.removeAll()
         peripheralRSSI.removeAll()
         inboundFragments.clear()
         outboundFragments.clear()
@@ -829,7 +854,10 @@ public class BleManager: NSObject, TransportManager {
         estimatedMeshPeerCount = 0
         notifyLock.lock()
         subscribedCentralsById.removeAll()
+        centralLastHeardAt.removeAll()
         notifyLock.unlock()
+        connectTimeoutTokens.removeAll()
+        writeStallPolicy.reset()
 
         pendingRestoredPeripherals = [:]
 
@@ -1123,9 +1151,25 @@ public class BleManager: NSObject, TransportManager {
             guard let self = self else { return }
             let now = Date()
             for peripheral in self.discoveredPeripherals.values {
-                if self.connections.connectedPeripheral(for: peripheral.identifier) == nil {
-                    self.attemptConnection(to: peripheral, reason: "monitor")
+                guard self.connections.connectedPeripheral(for: peripheral.identifier) == nil else { continue }
+                // Not every peripheral it ever saw: one never identified that
+                // stopped advertising is an address a peer has left, and a
+                // pending connect to it only crowds out the one to where the
+                // peer went (`PeerLinkResolution`).
+                let identified = self.connections.hasAnyDevice(for: peripheral.identifier)
+                guard PeerLinkResolution.monitorShouldRedial(
+                    identified: identified,
+                    lastAdvertisedAt: self.lastAdvertisedAt[peripheral.identifier],
+                    now: now
+                ) else {
+                    // Past the window it is never read again unless the
+                    // peripheral advertises anew (which sets it afresh), so
+                    // drop it: one entry per rotated address otherwise
+                    // accumulated for the life of the process.
+                    self.lastAdvertisedAt.removeValue(forKey: peripheral.identifier)
+                    continue
                 }
+                self.attemptConnection(to: peripheral, reason: "monitor")
             }
             let pendingKeys: [UUID] = self.inboundFragments.pendingIds()
             for centralId in pendingKeys {
@@ -1162,6 +1206,15 @@ public class BleManager: NSObject, TransportManager {
 
         // 1. Already connected check
         if connections.connectedPeripheral(for: peripheral.identifier) != nil {
+            return
+        }
+
+        // 1b. A known peer we already hold a link to on another identifier.
+        // The Link Layer completes one connection between two devices, so
+        // this dial would only time out, and while it is pending it holds
+        // the identifier the send path may still fall back to.
+        if let deviceId = connections.peripheralDeviceId(for: peripheral.identifier),
+           !otherLiveLinks(of: deviceId, excluding: peripheral.identifier).isEmpty {
             return
         }
 
@@ -1226,6 +1279,30 @@ public class BleManager: NSObject, TransportManager {
         }
 
         centralManager?.connect(peripheral, options: nil)
+        // CoreBluetooth never times a connect out: a pending one waits until
+        // the peripheral answers, and while it waits every later attempt is
+        // refused as "already connecting". In the 2026-10-19 rerun that held
+        // a dead link in place for 17 minutes, because the connect to the
+        // peer's new advertising identity never completed. In the foreground
+        // a connect that has not landed in CONNECTION_TIMEOUT is cancelled so
+        // the next discovery can try again. In the background a pending
+        // connect is how iOS reconnects a peer that comes back into range, so
+        // it is left alone.
+        let attempt = UUID()
+        connectTimeoutTokens[peripheral.identifier] = attempt
+        DispatchQueue.main.asyncAfter(deadline: .now() + CONNECTION_TIMEOUT) { [weak self] in
+            guard let self = self,
+                  self.connectTimeoutTokens[peripheral.identifier] == attempt,
+                  peripheral.state == .connecting,
+                  UIApplication.shared.applicationState == .active else { return }
+            self.connectTimeoutTokens.removeValue(forKey: peripheral.identifier)
+            print("[BleManager] Connect to \(peripheral.identifier) did not complete in \(Int(self.CONNECTION_TIMEOUT)) s; cancelling so it can be retried")
+            self.emitDiagnostic("warning", "BLE connect timed out; cancelled", context: [
+                "identifier": peripheral.identifier.uuidString,
+                "timeoutSeconds": self.CONNECTION_TIMEOUT
+            ])
+            self.centralManager?.cancelPeripheralConnection(peripheral)
+        }
         if logThrottler.shouldLog(key: "connect_attempt_\(peripheral.identifier.uuidString)", interval: 10) {
             print("[BleManager] Attempting connection to \(peripheral.identifier) (reason: \(reason))")
             var context: [String: Any] = [
@@ -1237,6 +1314,90 @@ public class BleManager: NSObject, TransportManager {
             }
             emitDiagnostic("info", "Connecting to BLE peripheral", context: context)
         }
+    }
+
+    /// The peer just proved its id on `verified`. Any other identifier it
+    /// mapped from and is not connected on is an address it rotated away
+    /// from: forget it, so neither the send path nor the monitor dials it
+    /// again, and cancel a connect still pending to it. Main only.
+    private func retireSupersededPeripherals(of deviceId: String, verifiedOn verified: UUID) {
+        for identifier in connections.retirePeripheralIdentifiers(supersededBy: verified, deviceId: deviceId) {
+            let peripheral = discoveredPeripherals.removeValue(forKey: identifier)
+            lastAdvertisedAt.removeValue(forKey: identifier)
+            connectionAttemptTimestamps.removeValue(forKey: identifier)
+            connectionRetryCount.removeValue(forKey: identifier)
+            peripheralRSSI.removeValue(forKey: identifier)
+            if let peripheral, peripheral.state == .connecting {
+                centralManager?.cancelPeripheralConnection(peripheral)
+            }
+            print("[BleManager] Retired \(identifier) for \(deviceId): verified on \(verified)")
+            emitDiagnostic("info", "Retired a superseded peripheral identifier", context: [
+                "identifier": identifier.uuidString,
+                "verifiedOn": verified.uuidString,
+                "deviceId": deviceId
+            ])
+        }
+    }
+
+    /// The other identifiers `deviceId` holds a usable link on (see
+    /// `PeerLinkResolution.otherLiveLinks`). Any thread.
+    private func otherLiveLinks(of deviceId: String, excluding identifier: UUID) -> [UUID] {
+        let now = Date()
+        notifyLock.lock()
+        let subscribed = Set(subscribedCentralsById.keys.filter {
+            PeerLinkResolution.subscriptionIsLive(lastHeardAt: centralLastHeardAt[$0], now: now)
+        })
+        notifyLock.unlock()
+        return connections.otherLiveLinks(
+            of: deviceId,
+            excluding: identifier,
+            isSubscribed: { subscribed.contains($0) }
+        )
+    }
+
+    private func isSubscribedCentral(_ identifier: UUID) -> Bool {
+        notifyLock.lock()
+        defer { notifyLock.unlock() }
+        return subscribedCentralsById[identifier] != nil
+    }
+
+    /// A subscribed central subscribed or wrote: its link is up.
+    private func noteCentralHeard(_ identifier: UUID) {
+        notifyLock.lock()
+        if subscribedCentralsById[identifier] != nil {
+            centralLastHeardAt[identifier] = Date()
+        }
+        notifyLock.unlock()
+    }
+
+    /// Retires `identifier` when the peer it maps to is still linked on
+    /// another one, instead of reporting the peer lost or redialling it.
+    /// Returns whether it did. Main only.
+    @discardableResult
+    private func retireIfLinkedElsewhere(_ identifier: UUID, wasConnected: Bool) -> Bool {
+        guard let deviceId = connections.peripheralDeviceId(for: identifier),
+              let kept = otherLiveLinks(of: deviceId, excluding: identifier).first else {
+            return false
+        }
+        connectionRetryCount.removeValue(forKey: identifier)
+        _ = connections.consumePendingRole(for: identifier)
+        retireSupersededPeripherals(of: deviceId, verifiedOn: kept)
+        // The ACL link to this identifier is gone, so a central-role mapping
+        // for it keys nothing, unless it is itself a subscribed central.
+        if !isSubscribedCentral(identifier) {
+            connections.removeCentralDeviceId(for: identifier)
+        }
+        // The peer's egress MTU was whichever link verified last; it may
+        // have been this one.
+        reflectEgressMtu(forDeviceId: deviceId)
+        refreshSelfMetrics()
+        emitDiagnostic("info", "BLE link dropped; peer still linked on another identifier", context: [
+            "identifier": identifier.uuidString,
+            "kept": kept.uuidString,
+            "deviceId": deviceId,
+            "wasConnected": wasConnected
+        ])
+        return true
     }
 
     private func ensureDeviceId(for centralId: UUID) {
@@ -1685,7 +1846,26 @@ public class BleManager: NSObject, TransportManager {
             // and the fragments waited for the expiry that tears them.
             var hitBackpressure = self.flushPendingOutboundFragments()
 
-            while let fragment = self.protocolInstance.bleGetNextFragment() {
+            while true {
+                // Stop before the pop, not after it. The pop is destructive and
+                // shared by every peer, so a fragment pulled while some queue
+                // is past its mark has nowhere to go but further past it, and
+                // the post-enqueue checks below only see that once it has
+                // happened. Both egress queues count: either one discarding
+                // tears a message.
+                //
+                // Only a recipient with a link counts: one with none cannot
+                // drain, so counting it stopped every other peer until its
+                // fragments expired (`OutboundFragmentQueue.anyBackedUp`).
+                let deliverable: (String) -> Bool = { recipient in
+                    self.findPeripheral(for: recipient) != nil || self.notifyTarget(for: recipient) != nil
+                }
+                if self.outboundFragments.anyBackedUp(deliverable: deliverable)
+                    || self.notifyFragments.anyBackedUp(deliverable: deliverable) {
+                    hitBackpressure = true
+                    break
+                }
+                guard let fragment = self.protocolInstance.bleGetNextFragment() else { break }
                 let recipientId = fragment.recipientId
                 let data = Data(fragment.data)
 
@@ -1741,7 +1921,7 @@ public class BleManager: NSObject, TransportManager {
                     // destructive pop) into the bounded per-peer queue. The
                     // write buffer drains far slower than this loop can pull;
                     // without this stop the loop spins the whole backlog into
-                    // the queue, overflows MAX_PENDING_FRAGMENTS_PER_PEER, and
+                    // the queue, overflows MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER, and
                     // OutboundFragmentQueue.enqueue discards the in-flight
                     // message. Leaving the backlog in Rust keeps delivery
                     // lossless. Mirrors Android's drainAndSendFragments.
@@ -1760,18 +1940,13 @@ public class BleManager: NSObject, TransportManager {
                     // arms it too, so the floor is there before this queue
                     // reaches the mark.
                     //
-                    // The mark is checked after the enqueue because the pop is
-                    // destructive and nothing can hand a fragment back to Rust,
-                    // so each drain that meets a stalled peer at the head adds
-                    // one fragment past it. The headroom to the cap is a budget
-                    // of such drains, not a guarantee: a peer stalled while
-                    // other peers keep drains coming can still reach the cap,
-                    // and the whole-queue discard is then the intended outcome.
-                    // Those fragments were headed for the 30 s expiry anyway,
-                    // which drops them fragment by fragment and can tear a
-                    // message; the discard never does. Holding the fragment
-                    // back in Swift instead would trade that for every other
-                    // peer waiting behind a stalled one.
+                    // This check runs after the enqueue; the one at the top of
+                    // the loop is what stops the next pop. Together they keep
+                    // a stalled peer's queue at the mark plus at most one
+                    // fragment, far below the cap, however many drains other
+                    // peers trigger. The cost is that every peer waits while
+                    // one is backed up, because the pop is one FIFO; the
+                    // re-drain below is the floor that resumes it.
                     if self.outboundFragments.isBackedUp(recipientId) {
                         hitBackpressure = true
                         break
@@ -2028,7 +2203,19 @@ public class BleManager: NSObject, TransportManager {
     }
 
     private func evictPeer(_ deviceId: String, reason: String) {
-        guard let identifier = connections.peripheralIdentifier(for: deviceId) else {
+        // Every identifier the peer maps from, not one. A peer can hold two
+        // (ADR 0030: a second link persists with a peer the bridge does not
+        // control, such as a Mac rotating its address). Evicting one of them
+        // and then reporting the peer lost dropped it in the core while the
+        // other link stayed up, and nothing re-announced it until that link
+        // cycled. Each pass unmaps the identifier it took, so this ends.
+        var identifiers: [UUID] = []
+        while identifiers.count < 16, let identifier = connections.peripheralIdentifier(for: deviceId) {
+            identifiers.append(identifier)
+            connections.removePeripheralDeviceId(for: identifier)
+            connections.removeCentralDeviceId(for: identifier)
+        }
+        guard !identifiers.isEmpty else {
             if logThrottler.shouldLog(key: "mesh_evict_missing_\(deviceId)") {
                 print("[BleManager] Cannot evict \(deviceId): missing identifier")
             }
@@ -2036,23 +2223,25 @@ public class BleManager: NSObject, TransportManager {
         }
 
         if logThrottler.shouldLog(key: "mesh_evict_\(deviceId)", interval: 5) {
-            print("[BleManager] Evicting \(deviceId) to reclaim capacity (reason: \(reason))")
+            print("[BleManager] Evicting \(deviceId) to reclaim capacity (reason: \(reason), identifiers: \(identifiers.count))")
         }
 
-        if let peripheral = connections.connectedPeripheral(for: identifier) {
-            centralManager?.cancelPeripheralConnection(peripheral)
-        }
-
-        _ = connections.removePeripheral(identifier)
-        connections.removePeripheralDeviceId(for: identifier)
-        connections.removeCentralDeviceId(for: identifier)
         connections.removeConnectionRole(for: deviceId)
-        peripheralRSSI.removeValue(forKey: identifier)
-        // Removals are synchronous and thread-safe, so `refreshSelfMetrics()`
-        // below still sees the post-removal counts — without the
-        // `fragmentQueue.sync` that used to park the main thread here.
-        inboundFragments.removeAll(identifier)
         outboundFragments.removeAll(deviceId)
+        for identifier in identifiers {
+            if let peripheral = connections.connectedPeripheral(for: identifier) {
+                centralManager?.cancelPeripheralConnection(peripheral)
+            }
+            _ = connections.removePeripheral(identifier)
+            peripheralRSSI.removeValue(forKey: identifier)
+            // Removals are synchronous and thread-safe, so `refreshSelfMetrics()`
+            // below still sees the post-removal counts, without the
+            // `fragmentQueue.sync` that used to park the main thread here.
+            inboundFragments.removeAll(identifier)
+            connectionAttemptTimestamps.removeValue(forKey: identifier)
+            connectTimeoutTokens.removeValue(forKey: identifier)
+            connectionRetryCount.removeValue(forKey: identifier)
+        }
         // A fragment block dispatched before this point runs after the removals
         // above and would resurrect the evicted peer's buffer. Chase it on the
         // owning queue: serial and FIFO, so this drops exactly the backlog that
@@ -2061,12 +2250,13 @@ public class BleManager: NSObject, TransportManager {
         // — same deinit rule as `stopUnsafe`.
         let inbound = inboundFragments
         let outbound = outboundFragments
+        let evicted = identifiers
         fragmentQueue.async {
-            inbound.removeAll(identifier)
+            for identifier in evicted {
+                inbound.removeAll(identifier)
+            }
             outbound.removeAll(deviceId)
         }
-        connectionAttemptTimestamps.removeValue(forKey: identifier)
-        connectionRetryCount.removeValue(forKey: identifier)
         meshController.registerDisconnection(peerId: deviceId)
         refreshSelfMetrics()
 
@@ -2141,11 +2331,29 @@ public class BleManager: NSObject, TransportManager {
                     print("[BleManager] Cannot send fragment yet, write buffer full for recipient: \(recipientId)")
                     emitDiagnostic("info", "BLE write buffer full, retrying", context: ["recipientId": recipientId])
                 }
+                if writeStallPolicy.noteRefused(peripheral.identifier) {
+                    print("[BleManager] ⚠️ Write buffer full for \(Int(BleWriteStallPolicy.defaultStallSeconds)) s on \(peripheral.identifier); tearing the link down to reconnect")
+                    // Which links the peer had when the write side died, for
+                    // the open question of what stalls it (a second link
+                    // between the same two radios is the suspect).
+                    let others = otherLiveLinks(of: recipientId, excluding: peripheral.identifier)
+                    print("[BleManager] Stall on \(peripheral.identifier): peer's other live links \(others.map { $0.uuidString })")
+                    emitDiagnostic("warning", "BLE link refused every write; tearing it down", context: [
+                        "recipientId": recipientId,
+                        "identifier": peripheral.identifier.uuidString,
+                        "stallSeconds": BleWriteStallPolicy.defaultStallSeconds,
+                        "otherLiveLinks": others.map { $0.uuidString }
+                    ])
+                    DispatchQueue.main.async { [weak self] in
+                        self?.centralManager?.cancelPeripheralConnection(peripheral)
+                    }
+                }
                 return false
             }
         }
         
         peripheral.writeValue(data, for: characteristic, type: .withoutResponse)
+        writeStallPolicy.noteWritable(peripheral.identifier)
         meshController.markPeerActive(recipientId)
         meshController.markPeerActive(deviceId)
         return true
@@ -3070,6 +3278,7 @@ extension BleManager: CBCentralManagerDelegate {
         // unknown-bootstrap path below it is rate limited. Recording above it
         // would spend the 200-entry cap on passing headphones.
         peripheralRestorationPolicy.recordSeen(uuid: peripheral.identifier, at: now, source: .advertisement)
+        lastAdvertisedAt[peripheral.identifier] = now
 
         // Mesh density is counted here too, for the same reasons: after the
         // gate, so it counts mesh candidates and not every Bluetooth device in
@@ -3194,6 +3403,8 @@ extension BleManager: CBCentralManagerDelegate {
         // objects of an earlier one are not this link's.
         clearServiceInstanceSelection(for: peripheral.identifier)
         connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
+        connectTimeoutTokens.removeValue(forKey: peripheral.identifier)
+        writeStallPolicy.forget(peripheral.identifier)
         connectionRetryCount.removeValue(forKey: peripheral.identifier) // Reset retry count on successful connection
         // `.linkActivity`, not `.advertisement`: a completed connect proves
         // this peer was reachable, not that the app was scanning, so it
@@ -3218,7 +3429,15 @@ extension BleManager: CBCentralManagerDelegate {
             "retryCount": retryCount
         ])
         connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
+        connectTimeoutTokens.removeValue(forKey: peripheral.identifier)
         _ = connections.consumePendingRole(for: peripheral.identifier)
+
+        // The same rule as `didDisconnectPeripheral`: a peer linked on
+        // another identifier is not redialled here (the dial cannot complete
+        // while that link stands), and this identifier is retired.
+        if retireIfLinkedElsewhere(peripheral.identifier, wasConnected: false) {
+            return
+        }
         
         // Give up after max retries
         guard retryCount <= MAX_CONNECTION_RETRIES else {
@@ -3240,8 +3459,9 @@ extension BleManager: CBCentralManagerDelegate {
             // `discoveredPeripherals` was dropped deliberately — by `stop()`,
             // or by the restoration age-out, which cancels the OS-side connect
             // request precisely so it stops being retried. Reconnecting here
-            // re-arms what the age-out just cleared, and a cancelled pending
-            // connect is a plausible source of this very callback.
+            // re-arms what the age-out just cleared. (CoreBluetooth reports a
+            // cancelled pending connect through `didDisconnectPeripheral`;
+            // this guard holds whichever callback a cancel arrives on.)
             guard self.discoveredPeripherals[peripheral.identifier] != nil else { return }
             self.attemptConnection(to: peripheral, reason: "retry_fail")
         }
@@ -3250,6 +3470,11 @@ extension BleManager: CBCentralManagerDelegate {
     public func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         let wasConnected = connections.connectedPeripheral(for: peripheral.identifier) != nil
         _ = connections.removePeripheral(peripheral.identifier)
+        connectTimeoutTokens.removeValue(forKey: peripheral.identifier)
+        // The link is gone, so is its write stall. A refusal between the
+        // teardown verdict and this callback re-armed the clock, and the
+        // identifier survives the reconnect.
+        writeStallPolicy.forget(peripheral.identifier)
 
         // Drop the handshake state with the link. Keeping it would let a
         // reconnect pair a device id read from the previous connection with an
@@ -3271,6 +3496,20 @@ extension BleManager: CBCentralManagerDelegate {
             ])
         }
         
+        // The peer is still reachable on another identifier: this one is an
+        // address it left, or a second link to it. Retire it instead of
+        // reporting the peer lost or redialling. Both branches below used to
+        // do one of those, and in run 5 of the 2026-10-19 volume test a
+        // redial of the link the stall teardown cancelled timed out, landed
+        // here as "wasn't connected", and reported Android lost while the
+        // iPhone held a second, working link to it: the core refused every
+        // send for ten minutes. CoreBluetooth reports a cancelled connect
+        // here, so this covers the connect timeout as well; `didFailToConnect`
+        // applies the same rule in case a cancel ever arrives there.
+        if retireIfLinkedElsewhere(peripheral.identifier, wasConnected: wasConnected) {
+            return
+        }
+
         // Don't remove from discovered list - keep trying to reconnect
         // Only remove RSSI if it's a permanent error
         if let error = error as? CBError, error.code == .connectionTimeout {
@@ -3336,12 +3575,26 @@ extension BleManager: CBCentralManagerDelegate {
                 }
             }
         } else {
-            // Wasn't connected, just notify if we had device ID
+            // A dial that never connected: a reconnect that failed, or one the
+            // connect timeout cancelled. The peer is reported lost once, and
+            // the identifier is unmapped, so it is no longer "identified" and
+            // the monitor re-dials it only while it is still advertising
+            // (`PeerLinkResolution.monitorShouldRedial`). It stayed mapped
+            // before, so a verified peer that had walked away was dialled,
+            // cancelled at 10 s and reported lost again on every monitor
+            // tick for as long as the app was in the foreground, restarting
+            // the advertisement each time. A peer that comes back is
+            // re-identified on its next verified link.
             if let deviceId = connections.peripheralDeviceId(for: peripheral.identifier) {
                 notifyBlePeerLost(deviceId: deviceId)
                 meshController.registerDisconnection(peerId: deviceId)
                 refreshSelfMetrics()
                 connections.removeConnectionRole(for: deviceId)
+                connections.removePeripheralDeviceId(for: peripheral.identifier)
+                if !isSubscribedCentral(peripheral.identifier) {
+                    connections.removeCentralDeviceId(for: peripheral.identifier)
+                }
+                connectionRetryCount.removeValue(forKey: peripheral.identifier)
                 DispatchQueue.main.async {
                     self.refreshAdvertising(reason: "disconnect")
                 }
@@ -3668,6 +3921,7 @@ extension BleManager: CBPeripheralDelegate {
         connections.setPeripheralDeviceId(peerId, for: peripheral.identifier)
         connections.setCentralDeviceId(peerId, for: peripheral.identifier)
         connectionAttemptTimestamps.removeValue(forKey: peripheral.identifier)
+        retireSupersededPeripherals(of: peerId, verifiedOn: peripheral.identifier)
 
         // ORDERING INVARIANT — DO NOT REORDER.
         //
@@ -4074,6 +4328,7 @@ extension BleManager: CBPeripheralDelegate {
     /// Flow-control signal: the BLE write buffer has drained for this peripheral.
     /// Resume sending queued fragments instead of waiting for a timer tick.
     public func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
+        writeStallPolicy.noteWritable(peripheral.identifier)
         guard let recipientId = connections.peripheralDeviceId(for: peripheral.identifier) else { return }
         if logThrottler.shouldLog(key: "flow_ready_\(recipientId)", interval: 1.0) {
             emitDiagnostic("debug", "BLE write buffer drained, resuming sends", context: ["recipientId": recipientId])
@@ -4276,6 +4531,7 @@ extension BleManager: CBPeripheralManagerDelegate {
     
     public func peripheralManager(_ peripheral: CBPeripheralManager, didReceiveWrite requests: [CBATTRequest]) {
         for request in requests {
+            noteCentralHeard(request.central.identifier)
             print("[BleManager] 📨 GATT WRITE REQUEST from \(request.central.identifier), char: \(request.characteristic.uuid), size: \(request.value?.count ?? 0)")
             emitDiagnostic("info", "GATT write request received", context: [
                 "centralId": request.central.identifier.uuidString,
@@ -4360,6 +4616,7 @@ extension BleManager: CBPeripheralManagerDelegate {
         // fragment drain tests notify-reachability off the main queue.
         notifyLock.lock()
         subscribedCentralsById[central.identifier] = central
+        centralLastHeardAt[central.identifier] = Date()
         notifyLock.unlock()
         print("[BleManager] Central subscribed: \(central.identifier)")
         emitDiagnostic("info", "Central subscribed to characteristic", context: [
@@ -4383,6 +4640,7 @@ extension BleManager: CBPeripheralManagerDelegate {
             ?? connections.peripheralDeviceId(for: central.identifier)
         notifyLock.lock()
         subscribedCentralsById.removeValue(forKey: central.identifier)
+        centralLastHeardAt.removeValue(forKey: central.identifier)
         notifyLock.unlock()
         emitDiagnostic("info", "Central unsubscribed", context: [
             "central": central.identifier.uuidString,

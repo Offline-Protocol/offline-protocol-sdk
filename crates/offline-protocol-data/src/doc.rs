@@ -178,10 +178,10 @@ impl BlobMeta {
     ///
     /// A shallow snapshot trims history below a point, and the engine has an
     /// open defect where changes referring below that point panic instead of
-    /// erroring, poisoning the document's lock as they go. Under the
-    /// `minisize` profile the SDK ships with `panic = "abort"`, so there is
-    /// no unwinding to catch: the only defense is never handing such a blob
-    /// over.
+    /// erroring, poisoning the document's lock as they go. Caught, that
+    /// panic still leaves the document unusable for the process, and under
+    /// `panic = "abort"` there is nothing to catch: the only defense is
+    /// never handing such a blob over.
     ///
     /// It is asked of a whole document as well as of a run of changes, and
     /// the two are asked differently. A snapshot carries its own base, so
@@ -314,8 +314,11 @@ impl DataDoc {
     /// these are bytes this SDK wrote and nobody altered. That is the real
     /// containment for the engine's known import-panic classes, and the
     /// reason no code path may ever feed unverified bytes here: the
-    /// `catch_unwind` below is a second line, and under the `minisize`
-    /// profile (`panic = "abort"`) it does not exist at all.
+    /// `catch_unwind` below is a second line, which poisons this handle
+    /// when it catches, and under `panic = "abort"` it does not exist at
+    /// all. It wraps the engine's apply step only. The header decode just
+    /// above it, like [`DataDoc::inspect`], runs outside it, so a panic
+    /// there unwinds to the caller and leaves this handle live.
     ///
     /// Returns whether the blob applied or is parked behind a missing
     /// predecessor. Callers that can destroy history (compaction, log
@@ -406,8 +409,10 @@ impl DataDoc {
     /// them. Nothing of the sort is true here: a peer is authenticated, which
     /// says who sent the bytes and nothing at all about their shape. So this
     /// path re-judges every blob with [`DataDoc::inspect`] and declines the
-    /// two shapes the engine is known to abort on, rather than relying on an
-    /// unwinding catch that the shipped mobile profile does not have.
+    /// two shapes the engine is known to panic on, rather than relying on
+    /// the unwinding catch in [`DataDoc::import`]: it covers the apply step
+    /// only, poisons this handle when it fires, and does not exist in a host
+    /// built with `panic = "abort"`.
     ///
     /// Refusing is not a failure: a duplicate is the ladder keeping its
     /// at-least-once promise, and a trimmed-history gap in a run of changes
