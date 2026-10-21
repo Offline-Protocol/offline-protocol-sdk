@@ -21,6 +21,8 @@ Pod::Spec.new do |s|
   # Source files (paths are relative to this file, i.e. the package root)
   s.source_files = [
     "ios/OfflineProtocolModule.{m,swift}",
+    "ios/ProtocolConfigParser.swift",
+    "ios/InitialRuntimeConfigApplier.swift",
     "ios/EncryptionConfigReader.swift",
     "ios/MeshRelayConfigReader.swift",
     "ios/CustodyConfigReader.swift",
@@ -28,6 +30,7 @@ Pod::Spec.new do |s|
     "ios/TransportManager.swift",
     "ios/BleManager.swift",
     "ios/InternetManager.swift",
+    "ios/InternetTransportBootstrap.swift",
     "ios/ForcedPresenceCheckQueue.swift",
     "ios/EventReplayRing.swift",
     "ios/InboundEventBuffer.swift",

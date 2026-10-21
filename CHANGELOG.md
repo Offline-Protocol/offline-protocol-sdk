@@ -15,6 +15,17 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **A Flutter plugin (preview).** `bindings/flutter/offline_protocol` hosts
+  the engine on iOS and Android from Dart: create, MLS with the platform
+  secure stores, start, stop, destroy, the local address, `sendMessage`, the
+  Internet, BLE and Wi-Fi Direct transports, and core events with the same
+  sequence numbers and gap replay as React Native. Its Android and iOS hosts
+  compile the React Native bridge sources where they are, less a named list
+  of the ones that need React, so a transport fix reaches both. Nostr and
+  Reticulum are not hosted yet, and a config that enables either is refused
+  at create. Until it is on pub.dev it is a path dependency. CI runs the Dart
+  tests and assembles the Android plugin against a size baseline; nothing in
+  CI compiles the iOS plugin yet. The contract is `docs/bridges/flutter.md`.
 - **A Java binding.** `bindings/java` is a typed Java API generated from the
   interface definition by `uniffi-bindgen-java`, the fourth member of the
   artifact set that `scripts/generate-bindings.sh` writes with Swift, Kotlin
