@@ -279,7 +279,8 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
     private func createOnEngine(_ configJson: String) throws {
         // Validated before the running engine is torn down: a config this
         // plugin refuses must leave the current session as it was.
-        _ = try ProtocolConfigParser.parse(configJson)
+        let parsed = try ProtocolConfigParser.parse(configJson)
+        try FlutterCreateConfigPolicy.requireCreateConfigSupported(config: parsed.config)
         tearDownProtocol()
         try host.create(
             configJson: configJson,

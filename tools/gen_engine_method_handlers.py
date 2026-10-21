@@ -60,6 +60,7 @@ CUSTOM: dict[str, str] = {}
 CUSTOM["create"] = """
     val configJson = arguments as? String
         ?: throw IllegalArgumentException("create expects a JSON string")
+    FlutterCreateConfigPolicy.requireCreateConfigSupported(configJson)
     env.createOnEngine(configJson)
     return null
 """
@@ -96,6 +97,7 @@ CUSTOM["enableTransport"] = """
     val map = arguments as? Map<*, *>
         ?: throw IllegalArgumentException("enableTransport expects a map")
     val type = FlutterBridgeArgs.requireString(map, "type")
+    FlutterCreateConfigPolicy.requireTransportTypeSupported(type)
     val configJson = map["config"] as? String
     val json = configJson?.let { JSONObject(it) }
     when (type.lowercase()) {
@@ -109,6 +111,11 @@ CUSTOM["enableTransport"] = """
         else -> host.enableTransport(env.context, type, json, env.internetHandlers)
     }
     return null
+"""
+
+CUSTOM["forceTransport"] = """
+    FlutterCreateConfigPolicy.requireForceTransportSupported(arguments)
+    return com.offlineprotocol.ProtocolEngineHostBridge.forceTransport(host, env.context, arguments)
 """
 
 CUSTOM["sendMessage"] = """
@@ -314,7 +321,6 @@ BRIDGE_DELEGATE = [
     "eraseCustody",
     "establishSecureSession",
     "finalizeFile",
-    "forceTransport",
     "forwardMessage",
     "getActiveTransports",
     "getBatteryLevel",

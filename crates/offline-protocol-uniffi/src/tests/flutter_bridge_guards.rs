@@ -416,6 +416,40 @@ fn flutter_aar_baseline_json_is_well_formed() {
 }
 
 #[test]
+fn flutter_plugin_refuses_reticulum_and_nostr_at_create() {
+    let flutter = flutter_plugin_dir();
+    let dart = std::fs::read_to_string(flutter.join("lib/src/flutter_create_config_policy.dart"))
+        .unwrap_or_else(|e| panic!("cannot read flutter_create_config_policy.dart: {e}"));
+    assert!(
+        dart.contains("assertCreateConfigSupported") && dart.contains("reticulumEnabled"),
+        "Dart must refuse Reticulum/Nostr before create reaches native"
+    );
+    let plugin_kt = std::fs::read_to_string(
+        flutter.join("android/src/main/kotlin/com/offlineprotocol/flutter/OfflineProtocolPlugin.kt"),
+    )
+    .unwrap_or_else(|e| panic!("cannot read OfflineProtocolPlugin.kt: {e}"));
+    assert!(
+        plugin_kt.contains("FlutterCreateConfigPolicy.requireCreateConfigSupported"),
+        "Android createOnEngine must refuse unsupported transports before teardown"
+    );
+    let plugin_swift = std::fs::read_to_string(flutter.join("ios/Classes/OfflineProtocolPlugin.swift"))
+        .unwrap_or_else(|e| panic!("cannot read OfflineProtocolPlugin.swift: {e}"));
+    assert!(
+        plugin_swift.contains("FlutterCreateConfigPolicy.requireCreateConfigSupported"),
+        "iOS createOnEngine must refuse unsupported transports before teardown"
+    );
+    let ci_script = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh"),
+    )
+    .unwrap_or_else(|e| panic!("cannot read ci-typecheck-flutter-ios-bridge.sh: {e}"));
+    assert!(
+        !ci_script.contains("ReticulumManager.swift") && !ci_script.contains("NostrManager.swift"),
+        "Flutter iOS typecheck must compile Reticulum/Nostr managers with ProtocolEngineHost"
+    );
+}
+
+#[test]
 fn flutter_method_channel_methods_match_native_plugins() {
     let flutter = flutter_plugin_dir();
     let manifest: std::collections::BTreeSet<String> =

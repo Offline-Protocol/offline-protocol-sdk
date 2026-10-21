@@ -135,10 +135,10 @@ event-channel callbacks are delivered on the main isolate’s platform thread
 | Config | Optional top-level `dors` and `relay` JSON (shared `InitialRuntimeConfigApplier`) |
 
 **Not in the Flutter plugin yet:** Nostr, Reticulum, telemetry pipe, and the
-React Native foreground mesh service. `createFromConfig` refuses a config with
-`reticulumEnabled` or `nostrEnabled` set, rather than enabling a transport
-nothing serves. Use React Native for those, or host their managers in the
-plugin and take them off its exclude lists.
+React Native foreground mesh service. Their shared bridge sources compile with
+the plugin, but `createFromConfig`, native create, and `enableTransport` /
+`forceTransport` **refuse** configs that enable them (Dart, Android, and iOS).
+Use React Native for those transports until the plugin hosts them explicitly.
 
 Configuration fields and transport behavior match the core and React Native;
 see [Configuration](../../docs/configuration.md) and the

@@ -28,7 +28,10 @@ On Android that is the `KotlinCompile` excludes in `android/build.gradle`. On
 iOS it is `rn_only_swift` in `ios/offline_protocol.podspec`, which must agree
 with the `--exclude` list in `ios/sync_bridge_rn.sh`. What is left out needs
 React (the module, its package, the mesh foreground and wake services, the
-sticky event dispatcher). Reticulum and Nostr managers compile with the plugin.
+sticky event dispatcher). Reticulum and Nostr **sources** compile with the
+plugin so the shared `ProtocolEngineHost` type-checks, but **create** and
+`enableTransport` / `forceTransport` refuse configs that turn those transports
+on until the Flutter plugin hosts them (use React Native today).
 
 A new shared source reaches the plugin without being registered. A list of
 what to take would not: the Kotlin plugin ignores `java { include }`, so such
@@ -170,6 +173,11 @@ On shutdown or before tearing down the engine, prefer `MeshSdk.disableTelemetryA
 matches the engine-thread flush. Calling other channel methods while a flush is
 in flight is safe but queues behind it; avoid overlapping polls you rely on for
 UI gating until the wait completes.
+
+During in-app navigation you may call `MeshSdk.disableTelemetry()` without
+`await` so Dart keeps rendering, as long as you defer engine polls you gate UI on
+(for example `internetIsReadyTyped`) until that future completes or you call the
+matching `*AndWait` helper before `destroy`.
 
 ## F8b. Staged native artifacts (pub.dev)
 

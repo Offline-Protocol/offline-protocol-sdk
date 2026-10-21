@@ -10,8 +10,17 @@ import Foundation
 /// call into `ProtocolEngineHostBridge`, which does the work against the
 /// shared `ProtocolEngineHost`.
 enum FlutterEngineChannel {
-    /// Shared with React Native via `EngineBridgeEnvironment` (ADR 0025).
-    typealias Environment = EngineBridgeEnvironment
+    /// What the bridge needs from the plugin that is not the engine: the event
+    /// replay ring and the lifecycle steps that also reset the plugin's own
+    /// event bookkeeping. Closures, so the bridge never names the plugin.
+    struct Environment {
+        let appState: () -> AppState
+        let replayEvents: (Int, Int) -> [[String: Any]]
+        let tearDownProtocol: () -> Void
+        let createOnEngine: (String) throws -> Void
+        let startOnEngine: () throws -> Void
+        let stopOnEngine: () throws -> Void
+    }
 
     /// Runs on the plugin's engine queue. A name outside the manifest answers
     /// `FlutterMethodNotImplemented`, which the plugin hands to Dart as such.
@@ -115,6 +124,7 @@ enum FlutterEngineChannel {
         case "enableTelemetry":
             return try ProtocolEngineHostBridge.enableTelemetry(host: host, env: env, arguments: arguments)
         case "enableTransport":
+            try FlutterCreateConfigPolicy.requireTransportTypeSupported(arguments: arguments)
             return try ProtocolEngineHostBridge.enableTransport(host: host, env: env, arguments: arguments)
         case "endTelemetrySession":
             return try ProtocolEngineHostBridge.endTelemetrySession(host: host, env: env, arguments: arguments)
@@ -127,6 +137,7 @@ enum FlutterEngineChannel {
         case "flushTelemetry":
             return try ProtocolEngineHostBridge.flushTelemetry(host: host, env: env, arguments: arguments)
         case "forceTransport":
+            try FlutterCreateConfigPolicy.requireTransportTypeSupported(arguments: arguments)
             return try ProtocolEngineHostBridge.forceTransport(host: host, env: env, arguments: arguments)
         case "forwardMessage":
             return try ProtocolEngineHostBridge.forwardMessage(host: host, env: env, arguments: arguments)

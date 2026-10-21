@@ -169,6 +169,11 @@ static Future<dynamic> deriveUserIdFromPublicKey([Map<String, dynamic>? args]) =
     _invoke<dynamic>('deriveUserIdFromPublicKey', args);
 
 /// Native `disableTelemetry` (see React Native `OfflineProtocolNativeModule.disableTelemetry`).
+///
+/// Completes when the native call returns (including any engine-thread flush).
+/// Prefer [disableTelemetryAndWait] before engine teardown or when the
+/// next engine call must not queue behind telemetry. To keep Dart UI moving, you
+/// may invoke this without `await` and defer typed polls until the future completes (F8).
 static Future<dynamic> disableTelemetry([Map<String, dynamic>? args]) =>
     _invoke<dynamic>('disableTelemetry', args);
 

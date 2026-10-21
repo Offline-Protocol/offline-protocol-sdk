@@ -331,6 +331,7 @@ class OfflineProtocolPlugin :
         }
 
     private fun createOnEngine(configJson: String) {
+        FlutterCreateConfigPolicy.requireCreateConfigSupported(configJson)
         tearDownProtocol()
         val ctx = applicationContext ?: throw IllegalStateException("Plugin not attached")
         engineHost.create(

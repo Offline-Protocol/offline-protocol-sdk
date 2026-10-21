@@ -92,6 +92,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   blocking telemetry flush explicitly (F8).
 - **Flutter `OfflineProtocol.minimalFootprintConfig`.** Transport flags-only create
   payload for the smallest runtime surface (F9).
+- **Flutter preview transport policy.** `createFromConfig`, native create, and
+  `enableTransport` / `forceTransport` refuse Reticulum and Nostr until the plugin
+  hosts them (Dart + Android + iOS guards, tests, and F1 docs).
 - **Engine-bridge poll smoke tests.** `js-ci-harness/engine-bridge-smoke.test.js`
   (MLS and Internet readiness through the RN SDK) and
   `ProtocolEngineHostBridgeSmokeTest` on Android complement Rust delegation guards.

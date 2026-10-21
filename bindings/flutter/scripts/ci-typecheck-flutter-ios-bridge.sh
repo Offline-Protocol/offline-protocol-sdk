@@ -38,7 +38,9 @@ while IFS= read -r f; do BRIDGE_SWIFT+=("$f"); done < <(find "${FLUTTER_IOS}/Bri
 PLUGIN_SWIFT=()
 while IFS= read -r f; do PLUGIN_SWIFT+=("$f"); done < <(find "${FLUTTER_IOS}/Classes" -name '*.swift' -type f | sort)
 
-RN_ONLY_EXCLUDES=" OfflineProtocolModule.swift ProtocolEngineHostBridgeReactNative.swift NostrManager.swift NostrQueryTracker.swift ReticulumManager.swift InboundEventBuffer.swift Package.swift "
+# Must match podspec `rn_only_swift` (React-only / unhosted), not Reticulum/Nostr:
+# those managers compile in the Flutter pod and ProtocolEngineHost references them.
+RN_ONLY_EXCLUDES=" OfflineProtocolModule.swift ProtocolEngineHostBridgeReactNative.swift InboundEventBuffer.swift Package.swift "
 SHARED_SWIFT=()
 for f in "${RN_IOS}"/*.swift; do
   base="$(basename "$f")"
