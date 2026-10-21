@@ -919,6 +919,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 51826:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file_from_path() != 60049:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message() != 11928:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media() != 26391:
@@ -1574,6 +1576,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_c
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file_from_path.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file_from_path.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message.restype = ctypes.c_uint16
@@ -2826,6 +2831,14 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file.ar
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file_from_path.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file_from_path.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_group_message.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -10367,6 +10380,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def send_file(self, recipient: str,file_data: typing.List[int],file_name: str) -> str:
         raise NotImplementedError
+    def send_file_from_path(self, recipient: str,file_path: str,file_name: str) -> str:
+        raise NotImplementedError
     def send_group_message(self, group_id: str,content: str,priority: typing.Optional[MessagePriority],reply_to_msg: typing.Optional[str]) -> typing.List[str]:
         raise NotImplementedError
     def send_media(self, recipient: str,file_data: typing.List[int],file_name: str,content_type: ContentType,media_metadata: typing.Optional[MediaMetadata]) -> str:
@@ -12563,6 +12578,27 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def send_file_from_path(self, recipient: str,file_path: str,file_name: str) -> str:
+        
+        _UniffiFfiConverterString.check_lower(recipient)
+
+        _UniffiFfiConverterString.check_lower(file_path)
+
+        _UniffiFfiConverterString.check_lower(file_name)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(recipient),
+            _UniffiFfiConverterString.lower(file_path),
+            _UniffiFfiConverterString.lower(file_name),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterString.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file_from_path,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)

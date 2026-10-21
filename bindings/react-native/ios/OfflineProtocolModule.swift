@@ -2792,6 +2792,27 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SEND_FILE", fallbackMessage: "Failed to send file")
         }
     }
+
+    // The path twin of sendFile: hands the Rust core a filesystem path so the
+    // payload never crosses the RN bridge as a base64 string. The base64
+    // crossing is what runs constrained Android devices out of memory; iOS
+    // carries the same shape for API parity.
+    @objc func sendFileFromPath(_ recipient: String,
+                                filePath: String,
+                                fileName: String,
+                                resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_SEND_FILE", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let fileId = try proto.sendFileFromPath(recipient: recipient, filePath: filePath, fileName: fileName)
+            resolver(fileId)
+        } catch {
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SEND_FILE", fallbackMessage: "Failed to send file from path")
+        }
+    }
     
     @objc func sendMedia(_ recipient: String,
                          fileData: String,

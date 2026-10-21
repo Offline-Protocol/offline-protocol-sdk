@@ -6053,6 +6053,53 @@ impl OfflineProtocol {
         self.send_media(recipient, file_data, file_name, ContentType::File, None)
     }
 
+    /// Reads a file from `file_path` on the native filesystem and sends it as
+    /// a generic attachment (same semantics as [`Self::send_file`], including
+    /// `ContentType::File`).
+    ///
+    /// Unlike `send_file`, which takes the bytes already in memory on the
+    /// caller side, this call reads the file inside the Rust core. A React
+    /// Native caller passes a path instead of a base64 string, so nothing is
+    /// staged in the JavaScript heap, in the bridge buffer, or (on Android) as
+    /// a `List<UByte>` with one boxed object per byte. The file is read once
+    /// into the Rust heap and chunked there; the chunker copies each slice,
+    /// so the peak while chunking is about twice the file size, and the chunk
+    /// set lives for the transfer, as it does for [`Self::send_file`]. The
+    /// read is not streamed.
+    ///
+    /// `file_path` is an absolute path or a `file://` URI (percent-encoded,
+    /// as `expo-file-system` and the platform pickers produce it); the
+    /// scheme is stripped here so every caller does not hand-roll it. Any
+    /// other scheme, including Android's `content://`, is refused: such a
+    /// URI names a content provider, not a file, and the caller must copy it
+    /// to a file first.
+    ///
+    /// Every refusal is [`ProtocolError::InvalidArgument`] and happens before
+    /// a byte is read:
+    ///
+    /// - a missing file or a permission failure;
+    /// - anything that is not a regular file. A FIFO would block this thread
+    ///   at open forever, and a device file such as `/dev/zero` reports a
+    ///   size of zero and would grow the buffer until the process aborts,
+    ///   which is the out-of-memory failure this entry point exists to
+    ///   remove;
+    /// - a file larger than the engine's transfer limit (100 MiB), which the
+    ///   engine would otherwise refuse only after the whole file was in
+    ///   memory.
+    ///
+    /// The read itself is bounded by the same limit, so a file that grows
+    /// between the check and the read is refused rather than read without
+    /// bound. The path is not retained after the read completes.
+    pub fn send_file_from_path(
+        &self,
+        recipient: String,
+        file_path: String,
+        file_name: String,
+    ) -> Result<String, ProtocolError> {
+        let bytes = read_send_file(&file_path)?;
+        self.send_media(recipient, bytes, file_name, ContentType::File, None)
+    }
+
     /// Processes a received file chunk (manual path, for platforms handling
     /// their own chunk routing outside the protocol receive loop).
     ///
@@ -8152,6 +8199,108 @@ mod error_mapping_tests {
     }
 }
 
+/// Resolves the `file_path` argument of
+/// [`OfflineProtocol::send_file_from_path`] to a filesystem path: a plain path
+/// passes through, a `file://` URI loses its scheme and is percent-decoded,
+/// and any other scheme is refused.
+fn send_file_path(file_path: &str) -> Result<std::path::PathBuf, ProtocolError> {
+    let invalid = |why: &str| {
+        ProtocolError::InvalidArgument(format!("send_file_from_path: {}: {}", file_path, why))
+    };
+    let Some(rest) = file_path.strip_prefix("file://") else {
+        if let Some((scheme, _)) = file_path.split_once("://") {
+            if !scheme.is_empty()
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+            {
+                return Err(invalid(&format!(
+                    "the {}:// scheme names no file; copy the content to a file and pass its path",
+                    scheme
+                )));
+            }
+        }
+        return Ok(std::path::PathBuf::from(file_path));
+    };
+    // `file:///abs` and `file://localhost/abs` both name `/abs`.
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !rest.starts_with('/') {
+        return Err(invalid(
+            "a file:// URI must name an absolute path on this host",
+        ));
+    }
+    let raw = rest.as_bytes();
+    let mut decoded = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'%' {
+            let hex = raw
+                .get(i + 1..i + 3)
+                .and_then(|h| std::str::from_utf8(h).ok())
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+                .ok_or_else(|| invalid("malformed percent-encoding"))?;
+            decoded.push(hex);
+            i += 3;
+        } else {
+            decoded.push(raw[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(decoded)
+        .map(std::path::PathBuf::from)
+        .map_err(|_| invalid("the decoded path is not UTF-8"))
+}
+
+/// Reads the file behind [`OfflineProtocol::send_file_from_path`], refusing
+/// before the first byte anything that is not a regular file or is over the
+/// engine's transfer limit, and bounding the read by that limit.
+fn read_send_file(file_path: &str) -> Result<Vec<u8>, ProtocolError> {
+    use std::io::Read;
+
+    let invalid = |why: String| {
+        ProtocolError::InvalidArgument(format!("send_file_from_path: {}: {}", file_path, why))
+    };
+    let path = send_file_path(file_path)?;
+    // The engine builds its transfer manager from the default configuration,
+    // and the interface cannot change it, so this is the limit `chunk_file`
+    // enforces. Checking it here refuses before the read instead of after.
+    let max = offline_protocol::file_transfer::FileTransferConfig::default().max_file_size;
+
+    // `metadata` stats without opening: opening a FIFO would block here.
+    let meta = std::fs::metadata(&path).map_err(|e| invalid(format!("cannot read: {}", e)))?;
+    if !meta.is_file() {
+        return Err(invalid("not a regular file".to_string()));
+    }
+    if meta.len() > max {
+        return Err(invalid(format!(
+            "file size {} exceeds maximum {}",
+            meta.len(),
+            max
+        )));
+    }
+
+    let file = std::fs::File::open(&path).map_err(|e| invalid(format!("cannot read: {}", e)))?;
+    // Re-check on the open handle: the path may have been swapped since.
+    let meta = file
+        .metadata()
+        .map_err(|e| invalid(format!("cannot read: {}", e)))?;
+    if !meta.is_file() {
+        return Err(invalid("not a regular file".to_string()));
+    }
+    let capacity = usize::try_from(meta.len().min(max)).unwrap_or(0);
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(max + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| invalid(format!("cannot read: {}", e)))?;
+    if bytes.len() as u64 > max {
+        return Err(invalid(format!(
+            "file grew past the maximum {} while being read",
+            max
+        )));
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     mod file_stores;
@@ -8859,6 +9008,148 @@ mod tests {
         assert_eq!(progress.chunks_sent, 1);
         assert_eq!(progress.total_chunks, 2);
         assert!(progress.percentage < 100);
+    }
+
+    const SEND_FILE_RECIPIENT: &str = "off1q0000000000000000000000000000000000000qapn78n";
+
+    /// A per-process scratch path, so two test binaries on one machine never
+    /// share a fixture.
+    fn send_file_fixture(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("op-sdk-sffp-{}-{}", std::process::id(), name))
+    }
+
+    fn send_file_from_path_error(path: &str) -> ProtocolError {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol
+            .send_file_from_path(
+                SEND_FILE_RECIPIENT.to_string(),
+                path.to_string(),
+                "x.bin".to_string(),
+            )
+            .unwrap_err()
+    }
+
+    #[test]
+    fn send_file_from_path_reports_a_missing_path_before_the_engine_state() {
+        // The engine is stopped, but the path guard runs first: a typo is
+        // reported as a path problem, never as "not started".
+        let err = send_file_from_path_error("/definitely/not/a/real/path-fixture");
+        match err {
+            ProtocolError::InvalidArgument(message) => {
+                assert!(message.contains("send_file_from_path"), "got: {message}");
+                assert!(
+                    message.contains("/definitely/not/a/real/path-fixture"),
+                    "got: {message}"
+                );
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_file_from_path_refuses_a_directory_without_reading() {
+        let dir = send_file_fixture("dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = send_file_from_path_error(&dir.to_string_lossy());
+        let _ = std::fs::remove_dir(&dir);
+        match err {
+            ProtocolError::InvalidArgument(message) => {
+                assert!(message.contains("not a regular file"), "got: {message}")
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn send_file_from_path_refuses_a_device_file_that_would_read_forever() {
+        // `/dev/zero` reports size zero and never ends; reading it would grow
+        // the buffer until the process aborts.
+        let err = send_file_from_path_error("/dev/zero");
+        match err {
+            ProtocolError::InvalidArgument(message) => {
+                assert!(message.contains("not a regular file"), "got: {message}")
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_file_from_path_refuses_a_file_over_the_limit_before_reading_it() {
+        // A sparse file: its length is over the limit without the disk or
+        // the test holding 100 MiB. The refusal comes from the size check,
+        // not from the engine after a full read.
+        let path = send_file_fixture("oversized.bin");
+        let max = offline_protocol::file_transfer::FileTransferConfig::default().max_file_size;
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(max + 1)
+            .unwrap();
+        let err = send_file_from_path_error(&path.to_string_lossy());
+        let _ = std::fs::remove_file(&path);
+        match err {
+            ProtocolError::InvalidArgument(message) => {
+                // The engine's own after-read refusal says "exceeds maximum"
+                // too, but without the entry point's prefix.
+                assert!(
+                    message.starts_with("send_file_from_path:")
+                        && message.contains("exceeds maximum"),
+                    "got: {message}"
+                )
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_file_from_path_hands_a_readable_file_to_the_engine() {
+        // The read succeeds, so the refusal is the stopped engine's own.
+        let path = send_file_fixture("readable.bin");
+        std::fs::write(&path, [0u8; 128]).unwrap();
+        let err = send_file_from_path_error(&path.to_string_lossy());
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(err, ProtocolError::NotStarted), "got: {err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn send_file_from_path_accepts_a_percent_encoded_file_uri() {
+        let path = send_file_fixture("with space.bin");
+        std::fs::write(&path, [0u8; 16]).unwrap();
+        let uri = format!("file://{}", path.to_string_lossy().replace(' ', "%20"));
+        let err = send_file_from_path_error(&uri);
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(err, ProtocolError::NotStarted), "got: {err:?}");
+    }
+
+    #[test]
+    fn send_file_from_path_resolves_file_uris_and_refuses_other_schemes() {
+        assert_eq!(
+            send_file_path("/plain/path").unwrap(),
+            std::path::PathBuf::from("/plain/path")
+        );
+        assert_eq!(
+            send_file_path("file:///a%20b/c.json").unwrap(),
+            std::path::PathBuf::from("/a b/c.json")
+        );
+        assert_eq!(
+            send_file_path("file://localhost/a").unwrap(),
+            std::path::PathBuf::from("/a")
+        );
+        for refused in [
+            "content://com.android.providers/document/1",
+            "file://otherhost/a",
+            "file:///bad%2",
+            "file:///bad%zz",
+        ] {
+            assert!(
+                matches!(
+                    send_file_path(refused),
+                    Err(ProtocolError::InvalidArgument(_))
+                ),
+                "{refused} must be refused"
+            );
+        }
     }
 
     fn create_reticulum_config() -> ProtocolConfig {

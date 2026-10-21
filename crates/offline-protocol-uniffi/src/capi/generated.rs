@@ -2609,6 +2609,14 @@ pub fn call_engine(target: &crate::OfflineProtocol, method: &str, mut args: Fiel
             let result = target.send_file(arg_recipient, arg_file_data, arg_file_name)?;
             Ok(result.encode())
         }
+        "send_file_from_path" => {
+            let arg_recipient = args.take("recipient")?;
+            let arg_file_path = args.take("file_path")?;
+            let arg_file_name = args.take("file_name")?;
+            args.finish()?;
+            let result = target.send_file_from_path(arg_recipient, arg_file_path, arg_file_name)?;
+            Ok(result.encode())
+        }
         "process_file_chunk" => {
             let arg_file_id = args.take("file_id")?;
             let arg_chunk_index = args.take("chunk_index")?;

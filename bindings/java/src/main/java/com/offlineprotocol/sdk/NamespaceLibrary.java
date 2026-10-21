@@ -568,6 +568,9 @@ final class NamespaceLibrary {
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != ((short) 51826)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file_from_path() != ((short) 60049)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message() != ((short) 11928)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }

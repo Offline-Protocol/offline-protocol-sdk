@@ -1223,6 +1223,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file(
     ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file_from_path(
+    ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media(
@@ -1731,6 +1733,8 @@ internal object UniffiLib {
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,`keyPackage`: RustBuffer.ByValue,`initialMessage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(`ptr`: Long,`recipient`: RustBuffer.ByValue,`fileData`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file_from_path(`ptr`: Long,`recipient`: RustBuffer.ByValue,`filePath`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_group_message(`ptr`: Long,`groupId`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,`replyToMsg`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): RustBuffer.ByValue
@@ -2486,6 +2490,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() and 0xFFFF) != 51826) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file_from_path() and 0xFFFF) != 60049) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message() and 0xFFFF) != 11928) {
@@ -4637,6 +4644,8 @@ public interface OfflineProtocolInterface {
     fun `sendConnectionRequest`(`recipient`: kotlin.String, `senderName`: kotlin.String, `keyPackage`: List<kotlin.UByte>?, `initialMessage`: kotlin.String?): kotlin.String
     
     fun `sendFile`(`recipient`: kotlin.String, `fileData`: List<kotlin.UByte>, `fileName`: kotlin.String): kotlin.String
+    
+    fun `sendFileFromPath`(`recipient`: kotlin.String, `filePath`: kotlin.String, `fileName`: kotlin.String): kotlin.String
     
     fun `sendGroupMessage`(`groupId`: kotlin.String, `content`: kotlin.String, `priority`: MessagePriority?, `replyToMsg`: kotlin.String?): List<kotlin.String>
     
@@ -6798,6 +6807,23 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
         
         FfiConverterString.lower(`recipient`),
         FfiConverterSequenceUByte.lower(`fileData`),
+        FfiConverterString.lower(`fileName`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `sendFileFromPath`(`recipient`: kotlin.String, `filePath`: kotlin.String, `fileName`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file_from_path(
+        it,
+        
+        FfiConverterString.lower(`recipient`),
+        FfiConverterString.lower(`filePath`),
         FfiConverterString.lower(`fileName`),_status)
 }
     }

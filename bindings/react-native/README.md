@@ -1380,6 +1380,30 @@ protocol.on('file_progress', (event) => {
 });
 ```
 
+### Sending Large Files (from a path)
+
+For files over a few megabytes, use `sendFileFromPath` instead. The SDK's
+Rust core opens the file itself, so the payload never crosses the JS/native
+bridge as base64: nothing is staged in the JavaScript heap or in the
+bridge's native buffers. On constrained Android devices those staging
+copies are what run out of memory on files in the tens of megabytes. The
+file is still read whole into the Rust heap and chunked there, which costs
+about twice its size while chunking; the read is not streamed.
+
+```typescript
+const fileId = await protocol.sendFileFromPath({
+  recipient: 'user456',
+  filePath: '/data/user/0/com.example.app/files/report.pdf',
+  fileName: 'report.pdf',
+});
+```
+
+`filePath` may also be a `file://` URI, as `expo-file-system` returns it.
+A `content://` URI is refused; copy the content to a file first. A missing
+or unreadable file, anything that is not a regular file, and a file over
+the 100 MiB transfer limit reject with `InvalidArgument` before any byte is
+read.
+
 ### Managing Transfers
 
 ```typescript
