@@ -64,16 +64,7 @@ class NativeEventPipeline {
     _lastEventSeq = seq;
 
     if (seq > expected) {
-      if (!_requestEventReplay(expected, seq - 1)) {
-        final replay = _replay;
-        if (replay != null) {
-          replay.deferred.add(event);
-        } else {
-          _reportEventGap(expected, seq);
-          _dispatchEventJson(event.eventJson);
-        }
-        return;
-      }
+      _requestEventReplay(expected, seq - 1);
     }
 
     final replay = _replay;
@@ -87,7 +78,10 @@ class NativeEventPipeline {
     }
   }
 
-  bool _requestEventReplay(int fromSeq, int toSeq) {
+  /// Asks native for `fromSeq..toSeq` and holds later events until it answers,
+  /// the timer fires, or [maxDeferredNativeEvents] are held. Always leaves a
+  /// replay in flight, so the caller defers the event that exposed the gap.
+  void _requestEventReplay(int fromSeq, int toSeq) {
     var replay = _replay;
     if (replay == null) {
       replay = _ReplayState(
@@ -127,7 +121,6 @@ class NativeEventPipeline {
         }
       },
     );
-    return true;
   }
 
   void _finishEventReplay() {

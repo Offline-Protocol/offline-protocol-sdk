@@ -67,6 +67,10 @@ class OfflineProtocol {
   /// on React Native after [ProtocolConfig] is constructed. When Internet or
   /// Wi‑Fi Direct are configured, [start] auto-enables them (React Native JS layer).
   ///
+  /// Throws a [PlatformException] when `reticulumEnabled` or `nostrEnabled` is
+  /// true: the plugin hosts no manager for either, and the core would otherwise
+  /// route messages to a transport nothing serves.
+  ///
   /// Resets Dart `seq` tracking to match the native session (native [create]
   /// tears down the previous engine and restarts event numbering from zero).
   static Future<void> createFromConfig(Map<String, dynamic> config) async {
@@ -186,10 +190,16 @@ class OfflineProtocol {
       replayEvents: _replayEventsFromNative,
     );
     if (_nativeEventSubscription != null) return;
-    _nativeEventSubscription =
-        _eventsChannel.receiveBroadcastStream().listen((raw) {
-      _eventPipeline?.admitRaw(raw);
-    });
+    _nativeEventSubscription = _eventsChannel.receiveBroadcastStream().listen(
+      (raw) {
+        _eventPipeline?.admitRaw(raw);
+      },
+      // Without a handler, an error from the native stream handler is an
+      // unhandled error in the root zone. Events keep flowing after it.
+      onError: (Object error, StackTrace st) {
+        debugPrint('[OfflineProtocol] native event channel error: $error\n$st');
+      },
+    );
   }
 
   /// Cancels the EventChannel listener and optionally clears pipeline seq state.
@@ -227,9 +237,10 @@ class OfflineProtocol {
     return out;
   }
 
-  /// Mirrors [InternetTransportBootstrap.readStoredConfig] key precedence and
-  /// React Native `start()` auto-enable (`transports.internet.enabled` + server).
-  /// Exposed for unit tests only.
+  /// Mirrors the React Native JavaScript `start()` auto-enable
+  /// (`transports.internet.enabled` with a `serverAddress`), and also accepts
+  /// the flat `internetEnabled` / `internetServerAddress` spellings the native
+  /// config parsers take. Exposed for unit tests only.
   @visibleForTesting
   static Map<String, dynamic>? resolveInternetAutoEnableConfig(
     Map<String, dynamic> root,

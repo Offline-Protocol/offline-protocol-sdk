@@ -1350,6 +1350,12 @@ jobs:
               - '.github/workflows/ci.yml'
               - 'crates/offline-protocol-uniffi/src/tests/flutter_bridge_guards.rs'
             flutter_native:
+              # The plugin's own Kotlin and Gradle build: `flutter analyze`
+              # excludes android/**, so without these a pull request that
+              # touches only them never compiles them, and main is where it
+              # breaks.
+              - 'bindings/flutter/offline_protocol/android/**'
+              - 'bindings/flutter/offline_protocol/example/android/**'
               - 'bindings/flutter/baselines/**'
               - 'bindings/flutter/scripts/**'
               - 'bindings/react-native/android/**'
@@ -1437,6 +1443,11 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: bash bindings/flutter/scripts/ci-build-android-jni-arm64.sh
+
+      # The example's Gradle wrapper is committed and the next step runs it,
+      # so its jar is checked against Gradle's published checksums first.
+      - uses: gradle/actions/wrapper-validation@v6
+        if: steps.flutter_native_gate.outputs.run == 'true'
 
       - name: Assemble release AAR and check size baseline
         if: steps.flutter_native_gate.outputs.run == 'true'

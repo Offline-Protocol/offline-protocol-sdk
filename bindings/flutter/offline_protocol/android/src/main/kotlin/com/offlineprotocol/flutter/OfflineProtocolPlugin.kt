@@ -37,9 +37,9 @@ import uniffi.offline_protocol.MessagePriority
 import uniffi.offline_protocol.OfflineProtocol
 import uniffi.offline_protocol.ProtocolConfig
 import uniffi.offline_protocol.WifiDirectTransportCallback
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -49,6 +49,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  * All UniFFI calls run on a dedicated engine thread ([engineExecutor]); results
  * and [EventChannel] deliveries are posted on the main looper ([mainHandler]).
  * See bridge contract K2.
+ *
+ * The executor is never shut down. Detach queues the teardown behind every call
+ * already submitted and returns, so the main thread never waits on transport
+ * I/O, and a later attach queues behind that teardown on the same thread: no
+ * create can interleave with the previous session's teardown. The one thread
+ * exits after it has been idle for [ENGINE_IDLE_SECONDS].
  */
 class OfflineProtocolPlugin :
     FlutterPlugin,
@@ -58,6 +64,7 @@ class OfflineProtocolPlugin :
 
     private lateinit var channel: MethodChannel
     private var eventsChannel: EventChannel? = null
+    @Volatile
     private var applicationContext: android.content.Context? = null
     private var protocol: OfflineProtocol? = null
     private var currentConfig: ProtocolConfig? = null
@@ -65,7 +72,7 @@ class OfflineProtocolPlugin :
     private var bleTransport: BleTransportFacade? = null
     private var wifiDirectManager: WifiDirectManager? = null
 
-    private var engineExecutor: ExecutorService = newEngineExecutor()
+    private val engineExecutor: ThreadPoolExecutor = newEngineExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
     private val attached = AtomicBoolean(false)
 
@@ -80,9 +87,6 @@ class OfflineProtocolPlugin :
     private val eventReplay = EventReplayRing()
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-        if (engineExecutor.isShutdown) {
-            engineExecutor = newEngineExecutor()
-        }
         applicationContext = binding.applicationContext
         attached.set(true)
         channel = MethodChannel(binding.binaryMessenger, CHANNEL_NAME)
@@ -103,21 +107,25 @@ class OfflineProtocolPlugin :
         if (::channel.isInitialized) {
             channel.setMethodCallHandler(null)
         }
-        val executor = engineExecutor
+        // Cleared here, on the main thread, and not by the queued teardown:
+        // a teardown that ran after a re-attach would clear the new context.
+        applicationContext = null
+        // Queued, never waited on: engine stop can block on transport I/O, and
+        // the main thread is not where that wait belongs (K2).
+        runOnEngine("detach teardown") { tearDownProtocol() }
+    }
+
+    private fun runOnEngine(what: String, block: () -> Unit) {
         try {
-            if (!executor.isShutdown) {
-                executor.submit {
-                    tearDownProtocol()
-                    applicationContext = null
-                }.get(TEARDOWN_TIMEOUT_SEC, TimeUnit.SECONDS)
+            engineExecutor.execute {
+                try {
+                    block()
+                } catch (e: Throwable) {
+                    Log.w(TAG, "$what failed", e)
+                }
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "Engine teardown timed out or failed during detach", e)
-            applicationContext = null
-        } finally {
-            if (!executor.isShutdown) {
-                executor.shutdown()
-            }
+        } catch (e: RejectedExecutionException) {
+            Log.w(TAG, "$what rejected by the engine executor", e)
         }
     }
 
@@ -126,7 +134,7 @@ class OfflineProtocolPlugin :
         val callbacks = object : Application.ActivityLifecycleCallbacks {
             override fun onActivityPaused(activity: Activity) {
                 if (activity !== trackedActivity) return
-                engineExecutor.execute {
+                runOnEngine("background mark") {
                     foregroundReconnectPolicy.didEnterBackground(
                         nowMs = SystemClock.elapsedRealtime(),
                     )
@@ -135,7 +143,7 @@ class OfflineProtocolPlugin :
 
             override fun onActivityResumed(activity: Activity) {
                 if (activity !== trackedActivity) return
-                engineExecutor.execute {
+                runOnEngine("foreground reconnect") {
                     if (foregroundReconnectPolicy.shouldReconnectOnForeground(
                             nowMs = SystemClock.elapsedRealtime(),
                         )
@@ -194,13 +202,8 @@ class OfflineProtocolPlugin :
             postDetachedError(result)
             return
         }
-        val executor = engineExecutor
-        if (executor.isShutdown) {
-            postDetachedError(result)
-            return
-        }
         try {
-            executor.execute {
+            engineExecutor.execute {
                 try {
                     val payload: Any? = when (call.method) {
                         "create" -> {
@@ -245,14 +248,22 @@ class OfflineProtocolPlugin :
                         }
                     }
                     mainHandler.post { result.success(payload) }
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
+                    // Throwable, not Exception: the generated bindings load the
+                    // native library on first use, and a missing or mismatched
+                    // .so throws UnsatisfiedLinkError. Uncaught on this thread it
+                    // kills the process and the call is never answered.
                     Log.e(TAG, "${call.method} failed", e)
                     mainHandler.post {
                         val mapped = mapProtocolBridgeError(e)
-                        if (mapped != null) {
-                            result.error(mapped.code, mapped.message, null)
-                        } else {
-                            result.error("ERROR", e.message, null)
+                        when {
+                            mapped != null -> result.error(mapped.code, mapped.message, null)
+                            e is LinkageError -> result.error(
+                                NATIVE_LIBRARY_ERROR,
+                                "The Offline Protocol native library could not be loaded: ${e.message}",
+                                null,
+                            )
+                            else -> result.error("ERROR", e.message, null)
                         }
                     }
                 }
@@ -307,12 +318,13 @@ class OfflineProtocolPlugin :
             ?: throw IllegalArgumentException("create expects a JSON string")
         tearDownProtocol()
         val parsed = ProtocolConfigParser.parse(configJson)
+        refuseUnhostedTransports(parsed.coreConfig)
         val proto = OfflineProtocol(parsed.coreConfig)
         proto.setEventCallback(object : EventCallback {
             override fun onEvent(eventJson: String) {
                 try {
                     emitEventJson(eventJson)
-                } catch (e: Exception) {
+                } catch (e: Throwable) {
                     Log.e(TAG, "Core event not handed to Dart", e)
                 }
             }
@@ -375,6 +387,23 @@ class OfflineProtocolPlugin :
             }
         }
         wireTransportCallbacks(proto)
+    }
+
+    /**
+     * Refuses a config that enables a transport this plugin has no manager
+     * for. Accepted, the core would route to a transport nothing serves and
+     * messages would wait on it with no error anywhere.
+     */
+    private fun refuseUnhostedTransports(config: ProtocolConfig) {
+        val unhosted = buildList {
+            if (config.reticulumEnabled) add("reticulumEnabled")
+            if (config.nostrEnabled) add("nostrEnabled")
+        }
+        if (unhosted.isNotEmpty()) {
+            throw IllegalArgumentException(
+                "${unhosted.joinToString()} is not supported by the Flutter plugin yet; set it to false",
+            )
+        }
     }
 
     private fun wireTransportCallbacks(proto: OfflineProtocol) {
@@ -597,11 +626,15 @@ class OfflineProtocolPlugin :
         private const val TAG = "OfflineProtocolPlugin"
         private const val CHANNEL_NAME = "com.offlineprotocol/offline_protocol"
         private const val EVENTS_CHANNEL_NAME = "com.offlineprotocol/offline_protocol_events"
-        private const val TEARDOWN_TIMEOUT_SEC = 10L
+        private const val ENGINE_IDLE_SECONDS = 30L
 
-        private fun newEngineExecutor(): ExecutorService =
-            Executors.newSingleThreadExecutor { runnable ->
+        /** Error code for a native library that is missing or does not match the bindings. */
+        private const val NATIVE_LIBRARY_ERROR = "NATIVE_LIBRARY_UNAVAILABLE"
+
+        /** One thread, so calls run in submission order; it exits when idle. */
+        private fun newEngineExecutor(): ThreadPoolExecutor =
+            ThreadPoolExecutor(1, 1, ENGINE_IDLE_SECONDS, TimeUnit.SECONDS, LinkedBlockingQueue()) { runnable ->
                 Thread(runnable, "OfflineProtocolEngine").apply { isDaemon = true }
-            }
+            }.apply { allowCoreThreadTimeOut(true) }
     }
 }

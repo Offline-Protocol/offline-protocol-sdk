@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 #
 # Builds the arm64-v8a UniFFI shared library for Flutter CI and local checks.
-# One ABI keeps pull-request jobs fast; release still builds all ABIs.
+# One ABI keeps pull-request jobs fast; release still builds all ABIs. The
+# profile is `mobile`, the one the Android release ships (ADR 0029), so the
+# footprint baseline measures the library applications actually get.
 #
 # Requires: ANDROID_NDK_HOME, Rust aarch64-linux-android target.
 # Writes: bindings/react-native/android/src/main/jniLibs/arm64-v8a/libuniffi_offline_protocol.so
@@ -34,10 +36,10 @@ export CC_aarch64_linux_android="${NDK_TOOLCHAIN}/${LINKER_BIN}"
 export CXX_aarch64_linux_android="${NDK_TOOLCHAIN}/${LINKER_BIN}++"
 
 cd "${REPO_ROOT}"
-cargo build --release --locked --target "${TARGET}" \
+cargo build --profile mobile --locked --target "${TARGET}" \
   --package offline-protocol-uniffi --no-default-features
 
-SO_ROOT="target/${TARGET}/release"
+SO_ROOT="target/${TARGET}/mobile"
 SO_PATH="${SO_ROOT}/liboffline_protocol_uniffi.so"
 if [[ ! -f "${SO_PATH}" ]]; then
   SO_PATH="${SO_ROOT}/deps/liboffline_protocol_uniffi.so"

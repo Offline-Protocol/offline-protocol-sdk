@@ -20,11 +20,15 @@ AAR_NAME="offline_protocol-release.aar"
 MODE="${1:-}"
 
 if [[ ! -x "${ANDROID_DIR}/gradlew" ]]; then
-  echo "missing ${ANDROID_DIR}/gradlew — bootstrap the Flutter example first" >&2
+  echo "missing ${ANDROID_DIR}/gradlew: bootstrap the Flutter example first" >&2
   exit 1
 fi
 
 JNI_DIR="${REPO_ROOT}/bindings/react-native/android/src/main/jniLibs"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "python3 required to measure the AAR" >&2
+  exit 1
+fi
 if ! compgen -G "${JNI_DIR}/arm64-v8a/*.so" >/dev/null 2>&1; then
   echo "UniFFI jniLibs not found under ${JNI_DIR}. Build React Native artifacts first:" >&2
   echo "  cd bindings/react-native && npm run build:uniffi:android" >&2
@@ -40,16 +44,31 @@ if [[ -z "${AAR_PATH}" || ! -f "${AAR_PATH}" ]]; then
   exit 1
 fi
 
-BYTES="$(wc -c < "${AAR_PATH}" | tr -d ' ')"
+# The baseline is the arm64-v8a plugin, which is all CI builds. A developer
+# who ran `npm run build:uniffi:android` has four ABIs under jniLibs and the
+# AAR packs all of them, so the bytes every other ABI occupies in the archive
+# are subtracted. In CI there are none and this is the file size exactly.
+BYTES="$(python3 - "${AAR_PATH}" <<'MEASURE'
+import os, sys, zipfile
+path = sys.argv[1]
+other = 0
+with zipfile.ZipFile(path) as aar:
+    for info in aar.infolist():
+        parts = info.filename.split("/")
+        if len(parts) > 2 and parts[0] == "jni" and parts[1] != "arm64-v8a":
+            # The data, its local header (30 bytes + name + extra) and its
+            # central directory entry (46 bytes + name + extra + comment).
+            name = len(info.filename.encode())
+            other += info.compress_size + 30 + name + len(info.extra)
+            other += 46 + name + len(info.extra) + len(info.comment)
+print(os.path.getsize(path) - other)
+MEASURE
+)"
 KIB="$(awk -v b="${BYTES}" 'BEGIN { printf "%.1f", b / 1024 }')"
 MIB="$(awk -v b="${BYTES}" 'BEGIN { printf "%.2f", b / 1024 / 1024 }')"
 
 case "${MODE}" in
   --write-baseline)
-    if ! command -v python3 >/dev/null 2>&1; then
-      echo "python3 required to update JSON baseline" >&2
-      exit 1
-    fi
     python3 - "${BASELINE}" "${BYTES}" <<'PY'
 import json, sys
 path, nbytes = sys.argv[1], int(sys.argv[2])
@@ -63,10 +82,6 @@ print(f"updated {path} -> {nbytes} bytes")
 PY
     ;;
   --check)
-    if ! command -v python3 >/dev/null 2>&1; then
-      echo "python3 required for --check" >&2
-      exit 1
-    fi
     python3 - "${BASELINE}" "${BYTES}" <<'PY'
 import json, sys
 path, measured = sys.argv[1], int(sys.argv[2])

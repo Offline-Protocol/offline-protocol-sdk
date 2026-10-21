@@ -1,5 +1,4 @@
 group 'com.offlineprotocol.flutter'
-version '0.29.0'
 
 buildscript {
     ext.kotlin_version = '1.9.24'
@@ -23,72 +22,41 @@ rootProject.allprojects {
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
 
-// Bridge sources have one home (ADR 0025). Compile surface: Internet, BLE,
-// Wi‑Fi Direct, event replay, foreground reconnect, teardown helpers.
+// Bridge sources have one home (ADR 0025). The compile surface is every
+// shared bridge source except the ones the KotlinCompile excludes below name:
+// a list of what to leave out, never a list of what to take, so a new shared
+// source reaches this plugin without being registered (decision 3).
 def bridgeDir = file('../../../react-native/android')
 def bridgeJava = bridgeDir.path + '/src/main/java'
 
-// Keep `pr3KotlinIncludes`, KotlinCompile excludes, and ios/offline_protocol.podspec
-// `pr3_bridge_swift` aligned (Rust guards pin both lists and docs/bridges/flutter.md).
-def pr3KotlinIncludes = [
-    'uniffi/**/*.kt',
-    'com/offlineprotocol/ProtocolConfigParser.kt',
-    'com/offlineprotocol/InitialRuntimeConfigApplier.kt',
-    'com/offlineprotocol/JsonExtensions.kt',
-    'com/offlineprotocol/InternetTransportBootstrap.kt',
-    'com/offlineprotocol/EncryptionConfigReader.kt',
-    'com/offlineprotocol/MeshRelayConfigReader.kt',
-    'com/offlineprotocol/CustodyConfigReader.kt',
-    'com/offlineprotocol/MlsSecureStorage.kt',
-    'com/offlineprotocol/ProtocolStateStorage.kt',
-    'com/offlineprotocol/StorageNamespace.kt',
-    'com/offlineprotocol/LegacyStoreAdoption.kt',
-    'com/offlineprotocol/TransportManager.kt',
-    'com/offlineprotocol/InternetManager.kt',
-    'com/offlineprotocol/RelayControlOpTranslator.kt',
-    'com/offlineprotocol/RelayAnswerPrefixes.kt',
-    'com/offlineprotocol/RelayGroupSnapshotBridge.kt',
-    'com/offlineprotocol/RelayRateLimiter.kt',
-    'com/offlineprotocol/RelayTimestamps.kt',
-    'com/offlineprotocol/LegacyRelayMessage.kt',
-    'com/offlineprotocol/AddressDeclarationPolicy.kt',
-    'com/offlineprotocol/ForcedPresenceCheckQueue.kt',
-    'com/offlineprotocol/RecipientInFlightTracker.kt',
-    'com/offlineprotocol/SupersededLatchPolicy.kt',
-    'com/offlineprotocol/GatewayAttachPolicy.kt',
-    'com/offlineprotocol/GatewayVerdictTracker.kt',
-    'com/offlineprotocol/PeerIdentityBinding.kt',
-    'com/offlineprotocol/MonotonicClock.kt',
-    'com/offlineprotocol/SocketGenerationTracker.kt',
-    'com/offlineprotocol/WriteStallWatchdog.kt',
-    'com/offlineprotocol/ProtocolErrorBridge.kt',
-    'com/offlineprotocol/PresenceWatchPolicy.kt',
-    'com/offlineprotocol/EventReplayRing.kt',
-    'com/offlineprotocol/ForegroundReconnectPolicy.kt',
-    'com/offlineprotocol/TeardownSequence.kt',
-    'com/offlineprotocol/WifiDirectManager.kt',
-    'com/offlineprotocol/WifiDirectGroupFormation.kt',
-    'com/offlineprotocol/LanPeerDiscovery.kt',
-    'com/offlineprotocol/LanPeerState.kt',
-    'com/offlineprotocol/PeerStreamFraming.kt',
-    'com/offlineprotocol/PeerStreamSockets.kt',
-    'com/offlineprotocol/PeerStreamDialPolicy.kt',
-    'com/offlineprotocol/BleAppTag.kt',
-    'com/offlineprotocol/BleDensityPolicy.kt',
-    'com/offlineprotocol/BleDiscoveryBootstrapPolicy.kt',
-    'com/offlineprotocol/BleHelloPolicy.kt',
-    'com/offlineprotocol/BleMessageNotificationPolicy.kt',
-    'com/offlineprotocol/BleServiceInstanceSelection.kt',
-    'com/offlineprotocol/ble/**/*.kt',
-    'com/offlineprotocol/mesh/**/*.kt',
-]
+// Values the React Native module declares are read from the line that declares
+// them, never written again here (decision 5): a copy is right on the day it is
+// made and drifts with nothing failing. Each must be declared exactly once.
+def moduleBuild = new File(bridgeDir, 'build.gradle').text
+def exactlyOne = { String name, String pattern ->
+    def found = (moduleBuild =~ pattern).collect { it[1] }
+    if (found.size() != 1) {
+        throw new GradleException(
+            "react-native/android/build.gradle must declare ${name} exactly once (found ${found.size()})")
+    }
+    found[0]
+}
+def sdkLevel = { String name ->
+    exactlyOne(name, /(?m)^[ \t]*${java.util.regex.Pattern.quote(name)}[ \t]+(\d+)[ \t]*$/).toInteger()
+}
+def moduleDependency = { String module ->
+    def quoted = java.util.regex.Pattern.quote(module)
+    exactlyOne(module, /(?m)^[ \t]*implementation[ \t(]+['"]${quoted}:([^'"@]+)(?:@aar)?['"]/)
+}
+def rnPackage = new groovy.json.JsonSlurper().parse(file('../../../react-native/package.json'))
+version rnPackage.version
 
 android {
     namespace 'com.offlineprotocol'
-    compileSdk 34
+    compileSdk sdkLevel('compileSdk')
 
     defaultConfig {
-        minSdkVersion 24
+        minSdkVersion sdkLevel('minSdkVersion')
         consumerProguardFiles bridgeDir.path + '/consumer-rules.pro'
     }
 
@@ -106,7 +74,6 @@ android {
             manifest.srcFile 'src/main/AndroidManifest.xml'
             java {
                 srcDirs bridgeJava, 'src/main/kotlin'
-                pr3KotlinIncludes.each { include it }
             }
             jniLibs.srcDirs bridgeDir.path + '/src/main/jniLibs'
         }
@@ -114,6 +81,9 @@ android {
 }
 
 // The Kotlin plugin compiles every `.kt` under [bridgeJava] unless excluded here.
+// These need React, or are transports the plugin does not host yet. A Rust guard
+// (flutter_android_excludes_name_real_files) refuses a name that matches no file,
+// which is a rename nobody carried over and would let the renamed file in.
 tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
     exclude('com/offlineprotocol/OfflineProtocolModule.kt')
     exclude('com/offlineprotocol/OfflineProtocolPackage.kt')
@@ -129,9 +99,7 @@ tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
 
 dependencies {
     implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
-    implementation 'net.java.dev.jna:jna:5.19.1@aar'
-    implementation 'androidx.security:security-crypto:1.1.0'
-    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
-    implementation 'androidx.lifecycle:lifecycle-common:2.8.7'
-    implementation 'androidx.lifecycle:lifecycle-runtime:2.8.7'
+    implementation "net.java.dev.jna:jna:${moduleDependency('net.java.dev.jna:jna')}@aar"
+    implementation "androidx.security:security-crypto:${moduleDependency('androidx.security:security-crypto')}"
+    implementation "com.squareup.okhttp3:okhttp:${moduleDependency('com.squareup.okhttp3:okhttp')}"
 }

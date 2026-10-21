@@ -124,8 +124,10 @@ event-channel callbacks are delivered on the main isolate’s platform thread
 | Config | Optional top-level `dors` and `relay` JSON (shared `InitialRuntimeConfigApplier`) |
 
 **Not in the Flutter plugin yet:** Nostr, Reticulum, telemetry pipe, and the
-React Native foreground mesh service. Use React Native or extend the Flutter
-compile whitelist before exposing those transports here.
+React Native foreground mesh service. `createFromConfig` refuses a config with
+`reticulumEnabled` or `nostrEnabled` set, rather than enabling a transport
+nothing serves. Use React Native for those, or host their managers in the
+plugin and take them off its exclude lists.
 
 Configuration fields and transport behavior match the core and React Native;
 see [Configuration](../../docs/configuration.md) and the
@@ -161,6 +163,10 @@ start), subscribes to events, and prints the device `off1…` address. Details:
   `flutter test`, `flutter analyze`, arm64 UniFFI into jniLibs, release AAR
   assembly, and `measure-plugin-aar-size.sh --check`. Path filters skip the
   native gate when only Dart or guard tests change; pushes to `main` run the
-  full job.
+  full job. No CI job compiles the iOS plugin yet; the manual typecheck is in
+  [docs/bridges/flutter.md](../../docs/bridges/flutter.md#what-ci-runs).
+- **Version:** the podspec and the Gradle build read it from
+  `bindings/react-native/package.json`. Bump `offline_protocol/pubspec.yaml`
+  with it; the release refuses a tag the pubspec does not match.
 - **AAR footprint:** [baselines/README.md](baselines/README.md).
 - **Rust guards:** `crates/offline-protocol-uniffi/src/tests/flutter_bridge_guards.rs`.

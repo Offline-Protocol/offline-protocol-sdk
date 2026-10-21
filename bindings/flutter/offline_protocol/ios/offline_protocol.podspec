@@ -6,62 +6,27 @@ require 'json'
 rn_ios = 'BridgeRN'
 plugin_ios = File.dirname(File.realpath(__FILE__))
 
-# Flutter compile surface: Internet stack, BLE, peer-stream (Wi‑Fi Direct slot),
-# event replay, foreground reconnect. Nostr / Reticulum stay on React Native
-# until the Flutter whitelist expands.
-# Keep `pr3_bridge_swift` aligned with android/build.gradle `pr3KotlinIncludes`
-# and KotlinCompile excludes (Rust guards pin both).
-pr3_bridge_swift = [
-  'ProtocolConfigParser.swift',
-  'InitialRuntimeConfigApplier.swift',
-  'InternetTransportBootstrap.swift',
-  'EncryptionConfigReader.swift',
-  'MeshRelayConfigReader.swift',
-  'CustodyConfigReader.swift',
-  'MlsSecureStorage.swift',
-  'ProtocolStateStorage.swift',
-  'StorageNamespace.swift',
-  'LegacyStoreAdoption.swift',
-  'TransportManager.swift',
-  'InternetManager.swift',
-  'RelayControlOpTranslator.swift',
-  'RelayAnswerPrefixes.swift',
-  'RelayGroupSnapshotBridge.swift',
-  'RelayRateLimiter.swift',
-  'RelayTimestamps.swift',
-  'LegacyRelayMessage.swift',
-  'AddressDeclarationPolicy.swift',
-  'ForcedPresenceCheckQueue.swift',
-  'RecipientInFlightTracker.swift',
-  'SupersededLatchPolicy.swift',
-  'GatewayAttachPolicy.swift',
-  'GatewayVerdictTracker.swift',
-  'PeerIdentityBinding.swift',
-  'MonotonicClock.swift',
-  'SocketGenerationTracker.swift',
-  'WriteStallWatchdog.swift',
-  'ProtocolErrorBridge.swift',
-  'PresenceWatchPolicy.swift',
-  'EventReplayRing.swift',
-  'ForegroundReconnectPolicy.swift',
-  'BleManager.swift',
-  'WifiDirectManager.swift',
-  'BleAppTag.swift',
-  'BleDensityPolicy.swift',
-  'BleHelloPolicy.swift',
-  'BleMessageNotificationPolicy.swift',
-  'BleServiceInstanceSelection.swift',
-  'InboundFragmentBuffer.swift',
-  'OutboundFragmentQueue.swift',
-  'PeerStreamFraming.swift',
-  'PeerStreamSession.swift',
-  'PeripheralRestorationAgeOutPolicy.swift',
-].map { |name| File.join(rn_ios, name) } + [
-  File.join(rn_ios, 'ble/**/*.swift'),
-  File.join(rn_ios, 'mesh/**/*.swift'),
-]
+# Values the React Native package declares are read from it, never written
+# again here (ADR 0025 decision 5): a copy is right on the day it is made and
+# drifts with nothing failing. The version comes from package.json, which the
+# release gate keeps in step with the tag; the deployment target comes from the
+# line in MeshSdk.podspec that declares it, which has to be there exactly once.
+rn_root = File.expand_path('../../../react-native', plugin_ios)
+rn_package = JSON.parse(File.read(File.join(rn_root, 'package.json')))
+rn_targets = File.read(File.join(rn_root, 'MeshSdk.podspec'))
+  .scan(/s\.platforms\s*=\s*\{\s*:ios\s*=>\s*"([0-9.]+)"\s*\}/).flatten
+unless rn_targets.length == 1
+  raise "MeshSdk.podspec must declare the iOS deployment target exactly once (found #{rn_targets.length})"
+end
+ios_deployment_target = rn_targets.first
 
-# React Native–only; Flutter uses EventReplayRing and shared transport stack above.
+# The compile surface is every shared bridge source except the ones named here
+# (ADR 0025 decision 3): a list of what to leave out, never a list of what to
+# take, so a new shared source reaches this pod without being registered.
+# These need React, or are transports the plugin does not host yet. Keep in
+# step with the rsync excludes in sync_bridge_rn.sh; a Rust guard
+# (flutter_ios_exclude_lists_agree_and_name_real_files) holds both to the
+# sources that exist.
 rn_only_swift = [
   'BridgeRN/OfflineProtocolModule.swift',
   'BridgeRN/OfflineProtocolModule.m',
@@ -73,20 +38,19 @@ rn_only_swift = [
 
 Pod::Spec.new do |s|
   s.name             = 'offline_protocol'
-  s.version          = '0.29.0'
+  s.version          = rn_package['version']
   s.summary          = 'Flutter bindings for the Offline Protocol SDK'
   s.description      = 'Offline-first mesh messaging with MLS encryption (Flutter plugin).'
   s.homepage         = 'https://github.com/Offline-Protocol/offline-protocol-sdk'
   s.license          = { :type => 'AGPL-3.0-only' }
   s.author           = { 'Offline Protocol, Inc.' => 'support@offlineprotocol.com' }
   s.source           = { :path => '.' }
-  s.platform         = :ios, '13.0'
+  s.platform         = :ios, ios_deployment_target
   s.swift_version    = '5.5'
 
   sync_script = File.join(plugin_ios, 'sync_bridge_rn.sh')
   s.prepare_command = "bash #{sync_script.shellescape}"
 
-  # pr3_bridge_swift names the compile surface for Rust guards; CocoaPods uses globs.
   s.source_files = [
     'Classes/**/*.swift',
     'BridgeRN/**/*.swift',

@@ -4,6 +4,8 @@ import UIKit
 /// Flutter host for the Offline Protocol engine (lifecycle, events, transports).
 ///
 /// UniFFI calls run on `engineQueue`; Flutter callbacks run on the main queue (bridge K2).
+/// Nothing on the main thread waits for the engine queue: engine stop can block on
+/// transport I/O, so detach queues the teardown and returns.
 public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
     private var channel: FlutterMethodChannel?
     private var eventsChannel: FlutterEventChannel?
@@ -20,7 +22,10 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
     private let attachmentLock = NSLock()
     private var isPluginAttached = false
 
-    private let eventSeqLock = NSLock()
+    /// Guards `eventSink`, `eventSeq` and the replay ring together. The sink is
+    /// written on the main thread and read on the UniFFI callback thread, and an
+    /// unsynchronised read of a reference-typed property is a memory-safety race.
+    private let eventLock = NSLock()
     private var eventSeq = 0
     private let eventReplay = EventReplayRing()
     private var eventSink: FlutterEventSink?
@@ -59,18 +64,22 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
 
         removeForegroundObserver()
         eventsChannel?.setStreamHandler(nil)
-        eventSink = nil
+        setEventSink(nil)
         channel?.setMethodCallHandler(nil)
-        engineQueue.sync {
-            tearDownProtocol()
+        // Queued behind every call already submitted, never waited on. The block
+        // holds `self` until the teardown has run.
+        engineQueue.async { [self] in
+            self.tearDownProtocol()
         }
     }
 
     deinit {
         removeForegroundObserver()
-        engineQueue.sync {
-            tearDownProtocol()
-        }
+        // Directly, never `engineQueue.sync`: every block on that queue holds
+        // `self` strongly or weakly, so deinit can run on the engine queue
+        // itself, where a sync onto it deadlocks. No block can be running
+        // against this instance by the time it is deallocating.
+        tearDownProtocol()
     }
 
     private func installForegroundObserver() {
@@ -111,18 +120,24 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
 
     private func handleAppBecameActive() {
         if foregroundReconnectPolicy.shouldReconnectOnForeground(nowMs: MonotonicClock.nowMs()) {
-            try? internetManager?.forceReconnect()
+            internetManager?.forceReconnect()
         }
     }
 
     public func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink) -> FlutterError? {
-        eventSink = events
+        setEventSink(events)
         return nil
     }
 
     public func onCancel(withArguments arguments: Any?) -> FlutterError? {
-        eventSink = nil
+        setEventSink(nil)
         return nil
+    }
+
+    private func setEventSink(_ sink: FlutterEventSink?) {
+        eventLock.lock()
+        eventSink = sink
+        eventLock.unlock()
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -222,12 +237,15 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
     }
 
     private func emitEventJson(_ eventJson: String) {
-        guard let sink = eventSink else { return }
-        eventSeqLock.lock()
+        eventLock.lock()
+        guard let sink = eventSink else {
+            eventLock.unlock()
+            return
+        }
         let seq = eventSeq
         eventReplay.record(seq: seq, eventJson: eventJson)
         eventSeq += 1
-        eventSeqLock.unlock()
+        eventLock.unlock()
         DispatchQueue.main.async {
             sink([
                 "eventJson": eventJson,
@@ -246,6 +264,7 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         }
         tearDownProtocol()
         let parsed = try ProtocolConfigParser.parse(configJson)
+        try refuseUnhostedTransports(parsed.config)
         let proto = try OfflineProtocol(config: parsed.config)
         proto.setEventCallback(callback: FlutterEventCallback(emit: { [weak self] json in
             self?.emitEventJson(json)
@@ -264,6 +283,25 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
             proto.setBleTransportCallback(callback: FlutterBleTransportCallback(bleManager: manager))
         }
         wireWifiDirectCallbackIfNeeded(proto: proto)
+    }
+
+    /// Refuses a config that enables a transport this plugin has no manager for.
+    /// Accepted, the core would route to a transport nothing serves and messages
+    /// would wait on it with no error anywhere.
+    private func refuseUnhostedTransports(_ config: ProtocolConfig) throws {
+        var unhosted: [String] = []
+        if config.reticulumEnabled { unhosted.append("reticulumEnabled") }
+        if config.nostrEnabled { unhosted.append("nostrEnabled") }
+        guard unhosted.isEmpty else {
+            throw NSError(
+                domain: "OfflineProtocol",
+                code: -1,
+                userInfo: [
+                    NSLocalizedDescriptionKey:
+                        "\(unhosted.joined(separator: ", ")) is not supported by the Flutter plugin yet; set it to false",
+                ]
+            )
+        }
     }
 
     private func wireWifiDirectCallbackIfNeeded(proto: OfflineProtocol) {
@@ -318,9 +356,9 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
     }
 
     private func stopOnEngine() {
-        try? bleManager?.stop()
-        try? internetManager?.stop()
-        try? wifiDirectManager?.stop()
+        bleManager?.stop()
+        internetManager?.stop()
+        wifiDirectManager?.stop()
         try? protocolInstance?.stop()
     }
 
@@ -477,19 +515,19 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
     }
 
     private func tearDownProtocol() {
-        try? bleManager?.stop()
+        bleManager?.stop()
         bleManager = nil
-        try? internetManager?.stop()
+        internetManager?.stop()
         internetManager = nil
-        try? wifiDirectManager?.stop()
+        wifiDirectManager?.stop()
         wifiDirectManager = nil
         try? protocolInstance?.stop()
         protocolInstance = nil
         currentConfig = nil
-        eventSeqLock.lock()
+        eventLock.lock()
         eventSeq = 0
         eventReplay.clear()
-        eventSeqLock.unlock()
+        eventLock.unlock()
     }
 }
 
