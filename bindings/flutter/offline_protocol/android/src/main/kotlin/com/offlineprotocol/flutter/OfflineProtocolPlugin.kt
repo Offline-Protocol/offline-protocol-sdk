@@ -11,6 +11,8 @@ import java.util.Collections
 import com.offlineprotocol.EventReplayRing
 import com.offlineprotocol.ForegroundReconnectPolicy
 import com.offlineprotocol.ProtocolEngineHost
+import com.offlineprotocol.StickyEventBuffer
+import com.offlineprotocol.StickyEventDispatcher
 import com.offlineprotocol.TeardownSequence
 import com.offlineprotocol.mapProtocolBridgeError
 import io.flutter.embedding.engine.plugins.FlutterPlugin
@@ -83,6 +85,17 @@ class OfflineProtocolPlugin :
     private var eventSeq = 0
     private val eventReplay = EventReplayRing()
 
+    /** One-shot events when the EventChannel has no listener (RN sticky parity). */
+    private val oneShotEvents = StickyEventDispatcher(
+        buffer = StickyEventBuffer(),
+        canEmit = { eventSink != null },
+        emit = { eventJson -> emitEventJsonForSticky(eventJson) },
+        schedule = { runnable ->
+            mainHandler.post(runnable)
+            true
+        },
+    )
+
     private val channelEnvironment: FlutterEngineChannel.Environment
         get() = FlutterEngineChannel.Environment(
             context = applicationContext ?: throw IllegalStateException("Plugin not attached"),
@@ -94,6 +107,7 @@ class OfflineProtocolPlugin :
             startOnEngine = { startOnEngine() },
             stopOnEngine = { stopOnEngine() },
             seedAppState = { seedTelemetryAppState() },
+            discardOneShotEvent = { key -> oneShotEvents.discard(key) },
         )
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -204,6 +218,7 @@ class OfflineProtocolPlugin :
             override fun onActivityStarted(activity: Activity) {
                 sawActivityStart = true
                 startedActivities.add(activity)
+                oneShotEvents.flush()
                 runOnEngine("telemetry foreground") { notifyAppStateQuietly(AppState.ACTIVE) }
             }
 
@@ -255,6 +270,7 @@ class OfflineProtocolPlugin :
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
         eventSink = events
+        oneShotEvents.flush()
     }
 
     override fun onCancel(arguments: Any?) {
@@ -305,7 +321,13 @@ class OfflineProtocolPlugin :
     }
 
     private fun emitEventJson(eventJson: String) {
-        val sink = eventSink ?: return
+        if (eventSink == null) return
+        emitEventJsonForSticky(eventJson)
+    }
+
+    /** @return true when a listener is attached and the event was queued for delivery. */
+    private fun emitEventJsonForSticky(eventJson: String): Boolean {
+        val sink = eventSink ?: return false
         val seq: Int
         synchronized(eventSeqLock) {
             seq = eventSeq
@@ -320,6 +342,11 @@ class OfflineProtocolPlugin :
                 ),
             )
         }
+        return true
+    }
+
+    private fun sendStickyOneShotEvent(typeKey: String, eventJson: String) {
+        oneShotEvents.send(typeKey, eventJson)
     }
 
     private fun replayEventsOnEngine(fromSeq: Int, toSeq: Int): List<Map<String, Any>> =
@@ -355,7 +382,12 @@ class OfflineProtocolPlugin :
             connectionStatusEmitter = { connected, authenticated ->
                 emitEventJson(buildInternetStatusEvent(connected, authenticated))
             },
-            supersededEmitter = { reason -> emitEventJson(com.offlineprotocol.SupersededLatchPolicy.eventJson(reason)) },
+            supersededEmitter = { reason ->
+                sendStickyOneShotEvent(
+                    com.offlineprotocol.SupersededLatchPolicy.EVENT_TYPE,
+                    com.offlineprotocol.SupersededLatchPolicy.eventJson(reason),
+                )
+            },
         )
 
     private fun buildServerMessageEvent(rawJson: String): String {
@@ -374,6 +406,7 @@ class OfflineProtocolPlugin :
     }
 
     private fun startOnEngine() {
+        oneShotEvents.beginSession()
         engineHost.startProtocolCore()
         engineHost.startBleTransportIfPresent()
         val ctx = applicationContext
@@ -390,8 +423,8 @@ class OfflineProtocolPlugin :
                 Log.e(TAG, "User-requested mesh stop failed", e)
             } finally {
                 val json = JSONObject()
-                json.put("type", "mesh_stopped_by_user")
-                emitEventJson(json.toString())
+                json.put("type", EVENT_MESH_STOPPED_BY_USER)
+                sendStickyOneShotEvent(EVENT_MESH_STOPPED_BY_USER, json.toString())
                 applicationContext?.let { FlutterMeshForegroundKeepAlive.stop(it) }
             }
         }
@@ -415,6 +448,7 @@ class OfflineProtocolPlugin :
     }
 
     private fun tearDownProtocol() {
+        oneShotEvents.endSession()
         applicationContext?.let { FlutterMeshForegroundKeepAlive.stop(it) }
         engineHost.backgroundProcessor.stopProcessScheduler()
         val teardown = TeardownSequence()
@@ -437,6 +471,7 @@ class OfflineProtocolPlugin :
 
     companion object {
         private const val TAG = "OfflineProtocolPlugin"
+        private const val EVENT_MESH_STOPPED_BY_USER = "mesh_stopped_by_user"
         private const val CHANNEL_NAME = "com.offlineprotocol/offline_protocol"
         private const val EVENTS_CHANNEL_NAME = "com.offlineprotocol/offline_protocol_events"
         private const val ENGINE_IDLE_SECONDS = 30L

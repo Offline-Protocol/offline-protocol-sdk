@@ -479,7 +479,7 @@ internal object EngineMethodHandlers {
         env: FlutterEngineChannel.Environment,
         arguments: Any?,
     ): Any? {
-    host.requireProtocol().emitTestEvent()
+    host.requireProtocolBridge().emitTestEvent()
         return null
     }
 
@@ -506,15 +506,8 @@ internal object EngineMethodHandlers {
         val type = FlutterBridgeArgs.requireString(map, "type")
         val configJson = map["config"] as? String
         val json = configJson?.let { JSONObject(it) }
-        when (type.lowercase()) {
-            "internet" -> {
-                val manager = ensureInternetManager(host, env)
-                if (manager.state == TransportState.RUNNING || manager.state == TransportState.STARTING) {
-                    manager.stop()
-                }
-                InternetTransportBootstrap.configureAndStart(manager, json ?: JSONObject())
-            }
-            else -> host.enableTransport(env.context, type, json, env.internetHandlers)
+        host.enableTransport(env.context, type, json, env.internetHandlers) {
+            env.discardOneShotEvent(com.offlineprotocol.SupersededLatchPolicy.EVENT_TYPE)
         }
         return null
     }
@@ -1680,36 +1673,4 @@ internal object EngineMethodHandlers {
     ): Any? {
     return com.offlineprotocol.ProtocolEngineHostBridge.wipePersistedState(host, env.context, arguments)
     }
-
-private fun ensureInternetManager(
-    host: ProtocolEngineHost,
-    env: FlutterEngineChannel.Environment,
-): com.offlineprotocol.InternetManager {
-    host.internetManager?.let { return it }
-    val config = host.currentConfig
-        ?: throw IllegalStateException("Protocol config not initialized")
-    val proto = host.protocol
-        ?: throw IllegalStateException("Protocol not initialized")
-    return InternetTransportBootstrap.createManager(
-        env.context,
-        proto,
-        config.profile,
-        config.appId,
-    ) { level, message, context ->
-        Log.println(
-            when (level) {
-                "error" -> Log.ERROR
-                "warning" -> Log.WARN
-                else -> Log.INFO
-            },
-            TAG,
-            "$message ${context ?: emptyMap()}",
-        )
-    }.also { manager ->
-        InternetTransportBootstrap.attachEmitters(manager) { json ->
-            env.internetHandlers.serverMessageEmitter(json)
-        }
-        host.internetManager = manager
-    }
-}
 }

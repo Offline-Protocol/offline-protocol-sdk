@@ -464,6 +464,25 @@ fn flutter_android_hosts_mesh_foreground_keep_alive() {
             && plugin_kt.contains("FlutterMeshForegroundKeepAlive.stop"),
         "Flutter start/stop must drive the shared mesh foreground service"
     );
+    assert!(
+        plugin_kt.contains("StickyEventDispatcher")
+            && plugin_kt.contains("sendStickyOneShotEvent")
+            && plugin_kt.contains("mesh_stopped_by_user")
+            && plugin_kt.contains("SupersededLatchPolicy.EVENT_TYPE"),
+        "Flutter must sticky-deliver one-shot events like React Native"
+    );
+    assert!(
+        std::fs::read_to_string(
+            flutter.join("android/src/main/kotlin/com/offlineprotocol/flutter/FlutterEngineChannel.kt"),
+        )
+        .unwrap_or_else(|e| panic!("cannot read FlutterEngineChannel.kt: {e}"))
+        .contains("discardOneShotEvent"),
+        "Flutter enableTransport must discard held internet_session_superseded"
+    );
+    assert!(
+        !gradle.contains("StickyEventDispatcher.kt"),
+        "Flutter must compile StickyEventDispatcher for one-shot redelivery"
+    );
     let manifest = std::fs::read_to_string(flutter.join("android/src/main/AndroidManifest.xml"))
         .unwrap_or_else(|e| panic!("cannot read plugin AndroidManifest.xml: {e}"));
     assert!(

@@ -567,23 +567,17 @@ _m("rekeySession", """
 
 _m("mlsGenerateKeyPackage", """
         val bundle = host.requireProtocolBridge().mlsGenerateKeyPackage()
-        return mapOf(
-            "packageId" to bundle.packageId,
-            "keyPackage" to bundle.keyPackage.map { it.toInt() },
-        )
+        return keyPackageMap(bundle)
 """)
 
 _m("mlsGetOrCreateKeyPackage", """
         val bundle = host.requireProtocolBridge().mlsGetOrCreateKeyPackage()
-        return mapOf(
-            "packageId" to bundle.packageId,
-            "keyPackage" to bundle.keyPackage.map { it.toInt() },
-        )
+        return keyPackageMap(bundle)
 """)
 
 _m("mlsGetPendingKeyPackages", """
         val packages = host.requireProtocolBridge().mlsGetPendingKeyPackages()
-        return packages.map { mapOf("packageId" to it.packageId, "keyPackage" to it.keyPackage.map { b -> b.toInt() }) }
+        return packages.map { keyPackageMap(it) }
 """)
 
 _m("mlsMarkKeyPackageSynced", """

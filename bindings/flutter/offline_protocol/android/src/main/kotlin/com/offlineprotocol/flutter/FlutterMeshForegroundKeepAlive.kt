@@ -16,7 +16,7 @@ internal object FlutterMeshForegroundKeepAlive {
 
     fun start(context: Context, onUserStopRequested: () -> Unit) {
         try {
-            val callback = {
+            val callback: () -> Unit = {
                 try {
                     onUserStopRequested()
                 } catch (e: Exception) {

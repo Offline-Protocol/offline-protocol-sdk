@@ -321,6 +321,15 @@ HEADER = textwrap.dedent(
             "timestampMs" to encrypted.timestampMs.toDouble(),
         )
 
+        private fun keyPackageMap(bundle: MlsKeyPackageBundle): Map<String, Any?> = mapOf(
+            "packageId" to bundle.packageId,
+            "userId" to bundle.userId,
+            "keyPackageData" to bundle.keyPackageData.map { byte -> byte.toInt() },
+            "createdAtMs" to bundle.createdAtMs.toDouble(),
+            "expiresAtMs" to bundle.expiresAtMs.toDouble(),
+            "synced" to bundle.synced,
+        )
+
         private fun JSONObject.optNullableString(key: String): String? =
             if (has(key) && !isNull(key)) optString(key) else null
 

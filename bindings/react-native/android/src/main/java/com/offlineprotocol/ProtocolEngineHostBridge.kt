@@ -198,6 +198,15 @@ object ProtocolEngineHostBridge {
         "timestampMs" to encrypted.timestampMs.toDouble(),
     )
 
+    private fun keyPackageMap(bundle: MlsKeyPackageBundle): Map<String, Any?> = mapOf(
+        "packageId" to bundle.packageId,
+        "userId" to bundle.userId,
+        "keyPackageData" to bundle.keyPackageData.map { byte -> byte.toInt() },
+        "createdAtMs" to bundle.createdAtMs.toDouble(),
+        "expiresAtMs" to bundle.expiresAtMs.toDouble(),
+        "synced" to bundle.synced,
+    )
+
     private fun JSONObject.optNullableString(key: String): String? =
         if (has(key) && !isNull(key)) optString(key) else null
 
@@ -755,27 +764,21 @@ object ProtocolEngineHostBridge {
     fun mlsGenerateKeyPackage(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
 
         val bundle = host.requireProtocolBridge().mlsGenerateKeyPackage()
-        return mapOf(
-            "packageId" to bundle.packageId,
-            "keyPackage" to bundle.keyPackage.map { it.toInt() },
-        )
+        return keyPackageMap(bundle)
 
     }
 
     fun mlsGetOrCreateKeyPackage(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
 
         val bundle = host.requireProtocolBridge().mlsGetOrCreateKeyPackage()
-        return mapOf(
-            "packageId" to bundle.packageId,
-            "keyPackage" to bundle.keyPackage.map { it.toInt() },
-        )
+        return keyPackageMap(bundle)
 
     }
 
     fun mlsGetPendingKeyPackages(host: ProtocolEngineHost, ctx: Context?, arguments: Any?): Any? {
 
         val packages = host.requireProtocolBridge().mlsGetPendingKeyPackages()
-        return packages.map { mapOf("packageId" to it.packageId, "keyPackage" to it.keyPackage.map { b -> b.toInt() }) }
+        return packages.map { keyPackageMap(it) }
 
     }
 
