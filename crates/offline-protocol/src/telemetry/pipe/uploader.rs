@@ -1301,13 +1301,16 @@ pub(crate) mod tests {
     }
 
     /// SHA-256 of each root in `ingest-roots.pem`, in file order: ISRG Root
-    /// X1 and X2 (Let's Encrypt); GTS Root R1 to R4 (Google Trust Services);
+    /// X1, X2, YE and YR (Let's Encrypt); GTS Root R1 to R4 (Google Trust
+    /// Services);
     /// SSL.com TLS RSA and ECC Root CA 2022, SSL.com Root Certification
     /// Authority RSA and ECC; Sectigo Public Server Authentication Root R46
     /// and E46, USERTrust RSA and ECC Certification Authority (Sectigo).
-    const INGEST_ROOT_FINGERPRINTS: [&str; 14] = [
+    const INGEST_ROOT_FINGERPRINTS: [&str; 16] = [
         "96bcec06264976f37460779acf28c5a7cfe8a3c0aae11a8ffcee05c0bddf08c6",
         "69729b8e15a86efc177a57afb7171dfc64add28c2fca8cf1507e34453ccb1470",
+        "e14ffcad5b0025731006caa43a121a22d8e9700f4fb9cf852f02a708aa5d5666",
+        "e57b7e6f150c419102e8d5c055729ff967b9d1a829bf00cec89ca604ebf4a86f",
         "d947432abde7b7fa90fc2e6b59101b1280e0e1c7e4e40fa3c6887fff57a7f4cf",
         "8d25cd97229dbf70356bda4eb3cc734031e24cf00fafcfd32dc76eb5841c7ea8",
         "34d8a73ee208d9bcdb0d956520934b4e40e69482596e8b6f73c8426b010a6f48",
@@ -1322,10 +1325,10 @@ pub(crate) mod tests {
         "4ff460d54b9c86dabfbcfc5712e0400d2bed3fbc4d4fbdaa86e06adcd2a9ad7a",
     ];
 
-    /// The trust anchors have no cheap behaviour test (it would need a
-    /// certificate authority of its own), so the setting itself is pinned:
-    /// exactly the fourteen roots in `ingest-roots.pem`, byte for byte, with
-    /// verification on and the crypto provider named.
+    /// The setting itself is pinned: exactly the sixteen roots in
+    /// `ingest-roots.pem`, byte for byte, with verification on and the crypto
+    /// provider named. The behaviour is pinned by the captured-chain test
+    /// below.
     #[test]
     fn the_agent_validates_against_the_pinned_ingest_roots_only() {
         use sha2::Digest;
@@ -1356,7 +1359,79 @@ pub(crate) mod tests {
             .map(|item| item.expect("a well-formed PEM block"))
             .filter(|item| matches!(item, ureq::tls::PemItem::Certificate(_)))
             .count();
-        assert_eq!((blocks, parsed), (14, 14));
+        assert_eq!((blocks, parsed), (16, 16));
+    }
+
+    /// The pinned roots as DER, the form rustls takes them in.
+    fn pinned_roots_der() -> Vec<rustls::pki_types::CertificateDer<'static>> {
+        ureq::tls::parse_pem(INGEST_ROOTS_PEM)
+            .filter_map(|item| match item {
+                Ok(ureq::tls::PemItem::Certificate(cert)) => {
+                    Some(rustls::pki_types::CertificateDer::from(cert.der().to_vec()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every pinned root becomes a rustls trust anchor. ureq hands the set to
+    /// `RootCertStore::add_parsable_certificates`, which skips a certificate
+    /// it cannot use and says so only in a debug log, so the configuration
+    /// test above could pass with an anchor rustls never loaded.
+    #[test]
+    fn every_pinned_root_becomes_a_rustls_trust_anchor() {
+        let mut store = rustls::RootCertStore::empty();
+        let (added, ignored) = store.add_parsable_certificates(pinned_roots_der());
+        assert_eq!((added, ignored), (16, 0));
+    }
+
+    /// The ingest's real chain, captured on 2026-10-21 (the leaf, Let's
+    /// Encrypt YE1, ISRG Root YE cross-signed by X2, and X2 cross-signed by
+    /// X1), verified offline against the pinned roots at a fixed time inside
+    /// the leaf's validity. It is checked twice: as served, and cut at Root
+    /// YE, the shorter chain Let's Encrypt also publishes. The second is why
+    /// ISRG Root YE is pinned. Without it that chain has no anchor, and an
+    /// edge that stopped sending the cross-signs would silence telemetry on
+    /// every shipped SDK.
+    #[test]
+    fn the_captured_ingest_chain_validates_as_served_and_cut_at_root_ye() {
+        use rustls::client::danger::ServerCertVerifier;
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+
+        const CHAIN: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ingest-chain-2026-10.pem"
+        ));
+        let chain: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(CHAIN)
+            .collect::<Result<_, _>>()
+            .expect("the chain fixture parses");
+        let [leaf, ye1, ye_by_x2, x2_by_x1] = chain.as_slice() else {
+            panic!(
+                "the chain fixture holds {} certificates, not 4",
+                chain.len()
+            );
+        };
+
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add_parsable_certificates(pinned_roots_der());
+        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            std::sync::Arc::new(roots),
+            std::sync::Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .expect("a verifier over the pinned roots");
+        // 2026-10-21T00:00:00Z, inside every certificate's validity.
+        let now = UnixTime::since_unix_epoch(Duration::from_secs(1_792_540_800));
+        let host = ServerName::try_from("analytics.offlineprotocol.com").expect("a DNS name");
+
+        let served = vec![ye1.clone(), ye_by_x2.clone(), x2_by_x1.clone()];
+        let cut_at_root_ye = vec![ye1.clone()];
+        for (shape, intermediates) in [("as served", served), ("cut at Root YE", cut_at_root_ye)] {
+            verifier
+                .verify_server_cert(leaf, &intermediates, &host, &[], now)
+                .unwrap_or_else(|err| panic!("the chain {shape} was refused: {err}"));
+        }
     }
 
     /// The real ingest's chain validates against the pinned roots. Needs the

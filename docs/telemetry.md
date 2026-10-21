@@ -238,8 +238,11 @@ Every batch is `POST`ed to one endpoint, fixed at build time, over TLS 1.2 or
 certificate, compiled into the SDK. The ingest is served through Cloudflare,
 whose edge certificates come from Let's Encrypt, Google Trust Services or
 SSL.com, with a backup from one of those or Sectigo that Cloudflare deploys
-on its own; the SDK trusts those four authorities' server roots, fourteen in
-all, and nothing else. Neither the device's own trust store nor the rest of
+on its own; the SDK trusts those four authorities' server roots, sixteen in
+all, and nothing else. They include Let's Encrypt's Generation Y roots (ISRG
+Root YE and YR), which issue the ingest's certificate today, so the chain
+still validates if the edge stops sending the cross-signs back to ISRG Root
+X1 and X2. Neither the device's own trust store nor the rest of
 the Mozilla root set is consulted, so a compromise of any other authority
 cannot vouch for the ingest, and the uploader follows no redirect, so that
 endpoint is the only destination a batch is sent to.

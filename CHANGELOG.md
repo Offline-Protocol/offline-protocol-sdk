@@ -370,13 +370,19 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   after eight eMudhra intermediates were found with weak keys in October 2026.
   Anyone holding one of those keys on the network path could have presented
   a certificate for the ingest and read the telemetry API key and the
-  batches. The uploader now trusts fourteen roots, the server roots of the
+  batches. The uploader now trusts sixteen roots, the server roots of the
   four authorities the ingest's edge issues from (Let's Encrypt, Google Trust
   Services, SSL.com, and Sectigo for Cloudflare's backup certificate), pinned
   by SHA-256 in a test, so a compromise of any other authority no longer
-  reaches the SDK. `webpki-roots` leaves the dependency graph, `ureq` drops to
-  `rustls-no-provider`, the uploader names the ring crypto provider instead of
-  taking a process default, and `rustls-webpki` moves to 0.103.16. Nothing
+  reaches the SDK. They include Let's Encrypt's Generation Y roots, ISRG Root
+  YE and YR, which issue the ingest's certificate today, so the chain still
+  validates if the edge stops sending the cross-signs to the older ISRG roots.
+  `webpki-roots` leaves the dependency graph, `ureq` drops to
+  `rustls-no-provider`, and the uploader names the ring crypto provider
+  instead of taking a process default. `rustls-webpki` moves to 0.103.16,
+  which rejects any path through the compromised eMudhra intermediates' keys
+  whatever root it ends at, closing the cross-signed path through Sectigo's
+  AAA Certificate Services as well. Nothing
   changes for an application: the endpoint, the proxy handling and the
   device-store exclusion are as before. Applications on 0.26.0 to 0.29.0 that
   enable telemetry should update. See

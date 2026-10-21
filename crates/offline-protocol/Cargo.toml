@@ -69,7 +69,10 @@ offline-protocol-data = { workspace = true, optional = true }
 # roots that can issue the ingest's certificate (`ingest-roots.pem`), never the
 # device's store and never the whole Mozilla set, so a compromise of any other
 # authority cannot reach it. `rustls` with ring is the crypto provider the
-# uploader names; it is the same rustls ureq links, so it adds no crate.
+# uploader names; it is the same rustls ureq links, so it adds no crate. It
+# must stay on the rustls series ureq uses (0.23): the provider crosses into
+# ureq through `unversioned_rustls_crypto_provider`, and two series would be
+# two crates whose types do not match, a build error at that call.
 # HTTP CONNECT proxy support is part of ureq's core rather than a feature: the
 # uploader can use an HTTP CONNECT proxy selected through the environment, read
 # when telemetry is enabled, and TLS still runs end to end to the ingest,

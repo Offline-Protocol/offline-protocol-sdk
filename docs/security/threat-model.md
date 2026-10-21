@@ -758,9 +758,12 @@ vouch for the ingest, so a compromise of one authority the ingest never uses
 until it was rebuilt ([ADR 0031](../adr/0031-telemetry-trusts-only-the-ingests-issuers.md)).
 
 **What bounds it:** the set covers every authority the edge issues from,
-including the one its backup certificate uses, so a rotation the edge makes
-on its own stays inside it; a move outside the set is treated as an SDK
-release event, and the failure is loud in the stats rather than silent.
+including the one its backup certificate uses, and each authority's current
+roots rather than only those in root programs (Let's Encrypt's Generation Y
+roots are pinned although no store carries them yet), so a rotation the edge
+or an authority makes on its own stays inside it; a move outside the set is
+treated as an SDK release event, and the failure is loud in the stats rather
+than silent.
 
 ### R15. The Bluetooth LE app tag is unsigned and readable
 
