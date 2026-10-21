@@ -39,6 +39,22 @@ Native tree.
 Use `OfflineProtocol` for lifecycle, events, and common helpers. Use `MeshSdk` for the
 full method-channel surface pinned in `method_channel_methods.txt` (React Native parity).
 
+### Events and one-shots
+
+Subscribe to `OfflineProtocol.events` before `createFromConfig` if you need the full
+stream and sequence replay. **`internet_session_superseded`**: Android sticky-delivers
+when Dart is not listening; iOS re-emits on app foreground while the latch is set.
+**`mesh_stopped_by_user`**: Android only (mesh notification Stop). See
+[F7b](bridges/flutter.md#f7b-one-shot-events-internet_session_superseded-mesh_stopped_by_user).
+
+### Telemetry and engine polling
+
+`MeshSdk.flushTelemetry`, `disableTelemetry`, and `endTelemetrySession` run on the
+native engine thread and may block for a few seconds; other channel calls queue
+behind them. Use `flushTelemetryAndWait` (and the other `*AndWait` helpers) at
+shutdown boundaries; avoid tight UI polling loops (`getStateTyped`,
+`internetIsReadyTyped`, …) while a non-awaited flush is in flight. Details: [F8](bridges/flutter.md#f8-telemetry).
+
 ## Publish to pub.dev (maintainers)
 
 On a release tag, CI stages UniFFI libraries into the plugin tree

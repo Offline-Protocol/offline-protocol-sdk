@@ -150,6 +150,15 @@ public class OfflineProtocolPlugin: NSObject, FlutterPlugin, FlutterStreamHandle
         if foregroundReconnectPolicy.shouldReconnectOnForeground(nowMs: MonotonicClock.nowMs()) {
             host.internetManager?.forceReconnect()
         }
+        restateInternetSupersededIfNeeded()
+    }
+
+    /// Re-emits `internet_session_superseded` while the internet transport latch
+    /// is set. Same contract as React Native iOS `restateInternetSupersededIfNeeded`:
+    /// the event is level-triggered on foreground, not edge-triggered once.
+    private func restateInternetSupersededIfNeeded() {
+        guard let eventJson = host.internetManager?.supersedeRestatementJson() else { return }
+        emitEventJson(eventJson)
     }
 
     private func setAppState(_ state: AppState) {

@@ -27,9 +27,10 @@ decision 3 asks: a list of what to leave out, never a list of what to take.
 On Android that is the `KotlinCompile` excludes in `android/build.gradle`. On
 iOS it is `rn_only_swift` in `ios/offline_protocol.podspec`, which must agree
 with the `--exclude` list in `ios/sync_bridge_rn.sh`. What is left out needs
-React (the module, its package, the mesh foreground and wake services, the
-sticky event dispatcher). Reticulum, Nostr, and `MeshForegroundService` compile
-with the plugin; headless mesh wake (`MeshHeadlessWakeService`) stays React-only.
+React (the module and package entrypoints, RN-only bridge adapters, and
+`MeshHeadlessWakeService`). Reticulum, Nostr, `MeshForegroundService`, and on
+Android `StickyEventDispatcher` / `StickyEventBuffer` compile with the plugin;
+headless mesh wake stays React-only.
 Release AAR
 size is gated in CI ([F9](#f9-binary-footprint)); use
 `OfflineProtocol.minimalFootprintConfig` when you ship a subset of transports.
@@ -155,6 +156,26 @@ channel subscription while keeping the broadcast `events` stream. `stop` and
 Foreground Internet reconnect uses shared `ForegroundReconnectPolicy` (Android
 `ActivityLifecycleCallbacks` on the plugin activity, iOS `UIApplication`
 notifications).
+
+## F7b. One-shot events (`internet_session_superseded`, `mesh_stopped_by_user`)
+
+These tags report state nothing else restates. Delivery is at-least-once; apps
+treat them as state, not one-time edges.
+
+**Android** holds both in `StickyEventDispatcher` when the event channel has no
+listener, flushes on subscribe and activity start, and discards held
+`internet_session_superseded` when `enableTransport('internet', …)` re-enables
+the relay (same as React Native). **`mesh_stopped_by_user`** is Android-only
+(notification Stop); there is no iOS counterpart.
+
+**iOS** re-derives `internet_session_superseded` from the live transport latch
+on each app foreground (`supersedeRestatementJson()`), matching React Native iOS.
+Use `MeshSdk.internetIsSupersededTyped()` after process restart when no event
+was buffered.
+
+Subscribe to `OfflineProtocol.events` before `createFromConfig` when you need
+every engine event and gap replay; one-shots still benefit from the native
+redelivery above when Dart was not listening at emit time.
 
 ## F8. Telemetry
 

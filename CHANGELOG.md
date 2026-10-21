@@ -87,9 +87,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   queries use domain codes when the shared bridge throws.
 - **Flutter `MeshSdk` typed read helpers.** `getStateTyped`, `internetIsReadyTyped`,
   `internetIsSupersededTyped`, `isBluetoothEnabledTyped`, `isMlsInitializedTyped`,
-  `isRelayTyped`, `hasPendingKeyPackageTyped`, and `getBatteryLevelTyped` avoid
-  hand-built maps on common polling paths; `flushTelemetryAndWait` names the
-  blocking telemetry flush explicitly (F8).
+  `isRelayTyped`, `hasPendingKeyPackageTyped`, `getBatteryLevelTyped`,
+  `localAddressTyped`, `getPendingAckCountTyped`, `getRetryQueueSizeTyped`,
+  `bleGetPeerCountTyped`, and `getActiveTransportsTyped` avoid hand-built maps on
+  common polling paths; `flushTelemetryAndWait` names the blocking telemetry flush
+  explicitly (F8).
+- **Flutter iOS supersede restatement.** Foreground re-emits
+  `internet_session_superseded` from the transport latch (React Native iOS parity).
+- **Flutter Android one-shot redelivery.** Sticky `mesh_stopped_by_user` and
+  `internet_session_superseded` with discard on internet re-enable.
 - **Flutter `OfflineProtocol.minimalFootprintConfig`.** Transport flags-only create
   payload for the smallest runtime surface (F9).
 - **Flutter Android mesh foreground keep-alive.** `MeshForegroundService` ships with

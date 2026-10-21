@@ -489,6 +489,15 @@ fn flutter_android_hosts_mesh_foreground_keep_alive() {
         manifest.contains("MeshForegroundService"),
         "Flutter plugin manifest must declare MeshForegroundService"
     );
+    let flutter_ios_plugin = std::fs::read_to_string(
+        flutter.join("ios/Classes/OfflineProtocolPlugin.swift"),
+    )
+    .unwrap_or_else(|e| panic!("cannot read OfflineProtocolPlugin.swift: {e}"));
+    assert!(
+        flutter_ios_plugin.contains("restateInternetSupersededIfNeeded()")
+            && flutter_ios_plugin.contains("supersedeRestatementJson()"),
+        "Flutter iOS must restate internet_session_superseded on foreground like React Native"
+    );
     let ci_script = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh"),

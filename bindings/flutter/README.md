@@ -137,8 +137,10 @@ event-channel callbacks are delivered on the main isolate’s platform thread
 **Transports:** Nostr and Reticulum use the same shared host as React Native
 (`reticulumEnabled` / `nostrEnabled` or `enableTransport`). **Android** starts
 the shared `MeshForegroundService` on engine `start` (notification Stop runs the
-same teardown path as RN). **Not ported:** React Native `MeshHeadlessWakeService`
-(JS wake after process kill); use RN if you need that opt-in.
+same teardown path as RN and sticky-delivers `mesh_stopped_by_user`). **iOS**
+re-emits `internet_session_superseded` on app foreground while the latch is set.
+**Not ported:** React Native `MeshHeadlessWakeService` (JS wake after process kill);
+use RN if you need that opt-in.
 
 Configuration fields and transport behavior match the core and React Native;
 see [Configuration](../../docs/configuration.md) and the
