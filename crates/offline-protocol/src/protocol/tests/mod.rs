@@ -26623,6 +26623,124 @@ fn test_restored_outbox_settlements_reach_telemetry_only_for_app_sends() {
     );
 }
 
+/// Live eviction reads the flag from the entry it retires: an evicted
+/// internal frame reaches the app and not telemetry, an evicted app message
+/// reaches both.
+#[test]
+fn test_outbox_eviction_reaches_telemetry_only_for_an_app_send() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let events: Arc<Mutex<Vec<Event>>> = Arc::new(Mutex::new(Vec::new()));
+    let events_handle = Arc::clone(&events);
+    protocol.on_event(move |event| {
+        events_handle.lock().unwrap().push(event);
+    });
+    let sink = RecordingTelemetrySink::default();
+    protocol
+        .install_telemetry_sink(Arc::new(sink.clone()), TelemetryConfig::default())
+        .unwrap();
+
+    let app_id = protocol
+        .send_message("bob", "hello", None::<MessagePriority>, None::<String>)
+        .unwrap();
+    let request_id = protocol
+        .send_connection_request("carol", "Alice", None, None)
+        .unwrap();
+    // An entry awaiting its acknowledgement is never evicted.
+    for id in [&app_id, &request_id] {
+        protocol.ack_manager.remove_ack(id);
+    }
+    sink.take();
+
+    assert!(protocol.make_outbox_room(None));
+    assert!(protocol.make_outbox_room(None));
+    assert!(protocol.outbox.is_empty());
+
+    let failed: Vec<String> = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e {
+            Event::MessageFailed {
+                message_id, reason, ..
+            } if reason == "Outbox capacity exceeded" => Some(message_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed.len(), 2, "the app hears both evictions: {failed:?}");
+    assert_eq!(failed_records(&sink.take()), 1, "only the app's message");
+}
+
+/// A message queued for session establishment and flushed later still
+/// creates its entry inside the app dispatch, so it is the app's.
+#[test]
+fn test_a_flushed_pending_message_is_an_app_send() {
+    let mut protocol = OfflineProtocol::new(create_test_config()).unwrap();
+    let mock_transport = MockTransport::new(TransportType::Internet);
+    mock_transport.start().unwrap();
+    protocol
+        .transport_manager_mut()
+        .add_transport(TransportType::Internet, Box::new(mock_transport));
+    protocol.start().unwrap();
+
+    let message_id = MessageId::new();
+    let mut pending = PendingMessage {
+        content: "queued for a session".to_string(),
+        priority: MessagePriority::Medium,
+        message_id: message_id.clone(),
+        reply_to_msg: None,
+        forwarded_from: None,
+        content_type: ContentType::Text,
+        media_metadata: None,
+        rich: None,
+        queued_at: Utc::now(),
+        serialized_bytes: 0,
+        app_id: None,
+    };
+    pending.measure();
+    protocol
+        .pending_encrypted_messages
+        .insert("bob".to_string(), vec![pending]);
+
+    protocol.flush_pending_messages("bob").unwrap();
+
+    assert!(
+        protocol
+            .outbox
+            .get(&message_id)
+            .expect("the flushed message is in the outbox")
+            .app_send
+    );
+}
+
+/// A record written before `app_send` existed restores as not the app's,
+/// which keeps a delivery restored across the upgrade out of telemetry and
+/// in `on_event`.
+#[test]
+fn test_a_legacy_outbox_record_restores_as_not_an_app_send() {
+    let entry = OutboxEntry {
+        message: test_message(&id("bob"), "written by an older version"),
+        attempt_count: 1,
+        first_sent_at: Utc::now(),
+        last_sent_at: Utc::now(),
+        last_transport: None,
+        reseal: None,
+        relay_pushed: false,
+        app_send: true,
+    };
+    let mut legacy = serde_json::to_value(&entry).unwrap();
+    assert!(legacy.as_object_mut().unwrap().remove("app_send").is_some());
+
+    let restored: OutboxEntry = serde_json::from_value(legacy).unwrap();
+    assert!(!restored.app_send);
+}
+
 #[test]
 fn test_remove_outbox_entry_clears_storage() {
     let storage = Arc::new(InMemoryStorage::new());
