@@ -30,9 +30,6 @@ ios_deployment_target = rn_targets.first
 rn_only_swift = [
   'BridgeRN/OfflineProtocolModule.swift',
   'BridgeRN/OfflineProtocolModule.m',
-  'BridgeRN/NostrManager.swift',
-  'BridgeRN/NostrQueryTracker.swift',
-  'BridgeRN/ReticulumManager.swift',
   'BridgeRN/InboundEventBuffer.swift',
 ]
 
@@ -66,7 +63,9 @@ Pod::Spec.new do |s|
     File.join(rn_ios, 'Generated/offline_protocolFFI.modulemap'),
   ]
 
-  s.vendored_frameworks = File.join(rn_ios, 'libs/offline_protocol_uniffi.xcframework')
+  staged_xcf = File.join(plugin_ios, 'Frameworks/offline_protocol_uniffi.xcframework')
+  rn_xcf = File.join(rn_ios, 'libs/offline_protocol_uniffi.xcframework')
+  s.vendored_frameworks = File.directory?(staged_xcf) ? staged_xcf : rn_xcf
 
   s.public_header_files = [
     File.join(rn_ios, 'Generated/offline_protocolFFI.h'),

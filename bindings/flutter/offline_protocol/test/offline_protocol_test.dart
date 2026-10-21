@@ -68,7 +68,7 @@ void main() {
   test('nativeMethodChannelMethods includes replay and enableTransport', () {
     expect(
       OfflineProtocol.nativeMethodChannelMethods,
-      containsAll(['replayEvents', 'enableTransport', 'enableInternetTransport']),
+      containsAll(['replayEvents', 'enableTransport', 'create', 'sendMessage']),
     );
     expect(OfflineProtocol.nativeMethodChannelMethods, isNotEmpty);
     expect(OfflineProtocol.nativeMethodChannelMethods.toSet().length,

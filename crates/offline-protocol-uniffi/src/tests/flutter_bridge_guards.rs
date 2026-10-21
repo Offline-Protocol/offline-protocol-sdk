@@ -24,57 +24,49 @@ fn flutter_dart_method_channel_methods(dart: &str) -> Vec<String> {
         .collect()
 }
 
-/// Method names handled in `OfflineProtocolPlugin.kt` `when (call.method)`.
+fn flutter_method_channel_manifest() -> Vec<String> {
+    let path = flutter_plugin_dir().join("method_channel_methods.txt");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    raw.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Method names dispatched in `FlutterEngineChannel.kt` (`"method" ->`).
 fn flutter_kotlin_method_channel_methods(kt: &str) -> std::collections::BTreeSet<String> {
-    const ANCHOR: &str = "when (call.method) {";
-    let block = kt
-        .split(ANCHOR)
-        .nth(1)
-        .unwrap_or_else(|| panic!("{ANCHOR} not found in OfflineProtocolPlugin.kt"));
-    let block = block
-        .split("else ->")
-        .next()
-        .unwrap_or_else(|| panic!("when (call.method) missing else arm"));
     let mut names = std::collections::BTreeSet::new();
-    for line in block.lines() {
+    for line in kt.lines() {
         let line = line.trim();
         let Some(rest) = line.strip_prefix('"') else {
             continue;
         };
-        let Some((method, _)) = rest.split_once('"') else {
+        let Some((method, tail)) = rest.split_once('"') else {
             continue;
         };
-        if !method.is_empty() {
+        if tail.trim_start().starts_with("->") && !method.is_empty() {
             names.insert(method.to_string());
         }
     }
     names
 }
 
-/// Method names handled in `OfflineProtocolPlugin.swift` `switch call.method`.
+/// Method names dispatched in `FlutterEngineChannel.swift` (`case "method":`).
 fn flutter_swift_method_channel_methods(swift: &str) -> std::collections::BTreeSet<String> {
-    const ANCHOR: &str = "switch call.method {";
-    let block = swift
-        .split(ANCHOR)
-        .nth(1)
-        .unwrap_or_else(|| panic!("{ANCHOR} not found in OfflineProtocolPlugin.swift"));
-    let block = block
-        .split("default:")
-        .next()
-        .unwrap_or_else(|| panic!("switch call.method missing default arm"));
     let mut names = std::collections::BTreeSet::new();
-    for line in block.lines() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("case \"") else {
-            continue;
+    let mut rest = swift;
+    while let Some(idx) = rest.find("case \"") {
+        rest = &rest[idx + 6..];
+        let Some(end) = rest.find('"') else {
+            break;
         };
-        let Some((method, _)) = rest.split_once('"') else {
-            continue;
-        };
-        if method.contains(',') {
-            continue;
+        let method = &rest[..end];
+        if !method.is_empty() && !method.contains(',') {
+            names.insert(method.to_string());
         }
-        names.insert(method.to_string());
+        rest = &rest[end + 1..];
     }
     names
 }
@@ -103,6 +95,14 @@ const FLUTTER_SHARED_SOURCES: &[&str] = &[
     "WifiDirectManager",
     "ProtocolConfigParser",
     "InitialRuntimeConfigApplier",
+    "ProtocolBackgroundProcessor",
+    "ProtocolEngineHost",
+    "ProtocolEngineHostBridge",
+    "TransportBridge",
+    "BridgeArgumentMaps",
+    "ReticulumManager",
+    "NostrManager",
+    "NostrQueryTracker",
 ];
 
 /// Every `exclude('com/offlineprotocol/X.kt')` in the plugin's Gradle build.
@@ -408,39 +408,39 @@ fn flutter_aar_baseline_json_is_well_formed() {
 
 #[test]
 fn flutter_method_channel_methods_match_native_plugins() {
-    let flutter = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../bindings/flutter/offline_protocol");
+    let flutter = flutter_plugin_dir();
+    let manifest: std::collections::BTreeSet<String> =
+        flutter_method_channel_manifest().into_iter().collect();
+    assert!(
+        manifest.len() >= 170,
+        "method_channel_methods.txt must list the full channel surface"
+    );
+
     let dart = std::fs::read_to_string(flutter.join("lib/src/offline_protocol.dart"))
         .unwrap_or_else(|e| panic!("cannot read offline_protocol.dart: {e}"));
-    let kt = std::fs::read_to_string(
-        flutter
-            .join("android/src/main/kotlin/com/offlineprotocol/flutter/OfflineProtocolPlugin.kt"),
-    )
-    .unwrap_or_else(|e| panic!("cannot read OfflineProtocolPlugin.kt: {e}"));
-    let swift = std::fs::read_to_string(flutter.join("ios/Classes/OfflineProtocolPlugin.swift"))
-        .unwrap_or_else(|e| panic!("cannot read OfflineProtocolPlugin.swift: {e}"));
-
     let dart_methods = flutter_dart_method_channel_methods(&dart);
-    assert!(
-        !dart_methods.is_empty(),
-        "nativeMethodChannelMethods must list at least one method"
-    );
     let dart_set: std::collections::BTreeSet<_> = dart_methods.iter().cloned().collect();
     assert_eq!(
-        dart_methods.len(),
-        dart_set.len(),
-        "nativeMethodChannelMethods must not contain duplicates: {dart_methods:?}"
+        dart_set, manifest,
+        "Dart nativeMethodChannelMethods must match method_channel_methods.txt"
     );
+
+    let kt = std::fs::read_to_string(
+        flutter.join("android/src/main/kotlin/com/offlineprotocol/flutter/FlutterEngineChannel.kt"),
+    )
+    .unwrap_or_else(|e| panic!("cannot read FlutterEngineChannel.kt: {e}"));
+    let swift = std::fs::read_to_string(flutter.join("ios/Classes/FlutterEngineChannel.swift"))
+        .unwrap_or_else(|e| panic!("cannot read FlutterEngineChannel.swift: {e}"));
 
     let kotlin = flutter_kotlin_method_channel_methods(&kt);
     let swift_methods = flutter_swift_method_channel_methods(&swift);
 
     assert_eq!(
-        kotlin, dart_set,
-        "OfflineProtocolPlugin.kt when (call.method) must match Dart nativeMethodChannelMethods"
+        kotlin, manifest,
+        "FlutterEngineChannel.kt dispatch must match method_channel_methods.txt"
     );
     assert_eq!(
-        swift_methods, dart_set,
-        "OfflineProtocolPlugin.swift switch call.method must match Dart nativeMethodChannelMethods"
+        swift_methods, manifest,
+        "FlutterEngineChannel.swift dispatch must match method_channel_methods.txt"
     );
 }

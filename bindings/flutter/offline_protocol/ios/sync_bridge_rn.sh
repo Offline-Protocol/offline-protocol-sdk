@@ -12,9 +12,6 @@ mkdir -p "$DEST"
 rsync -a \
   --exclude OfflineProtocolModule.swift \
   --exclude OfflineProtocolModule.m \
-  --exclude NostrManager.swift \
-  --exclude NostrQueryTracker.swift \
-  --exclude ReticulumManager.swift \
   --exclude InboundEventBuffer.swift \
   --exclude tests/ \
   --exclude Package.swift \

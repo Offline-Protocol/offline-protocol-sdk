@@ -28,8 +28,7 @@ On Android that is the `KotlinCompile` excludes in `android/build.gradle`. On
 iOS it is `rn_only_swift` in `ios/offline_protocol.podspec`, which must agree
 with the `--exclude` list in `ios/sync_bridge_rn.sh`. What is left out needs
 React (the module, its package, the mesh foreground and wake services, the
-sticky event dispatcher) or is a transport the plugin does not host yet
-(Nostr, Reticulum).
+sticky event dispatcher). Reticulum and Nostr managers compile with the plugin.
 
 A new shared source reaches the plugin without being registered. A list of
 what to take would not: the Kotlin plugin ignores `java { include }`, so such
@@ -98,10 +97,12 @@ thread it kills the process and the call is never answered. It is reported as
 
 ## F3. Method-channel API is pinned across three languages
 
-Dart calls `MethodChannel('com.offlineprotocol/offline_protocol')`. The method
-names are listed in `OfflineProtocol.nativeMethodChannelMethods` and must match
-`OfflineProtocolPlugin.kt` and `OfflineProtocolPlugin.swift` exactly. CI enforces
-this via `flutter_method_channel_methods_match_native_plugins`.
+Dart calls `MethodChannel('com.offlineprotocol/offline_protocol')`. The canonical
+list is `method_channel_methods.txt` (171 React Native–parity methods plus
+`replayEvents`). Dart mirrors it in `OfflineProtocol.nativeMethodChannelMethods`;
+Android dispatches in `FlutterEngineChannel.kt`; iOS declares the same surface in
+`FlutterEngineChannel.swift`. CI enforces parity via
+`flutter_method_channel_methods_match_native_plugins`.
 
 New surface area: add the Dart wrapper, both native handlers, and extend the
 const list (tests fail if the list drifts).
@@ -124,10 +125,6 @@ sink is attached. Apps must subscribe to `OfflineProtocol.events` **before**
 Native ([C6](README.md#c6-config-parsers-must-not-default-to-literals)). Dart
 may auto-enable transports after `start()` mirroring the React Native JS layer
 (Internet, Wi‑Fi Direct).
-
-`create` refuses a config with `reticulumEnabled` or `nostrEnabled` set. The
-plugin hosts no manager for either, and accepting the flag would have the core
-route messages to a transport nothing serves, with no error anywhere.
 
 ## F5b. iOS BLE and `Info.plist`
 
@@ -157,10 +154,20 @@ notifications).
 
 ## F8. Telemetry
 
-The Flutter plugin does not yet call `enableTelemetry`. When it does, it must
-follow [C12](README.md#c12-telemetry-is-callback-free-and-the-binding-fills-the-platform):
-fill platform fields in the binding, own the session boundary off UI pause
-granularity, and never run blocking flush on the main thread.
+Telemetry methods are exposed on the method channel (`enableTelemetry`,
+`disableTelemetry`, `flushTelemetry`, `telemetryStats`, `telemetryInstallId`,
+`endTelemetrySession`, `setTelemetryEnabled`) and in Dart via `MeshSdk`. Android
+fills platform fields in `ProtocolEngineHost.parseTelemetryConfig` ([C12](README.md#c12-telemetry-is-callback-free-and-the-binding-fills-the-platform)).
+The binding owns the session boundary off UI pause granularity and never runs
+blocking flush on the main thread.
+
+## F8b. Staged native artifacts (pub.dev)
+
+Release workflow runs `bindings/flutter/scripts/stage-plugin-native-artifacts.sh`
+after mobile UniFFI artifacts are assembled. The plugin Gradle build prefers
+`android/src/main/jniLibs` when staged; the podspec prefers
+`ios/Frameworks/offline_protocol_uniffi.xcframework` when present. See
+[flutter-integration.md](../flutter-integration.md).
 
 ## F9. Binary footprint
 

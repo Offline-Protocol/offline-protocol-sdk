@@ -40,12 +40,23 @@ This produces:
 
 ## Add the plugin
 
-Until the plugin is published to pub.dev, depend on the path in this repository:
+**pub.dev (release packages):** depend on the published `offline_protocol` version
+that matches your SDK release. Native libraries are bundled in the plugin when
+built through the release pipeline (see [flutter-integration.md](../../docs/flutter-integration.md)).
+
+**Monorepo / development:** path dependency:
 
 ```yaml
 dependencies:
   offline_protocol:
     path: ../bindings/flutter/offline_protocol   # adjust for your layout
+```
+
+After `npm run build:uniffi:all` in `bindings/react-native`, stage artifacts into
+the plugin for local pub builds:
+
+```bash
+bash bindings/flutter/scripts/stage-plugin-native-artifacts.sh
 ```
 
 ## Platform setup

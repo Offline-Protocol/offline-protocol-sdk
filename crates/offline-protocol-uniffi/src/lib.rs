@@ -17528,7 +17528,12 @@ mod tests {
         // take `manager: TransportManager` parameters); OfflineProtocolModule.kt
         // hosts the listener objects, whose overrides carry the same
         // parameter.
-        const NOT_A_MANAGER: &[&str] = &["TransportManager.kt", "OfflineProtocolModule.kt"];
+        const NOT_A_MANAGER: &[&str] = &[
+            "TransportManager.kt",
+            "OfflineProtocolModule.kt",
+            // Host wrapper: holds managers, does not extend TransportManager.
+            "ProtocolEngineHost.kt",
+        ];
         let expected_from_wide_scan: Vec<String> = rn_android_kotlin_sources()
             .into_iter()
             .filter(|(rel, code)| {

@@ -75,7 +75,11 @@ android {
             java {
                 srcDirs bridgeJava, 'src/main/kotlin'
             }
-            jniLibs.srcDirs bridgeDir.path + '/src/main/jniLibs'
+            def stagedJni = file('src/main/jniLibs')
+            def rnJni = file(bridgeDir.path + '/src/main/jniLibs')
+            jniLibs.srcDirs(
+                (stagedJni.exists() && stagedJni.list()?.length > 0) ? stagedJni : rnJni
+            )
         }
     }
 }
@@ -89,9 +93,6 @@ tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
     exclude('com/offlineprotocol/OfflineProtocolPackage.kt')
     exclude('com/offlineprotocol/MeshHeadlessWakeService.kt')
     exclude('com/offlineprotocol/MeshForegroundService.kt')
-    exclude('com/offlineprotocol/ReticulumManager.kt')
-    exclude('com/offlineprotocol/NostrManager.kt')
-    exclude('com/offlineprotocol/NostrQueryTracker.kt')
     exclude('com/offlineprotocol/StickyEventBuffer.kt')
     exclude('com/offlineprotocol/StickyEventDispatcher.kt')
     exclude('com/offlineprotocol/MeshWakePolicy.kt')
