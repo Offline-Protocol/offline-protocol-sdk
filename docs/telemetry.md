@@ -85,7 +85,7 @@ exactly these `data` fields, and nothing else:
 
 | Type | Fields | Where it comes from |
 |---|---|---|
-| `protocol.message.delivered` | `latency_ms` (from the first send), `hop_count`, `transport` | The acknowledgement of a message the app sent; not of a media chunk or an internal frame |
+| `protocol.message.delivered` | `latency_ms` (from the first accepted send), `hop_count`, `transport` | The acknowledgement of a message the app sent; not of a media chunk or an internal frame |
 | `protocol.message.failed` | `reason`, `retry_count` | A message the app sent that gave up; not a media chunk or an internal frame |
 | `protocol.message.deferred` | `reason`, `retry_count` | A send parked for later |
 | `protocol.message.relayed` | `hop_count`, `remaining_ttl` | A frame this device forwarded for someone else |

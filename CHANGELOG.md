@@ -114,12 +114,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 ### Changed
 
 - **`MessageDelivered.latency_ms` runs from the first send.** An app that shows or logs
-  this value now sees the whole wait, not the last attempt. On the usual
-  path it ran from when the pending acknowledgement was registered, so a
-  message that was deferred, or re-sent after its acknowledgement timed out,
-  reported only its last attempt, while a parked message settled by a
-  neighbour reported the whole wait. Both now report the whole wait. Transport
-  scoring still uses the last attempt's round trip.
+  this value now sees the wait since a carrier first accepted the message,
+  not the last attempt. On the usual path it ran from when the pending
+  acknowledgement was registered, so a message re-sent after its
+  acknowledgement timed out, or parked after the relay took it, reported only
+  its last attempt, while a parked message settled by a neighbour reported the
+  whole wait. Both paths now measure from the first transmit a carrier
+  accepted; time spent before that, while every transport refused the
+  message, is still not included. Transport scoring still uses the last
+  attempt's round trip.
 
 - **The iOS and Android libraries are built for size, and still unwind.** A
   new `mobile` profile, `release` at opt-level "s", builds both, in the
