@@ -1,6 +1,8 @@
 # 0024. The SDK ships its own TLS stack for telemetry
 
-**Status:** Accepted
+**Status:** Accepted. The root set is amended by
+[ADR 0031](0031-telemetry-trusts-only-the-ingests-issuers.md): the uploader
+now trusts only the ingest's issuers, not the bundled Mozilla set.
 
 ## Context
 

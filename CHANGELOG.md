@@ -15,6 +15,17 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **A Flutter plugin (preview).** `bindings/flutter/offline_protocol` hosts
+  the engine on iOS and Android from Dart: create, MLS with the platform
+  secure stores, start, stop, destroy, the local address, `sendMessage`, the
+  Internet, BLE and Wi-Fi Direct transports, and core events with the same
+  sequence numbers and gap replay as React Native. Its Android and iOS hosts
+  compile the React Native bridge sources where they are, less a named list
+  of the ones that need React, so a transport fix reaches both. Nostr and
+  Reticulum are not hosted yet, and a config that enables either is refused
+  at create. Until it is on pub.dev it is a path dependency. CI runs the Dart
+  tests and assembles the Android plugin against a size baseline; nothing in
+  CI compiles the iOS plugin yet. The contract is `docs/bridges/flutter.md`.
 - **A Java binding.** `bindings/java` is a typed Java API generated from the
   interface definition by `uniffi-bindgen-java`, the fourth member of the
   artifact set that `scripts/generate-bindings.sh` writes with Swift, Kotlin
@@ -73,6 +84,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   JavaScriptCore. On the local API the two are platform operations: the wire
   already carries base64, and a signing twin there would reach the shared key
   past the `sign_data` deny group.
+- **Large file sends from React Native no longer stage a base64 string on
+  the bridge.** `sendFileFromPath({recipient, filePath, fileName})` sits
+  beside `sendFile`, which is unchanged. It passes a path (or a `file://`
+  URI) to the Rust core, which reads the file itself, so the Kotlin and
+  Swift sides hold only the path. On constrained Android a 25 MB attachment
+  through `sendFile` materialised a ~34 MB base64 JS string, a decoded byte
+  array and a boxed `List<UByte>` before Rust saw it; the new entry point
+  skips all three. The read is whole-file into the Rust heap, not streamed.
+  A missing file, anything that is not a regular file (a FIFO would block,
+  a device file would read until the process aborted) and a file over the
+  100 MiB transfer limit return `InvalidArgument` before a byte is read.
+  Content type is always `File`. It is reachable from every binding
+  (TypeScript, Kotlin, Swift, Java, Python, C). The local API withholds it
+  as a platform operation: on the wire a path would be a read of any file
+  the server can open.
 - **The service image is published.** The release workflow builds
   `bindings/python/docker` for linux/amd64 and linux/arm64 and pushes it to
   `ghcr.io/offline-protocol/offline-protocol-service`, tagged `X.Y.Z`, and
@@ -370,6 +396,32 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 - **`BleTransport::record_send_success` and `record_send_failure`.** They had
   no caller outside their own test, and the failure half was the cause of the
   fix above. BLE has no send confirmation loop to feed them (#557).
+
+### Security
+
+- **The telemetry uploader trusts only the ingest's issuers.** Until now it
+  trusted the whole Mozilla root set bundled through `webpki-roots` 1.0.9,
+  which still carried emSign ECC Root CA - G3, one of the roots withdrawn
+  after eight eMudhra intermediates were found with weak keys in October 2026.
+  Anyone holding one of those keys on the network path could have presented
+  a certificate for the ingest and read the telemetry API key and the
+  batches. The uploader now trusts sixteen roots, the server roots of the
+  four authorities the ingest's edge issues from (Let's Encrypt, Google Trust
+  Services, SSL.com, and Sectigo for Cloudflare's backup certificate), pinned
+  by SHA-256 in a test, so a compromise of any other authority no longer
+  reaches the SDK. They include Let's Encrypt's Generation Y roots, ISRG Root
+  YE and YR, which issue the ingest's certificate today, so the chain still
+  validates if the edge stops sending the cross-signs to the older ISRG roots.
+  `webpki-roots` leaves the dependency graph, `ureq` drops to
+  `rustls-no-provider`, and the uploader names the ring crypto provider
+  instead of taking a process default. `rustls-webpki` moves to 0.103.16,
+  which rejects any path through the compromised eMudhra intermediates' keys
+  whatever root it ends at, closing the cross-signed path through Sectigo's
+  AAA Certificate Services as well. Nothing
+  changes for an application: the endpoint, the proxy handling and the
+  device-store exclusion are as before. Applications on 0.26.0 to 0.29.0 that
+  enable telemetry should update. See
+  [ADR 0031](docs/adr/0031-telemetry-trusts-only-the-ingests-issuers.md).
 
 ## [0.29.0] — 2026-10-13
 

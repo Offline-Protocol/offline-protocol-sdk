@@ -1221,6 +1221,30 @@ export interface SendFileParams {
 }
 
 /**
+ * Parameters for sending a file by filesystem path rather than by its bytes.
+ *
+ * The SDK's Rust core opens and reads the file, so the payload never crosses
+ * the JS/native bridge as a base64 string. Prefer it for anything over a few
+ * megabytes. The file is read whole into the Rust heap and chunked there; it
+ * is not streamed.
+ *
+ * `filePath` is an absolute path readable by the app, or a `file://` URI as
+ * `expo-file-system` returns it (the SDK strips the scheme and decodes it).
+ * A `content://` URI is refused: copy the content to a file first. A missing
+ * file, a permission failure, anything that is not a regular file, and a file
+ * over the 100 MiB transfer limit reject with `InvalidArgument` before a byte
+ * is read.
+ */
+export interface SendFileFromPathParams {
+  /** Recipient's user ID */
+  recipient: string;
+  /** Absolute path or `file://` URI of the file. Must be readable by the app. */
+  filePath: string;
+  /** File name advertised to the recipient (does not have to match basename). */
+  fileName: string;
+}
+
+/**
  * Base event interface
  */
 interface BaseEvent {

@@ -9,6 +9,7 @@ binding.
 | This file | The contract every binding shares |
 | [Swift](swift.md) | iOS native, the Swift package and the React Native iOS bridge |
 | [Kotlin](kotlin.md) | Android native, the Android library and the React Native Android bridge |
+| [Flutter](flutter.md) | Flutter plugin (`bindings/flutter/offline_protocol`) |
 | [Python](python.md) | Desktop and tooling |
 | [TypeScript](typescript.md) | The React Native JavaScript surface |
 | [Local API](local-api.md) | A server fronting one engine for several local clients over a socket, and the reference server |
@@ -633,19 +634,27 @@ except the ones named as needing it:
 | Android | `OfflineProtocolModule.kt`, `OfflineProtocolPackage.kt`, `MeshHeadlessWakeService.kt` |
 | iOS | `OfflineProtocolModule.swift`, `OfflineProtocolModule.m` |
 
-The Swift package and the Android library are built from the files the React
-Native module compiles, where they are, less those five
-([ADR 0025](../adr/0025-native-packages-are-assembled-in-place.md)). So a
-transport manager that takes a `Promise`, or a policy class that imports
-React for one type, still builds in React Native and breaks both native
-packages for every application that uses them.
+The Swift package, the Android library, and the Flutter plugin are built from
+the files the React Native module compiles, where they are, less the React-only
+entry points
+([ADR 0025](../adr/0025-native-packages-are-assembled-in-place.md)). Flutter
+compiles them through a list of what to leave out in `android/build.gradle`
+and `offline_protocol.podspec` instead of assembling a separate package tree
+([F1](flutter.md#f1-shared-bridge-sources-compiled-less-a-named-list)). So a
+transport manager that takes a `Promise`, or a policy class that imports React
+for one type, still builds in React Native and breaks the native packages and
+the Flutter plugin for every application that uses them.
 
 The check is the package build, on every pull request: the `Swift Package`
-job builds the package and runs it on a simulator, and the `Android Library`
-job compiles the library and its suite. Each list of what to leave out is
+job builds the package and runs it on a simulator, the `Android Library`
+job compiles the library and its suite, and the `Flutter Binding` job runs
+Dart tests, assembles the plugin release AAR (shared Kotlin + jniLibs), and
+checks the committed footprint baseline when Flutter-related paths change.
+Each list of what to leave out is
 checked the other way too. A name on it that matches no file is a rename
-nobody carried over, and both builds refuse it, because the renamed file
-would otherwise be taken.
+nobody carried over, and the two native package builds refuse it, because the
+renamed file would otherwise be taken. For the Flutter plugin two Rust guards
+refuse it instead.
 
 **A value the React Native package declares, and that would drift without
 anything failing, is read and not written again.** The packages read the iOS
@@ -665,6 +674,7 @@ found by the first application to update.
 | Kotlin | Secure storage backed by Keystore; no blocking work on the main looper; awareness that platform callbacks arrive on binder threads; the telemetry session boundary from an `Application.ActivityLifecycleCallbacks` watcher, never `onHostPause` (C12); a peer-stream manager, over a Wi-Fi Direct group and the Wi-Fi network, that announces a peer only under the address its preamble proved, one per address, by the lower-opened rule (K8) |
 | Python | Nothing platform-specific; it is the thinnest binding and therefore the best place to smoke-test an ABI change; a re-entrant lock on the generated callback handle map, installed at import, because the collector can free a core object inside a callback lookup and the core's drop then asks for that lock again (P10); the host platform for telemetry from `platform`; a BLE peripheral that serves the address and the core-built identity assertion, and a central that verifies before it announces (P8); a peripheral that binds each central to the address its hello proved, and a central that writes its hello before its first write (P15); a central that scans unfiltered on BlueZ, and both roles registering again when bluetoothd restarts or the adapter powers on (P16, P17); a peripheral that resets, once, a controller the kernel lost track of and that refuses every advertisement (P17); a peer-stream manager that announces a host only under the address its preamble proved, and keeps one announced stream per address (P9); a gateway-daemon client that announces a session only once the gateway bound it to this device's address, and settles a frame only on the gateway's verdict, never on the write (P11) |
 | TypeScript | Config normalization, event typing kept in step with the core, no assumption that a native method exists in an older binary, and no telemetry lifecycle code of its own |
+| Flutter | Shared bridge sources compiled less a named list of React-only ones (F1); engine-thread UniFFI with main-thread channel callbacks (F2); method-channel names pinned to Dart (F3); event seq/replay parity with React Native (F4); config via shared parsers (F5); secure storage via shared Kotlin/Swift adapters (F6) |
 | C | Nothing the library can do for it: the transports, storage and lifecycle are all the host's; callbacks callable from any thread that never call back into the engine and never unwind; every string the library hands out freed with `offline_protocol_string_free`; `os_major` supplied for telemetry, `os` never (K1 to K3 in [c.md](c.md)) |
 
 A storage adapter written in any of them owes the same thing: a green
