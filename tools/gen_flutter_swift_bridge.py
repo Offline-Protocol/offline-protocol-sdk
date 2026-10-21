@@ -34,23 +34,11 @@ import Foundation
 /// call into `ProtocolEngineHostBridge`, which does the work against the
 /// shared `ProtocolEngineHost`.
 enum FlutterEngineChannel {
-    /// What the bridge needs from the plugin that is not the engine: the event
-    /// replay ring and the lifecycle steps that also reset the plugin's own
-    /// event bookkeeping. Closures, so the bridge never names the plugin.
-    struct Environment {
-        let appState: () -> AppState
-        let replayEvents: (Int, Int) -> [[String: Any]]
-        let tearDownProtocol: () -> Void
-        let createOnEngine: (String) throws -> Void
-        let startOnEngine: () throws -> Void
-        let stopOnEngine: () throws -> Void
-    }
-
     /// Runs on the plugin's engine queue. A name outside the manifest answers
     /// `FlutterMethodNotImplemented`, which the plugin hands to Dart as such.
     static func dispatch(
         host: ProtocolEngineHost,
-        env: Environment,
+        env: EngineBridgeEnvironment,
         method: String,
         arguments: Any?
     ) throws -> Any? {

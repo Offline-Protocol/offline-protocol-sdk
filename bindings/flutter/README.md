@@ -29,13 +29,21 @@ dependencies:
     path: ../bindings/flutter/offline_protocol   # adjust for your layout
 ```
 
-Build UniFFI mobile artifacts once, then stage them into the plugin:
+Build UniFFI mobile artifacts once, then stage them into the plugin (from the **repository root** for the first and last commands; **`npm` only works inside `bindings/react-native`**, there is no root `package.json`):
 
 ```bash
+# repository root
 ./scripts/generate-bindings.sh
-cd bindings/react-native && npm run build:uniffi:all
+
+cd bindings/react-native
+npm ci
+npm run build:uniffi:all    # needs ANDROID_NDK_HOME (Android) and Xcode (iOS)
+cd ../..
+
 bash bindings/flutter/scripts/stage-plugin-native-artifacts.sh
 ```
+
+`stage-plugin-native-artifacts.sh --check` verifies copies already under the plugin; run the script **without** `--check` first to create them.
 
 ## Platform setup
 

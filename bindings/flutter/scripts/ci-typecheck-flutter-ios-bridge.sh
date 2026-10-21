@@ -6,8 +6,11 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 RN_IOS="${REPO_ROOT}/bindings/react-native/ios"
 FLUTTER_IOS="${REPO_ROOT}/bindings/flutter/offline_protocol/ios"
-FLUTTER_BIN="$(command -v flutter)"
-FLUTTER_ROOT="$(cd "$(dirname "$FLUTTER_BIN")/.." && pwd)"
+if [[ -z "${FLUTTER_ROOT:-}" || ! -d "${FLUTTER_ROOT}/bin/cache" ]]; then
+  FLUTTER_BIN="$(command -v flutter)"
+  FLUTTER_BIN="$(python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$FLUTTER_BIN")"
+  FLUTTER_ROOT="$(cd "$(dirname "$FLUTTER_BIN")/.." && pwd)"
+fi
 ENGINE_FRAMEWORK="${FLUTTER_ROOT}/bin/cache/artifacts/engine/ios/Flutter.xcframework/ios-arm64_x86_64-simulator"
 
 if [[ ! -d "$ENGINE_FRAMEWORK" ]]; then
@@ -16,9 +19,11 @@ if [[ ! -d "$ENGINE_FRAMEWORK" ]]; then
   exit 1
 fi
 
+DEPLOY="$(bash "${REPO_ROOT}/scripts/ios-deployment-target.sh")"
+
 case "$(uname -m)" in
-  arm64) SIM_TARGET="arm64-apple-ios-simulator"; ARCHIVE="${REPO_ROOT}/target/aarch64-apple-ios-sim/mobile/liboffline_protocol_uniffi.a" ;;
-  x86_64) SIM_TARGET="x86_64-apple-ios-simulator"; ARCHIVE="${REPO_ROOT}/target/x86_64-apple-ios/mobile/liboffline_protocol_uniffi.a" ;;
+  arm64) SIM_TARGET="arm64-apple-ios${DEPLOY}-simulator"; ARCHIVE="${REPO_ROOT}/target/aarch64-apple-ios-sim/mobile/liboffline_protocol_uniffi.a" ;;
+  x86_64) SIM_TARGET="x86_64-apple-ios${DEPLOY}-simulator"; ARCHIVE="${REPO_ROOT}/target/x86_64-apple-ios/mobile/liboffline_protocol_uniffi.a" ;;
   *) echo "unsupported runner arch $(uname -m)" >&2; exit 1 ;;
 esac
 
@@ -31,22 +36,18 @@ fi
 bash "${FLUTTER_IOS}/sync_bridge_rn.sh"
 
 SDK="$(xcrun --sdk iphonesimulator --show-sdk-path)"
-DEPLOY="$(bash "${REPO_ROOT}/scripts/ios-deployment-target.sh")"
 
 BRIDGE_SWIFT=()
 while IFS= read -r f; do BRIDGE_SWIFT+=("$f"); done < <(find "${FLUTTER_IOS}/BridgeRN" -name '*.swift' -type f | sort)
 PLUGIN_SWIFT=()
 while IFS= read -r f; do PLUGIN_SWIFT+=("$f"); done < <(find "${FLUTTER_IOS}/Classes" -name '*.swift' -type f | sort)
 
-# Must match podspec `rn_only_swift` (React-only adapters). InboundEventBuffer is
-# compiled via BridgeRN/ (rsync copy), not duplicated from ${RN_IOS} here.
-RN_ONLY_EXCLUDES=" OfflineProtocolModule.swift ProtocolEngineHostBridgeReactNative.swift Package.swift "
-SHARED_SWIFT=()
-for f in "${RN_IOS}"/*.swift; do
-  base="$(basename "$f")"
-  [[ "$RN_ONLY_EXCLUDES" == *" ${base} "* ]] && continue
-  SHARED_SWIFT+=("$f")
-done
+# Match the pod compile surface: BridgeRN/ only (sync_bridge_rn.sh), not RN_IOS
+# paths in parallel — duplicate basenames make swiftc fail.
+if ((${#BRIDGE_SWIFT[@]} == 0)); then
+  echo "no Swift under ${FLUTTER_IOS}/BridgeRN; run sync_bridge_rn.sh first" >&2
+  exit 1
+fi
 
 xcrun --sdk iphonesimulator swiftc -typecheck \
   -target "${SIM_TARGET}" \
@@ -55,10 +56,6 @@ xcrun --sdk iphonesimulator swiftc -typecheck \
   -Xcc "-mios-simulator-version-min=${DEPLOY}" \
   -Xcc "-fmodule-map-file=${RN_IOS}/Generated/offline_protocolFFI.modulemap" \
   -Xcc "-I${RN_IOS}/Generated" \
-  "${SHARED_SWIFT[@]}" \
-  "${RN_IOS}/ble"/*.swift \
-  "${RN_IOS}/mesh"/*.swift \
-  "${RN_IOS}/Generated/offline_protocol.swift" \
   "${BRIDGE_SWIFT[@]}" \
   "${PLUGIN_SWIFT[@]}"
 

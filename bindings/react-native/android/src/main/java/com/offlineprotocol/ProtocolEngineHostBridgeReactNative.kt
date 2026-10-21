@@ -22,7 +22,7 @@ internal object ProtocolEngineHostBridgeReactNative {
     ) {
         try {
             val host = module.engineHost
-            val context = module.reactApplicationContext
+            val context = module.bridgeContext
             val result = block(host, context)
             promise.resolve(BridgeResults.toReactNativeJsonStringOrPassThrough(result))
         } catch (e: Exception) {

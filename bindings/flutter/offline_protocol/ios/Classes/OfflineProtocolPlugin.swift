@@ -365,13 +365,13 @@ private final class FlutterEventCallback: EventCallback, @unchecked Sendable {
     }
 
     func onEvent(eventJson: String) {
-        let deliver = { [weak self] in
+        let post = { [weak self] in
             self?.plugin?.deliverCoreEvent(eventJson)
         }
         if Thread.isMainThread {
-            deliver()
+            post()
         } else {
-            DispatchQueue.main.async(execute: deliver)
+            DispatchQueue.main.async { post() }
         }
     }
 }

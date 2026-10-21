@@ -2,6 +2,7 @@ package com.offlineprotocol
 
 import android.app.Activity
 import android.app.Application
+import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -50,7 +51,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
-    @Volatile
+    /** React context for shared bridge adapters (same module, not subclass-accessible). */
+    internal val bridgeContext: Context
+        get() = reactApplicationContext
+
     private var protocol: OfflineProtocol?
         get() = engineHost.protocol
         set(value) {
@@ -1173,6 +1177,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         try {
             engineHost.setTelemetryEnabled(enabled)
             promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("TELEMETRY_SET_ENABLED_FAILED", e.message, e)
         }
     }
 

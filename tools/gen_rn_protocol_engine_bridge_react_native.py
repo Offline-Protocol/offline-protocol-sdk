@@ -102,7 +102,7 @@ def generate_react_native_kt(module: str, manifest: dict[str, dict[str, str]]) -
         "    ) {",
         "        try {",
         "            val host = module.engineHost",
-        "            val context = module.reactApplicationContext",
+        "            val context = module.bridgeContext",
         "            val result = block(host, context)",
         "            promise.resolve(BridgeResults.toReactNativeJsonStringOrPassThrough(result))",
         "        } catch (e: Exception) {",
@@ -190,6 +190,26 @@ def replace_fun_body(module: str, name: str, new_body: str) -> str:
 def ensure_module_helpers(module: str) -> str:
     if "internal val engineHost" not in module:
         module = module.replace("private val engineHost", "internal val engineHost", 1)
+    if "internal val bridgeContext" not in module:
+        insert = textwrap.dedent(
+            """
+                /** React context for shared bridge adapters (same module, not subclass-accessible). */
+                internal val bridgeContext: Context
+                    get() = reactApplicationContext
+
+            """
+        )
+        module = module.replace(
+            "    internal val engineHost by lazy {",
+            insert + "    internal val engineHost by lazy {",
+            1,
+        )
+        if "import android.content.Context" not in module:
+            module = module.replace(
+                "import android.app.Application",
+                "import android.app.Application\nimport android.content.Context",
+                1,
+            )
     if "fun rejectBridgePromise" not in module:
         insert = textwrap.dedent(
             """
