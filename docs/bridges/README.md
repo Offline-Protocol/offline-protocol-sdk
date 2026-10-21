@@ -363,6 +363,36 @@ and they are fast enough that there is no excuse:
 compiler will not find it in the three languages that do not share a type system
 with the one you changed.
 
+## C9b. Shared engine bridge generators and RN promise codes
+
+Flutter and React Native delegate the 107 methods listed in
+`tools/gen_protocol_engine_host_bridge.py` through
+`ProtocolEngineHostBridge` plus thin RN adapters
+(`ProtocolEngineHostBridgeReactNative.{swift,kt}`). Generators must stay in
+sync:
+
+```bash
+bash scripts/check-binding-generators.sh --check   # CI gate
+```
+
+React Native promise **fallback** codes (when the shared bridge throws) are
+**not** rediscovered from thin `@objc` / `@ReactMethod` bodies. They live in
+`tools/rn_engine_bridge_error_manifest.json`. After you change reject semantics
+for one of the 107 methods in a way apps depend on:
+
+```bash
+python3 tools/extract_rn_bridge_error_manifest.py   # merges scraped codes; keeps existing entries
+python3 tools/gen_rn_protocol_engine_bridge_react_native_swift.py
+python3 tools/gen_rn_protocol_engine_bridge_react_native.py
+bash scripts/check-binding-generators.sh --check
+```
+
+Commit the manifest and both generated adapter files together. Rust test
+`react_native_engine_bridge_error_codes_match_manifest` pins the adapters to
+the manifest; edit the manifest directly when a method resolves on native without
+rejecting but needs a domain code if the shared bridge throws (read-only
+queries).
+
 ## C10. Lifecycle rules for event emission
 
 An event delivered to a binding that has no live host instance is **lost**. The

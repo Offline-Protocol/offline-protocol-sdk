@@ -193,7 +193,7 @@ fun getIdentityPublicKey(module: OfflineProtocolModule, promise: Promise) {
 }
 
 fun getIsCharging(module: OfflineProtocolModule, promise: Promise) {
-    run(module, promise, "ERROR_BRIDGE", "Failed to run getIsCharging") { host, context ->
+    run(module, promise, "ERROR_BATTERY", "Protocol not initialized") { host, context ->
         ProtocolEngineHostBridge.getIsCharging(host, context, null)
     }
 }
@@ -241,7 +241,7 @@ fun getRelayConfig(module: OfflineProtocolModule, promise: Promise) {
 }
 
 fun getRelayPriority(module: OfflineProtocolModule, promise: Promise) {
-    run(module, promise, "ERROR_BRIDGE", "Failed to run getRelayPriority") { host, context ->
+    run(module, promise, "ERROR_RELAY", "Protocol not initialized") { host, context ->
         ProtocolEngineHostBridge.getRelayPriority(host, context, null)
     }
 }
@@ -253,7 +253,7 @@ fun getRetryQueueSize(module: OfflineProtocolModule, promise: Promise) {
 }
 
 fun getState(module: OfflineProtocolModule, promise: Promise) {
-    run(module, promise, "ERROR_BRIDGE", "Failed to run getState") { host, context ->
+    run(module, promise, "ERROR_NOT_INITIALIZED", "Failed to get protocol state") { host, context ->
         ProtocolEngineHostBridge.getState(host, context, null)
     }
 }
@@ -271,7 +271,7 @@ fun getTransportMetrics(module: OfflineProtocolModule, transportType: String, pr
 }
 
 fun hasPendingKeyPackage(module: OfflineProtocolModule, peerId: String, promise: Promise) {
-    run(module, promise, "ERROR_BRIDGE", "Failed to run hasPendingKeyPackage") { host, context ->
+    run(module, promise, "ERROR_MLS", "Protocol not initialized") { host, context ->
         ProtocolEngineHostBridge.hasPendingKeyPackage(host, context, mapOf("peerId" to peerId))
     }
 }
@@ -283,7 +283,7 @@ fun internetConfirmSent(module: OfflineProtocolModule, messageId: String, promis
 }
 
 fun internetForceReconnect(module: OfflineProtocolModule, promise: Promise) {
-    run(module, promise, "ERROR_BRIDGE", "Failed to run internetForceReconnect") { host, context ->
+    run(module, promise, "ERROR_INTERNET", "Internet transport not initialized") { host, context ->
         ProtocolEngineHostBridge.internetForceReconnect(host, context, null)
     }
 }
@@ -295,13 +295,13 @@ fun internetGetNextMessage(module: OfflineProtocolModule, promise: Promise) {
 }
 
 fun internetIsReady(module: OfflineProtocolModule, promise: Promise) {
-    run(module, promise, "ERROR_BRIDGE", "Failed to run internetIsReady") { host, context ->
+    run(module, promise, "ERROR_INTERNET", "Internet transport not initialized") { host, context ->
         ProtocolEngineHostBridge.internetIsReady(host, context, null)
     }
 }
 
 fun internetIsSuperseded(module: OfflineProtocolModule, promise: Promise) {
-    run(module, promise, "ERROR_BRIDGE", "Failed to run internetIsSuperseded") { host, context ->
+    run(module, promise, "ERROR_INTERNET", "Internet transport not initialized") { host, context ->
         ProtocolEngineHostBridge.internetIsSuperseded(host, context, null)
     }
 }
@@ -331,19 +331,19 @@ fun internetStatusChanged(module: OfflineProtocolModule, isConnected: Boolean, p
 }
 
 fun isBluetoothEnabled(module: OfflineProtocolModule, promise: Promise) {
-    run(module, promise, "ERROR_BRIDGE", "Failed to run isBluetoothEnabled") { host, context ->
+    run(module, promise, "ERROR_BLE", "Protocol not initialized") { host, context ->
         ProtocolEngineHostBridge.isBluetoothEnabled(host, context, null)
     }
 }
 
 fun isMlsInitialized(module: OfflineProtocolModule, promise: Promise) {
-    run(module, promise, "ERROR_BRIDGE", "Failed to run isMlsInitialized") { host, context ->
+    run(module, promise, "ERROR_MLS", "Protocol not initialized") { host, context ->
         ProtocolEngineHostBridge.isMlsInitialized(host, context, null)
     }
 }
 
 fun isRelay(module: OfflineProtocolModule, promise: Promise) {
-    run(module, promise, "ERROR_BRIDGE", "Failed to run isRelay") { host, context ->
+    run(module, promise, "ERROR_RELAY", "Protocol not initialized") { host, context ->
         ProtocolEngineHostBridge.isRelay(host, context, null)
     }
 }
@@ -403,7 +403,7 @@ fun mlsGetPendingKeyPackages(module: OfflineProtocolModule, promise: Promise) {
 }
 
 fun mlsHasSession(module: OfflineProtocolModule, otherUserId: String, promise: Promise) {
-    run(module, promise, "ERROR_BRIDGE", "Failed to run mlsHasSession") { host, context ->
+    run(module, promise, "ERROR_MLS", "Protocol not initialized") { host, context ->
         ProtocolEngineHostBridge.mlsHasSession(host, context, mapOf("otherUserId" to otherUserId))
     }
 }
@@ -421,7 +421,7 @@ fun mlsJoinSession(module: OfflineProtocolModule, welcomeJson: String, promise: 
 }
 
 fun mlsListSessions(module: OfflineProtocolModule, promise: Promise) {
-    run(module, promise, "ERROR_BRIDGE", "Failed to run mlsListSessions") { host, context ->
+    run(module, promise, "ERROR_MLS", "Protocol not initialized") { host, context ->
         ProtocolEngineHostBridge.mlsListSessions(host, context, null)
     }
 }

@@ -1,16 +1,29 @@
 #!/usr/bin/env python3
-"""Build tools/rn_engine_bridge_error_manifest.json from committed RN module sources."""
+"""Refresh tools/rn_engine_bridge_error_manifest.json from RN module reject semantics.
+
+Reads the committed React Native module sources in this repo. Methods that
+delegate through ProtocolEngineHostBridgeReactNative keep their manifest entry
+until you edit the manifest by hand or restore inline reject bodies temporarily.
+
+After changing reject semantics for a shared engine method:
+
+  python3 tools/extract_rn_bridge_error_manifest.py
+  python3 tools/gen_rn_protocol_engine_bridge_react_native_swift.py
+  python3 tools/gen_rn_protocol_engine_bridge_react_native.py
+  bash scripts/check-binding-generators.sh --check
+"""
 
 from __future__ import annotations
 
 import json
 import pathlib
 import re
-import subprocess
 import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 OUT = REPO / "tools/rn_engine_bridge_error_manifest.json"
+IOS = REPO / "bindings/react-native/ios/OfflineProtocolModule.swift"
+KT = REPO / "bindings/react-native/android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"
 GEN_BRIDGE = REPO / "tools/gen_protocol_engine_host_bridge.py"
 
 METHODS = re.findall(
@@ -20,18 +33,6 @@ METHODS = re.findall(
 
 DEFAULT_CODE = "ERROR_BRIDGE"
 DEFAULT_MSG = "Failed to run {name}"
-
-
-def git_show(path: str) -> str:
-    ref = "origin/main"
-    try:
-        return subprocess.check_output(
-            ["git", "show", f"{ref}:{path}"],
-            cwd=REPO,
-            text=True,
-        )
-    except subprocess.CalledProcessError:
-        return (REPO / path).read_text()
 
 
 def ios_method_body(module: str, name: str) -> str | None:
@@ -87,6 +88,8 @@ def normalize_message(msg: str) -> str:
 
 
 def parse_ios_body(body: str, name: str) -> tuple[str, str] | None:
+    if "ProtocolEngineHostBridgeReactNative." in body:
+        return None
     m = re.search(
         r"rejectWithProtocolError\([^,]+,\s*[^,]+,\s*fallbackCode:\s*\"([A-Z0-9_]+)\",\s*fallbackMessage:\s*\"([^\"]+)\"",
         body,
@@ -105,6 +108,8 @@ def parse_ios_body(body: str, name: str) -> tuple[str, str] | None:
 
 
 def parse_kotlin_body(body: str, name: str) -> tuple[str, str] | None:
+    if "ProtocolEngineHostBridgeReactNative." in body:
+        return None
     m = re.search(
         r"rejectWithProtocolError\([^,]+,\s*[^,]+,\s*\"([A-Z0-9_]+)\",\s*\"([^\"]+)\"",
         body,
@@ -119,7 +124,7 @@ def parse_kotlin_body(body: str, name: str) -> tuple[str, str] | None:
     return None
 
 
-def extract(platform: str, module: str, body_fn, parse_fn) -> dict[str, dict[str, str]]:
+def extract(module: str, body_fn, parse_fn) -> dict[str, dict[str, str]]:
     out: dict[str, dict[str, str]] = {}
     for name in METHODS:
         body = body_fn(module, name)
@@ -132,35 +137,37 @@ def extract(platform: str, module: str, body_fn, parse_fn) -> dict[str, dict[str
     return out
 
 
-def merge_manifest(*sources: dict[str, dict[str, str]]) -> dict[str, dict[str, str]]:
-    merged: dict[str, dict[str, str]] = {}
-    for src in sources:
-        merged.update(src)
-    for name in METHODS:
-        if name not in merged:
-            merged[name] = {"code": DEFAULT_CODE, "message": DEFAULT_MSG.format(name=name)}
-    return merged
-
-
 def main() -> int:
-    ios = git_show("bindings/react-native/ios/OfflineProtocolModule.swift")
-    kt = git_show(
-        "bindings/react-native/android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"
-    )
-    # Prefer iOS fallbacks where both exist (historically richer rejectWithProtocolError use).
-    manifest = merge_manifest(
-        extract("kotlin", kt, kotlin_method_body, parse_kotlin_body),
-        extract("ios", ios, ios_method_body, parse_ios_body),
-    )
+    base: dict[str, dict[str, str]] = {}
+    if OUT.exists():
+        base = json.loads(OUT.read_text())
+
+    ios = IOS.read_text()
+    kt = KT.read_text()
+    scraped = {}
+    scraped.update(extract(kt, kotlin_method_body, parse_kotlin_body))
+    scraped.update(extract(ios, ios_method_body, parse_ios_body))
+
+    manifest: dict[str, dict[str, str]] = {**base}
+    for name, entry in scraped.items():
+        manifest[name] = entry
+
+    for name in METHODS:
+        if name not in manifest:
+            manifest[name] = {"code": DEFAULT_CODE, "message": DEFAULT_MSG.format(name=name)}
+
     OUT.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    missing_custom = [
+    generic = [
         n
         for n in METHODS
-        if manifest[n]["code"] == DEFAULT_CODE and "Failed to run" in manifest[n]["message"]
+        if manifest[n]["code"] == DEFAULT_CODE and manifest[n]["message"] == DEFAULT_MSG.format(name=n)
     ]
-    print(f"wrote {OUT.relative_to(REPO)} ({len(METHODS)} methods, {len(missing_custom)} defaults)")
-    if missing_custom and "--strict" in sys.argv:
-        print("methods still on defaults:", missing_custom, file=sys.stderr)
+    print(
+        f"wrote {OUT.relative_to(REPO)} ({len(METHODS)} methods, "
+        f"{len(scraped)} scraped this run, {len(generic)} generic defaults)"
+    )
+    if generic and "--strict" in sys.argv:
+        print("methods still on generic defaults:", generic, file=sys.stderr)
         return 1
     return 0
 

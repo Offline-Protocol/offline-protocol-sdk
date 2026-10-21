@@ -183,7 +183,7 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func getIsCharging(_ module: OfflineProtocolModule, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BRIDGE", errorMessage: "Failed to run getIsCharging") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BATTERY", errorMessage: "Protocol not initialized") { host, env in
             try ProtocolEngineHostBridge.getIsCharging(host: host, env: env, arguments: nil)
         }
     }
@@ -231,7 +231,7 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func getRelayPriority(_ module: OfflineProtocolModule, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BRIDGE", errorMessage: "Failed to run getRelayPriority") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_RELAY", errorMessage: "Protocol not initialized") { host, env in
             try ProtocolEngineHostBridge.getRelayPriority(host: host, env: env, arguments: nil)
         }
     }
@@ -243,7 +243,7 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func getState(_ module: OfflineProtocolModule, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BRIDGE", errorMessage: "Failed to run getState") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_NOT_INITIALIZED", errorMessage: "Failed to get protocol state") { host, env in
             try ProtocolEngineHostBridge.getState(host: host, env: env, arguments: nil)
         }
     }
@@ -261,7 +261,7 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func hasPendingKeyPackage(_ module: OfflineProtocolModule, _ peerId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BRIDGE", errorMessage: "Failed to run hasPendingKeyPackage") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_MLS", errorMessage: "Protocol not initialized") { host, env in
             try ProtocolEngineHostBridge.hasPendingKeyPackage(host: host, env: env, arguments: ["peerId": peerId])
         }
     }
@@ -273,7 +273,7 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func internetForceReconnect(_ module: OfflineProtocolModule, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BRIDGE", errorMessage: "Failed to run internetForceReconnect") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_INTERNET", errorMessage: "Internet transport not initialized") { host, env in
             try ProtocolEngineHostBridge.internetForceReconnect(host: host, env: env, arguments: nil)
         }
     }
@@ -285,13 +285,13 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func internetIsReady(_ module: OfflineProtocolModule, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BRIDGE", errorMessage: "Failed to run internetIsReady") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_INTERNET", errorMessage: "Internet transport not initialized") { host, env in
             try ProtocolEngineHostBridge.internetIsReady(host: host, env: env, arguments: nil)
         }
     }
 
     static func internetIsSuperseded(_ module: OfflineProtocolModule, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BRIDGE", errorMessage: "Failed to run internetIsSuperseded") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_INTERNET", errorMessage: "Internet transport not initialized") { host, env in
             try ProtocolEngineHostBridge.internetIsSuperseded(host: host, env: env, arguments: nil)
         }
     }
@@ -321,19 +321,19 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func isBluetoothEnabled(_ module: OfflineProtocolModule, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BRIDGE", errorMessage: "Failed to run isBluetoothEnabled") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BLE", errorMessage: "Protocol not initialized") { host, env in
             try ProtocolEngineHostBridge.isBluetoothEnabled(host: host, env: env, arguments: nil)
         }
     }
 
     static func isMlsInitialized(_ module: OfflineProtocolModule, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BRIDGE", errorMessage: "Failed to run isMlsInitialized") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_MLS", errorMessage: "Protocol not initialized") { host, env in
             try ProtocolEngineHostBridge.isMlsInitialized(host: host, env: env, arguments: nil)
         }
     }
 
     static func isRelay(_ module: OfflineProtocolModule, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BRIDGE", errorMessage: "Failed to run isRelay") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_RELAY", errorMessage: "Protocol not initialized") { host, env in
             try ProtocolEngineHostBridge.isRelay(host: host, env: env, arguments: nil)
         }
     }
@@ -393,7 +393,7 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func mlsHasSession(_ module: OfflineProtocolModule, _ otherUserId: String, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BRIDGE", errorMessage: "Failed to run mlsHasSession") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_MLS", errorMessage: "Protocol not initialized") { host, env in
             try ProtocolEngineHostBridge.mlsHasSession(host: host, env: env, arguments: ["otherUserId": otherUserId])
         }
     }
@@ -411,7 +411,7 @@ enum ProtocolEngineHostBridgeReactNative {
     }
 
     static func mlsListSessions(_ module: OfflineProtocolModule, resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock) {
-        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_BRIDGE", errorMessage: "Failed to run mlsListSessions") { host, env in
+        run(module, resolver: resolver, rejecter: rejecter, errorCode: "ERROR_MLS", errorMessage: "Protocol not initialized") { host, env in
             try ProtocolEngineHostBridge.mlsListSessions(host: host, env: env, arguments: nil)
         }
     }

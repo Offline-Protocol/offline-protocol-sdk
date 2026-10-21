@@ -684,4 +684,34 @@ static Future<dynamic> wipePersistedState([Map<String, dynamic>? args]) =>
         if (replyToMsg != null) 'replyToMsg': replyToMsg,
         if (options != null) 'options': options,
       });
+
+  /// Resolves protocol state without building an argument map.
+  static Future<String> getStateTyped() async {
+    final value = await _invoke<dynamic>('getState');
+    return value?.toString() ?? 'Stopped';
+  }
+
+  /// Whether the Internet transport reports ready (false when not initialized).
+  static Future<bool> internetIsReadyTyped() async {
+    final value = await _invoke<dynamic>('internetIsReady');
+    return value == true;
+  }
+
+  /// Whether the relay session was superseded elsewhere (false when not initialized).
+  static Future<bool> internetIsSupersededTyped() async {
+    final value = await _invoke<dynamic>('internetIsSuperseded');
+    return value == true;
+  }
+
+  /// BLE radio state query used before showing a manual enable prompt on iOS.
+  static Future<bool> isBluetoothEnabledTyped() async {
+    final value = await _invoke<dynamic>('isBluetoothEnabled');
+    return value == true;
+  }
+
+  /// Whether MLS material is initialized on the running protocol instance.
+  static Future<bool> isMlsInitializedTyped() async {
+    final value = await _invoke<dynamic>('isMlsInitialized');
+    return value == true;
+  }
 }

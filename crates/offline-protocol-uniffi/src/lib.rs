@@ -18477,6 +18477,35 @@ mod tests {
     }
 
     #[test]
+    fn react_native_engine_bridge_error_manifest_eschews_generic_defaults() {
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/rn_engine_bridge_error_manifest.json");
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&manifest_path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", manifest_path.display())),
+        )
+        .expect("manifest json");
+        let generic: Vec<String> = rn_protocol_engine_host_bridge_method_names()
+            .into_iter()
+            .filter(|name| {
+                let Some(entry) = manifest.get(name) else {
+                    return true;
+                };
+                entry["code"].as_str() == Some("ERROR_BRIDGE")
+                    && entry["message"]
+                        .as_str()
+                        .is_some_and(|m| m.starts_with("Failed to run "))
+            })
+            .collect();
+        assert!(
+            generic.is_empty(),
+            "tools/rn_engine_bridge_error_manifest.json must not use generic ERROR_BRIDGE \
+             / Failed to run … for shared engine methods; assign a domain code instead: \
+             {generic:?}"
+        );
+    }
+
+    #[test]
     fn react_native_android_wifi_direct_callback_does_not_wait_for_a_manager() {
         let code = rn_source_code_only(
             "android/src/main/java/com/offlineprotocol/ProtocolEngineHost.kt",

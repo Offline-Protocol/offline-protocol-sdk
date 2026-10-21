@@ -186,7 +186,10 @@ compile-surface or UniFFI artifact changes.
 
 Reticulum and Nostr managers compile with the Flutter Android library (F1), so
 the release AAR is larger than a BLE-and-Internet-only build. That growth is
-expected and gated by the baseline, not a silent regression.
+expected and gated by the baseline, not a silent regression. Runtime footprint
+still follows `ProtocolConfig`: disable transports and mesh features you do not
+ship so the engine does not start managers you never use (same guidance as React
+Native).
 
 ## What CI runs
 
