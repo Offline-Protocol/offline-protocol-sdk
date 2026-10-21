@@ -24,17 +24,10 @@ if (( check )); then
   python3 tools/gen_rn_protocol_engine_bridge_react_native.py --check || failures=$((failures + 1))
   python3 tools/gen_rn_protocol_engine_bridge_react_native_swift.py --check || failures=$((failures + 1))
   python3 tools/gen_swift_protocol_engine_host_bridge.py || failures=$((failures + 1))
-  if [[ -f tools/gen_protocol_engine_host_bridge.py ]]; then
-    tmp="$(mktemp)"
-    cp bindings/react-native/android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt "$tmp"
-    python3 tools/gen_protocol_engine_host_bridge.py
-    if ! cmp -s "$tmp" bindings/react-native/android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt; then
-      mv "$tmp" bindings/react-native/android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt
-      echo "ProtocolEngineHostBridge.kt is stale; run tools/gen_protocol_engine_host_bridge.py" >&2
-      failures=$((failures + 1))
-    else
-      rm -f "$tmp"
-    fi
+  python3 tools/gen_protocol_engine_host_bridge.py --check || failures=$((failures + 1))
+  if [[ ! -f tools/rn_engine_bridge_error_manifest.json ]]; then
+    echo "missing tools/rn_engine_bridge_error_manifest.json; run tools/extract_rn_bridge_error_manifest.py" >&2
+    failures=$((failures + 1))
   fi
 else
   echo "usage: $0 --check" >&2

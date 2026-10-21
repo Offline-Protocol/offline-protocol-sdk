@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 import textwrap
@@ -11,6 +12,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 GEN_BRIDGE = REPO / "tools/gen_protocol_engine_host_bridge.py"
 MODULE = REPO / "bindings/react-native/android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"
 OUT = REPO / "bindings/react-native/android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridgeReactNative.kt"
+MANIFEST = REPO / "tools/rn_engine_bridge_error_manifest.json"
 
 METHODS = re.findall(
     r'"(\w+)"',
@@ -18,8 +20,8 @@ METHODS = re.findall(
 )
 
 
-def parse_react_method(module: str, name: str) -> tuple[str, str, str]:
-    """Return (full params without promise, promise param name, reject code snippet hint)."""
+def parse_react_method(module: str, name: str) -> tuple[str, str]:
+    """Return (full params without promise, promise param name)."""
     pat = rf"@ReactMethod\s*\n\s*fun {re.escape(name)}\(([^)]*)\)\s*\{{"
     m = re.search(pat, module)
     if not m:
@@ -30,34 +32,16 @@ def parse_react_method(module: str, name: str) -> tuple[str, str, str]:
     if "Promise" not in promise_part:
         raise SystemExit(f"{name}: last param must be Promise")
     other = parts[:-1]
-    return ", ".join(other), promise_part, find_error_code(module, name)
+    return ", ".join(other), promise_part
 
 
-def find_error_code(module: str, name: str) -> tuple[str, str]:
-    """Best-effort ERROR_* code and message prefix from existing body."""
-    pat = rf"fun {re.escape(name)}\([^)]*\)\s*\{{"
-    m = re.search(pat, module)
-    if not m:
-        return "ERROR_BRIDGE", f"Failed to run {name}"
-    start = m.end()
-    depth = 1
-    i = start
-    while i < len(module) and depth:
-        if module[i] == "{":
-            depth += 1
-        elif module[i] == "}":
-            depth -= 1
-        i += 1
-    body = module[start : i - 1]
-    code_m = re.search(r'promise\.reject\("([A-Z0-9_]+)"', body)
-    msg_m = re.search(r'promise\.reject\("[^"]+",\s*"([^"]+)"', body)
-    code = code_m.group(1) if code_m else "ERROR_BRIDGE"
-    msg = msg_m.group(1) if msg_m else f"Failed to run {name}"
-    if msg.endswith(":"):
-        msg = msg[:-1]
-    if ": ${" in msg:
-        msg = msg.split(": ${", 1)[0]
-    return code, msg
+def load_manifest() -> dict[str, dict[str, str]]:
+    return json.loads(MANIFEST.read_text())
+
+
+def error_for(name: str, manifest: dict[str, dict[str, str]]) -> tuple[str, str]:
+    entry = manifest[name]
+    return entry["code"], entry["message"]
 
 
 def build_args_expr(params: str) -> str:
@@ -92,7 +76,7 @@ def delegate_call(name: str, params: str) -> str:
     return f"ProtocolEngineHostBridge.{name}(host, context, {arg_pass})"
 
 
-def generate_react_native_kt(module: str) -> str:
+def generate_react_native_kt(module: str, manifest: dict[str, dict[str, str]]) -> str:
     lines = [
         "package com.offlineprotocol",
         "",
@@ -128,7 +112,8 @@ def generate_react_native_kt(module: str) -> str:
         "",
     ]
     for name in METHODS:
-        params, _, (code, msg) = parse_react_method(module, name)
+        params, _ = parse_react_method(module, name)
+        code, msg = error_for(name, manifest)
         if params.strip():
             sig = f"module: OfflineProtocolModule, {params}, promise: Promise"
             arg_names = [p.split(":")[0].strip() for p in params.split(",") if p.strip()]
@@ -172,7 +157,7 @@ def generate_react_native_kt(module: str) -> str:
 
 def replace_method_bodies(module: str) -> str:
     for name in METHODS:
-        params, _, _ = parse_react_method(module, name)
+        params, _ = parse_react_method(module, name)
         if params.strip():
             arg_names = [p.split(":")[0].strip() for p in params.split(",") if p.strip()]
             call = f"ProtocolEngineHostBridgeReactNative.{name}(this, {', '.join(arg_names)}, promise)"
@@ -228,11 +213,25 @@ def ensure_module_helpers(module: str) -> str:
     return module
 
 
+def verify_generated_errors(generated: str, manifest: dict[str, dict[str, str]]) -> list[str]:
+    problems: list[str] = []
+    for name, entry in manifest.items():
+        needle = f'run(module, promise, "{entry["code"]}", "{entry["message"]}"'
+        if f"fun {name}(" in generated and needle not in generated:
+            problems.append(f"{name}: expected `{needle}` in generated adapter")
+    return problems
+
+
 def main() -> None:
     import sys
 
+    manifest = load_manifest()
+    missing = [n for n in METHODS if n not in manifest]
+    if missing:
+        raise SystemExit(f"{MANIFEST.name} missing {missing}; run extract_rn_bridge_error_manifest.py")
+
     module = MODULE.read_text()
-    generated = generate_react_native_kt(module)
+    generated = generate_react_native_kt(module, manifest)
     if "--check" in sys.argv:
         if OUT.read_text() != generated:
             print(f"{OUT.relative_to(REPO)} is stale; run {pathlib.Path(__file__).name}", file=sys.stderr)
@@ -245,6 +244,9 @@ def main() -> None:
                     file=sys.stderr,
                 )
                 raise SystemExit(1)
+        for problem in verify_generated_errors(generated, manifest):
+            print(problem, file=sys.stderr)
+            raise SystemExit(1)
         print(f"{OUT.name}: OK ({len(METHODS)} methods)")
         return
     OUT.write_text(generated)

@@ -1351,6 +1351,8 @@ jobs:
               - 'crates/offline-protocol-uniffi/src/tests/flutter_bridge_guards.rs'
               - 'scripts/check-binding-generators.sh'
               - 'tools/gen_*'
+              - 'tools/rn_engine_bridge_error_manifest.json'
+              - 'tools/extract_rn_bridge_error_manifest.py'
             flutter_native:
               # The plugin's own Kotlin and Gradle build: `flutter analyze`
               # excludes android/**, so without these a pull request that

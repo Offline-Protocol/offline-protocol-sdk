@@ -20,32 +20,45 @@ import React
 
 @objc(OfflineProtocolModule)
 class OfflineProtocolModule: RCTEventEmitter {
-    private var protocolInstance: OfflineProtocol?
-    private var meshServicesInstance: MeshServices?
-    private var dataStoreInstance: DataStore?
-    private var bleManager: BleManager?
-    private var internetManager: InternetManager?
-    private var wifiDirectManager: WifiDirectManager?
-    private var reticulumManager: ReticulumManager?
-    private var nostrManager: NostrManager?
-
     /// Shared engine host for Flutter-parity bridge delegation (ADR 0025).
+    /// Module state forwards here, matching Android `OfflineProtocolModule.engineHost`.
     lazy var engineHost: ProtocolEngineHost = {
         ProtocolEngineHost(onDiagnostic: { [weak self] level, message, context in
             self?.emitDiagnostic(level: level, message: message, context: context)
         })
     }()
 
-    func syncEngineHostFromModuleState() {
-        engineHost.protocolInstance = protocolInstance
-        engineHost.meshServices = meshServicesInstance
-        engineHost.dataStore = dataStoreInstance
-        engineHost.bleManager = bleManager
-        engineHost.internetManager = internetManager
-        engineHost.wifiDirectManager = wifiDirectManager
-        engineHost.reticulumManager = reticulumManager
-        engineHost.nostrManager = nostrManager
-        engineHost.currentConfig = currentConfig
+    private var protocolInstance: OfflineProtocol? {
+        get { engineHost.protocolInstance }
+        set { engineHost.protocolInstance = newValue }
+    }
+    private var meshServicesInstance: MeshServices? {
+        get { engineHost.meshServices }
+        set { engineHost.meshServices = newValue }
+    }
+    private var dataStoreInstance: DataStore? {
+        get { engineHost.dataStore }
+        set { engineHost.dataStore = newValue }
+    }
+    private var bleManager: BleManager? {
+        get { engineHost.bleManager }
+        set { engineHost.bleManager = newValue }
+    }
+    private var internetManager: InternetManager? {
+        get { engineHost.internetManager }
+        set { engineHost.internetManager = newValue }
+    }
+    private var wifiDirectManager: WifiDirectManager? {
+        get { engineHost.wifiDirectManager }
+        set { engineHost.wifiDirectManager = newValue }
+    }
+    private var reticulumManager: ReticulumManager? {
+        get { engineHost.reticulumManager }
+        set { engineHost.reticulumManager = newValue }
+    }
+    private var nostrManager: NostrManager? {
+        get { engineHost.nostrManager }
+        set { engineHost.nostrManager = newValue }
     }
 
     func rejectBridgePromise(
@@ -171,7 +184,10 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// cancel it. An uncancelled one re-enters the protocol up to a second after
     /// the module was torn down.
     private var bleStatusBackupWorkItem: DispatchWorkItem?
-    private var currentConfig: ProtocolConfig?
+    private var currentConfig: ProtocolConfig? {
+        get { engineHost.currentConfig }
+        set { engineHost.currentConfig = newValue }
+    }
     private var internetServerUrl: String?
     private var internetAutoReconnect: Bool = true
     

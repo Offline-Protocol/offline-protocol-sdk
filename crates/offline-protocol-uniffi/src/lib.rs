@@ -18427,6 +18427,55 @@ mod tests {
         }
     }
 
+    /// Promise fallback codes on RN adapters must stay pinned to the committed
+    /// manifest, not rediscovered from thin delegate bodies after regen.
+    #[test]
+    fn react_native_engine_bridge_error_codes_match_manifest() {
+        let rn_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/rn_engine_bridge_error_manifest.json");
+        let manifest: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&manifest_path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", manifest_path.display())),
+        )
+        .expect("manifest json");
+        let names = rn_protocol_engine_host_bridge_method_names();
+        for name in &names {
+            let entry = manifest
+                .get(name)
+                .unwrap_or_else(|| panic!("manifest missing `{name}`"));
+            let code = entry["code"].as_str().unwrap_or_else(|| {
+                panic!("manifest `{name}` code must be a string")
+            });
+            let message = entry["message"].as_str().unwrap_or_else(|| {
+                panic!("manifest `{name}` message must be a string")
+            });
+            let swift = std::fs::read_to_string(
+                rn_dir.join("ios/ProtocolEngineHostBridgeReactNative.swift"),
+            )
+            .expect("read swift adapter");
+            let swift_needle = format!(r#"errorCode: "{code}", errorMessage: "{message}""#);
+            assert!(
+                swift.contains(&swift_needle),
+                "ProtocolEngineHostBridgeReactNative.swift must pin `{name}` to \
+                 `{swift_needle}`"
+            );
+            let kotlin = std::fs::read_to_string(
+                rn_dir.join(
+                    "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridgeReactNative.kt",
+                ),
+            )
+            .expect("read kotlin adapter");
+            let kotlin_needle = format!(r#"run(module, promise, "{code}", "{message}""#);
+            assert!(
+                kotlin.contains(&kotlin_needle),
+                "ProtocolEngineHostBridgeReactNative.kt must pin `{name}` to \
+                 `{kotlin_needle}`"
+            );
+        }
+    }
+
     #[test]
     fn react_native_android_wifi_direct_callback_does_not_wait_for_a_manager() {
         let code = rn_source_code_only(

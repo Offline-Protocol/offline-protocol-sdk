@@ -79,6 +79,13 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Pinned React Native bridge promise codes.** The 107 shared engine methods
+  read fallback `ERROR_*` codes and message prefixes from
+  `tools/rn_engine_bridge_error_manifest.json` (regenerate with
+  `tools/extract_rn_bridge_error_manifest.py` after changing native reject
+  semantics). CI and `react_native_engine_bridge_error_codes_match_manifest`
+  hold the Swift and Kotlin adapters to that file.
+
 - **A Flutter plugin (preview).** `bindings/flutter/offline_protocol` hosts
   the engine on iOS and Android from Dart: create, MLS with the platform
   secure stores, start, stop, destroy, the local address, `sendMessage`, the
