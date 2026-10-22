@@ -151,7 +151,7 @@ mod tests {
                 r#"unsigned64(j, "maxDelayMs", {})"#,
                 format_underscored(DEFAULT_MAX_DELAY_MS)
             ),
-            format!(r#"number(j, "backoffMultiplier") ?? 2.0"#),
+            format!(r#"number(j, "backoffMultiplier") ?? {DEFAULT_BACKOFF_MULTIPLIER:.1}"#),
             format!(
                 r#"unsigned64(j, "outboxMaxLifetimeMs", {})"#,
                 format_underscored(DEFAULT_OUTBOX_LIFETIME_MS)
