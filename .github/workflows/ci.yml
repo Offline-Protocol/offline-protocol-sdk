@@ -1427,6 +1427,7 @@ jobs:
           github.event_name == 'push'
           || steps.flutter_paths.outputs.flutter_dart == 'true'
           || steps.flutter_paths.outputs.flutter_native == 'true'
+          || steps.flutter_paths.outputs.flutter_ios == 'true'
           || steps.flutter_paths.outputs.flutter_lock == 'true'
         run: bash scripts/check-binding-generators.sh --check
 
