@@ -4610,7 +4610,13 @@ extension BleManager: CBPeripheralManagerDelegate {
             ])
             return
         }
-        
+
+        // Request low-latency connection intervals from CoreBluetooth so sustained
+        // NOTIFY throughput to this central is not degraded by power-save defaults.
+        // Mirrors the mesh-node bleno patch for the Mac/Pi relay's Objective-C
+        // peripheral manager, which lifted peripheral hold-time ~3s to ~29s (8-10x).
+        peripheral.setDesiredConnectionLatency(.low, for: central)
+
         // Retain this central so we can NOTIFY it (peripheral-role egress) and so it
         // counts toward the connection budget. Stored under `notifyLock` because the
         // fragment drain tests notify-reachability off the main queue.
