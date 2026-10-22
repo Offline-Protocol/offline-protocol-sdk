@@ -83,8 +83,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   read fallback `ERROR_*` codes and message prefixes from
   `tools/rn_engine_bridge_error_manifest.json` (workflow in
   [C9b](docs/bridges/README.md#c9b-shared-engine-bridge-generators-and-rn-promise-codes)).
-  CI and Rust guards hold the Swift and Kotlin adapters to that file; resolve-only
-  queries use domain codes when the shared bridge throws.
+  The same file records which methods reject with typed protocol codes (the 19
+  that always did, on both platforms) and the one method whose JSON is resolved
+  as an object (`getDorsConfig`); every other string reaches JavaScript
+  unchanged. CI and Rust guards hold the Swift and Kotlin adapters to that file;
+  resolve-only queries use domain codes when the shared bridge throws.
 - **Flutter `MeshSdk` typed read helpers.** `getStateTyped`, `internetIsReadyTyped`,
   `internetIsSupersededTyped`, `isBluetoothEnabledTyped`, `isMlsInitializedTyped`,
   `isRelayTyped`, `hasPendingKeyPackageTyped`, `getBatteryLevelTyped`,

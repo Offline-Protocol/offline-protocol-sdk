@@ -18428,19 +18428,41 @@ mod tests {
         }
     }
 
-    /// Promise fallback codes on RN adapters must stay pinned to the committed
-    /// manifest, not rediscovered from thin delegate bodies after regen.
+    fn rn_engine_bridge_manifest() -> serde_json::Value {
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tools/rn_engine_bridge_error_manifest.json");
+        serde_json::from_str(
+            &std::fs::read_to_string(&manifest_path)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", manifest_path.display())),
+        )
+        .expect("manifest json")
+    }
+
+    /// The shared-bridge methods whose manifest entry sets `flag` to true.
+    fn rn_engine_bridge_flagged(manifest: &serde_json::Value, flag: &str) -> Vec<String> {
+        rn_protocol_engine_host_bridge_method_names()
+            .into_iter()
+            .filter(|name| manifest[name.as_str()][flag].as_bool() == Some(true))
+            .collect()
+    }
+
+    /// Promise fallback codes and the two per-method flags on the RN adapters
+    /// must stay pinned to the committed manifest, not rediscovered from thin
+    /// delegate bodies after regen. The needle ends at the `) {` that opens the
+    /// body, so an adapter that gained or lost a flag the manifest does not
+    /// carry fails here rather than matching as a prefix.
     #[test]
     fn react_native_engine_bridge_error_codes_match_manifest() {
         let rn_dir =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
-        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tools/rn_engine_bridge_error_manifest.json");
-        let manifest: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&manifest_path)
-                .unwrap_or_else(|e| panic!("cannot read {}: {e}", manifest_path.display())),
-        )
-        .expect("manifest json");
+        let manifest = rn_engine_bridge_manifest();
+        let swift =
+            std::fs::read_to_string(rn_dir.join("ios/ProtocolEngineHostBridgeReactNative.swift"))
+                .expect("read swift adapter");
+        let kotlin = std::fs::read_to_string(rn_dir.join(
+            "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridgeReactNative.kt",
+        ))
+        .expect("read kotlin adapter");
         let names = rn_protocol_engine_host_bridge_method_names();
         for name in &names {
             let entry = manifest
@@ -18452,27 +18474,222 @@ mod tests {
             let message = entry["message"]
                 .as_str()
                 .unwrap_or_else(|| panic!("manifest `{name}` message must be a string"));
-            let swift = std::fs::read_to_string(
-                rn_dir.join("ios/ProtocolEngineHostBridgeReactNative.swift"),
-            )
-            .expect("read swift adapter");
-            let swift_needle = format!(r#"errorCode: "{code}", errorMessage: "{message}""#);
+            let maps = entry["mapProtocolErrors"].as_bool() == Some(true);
+            let parses = entry["parseJsonResult"].as_bool() == Some(true);
+            let swift_flags = format!(
+                "{}{}",
+                if maps {
+                    ", mapProtocolErrors: true"
+                } else {
+                    ""
+                },
+                if parses {
+                    ", parseJsonResult: true"
+                } else {
+                    ""
+                },
+            );
+            let kotlin_flags = format!(
+                "{}{}",
+                if maps {
+                    ", mapProtocolErrors = true"
+                } else {
+                    ""
+                },
+                if parses {
+                    ", parseJsonResult = true"
+                } else {
+                    ""
+                },
+            );
+            let swift_needle =
+                format!(r#"errorCode: "{code}", errorMessage: "{message}"{swift_flags}) {{"#);
             assert!(
                 swift.contains(&swift_needle),
                 "ProtocolEngineHostBridgeReactNative.swift must pin `{name}` to \
                  `{swift_needle}`"
             );
-            let kotlin = std::fs::read_to_string(rn_dir.join(
-                "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridgeReactNative.kt",
-            ))
-            .expect("read kotlin adapter");
-            let kotlin_needle = format!(r#"run(module, promise, "{code}", "{message}""#);
+            let kotlin_needle =
+                format!(r#"run(module, promise, "{code}", "{message}"{kotlin_flags}) {{"#);
             assert!(
                 kotlin.contains(&kotlin_needle),
                 "ProtocolEngineHostBridgeReactNative.kt must pin `{name}` to \
                  `{kotlin_needle}`"
             );
         }
+    }
+
+    /// A shared-bridge method rejects with a typed protocol code (`NoKeyPackage`,
+    /// `SessionNotReady`, `MediaTransferLimit`, `DataDisabled`) on both
+    /// platforms exactly where it did before the shared bridge existed: the 19
+    /// methods whose inline body went through `rejectWithProtocolError` on
+    /// Android and iOS alike. The first version of the shared bridge mapped all
+    /// 107 on Android and none on iOS, so an iOS send lost `SessionNotReady`
+    /// while Android changed the code an app sees for 88 other methods. A
+    /// method joins this list by a decision recorded in the manifest, not by
+    /// regenerating.
+    #[test]
+    fn react_native_engine_bridge_keeps_typed_error_codes_where_they_always_were() {
+        const MAPPED_BEFORE_THE_SHARED_BRIDGE: &[&str] = &[
+            "acceptConnectionRequest",
+            "cancelConnectionRequest",
+            "checkInternetPresence",
+            "eraseCustody",
+            "forwardMessage",
+            "internetSendRawCommand",
+            "processFileChunk",
+            "rejectConnectionRequest",
+            "resolveUsername",
+            "respondToServiceRequest",
+            "sendConnectionRequest",
+            "sendFileFromPath",
+            "sendMedia",
+            "sendMediaRich",
+            "sendMessageRich",
+            "sendPresenceUpdate",
+            "sendReadReceipt",
+            "sendServiceRequest",
+            "sendTypingIndicator",
+        ];
+        let manifest = rn_engine_bridge_manifest();
+        let mut flagged = rn_engine_bridge_flagged(&manifest, "mapProtocolErrors");
+        flagged.sort();
+        assert_eq!(
+            flagged, MAPPED_BEFORE_THE_SHARED_BRIDGE,
+            "tools/rn_engine_bridge_error_manifest.json `mapProtocolErrors` must name exactly \
+             the methods that rejected through rejectWithProtocolError before the shared bridge"
+        );
+
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+        );
+        assert!(
+            kotlin.contains(
+                "if (mapProtocolErrors) { rejectWithProtocolError(promise, error, fallbackCode, \
+                 fallbackMessage) } else { promise.reject(fallbackCode,"
+            ),
+            "OfflineProtocolModule.kt rejectBridgePromise must map protocol errors when, and \
+             only when, the manifest says the method always did"
+        );
+        let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        assert!(
+            swift.contains(
+                "if mapProtocolErrors { rejectWithProtocolError(error, rejecter, fallbackCode: \
+                 code, fallbackMessage: message) } else { rejecter(code,"
+            ),
+            "OfflineProtocolModule.swift rejectBridgePromise must map protocol errors when, and \
+             only when, the manifest says the method always did"
+        );
+        let kotlin_adapter = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridgeReactNative.kt",
+        );
+        assert!(
+            kotlin_adapter.contains(
+                "module.rejectBridgePromise(promise, e, errorCode, errorMessage, mapProtocolErrors)"
+            ),
+            "the Kotlin adapter must hand the per-method flag to rejectBridgePromise"
+        );
+        let swift_adapter = rn_source_code_only("ios/ProtocolEngineHostBridgeReactNative.swift");
+        assert!(
+            swift_adapter.contains("message: errorMessage, mapProtocolErrors: mapProtocolErrors )"),
+            "the Swift adapter must hand the per-method flag to rejectBridgePromise"
+        );
+    }
+
+    /// A shared-bridge result reaches JavaScript in the shape it always had.
+    ///
+    /// `src/index.ts` passes `getTopology` and `getMessageStats` to
+    /// `JSON.parse`, and `JSON.parse` on an object throws. The first version of
+    /// the shared bridge's React Native adapters parsed every string that
+    /// started with `{` or `[`, so both calls threw on both platforms, and the
+    /// Android parse also truncated every fractional JSON number to a long
+    /// (`switchHysteresis` 0.3 read back as 0). The JS harness stubs the native
+    /// module, so no JavaScript test can see either; this guard reads the three
+    /// sides instead:
+    ///
+    /// - neither `toReactNative` parses a string, and the Android JSON path
+    ///   never narrows a number to a long;
+    /// - no method `src/index.ts` parses is marked `parseJsonResult`, and the
+    ///   marked set is the one method React Native has always resolved as an
+    ///   object while the shared bridge returns its JSON.
+    #[test]
+    fn react_native_engine_bridge_resolves_strings_javascript_parses_as_strings() {
+        fn slice_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            let from = source
+                .find(start)
+                .unwrap_or_else(|| panic!("`{start}` not found: the guard needs a stable anchor"));
+            let rest = &source[from..];
+            let to = rest
+                .find(end)
+                .unwrap_or_else(|| panic!("`{end}` not found after `{start}`"));
+            &rest[..to]
+        }
+        let kotlin =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/BridgeResults.kt");
+        let kotlin_to_rn = slice_between(&kotlin, "fun toReactNative(", "fun parseJsonResult(");
+        for parse in ["JSONObject(", "JSONArray("] {
+            assert!(
+                !kotlin_to_rn.contains(parse),
+                "BridgeResults.kt toReactNative must not parse strings (`{parse}`)"
+            );
+        }
+        let kotlin_json = slice_between(
+            &kotlin,
+            "private fun jsonObjectToWritable(",
+            "private fun putValue(",
+        );
+        assert!(
+            !kotlin_json.contains("toLong()"),
+            "BridgeResults.kt must keep a JSON number's fraction: a narrowed double reads 0.3 as 0"
+        );
+        let swift = rn_source_code_only("ios/BridgeResults.swift");
+        let swift_to_rn = slice_between(
+            &swift,
+            "static func toReactNative(",
+            "static func parseJsonResult(",
+        );
+        assert!(
+            !swift_to_rn.contains("JSONSerialization"),
+            "BridgeResults.swift toReactNative must not parse strings"
+        );
+
+        let index_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bindings/react-native/src/index.ts");
+        let index = std::fs::read_to_string(&index_path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", index_path.display()));
+        let parsed_in_js: Vec<String> = rn_protocol_engine_host_bridge_method_names()
+            .into_iter()
+            .filter(|name| {
+                let call = format!("OfflineProtocolNativeModule.{name}(");
+                index.match_indices(&call).any(|(at, _)| {
+                    let rest = &index[at..];
+                    let end = rest.find("\n  }\n").unwrap_or(rest.len());
+                    rest[..end].contains("JSON.parse(")
+                })
+            })
+            .collect();
+        for expected in ["getTopology", "getMessageStats"] {
+            assert!(
+                parsed_in_js.iter().any(|n| n == expected),
+                "the index.ts scan must find `{expected}` parsed in JavaScript; \
+                 a scan that finds nothing proves nothing: {parsed_in_js:?}"
+            );
+        }
+        let manifest = rn_engine_bridge_manifest();
+        let parsed_natively = rn_engine_bridge_flagged(&manifest, "parseJsonResult");
+        for name in &parsed_natively {
+            assert!(
+                !parsed_in_js.contains(name),
+                "`{name}` is marked parseJsonResult, but src/index.ts parses its result itself; \
+                 JSON.parse on an object throws"
+            );
+        }
+        assert_eq!(
+            parsed_natively,
+            ["getDorsConfig"],
+            "parseJsonResult changes what JavaScript receives; only getDorsConfig, which React \
+             Native always resolved as an object, takes it"
+        );
     }
 
     #[test]

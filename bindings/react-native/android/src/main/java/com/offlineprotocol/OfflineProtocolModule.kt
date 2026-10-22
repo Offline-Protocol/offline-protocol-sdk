@@ -634,17 +634,29 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
 
     /**
-     * Rejects [promise] with the stable typed code when the error maps
-     * (see ProtocolErrorBridge.kt), otherwise with the method's legacy
-     * fallback code and "$fallbackMessage: <cause>".
+     * Rejects a shared-bridge [promise]. With [mapProtocolErrors] the error
+     * goes through [rejectWithProtocolError], so a mapped error rejects with
+     * its stable typed code (see ProtocolErrorBridge.kt); without it the
+     * method keeps the fixed fallback code it has always rejected with.
+     *
+     * Per method, from `tools/rn_engine_bridge_error_manifest.json`, and true
+     * exactly for the methods that mapped before the shared bridge existed.
+     * Mapping every method would change the code an app sees for the others;
+     * mapping none drops `NoKeyPackage` and `SessionNotReady` from the sends.
+     * iOS makes the same choice from the same file.
      */
     internal fun rejectBridgePromise(
         promise: Promise,
         error: Throwable,
         fallbackCode: String,
         fallbackMessage: String,
+        mapProtocolErrors: Boolean,
     ) {
-        rejectWithProtocolError(promise, error, fallbackCode, fallbackMessage)
+        if (mapProtocolErrors) {
+            rejectWithProtocolError(promise, error, fallbackCode, fallbackMessage)
+        } else {
+            promise.reject(fallbackCode, "$fallbackMessage: ${error.message}", error)
+        }
     }
 
     private fun rejectWithProtocolError(

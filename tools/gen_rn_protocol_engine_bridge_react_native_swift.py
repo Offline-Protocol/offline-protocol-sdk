@@ -35,6 +35,21 @@ def error_for(name: str, manifest: dict[str, dict[str, str]]) -> tuple[str, str]
     return entry["code"], entry["message"]
 
 
+def flags_for(name: str, manifest: dict) -> str:
+    """The `run` arguments after the code and message, in a fixed order.
+
+    The same two flags as the Kotlin generator, from the same manifest entry, so
+    both platforms resolve the same shape and reject with the same code.
+    """
+    entry = manifest[name]
+    flags = ""
+    if entry.get("mapProtocolErrors"):
+        flags += ", mapProtocolErrors: true"
+    if entry.get("parseJsonResult"):
+        flags += ", parseJsonResult: true"
+    return flags
+
+
 def parse_objc_method(module: str, name: str) -> tuple[str, str, str]:
     m = objc_method_pattern(name).search(module)
     if not m:
@@ -119,20 +134,39 @@ def generate_swift(module: str, manifest: dict[str, dict[str, str]]) -> str:
         "import React",
         "",
         "enum ProtocolEngineHostBridgeReactNative {",
+        "    /// Runs one shared-bridge method for a React Native promise.",
+        "    ///",
+        "    /// A string result is resolved as the string: `src/index.ts` parses the",
+        "    /// ones it expects as JSON, and `JSON.parse` on an object throws.",
+        "    /// `parseJsonResult` is set only where React Native has always resolved",
+        "    /// an object and the shared bridge returns its JSON. `mapProtocolErrors`",
+        "    /// is set only for the methods that always surfaced typed protocol codes.",
+        "    /// Both come from `tools/rn_engine_bridge_error_manifest.json`.",
         "    static func run(",
         "        _ module: OfflineProtocolModule,",
         "        resolver: @escaping RCTPromiseResolveBlock,",
         "        rejecter: @escaping RCTPromiseRejectBlock,",
         "        errorCode: String,",
         "        errorMessage: String,",
+        "        mapProtocolErrors: Bool = false,",
+        "        parseJsonResult: Bool = false,",
         "        env: EngineBridgeEnvironment = .inert(),",
         "        _ body: (ProtocolEngineHost, EngineBridgeEnvironment) throws -> Any?",
         "    ) {",
         "        do {",
         "            let result = try body(module.engineHost, env)",
-        "            resolver(BridgeResults.toReactNative(result) ?? NSNull())",
+        "            let payload = parseJsonResult",
+        "                ? BridgeResults.parseJsonResult(result)",
+        "                : BridgeResults.toReactNative(result)",
+        "            resolver(payload ?? NSNull())",
         "        } catch {",
-        "            module.rejectBridgePromise(rejecter, error: error, code: errorCode, message: errorMessage)",
+        "            module.rejectBridgePromise(",
+        "                rejecter,",
+        "                error: error,",
+        "                code: errorCode,",
+        "                message: errorMessage,",
+        "                mapProtocolErrors: mapProtocolErrors",
+        "            )",
         "        }",
         "    }",
         "",
@@ -147,12 +181,13 @@ def generate_swift(module: str, manifest: dict[str, dict[str, str]]) -> str:
             ext_params = "resolver: @escaping RCTPromiseResolveBlock, rejecter: @escaping RCTPromiseRejectBlock"
             call_args = "resolver: resolver, rejecter: rejecter"
         invoke = f"try ProtocolEngineHostBridge.{name}(host: host, env: env, arguments: {args})"
+        flags = flags_for(name, manifest)
         lines.append(
             textwrap.indent(
                 textwrap.dedent(
                     f"""
                     static func {name}(_ module: OfflineProtocolModule, {ext_params}) {{
-                        run(module, resolver: resolver, rejecter: rejecter, errorCode: "{code}", errorMessage: "{msg}") {{ host, env in
+                        run(module, resolver: resolver, rejecter: rejecter, errorCode: "{code}", errorMessage: "{msg}"{flags}) {{ host, env in
                             {invoke}
                         }}
                     }}
@@ -213,9 +248,14 @@ def ensure_module_helpers(module: str) -> str:
                     _ rejecter: @escaping RCTPromiseRejectBlock,
                     error: Error,
                     code: String,
-                    message: String
+                    message: String,
+                    mapProtocolErrors: Bool
                 ) {
-                    rejecter(code, "\\(message): \\(error.localizedDescription)", error)
+                    if mapProtocolErrors {
+                        rejectWithProtocolError(error, rejecter, fallbackCode: code, fallbackMessage: message)
+                    } else {
+                        rejecter(code, "\\(message): \\(error.localizedDescription)", error)
+                    }
                 }
 
             """
@@ -231,7 +271,7 @@ def ensure_module_helpers(module: str) -> str:
 def verify_generated_errors(generated: str, manifest: dict[str, dict[str, str]]) -> list[str]:
     problems: list[str] = []
     for name, entry in manifest.items():
-        needle = f'errorCode: "{entry["code"]}", errorMessage: "{entry["message"]}"'
+        needle = f'errorCode: "{entry["code"]}", errorMessage: "{entry["message"]}"{flags_for(name, manifest)}) {{'
         if f"static func {name}(" in generated and needle not in generated:
             problems.append(f"{name}: expected `{needle}` in generated adapter")
     return problems

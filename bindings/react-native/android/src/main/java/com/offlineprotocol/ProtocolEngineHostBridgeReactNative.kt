@@ -13,25 +13,39 @@ import com.facebook.react.bridge.ReadableMap
  */
 internal object ProtocolEngineHostBridgeReactNative {
 
+    /**
+     * Runs one shared-bridge method for a React Native promise.
+     *
+     * A string result is resolved as the string: `src/index.ts` parses the
+     * ones it expects as JSON, and `JSON.parse` on an object throws.
+     * [parseJsonResult] is set only where React Native has always resolved
+     * an object and the shared bridge returns its JSON. [mapProtocolErrors]
+     * is set only for the methods that always surfaced typed protocol
+     * codes. Both come from `tools/rn_engine_bridge_error_manifest.json`.
+     */
     private fun run(
         module: OfflineProtocolModule,
         promise: Promise,
         errorCode: String,
         errorMessage: String,
+        mapProtocolErrors: Boolean = false,
+        parseJsonResult: Boolean = false,
         block: (ProtocolEngineHost, Context) -> Any?,
     ) {
         try {
             val host = module.engineHost
             val context = module.bridgeContext
             val result = block(host, context)
-            promise.resolve(BridgeResults.toReactNativeJsonStringOrPassThrough(result))
+            promise.resolve(
+                if (parseJsonResult) BridgeResults.parseJsonResult(result) else BridgeResults.toReactNative(result),
+            )
         } catch (e: Exception) {
-            module.rejectBridgePromise(promise, e, errorCode, errorMessage)
+            module.rejectBridgePromise(promise, e, errorCode, errorMessage, mapProtocolErrors)
         }
     }
 
 fun acceptConnectionRequest(module: OfflineProtocolModule, recipient: String, accepterName: String, keyPackage: ReadableArray?, promise: Promise) {
-    run(module, promise, "ERROR_CONNECTION_REQUEST", "Failed to accept connection request") { host, context ->
+    run(module, promise, "ERROR_CONNECTION_REQUEST", "Failed to accept connection request", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.acceptConnectionRequest(host, context, mapOf("recipient" to recipient, "accepterName" to accepterName, "keyPackage" to BridgeResults.readableArrayToIntList(keyPackage)))
     }
 }
@@ -55,7 +69,7 @@ fun blockUser(module: OfflineProtocolModule, userId: String, promise: Promise) {
 }
 
 fun cancelConnectionRequest(module: OfflineProtocolModule, recipient: String, promise: Promise) {
-    run(module, promise, "ERROR_CONNECTION_REQUEST", "Failed to cancel connection request") { host, context ->
+    run(module, promise, "ERROR_CONNECTION_REQUEST", "Failed to cancel connection request", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.cancelConnectionRequest(host, context, mapOf("recipient" to recipient))
     }
 }
@@ -67,7 +81,7 @@ fun cancelFileTransfer(module: OfflineProtocolModule, fileId: String, promise: P
 }
 
 fun checkInternetPresence(module: OfflineProtocolModule, userId: String, options: ReadableMap, promise: Promise) {
-    run(module, promise, "ERROR_INTERNET", "Failed to query presence: Internet transport not initialized") { host, context ->
+    run(module, promise, "ERROR_INTERNET", "Failed to query presence: Internet transport not initialized", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.checkInternetPresence(host, context, mapOf("userId" to userId, "options" to BridgeResults.readableMapToArgumentMap(options)))
     }
 }
@@ -103,7 +117,7 @@ fun discoverServices(module: OfflineProtocolModule, serviceId: String?, promise:
 }
 
 fun eraseCustody(module: OfflineProtocolModule, promise: Promise) {
-    run(module, promise, "ERROR_ERASECUSTODY", "eraseCustody failed") { host, context ->
+    run(module, promise, "ERROR_ERASECUSTODY", "eraseCustody failed", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.eraseCustody(host, context, null)
     }
 }
@@ -127,7 +141,7 @@ fun forceTransport(module: OfflineProtocolModule, transportType: String, promise
 }
 
 fun forwardMessage(module: OfflineProtocolModule, originalMessageJson: String, newRecipient: String, priority: Int, promise: Promise) {
-    run(module, promise, "ERROR_FORWARD", "Failed to forward message") { host, context ->
+    run(module, promise, "ERROR_FORWARD", "Failed to forward message", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.forwardMessage(host, context, mapOf("originalMessageJson" to originalMessageJson, "newRecipient" to newRecipient, "priority" to priority))
     }
 }
@@ -169,7 +183,7 @@ fun getDeliverySuccessRate(module: OfflineProtocolModule, promise: Promise) {
 }
 
 fun getDorsConfig(module: OfflineProtocolModule, promise: Promise) {
-    run(module, promise, "ERROR_CONFIG", "Protocol not initialized") { host, context ->
+    run(module, promise, "ERROR_CONFIG", "Protocol not initialized", parseJsonResult = true) { host, context ->
         ProtocolEngineHostBridge.getDorsConfig(host, context, null)
     }
 }
@@ -319,7 +333,7 @@ fun internetSendFailed(module: OfflineProtocolModule, messageId: String, promise
 }
 
 fun internetSendRawCommand(module: OfflineProtocolModule, json: String, promise: Promise) {
-    run(module, promise, "ERROR_INTERNET", "Failed to send raw server command: Internet transport not initialized") { host, context ->
+    run(module, promise, "ERROR_INTERNET", "Failed to send raw server command: Internet transport not initialized", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.internetSendRawCommand(host, context, mapOf("json" to json))
     }
 }
@@ -445,7 +459,7 @@ fun parseInvite(module: OfflineProtocolModule, blob: String, promise: Promise) {
 }
 
 fun processFileChunk(module: OfflineProtocolModule, fileId: String, chunkIndex: Int, totalChunks: Int, fileSize: Double, fileName: String, fileChecksum: String, data: ReadableArray, promise: Promise) {
-    run(module, promise, "ERROR_FILE", "Failed to process file chunk") { host, context ->
+    run(module, promise, "ERROR_FILE", "Failed to process file chunk", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.processFileChunk(host, context, mapOf("fileId" to fileId, "chunkIndex" to chunkIndex, "totalChunks" to totalChunks, "fileSize" to fileSize, "fileName" to fileName, "fileChecksum" to fileChecksum, "data" to BridgeResults.readableArrayToIntList(data)))
     }
 }
@@ -457,7 +471,7 @@ fun registerService(module: OfflineProtocolModule, serviceId: String, version: S
 }
 
 fun rejectConnectionRequest(module: OfflineProtocolModule, recipient: String, promise: Promise) {
-    run(module, promise, "ERROR_CONNECTION_REQUEST", "Failed to reject connection request") { host, context ->
+    run(module, promise, "ERROR_CONNECTION_REQUEST", "Failed to reject connection request", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.rejectConnectionRequest(host, context, mapOf("recipient" to recipient))
     }
 }
@@ -481,67 +495,67 @@ fun requestEnableBluetooth(module: OfflineProtocolModule, promise: Promise) {
 }
 
 fun resolveUsername(module: OfflineProtocolModule, username: String, promise: Promise) {
-    run(module, promise, "ERROR_INVALID_ARGUMENT", "Failed to resolve username") { host, context ->
+    run(module, promise, "ERROR_INVALID_ARGUMENT", "Failed to resolve username", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.resolveUsername(host, context, mapOf("username" to username))
     }
 }
 
 fun respondToServiceRequest(module: OfflineProtocolModule, requestId: String, requester: String, serviceId: String, status: String, body: String, promise: Promise) {
-    run(module, promise, "ERROR_SERVICE_RESPONSE", "Failed to respond to service request") { host, context ->
+    run(module, promise, "ERROR_SERVICE_RESPONSE", "Failed to respond to service request", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.respondToServiceRequest(host, context, mapOf("requestId" to requestId, "requester" to requester, "serviceId" to serviceId, "status" to status, "body" to body))
     }
 }
 
 fun sendConnectionRequest(module: OfflineProtocolModule, recipient: String, senderName: String, keyPackage: ReadableArray?, initialMessage: String?, promise: Promise) {
-    run(module, promise, "ERROR_CONNECTION_REQUEST", "Failed to send connection request") { host, context ->
+    run(module, promise, "ERROR_CONNECTION_REQUEST", "Failed to send connection request", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.sendConnectionRequest(host, context, mapOf("recipient" to recipient, "senderName" to senderName, "keyPackage" to BridgeResults.readableArrayToIntList(keyPackage), "initialMessage" to initialMessage))
     }
 }
 
 fun sendFileFromPath(module: OfflineProtocolModule, recipient: String, filePath: String, fileName: String, promise: Promise) {
-    run(module, promise, "ERROR_SEND_FILE", "Failed to send file from path") { host, context ->
+    run(module, promise, "ERROR_SEND_FILE", "Failed to send file from path", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.sendFileFromPath(host, context, mapOf("recipient" to recipient, "filePath" to filePath, "fileName" to fileName))
     }
 }
 
 fun sendMedia(module: OfflineProtocolModule, recipient: String, fileData: String, fileName: String, contentType: String, mediaMetadata: ReadableMap?, promise: Promise) {
-    run(module, promise, "ERROR_SEND_MEDIA", "Failed to send media") { host, context ->
+    run(module, promise, "ERROR_SEND_MEDIA", "Failed to send media", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.sendMedia(host, context, mapOf("recipient" to recipient, "fileData" to fileData, "fileName" to fileName, "contentType" to contentType, "mediaMetadata" to BridgeResults.readableMapToArgumentMap(mediaMetadata)))
     }
 }
 
 fun sendMediaRich(module: OfflineProtocolModule, recipient: String, fileData: String, fileName: String, contentType: String, options: ReadableMap?, promise: Promise) {
-    run(module, promise, "ERROR_SEND_MEDIA", "Failed to send media") { host, context ->
+    run(module, promise, "ERROR_SEND_MEDIA", "Failed to send media", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.sendMediaRich(host, context, mapOf("recipient" to recipient, "fileData" to fileData, "fileName" to fileName, "contentType" to contentType, "options" to BridgeResults.readableMapToArgumentMap(options)))
     }
 }
 
 fun sendMessageRich(module: OfflineProtocolModule, recipient: String, content: String, priority: Int, replyToMsg: String?, options: ReadableMap?, promise: Promise) {
-    run(module, promise, "ERROR_SEND", "Failed to send rich message") { host, context ->
+    run(module, promise, "ERROR_SEND", "Failed to send rich message", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.sendMessageRich(host, context, mapOf("recipient" to recipient, "content" to content, "priority" to priority, "replyToMsg" to replyToMsg, "options" to BridgeResults.readableMapToArgumentMap(options)))
     }
 }
 
 fun sendPresenceUpdate(module: OfflineProtocolModule, recipient: String, status: Int, promise: Promise) {
-    run(module, promise, "ERROR_PRESENCE_UPDATE", "Failed to send presence update") { host, context ->
+    run(module, promise, "ERROR_PRESENCE_UPDATE", "Failed to send presence update", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.sendPresenceUpdate(host, context, mapOf("recipient" to recipient, "status" to status))
     }
 }
 
 fun sendReadReceipt(module: OfflineProtocolModule, recipient: String, messageIds: ReadableArray, promise: Promise) {
-    run(module, promise, "ERROR_READ_RECEIPT", "Failed to send read receipt") { host, context ->
+    run(module, promise, "ERROR_READ_RECEIPT", "Failed to send read receipt", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.sendReadReceipt(host, context, mapOf("recipient" to recipient, "messageIds" to BridgeResults.readableArrayToIntList(messageIds)))
     }
 }
 
 fun sendServiceRequest(module: OfflineProtocolModule, provider: String, serviceId: String, method: String, body: String, promise: Promise) {
-    run(module, promise, "ERROR_SERVICE_REQUEST", "Failed to send service request") { host, context ->
+    run(module, promise, "ERROR_SERVICE_REQUEST", "Failed to send service request", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.sendServiceRequest(host, context, mapOf("provider" to provider, "serviceId" to serviceId, "method" to method, "body" to body))
     }
 }
 
 fun sendTypingIndicator(module: OfflineProtocolModule, recipient: String, conversationId: String, isTyping: Boolean, promise: Promise) {
-    run(module, promise, "ERROR_TYPING_INDICATOR", "Failed to send typing indicator") { host, context ->
+    run(module, promise, "ERROR_TYPING_INDICATOR", "Failed to send typing indicator", mapProtocolErrors = true) { host, context ->
         ProtocolEngineHostBridge.sendTypingIndicator(host, context, mapOf("recipient" to recipient, "conversationId" to conversationId, "isTyping" to isTyping))
     }
 }
