@@ -15,6 +15,7 @@ pub mod events;
 #[cfg(feature = "file-store")]
 pub mod file_store;
 pub mod file_transfer;
+pub mod gradient_compress;
 mod group_mesh;
 mod media_envelope;
 pub mod mls;
