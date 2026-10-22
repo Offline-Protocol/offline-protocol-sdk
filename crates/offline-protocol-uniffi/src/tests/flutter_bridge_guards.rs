@@ -567,3 +567,50 @@ fn flutter_method_channel_methods_match_native_plugins() {
         "FlutterEngineChannel.swift dispatch must match method_channel_methods.txt"
     );
 }
+
+/// The plugin prefers native libraries the release stages into it, and falls
+/// back to the React Native build otherwise. The choice must test for the
+/// library, never for its directory: the library itself is ignored
+/// repository-wide, so a committed `Info.plist` (as the first version of this
+/// change had) is a framework with no binary on every fresh clone, and a
+/// directory test then never falls back. The iOS app fails at the first UniFFI
+/// symbol; the Android AAR ships with no native code.
+#[test]
+fn flutter_staged_native_artifacts_are_chosen_by_the_library_not_the_directory() {
+    let flutter = flutter_plugin_dir();
+    let podspec = std::fs::read_to_string(flutter.join("ios/offline_protocol.podspec"))
+        .unwrap_or_else(|e| panic!("cannot read offline_protocol.podspec: {e}"));
+    assert!(
+        podspec.contains("ios-arm64/liboffline_protocol_uniffi.a")
+            && podspec.contains("File.file?(staged_lib) ? staged_xcf : rn_xcf"),
+        "offline_protocol.podspec must vendor the staged XCFramework only when its device \
+         library is present"
+    );
+    assert!(
+        !podspec.contains("File.directory?(staged_xcf)"),
+        "offline_protocol.podspec must not choose the staged XCFramework by its directory"
+    );
+    let gradle = std::fs::read_to_string(flutter.join("android/build.gradle"))
+        .unwrap_or_else(|e| panic!("cannot read android/build.gradle: {e}"));
+    assert!(
+        gradle.contains("it.name == 'libuniffi_offline_protocol.so'")
+            && gradle.contains("jniLibs.srcDirs(stagedHasLibrary ? stagedJni : rnJni)"),
+        "android/build.gradle must use the staged jniLibs only when a library is present"
+    );
+    let ignore = std::fs::read_to_string(flutter.join("ios/.gitignore"))
+        .unwrap_or_else(|e| panic!("cannot read ios/.gitignore: {e}"));
+    assert!(
+        ignore.lines().any(|l| l.trim() == "Frameworks/"),
+        "ios/.gitignore must keep the staged XCFramework out of the repository"
+    );
+    let staged = flutter.join("ios/Frameworks/offline_protocol_uniffi.xcframework");
+    if staged.join("Info.plist").exists() {
+        assert!(
+            staged
+                .join("ios-arm64/liboffline_protocol_uniffi.a")
+                .exists(),
+            "{} holds an Info.plist with no library: a framework that links nothing",
+            staged.display()
+        );
+    }
+}
