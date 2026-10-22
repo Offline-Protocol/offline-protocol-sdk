@@ -5447,8 +5447,9 @@ impl OfflineProtocol {
         // did it take?" A tight distribution across chunks points at a
         // hard-coded per-attempt timeout; a fat tail points at genuine link
         // flakiness. Saturating so a clock skew never panics.
-        let dispatch_to_ack_ms =
-            Instant::now().saturating_duration_since(dispatched_at).as_millis() as u64;
+        let dispatch_to_ack_ms = Instant::now()
+            .saturating_duration_since(dispatched_at)
+            .as_millis() as u64;
 
         if let Some(window) = self.outbound_media_windows.get_mut(&file_id) {
             window.on_chunk_ack(chunk_index);

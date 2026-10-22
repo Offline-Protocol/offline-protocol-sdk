@@ -8965,9 +8965,10 @@ fn test_unreachable_media_chunk_resolves_file_id() {
             app_send: false,
         },
     );
-    protocol
-        .outbound_media_chunks
-        .insert(chunk_id.clone(), ("file_abc".to_string(), 3));
+    protocol.outbound_media_chunks.insert(
+        chunk_id.clone(),
+        ("file_abc".to_string(), 3, std::time::Instant::now()),
+    );
 
     protocol
         .on_transport_send_failed(
@@ -31772,7 +31773,7 @@ fn test_media_descriptor_persisted_and_cleared_on_completion() {
     let chunk_ids: Vec<_> = alice
         .outbound_media_chunks
         .iter()
-        .filter(|(_, (fid, _))| fid == &file_id)
+        .filter(|(_, (fid, _, _))| fid == &file_id)
         .map(|(id, _)| id.clone())
         .collect();
     assert!(!chunk_ids.is_empty());
