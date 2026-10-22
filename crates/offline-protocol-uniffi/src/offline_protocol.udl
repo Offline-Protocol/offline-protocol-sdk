@@ -66,6 +66,23 @@ namespace offline_protocol {
     // listed and deleted, so a backend that merges key types keeps its real
     // records. Probe a new backend on a scratch instance until it is green.
     string run_storage_conformance(ProtocolStateStorageProvider storage);
+
+    // Compress a flat f32 gradient using top-K sparsification + E3M0 4-bit
+    // quantization. ~125x reduction on realistic gradients. Pass 0 for
+    // chunk_size and topk to use the defaults (4096 / 64) matching the
+    // reference C implementation at
+    // companion-app/ios/IntelligenceMesh/Training/gradient_compress.c.
+    //
+    // Instance-less: pure function, no protocol state. Deterministic for a
+    // given input (no error-feedback through this entry point — see the
+    // stateful variant in a future interface).
+    sequence<u8> encode_gradient_topk_e3m0(sequence<f32> grad, u32 chunk_size, u32 topk);
+
+    // Decode a top-K + E3M0 compressed gradient back into a sparse n_params-
+    // long f32 vector. Positions not covered by the compressed stream remain
+    // zero. chunk_size and topk MUST match the encoder's configuration — the
+    // wire format carries neither, both peers agree out of band.
+    sequence<f32> decode_gradient_topk_e3m0(sequence<u8> compressed, u32 n_params, u32 chunk_size, u32 topk);
 };
 
 // A decoded and verified invite.

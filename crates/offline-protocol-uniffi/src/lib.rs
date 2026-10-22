@@ -82,6 +82,47 @@ pub fn derive_address(public_key: Vec<u8>) -> Result<String, ProtocolError> {
         .map_err(|e| ProtocolError::MlsError(e.to_string()))
 }
 
+/// Compress a flat f32 gradient using top-K sparsification + E3M0 4-bit
+/// quantization. Instance-less: no protocol state, so a worker can call this
+/// before publishing a CRDT contribution and a coord can call it before
+/// fanning out the aggregated delta.
+///
+/// `chunk_size = 0` and `topk = 0` select the defaults from
+/// `offline_protocol::gradient_compress` (4096 / 64). `topk` is clamped to
+/// `[1, chunk_size]` on the Rust side; a caller that passes nonsense gets
+/// well-defined behavior, not a panic.
+///
+/// Stateless (no error-feedback). A follow-up ticket adds a stateful
+/// `interface ErrorFeedback` for callers that want cross-round residual
+/// accumulation; the stateless path is sufficient for the initial hardware
+/// test where the gradient drives selection on its own magnitudes.
+pub fn encode_gradient_topk_e3m0(grad: Vec<f32>, chunk_size: u32, topk: u32) -> Vec<u8> {
+    offline_protocol::gradient_compress::encode_topk_e3m0(
+        &grad,
+        chunk_size as usize,
+        topk as usize,
+        None,
+    )
+}
+
+/// Decode a top-K + E3M0 compressed gradient back to a sparse `n_params`-long
+/// f32 vector. Positions not covered by the compressed data are zero.
+/// `chunk_size` and `topk` MUST match what the encoder used — the wire format
+/// carries neither, both peers agree out of band.
+pub fn decode_gradient_topk_e3m0(
+    compressed: Vec<u8>,
+    n_params: u32,
+    chunk_size: u32,
+    topk: u32,
+) -> Vec<f32> {
+    offline_protocol::gradient_compress::decode_topk_e3m0(
+        &compressed,
+        n_params as usize,
+        chunk_size as usize,
+        topk as usize,
+    )
+}
+
 /// A decoded and verified invite.
 ///
 /// Every field has passed verification: the address is the one its public key
