@@ -834,6 +834,19 @@ pub enum Event {
         total_chunks: u32,
         /// Progress percentage (0-100).
         percentage: u8,
+        /// Index of the chunk whose ACK triggered this progress event. Absent
+        /// on legacy emitters and in non-ACK progress updates (e.g. initial
+        /// pre-send accounting). Together with `last_chunk_latency_ms` this
+        /// gives a per-chunk timing sample without a separate event type.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_chunk_index: Option<u32>,
+        /// Dispatch-to-ACK round-trip for the chunk named by
+        /// `last_chunk_index`, in milliseconds. Attempt-inclusive — if the
+        /// chunk was retried, the value spans the first dispatch to the final
+        /// successful ACK. A tight cross-chunk distribution points at a
+        /// hard-coded SDK retry timeout; a fat tail points at link flakiness.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_chunk_latency_ms: Option<u64>,
     },
 
     /// File was completely received.
@@ -2146,8 +2159,23 @@ impl Event {
         }
     }
 
-    /// Creates a FileProgress event.
+    /// Creates a FileProgress event (no per-chunk timing — compat shim for
+    /// emitters that do not have a dispatched_at timestamp on hand).
     pub fn file_progress(file_id: String, chunks_sent: u32, total_chunks: u32) -> Self {
+        Self::file_progress_with_timing(file_id, chunks_sent, total_chunks, None, None)
+    }
+
+    /// Creates a FileProgress event carrying the per-chunk timing sample for
+    /// the chunk whose ACK triggered this emission. Prefer this over
+    /// `file_progress` wherever a dispatched_at is tracked: the two optional
+    /// fields are the single-sample view that the ACK-timing diagnostic reads.
+    pub fn file_progress_with_timing(
+        file_id: String,
+        chunks_sent: u32,
+        total_chunks: u32,
+        last_chunk_index: Option<u32>,
+        last_chunk_latency_ms: Option<u64>,
+    ) -> Self {
         let percentage = if total_chunks > 0 {
             ((chunks_sent as f32 / total_chunks as f32) * 100.0) as u8
         } else {
@@ -2159,6 +2187,8 @@ impl Event {
             chunks_sent,
             total_chunks,
             percentage,
+            last_chunk_index,
+            last_chunk_latency_ms,
         }
     }
 
@@ -3232,6 +3262,8 @@ impl fmt::Debug for Event {
                 chunks_sent,
                 total_chunks,
                 percentage,
+                last_chunk_index: _,
+                last_chunk_latency_ms: _,
             } => f
                 .debug_struct("FileProgress")
                 .field("file_id", file_id)
@@ -4063,11 +4095,15 @@ mod tests {
                 chunks_sent,
                 total_chunks,
                 percentage,
+                last_chunk_index,
+                last_chunk_latency_ms,
             } => {
                 assert_eq!(file_id, "file123");
                 assert_eq!(chunks_sent, 50);
                 assert_eq!(total_chunks, 100);
                 assert_eq!(percentage, 50);
+                assert_eq!(last_chunk_index, None);
+                assert_eq!(last_chunk_latency_ms, None);
             }
             _ => panic!("Wrong event type"),
         }

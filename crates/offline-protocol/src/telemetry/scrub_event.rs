@@ -337,6 +337,8 @@ fn scrub_in_place(event: &mut Event, scrubber: &Scrubber) {
             chunks_sent: _,
             total_chunks: _,
             percentage: _,
+            last_chunk_index: _,
+            last_chunk_latency_ms: _,
         } => {}
         Event::FileReceived {
             sender,

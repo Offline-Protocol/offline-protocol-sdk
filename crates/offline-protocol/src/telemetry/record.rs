@@ -473,6 +473,8 @@ pub(crate) mod tests {
                 chunks_sent: 0,
                 total_chunks: 0,
                 percentage: 0,
+                last_chunk_index: None,
+                last_chunk_latency_ms: None,
             },
             Event::FileReceived {
                 file_id: String::new(),

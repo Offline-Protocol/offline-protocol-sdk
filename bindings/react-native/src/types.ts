@@ -1488,6 +1488,21 @@ export interface FileProgressEvent extends BaseEvent {
   chunks_sent: number;
   total_chunks: number;
   percentage: number;
+  /**
+   * Index of the chunk whose ACK triggered this progress event. Absent on
+   * legacy senders and on non-ACK progress updates. Together with
+   * `last_chunk_latency_ms` this is a per-chunk timing sample for the
+   * ACK-latency diagnostic without a separate event type.
+   */
+  last_chunk_index?: number;
+  /**
+   * Dispatch-to-ACK round-trip for the chunk named by `last_chunk_index`, in
+   * milliseconds. Attempt-inclusive: if the chunk was retried, the value spans
+   * the first dispatch to the final successful ACK. A tight cross-chunk
+   * distribution points at a hard-coded SDK retry timeout; a fat tail points
+   * at genuine link flakiness.
+   */
+  last_chunk_latency_ms?: number;
 }
 
 /**

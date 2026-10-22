@@ -945,8 +945,13 @@ pub struct OfflineProtocol {
     pending_media_metadata: HashMap<String, PendingMediaMetadataEntry>,
     /// Tracks outbound media transfer delivery progress keyed by file_id.
     outbound_media_transfers: HashMap<String, OutboundMediaTransfer>,
-    /// Maps each outbound media chunk message ID to (file_id, chunk_index).
-    outbound_media_chunks: HashMap<MessageId, (String, u32)>,
+    /// Maps each outbound media chunk message ID to (file_id, chunk_index,
+    /// dispatched_at). `dispatched_at` is the monotonic timestamp of the FIRST
+    /// dispatch for this chunk; retries do not reset it, so the delta from this
+    /// to the eventual ACK is end-to-end attempt-inclusive latency for the
+    /// chunk, which is what the ACK-timing diagnostic needs to pin whether the
+    /// retry rate is driven by premature timeouts or by genuine link failure.
+    outbound_media_chunks: HashMap<MessageId, (String, u32, Instant)>,
     /// Sliding-window state for outbound file transfers, keyed by file_id.
     /// Chunks are only sent when the window has capacity (previous chunks ACKed).
     outbound_media_windows: HashMap<String, OutboundTransferState>,

@@ -3063,8 +3063,10 @@ impl OfflineProtocol {
                     .metadata
                     .insert(crate::constants::NO_ALERT_KEY.to_string(), "1".to_string());
             }
-            self.outbound_media_chunks
-                .insert(message.id.clone(), (file_id.to_string(), chunk_index));
+            self.outbound_media_chunks.insert(
+                message.id.clone(),
+                (file_id.to_string(), chunk_index, Instant::now()),
+            );
 
             let previous_transport = self.transport_manager.current_transport();
             // A chunk held for a slot is sent by the retry queue, pinned to
@@ -4891,7 +4893,7 @@ impl OfflineProtocol {
         let file_id = self
             .outbound_media_chunks
             .get(&parsed_id)
-            .map(|(file_id, _)| file_id.clone());
+            .map(|(file_id, _, _)| file_id.clone());
         // If this peer is also an unconfirmed-session probe target, fold the
         // verdict into the probe schedule so it backs off (15s -> 600s) instead
         // of re-probing every 5s forever. No-op for peers that are not probe
@@ -5432,9 +5434,21 @@ impl OfflineProtocol {
     }
 
     pub(super) fn handle_outbound_media_chunk_delivered(&mut self, message_id: &MessageId) {
-        let Some((file_id, chunk_index)) = self.outbound_media_chunks.remove(message_id) else {
+        let Some((file_id, chunk_index, dispatched_at)) =
+            self.outbound_media_chunks.remove(message_id)
+        else {
             return;
         };
+
+        // End-to-end attempt-inclusive latency for this chunk: time between the
+        // first dispatch (captured at insert) and the final successful ACK.
+        // Retries are rolled into this number, which is intentional — the
+        // diagnostic question is "when a chunk eventually succeeds, how long
+        // did it take?" A tight distribution across chunks points at a
+        // hard-coded per-attempt timeout; a fat tail points at genuine link
+        // flakiness. Saturating so a clock skew never panics.
+        let dispatch_to_ack_ms =
+            Instant::now().saturating_duration_since(dispatched_at).as_millis() as u64;
 
         if let Some(window) = self.outbound_media_windows.get_mut(&file_id) {
             window.on_chunk_ack(chunk_index);
@@ -5456,10 +5470,12 @@ impl OfflineProtocol {
 
         if !carries_data {
             if let Ok(state) = lock_shared_state(&self.shared_state) {
-                state.emit_event(Event::file_progress(
+                state.emit_event(Event::file_progress_with_timing(
                     file_id.clone(),
                     delivered_chunks,
                     total_chunks,
+                    Some(chunk_index),
+                    Some(dispatch_to_ack_ms),
                 ));
                 if completed {
                     state.emit_event(Event::media_sent(file_id.clone(), content_type, recipient));
@@ -5479,7 +5495,9 @@ impl OfflineProtocol {
         message_id: &MessageId,
         reason: &str,
     ) {
-        let Some((file_id, _chunk_index)) = self.outbound_media_chunks.remove(message_id) else {
+        let Some((file_id, _chunk_index, _dispatched_at)) =
+            self.outbound_media_chunks.remove(message_id)
+        else {
             return;
         };
         self.abort_outbound_media_transfer(&file_id, reason);
@@ -5498,7 +5516,7 @@ impl OfflineProtocol {
             return;
         };
         self.outbound_media_chunks
-            .retain(|_, (candidate_file_id, _)| candidate_file_id.as_str() != file_id);
+            .retain(|_, (candidate_file_id, _, _)| candidate_file_id.as_str() != file_id);
         self.outbound_media_windows.remove(file_id);
         // A terminal abort is settled state — the app hears MediaSendFailed
         // now, so a MediaResendRequired for it after a restart would be
@@ -5555,7 +5573,7 @@ impl OfflineProtocol {
         self.outbound_media_transfers
             .retain(|file_id, _| !stale_outbound_file_ids.contains(file_id));
         self.outbound_media_chunks
-            .retain(|_, (file_id, _)| !stale_outbound_file_ids.contains(file_id));
+            .retain(|_, (file_id, _, _)| !stale_outbound_file_ids.contains(file_id));
         self.outbound_media_windows
             .retain(|file_id, _| !stale_outbound_file_ids.contains(file_id));
         for file_id in &stale_outbound_file_ids {
@@ -6919,7 +6937,7 @@ impl OfflineProtocol {
         &self,
         message_id: &MessageId,
     ) -> Option<TransportType> {
-        let (file_id, _) = self.outbound_media_chunks.get(message_id)?;
+        let (file_id, _, _) = self.outbound_media_chunks.get(message_id)?;
         self.outbound_media_transfers
             .get(file_id)
             .map(|transfer| transfer.pinned_transport)
