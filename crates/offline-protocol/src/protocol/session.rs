@@ -1164,6 +1164,40 @@ impl OfflineProtocol {
         }
     }
 
+    /// Asks `peer_id` to corroborate a session that just failed an ordinary
+    /// decrypt, at most once per re-key interval.
+    ///
+    /// Invariant: a split between two sides that have both confirmed is
+    /// found by the first frame that fails between them. Confirmation probes
+    /// stop once a session confirms, so without this a split that formed
+    /// another way (an older peer's plaintext confirmation, a restored
+    /// store) would fail every frame for the life of the pair.
+    ///
+    /// A failure only asks; it never tears anything down, which is what ADR
+    /// 0006 requires of a class anyone corrupting a frame can reach. A
+    /// healthy session answers with a matching tag and nothing happens. The
+    /// probe is the ordinary one, so at most one is in the outbox.
+    pub(super) fn request_session_corroboration(&mut self, peer_id: &str) {
+        let now = Utc::now();
+        if self
+            .corroboration_due_at
+            .get(peer_id)
+            .is_some_and(|due_at| *due_at > now)
+        {
+            return;
+        }
+        if !self.corroboration_due_at.contains_key(peer_id)
+            && self.corroboration_due_at.len() >= MAX_REKEY_TRACKED_PEERS
+        {
+            self.corroboration_due_at.clear();
+        }
+        self.corroboration_due_at.insert(
+            peer_id.to_string(),
+            now + ChronoDuration::seconds(REKEY_INTERVAL_SECS),
+        );
+        self.send_session_confirmation_probe(peer_id, "decrypt_failed");
+    }
+
     /// Heals a pair that holds two different groups for its slot.
     ///
     /// Invariant: a split is ended by exactly one side, the one that

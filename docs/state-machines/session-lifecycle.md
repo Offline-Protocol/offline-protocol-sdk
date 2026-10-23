@@ -447,6 +447,21 @@ so a replayed probe from an earlier group buys at most one teardown per
 window. A reset that could not be sent drops nothing and gives the floor back,
 because the peer was told nothing and the next probe asks again.
 
+### A failed frame asks
+
+**A split between two sides that have both confirmed is found by the first
+frame that fails between them.** Confirmation probes stop once a session
+confirms, so a split that formed some other way, through an older peer's
+plaintext confirmation or a restored store, would otherwise fail every frame
+for the life of the pair.
+
+So an ordinary decrypt failure on a 1:1 session sends a confirmation probe,
+at most once per peer per re-key interval. It only asks. A healthy session
+answers with a matching tag and nothing happens; a split answers with a
+different one and is healed as above. Nothing is torn down on the failure
+itself, which is what ADR 0006 requires of a class that anyone corrupting a
+frame can reach.
+
 ## Session reset semantics
 
 Two paths advertise a key package with the reset flag set, and they differ in

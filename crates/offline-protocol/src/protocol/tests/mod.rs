@@ -44307,6 +44307,9 @@ fn both_create_losing_the_owners_welcome(
     }
     adopter_h.clear_sent_messages();
     while owner.receive_message().is_some() {}
+    // The owner's answers (an acknowledgement of the adopter's probe) are
+    // lost with its Welcome, so each test chooses what reaches whom next.
+    owner_h.clear_sent_messages();
     assert!(
         owner.both_create_awaiting_decrypt.contains(&id(hi)),
         "precondition: the owner kept its own group"
@@ -44414,4 +44417,49 @@ fn a_corroborated_probe_confirms_a_both_create_owner_and_a_bare_one_does_not() {
         owner.confirmed_sessions.contains(&id(hi)),
         "a corroborated probe must confirm the owner"
     );
+}
+
+/// A split between two sides that have both confirmed, as an older peer's
+/// plaintext confirmation or a restored store leaves one. No confirmation
+/// probe runs on a confirmed session, so before corroboration on failure
+/// every frame failed for the life of the pair. Now the first failure asks,
+/// the tags disagree, and the greater side heals.
+#[test]
+fn a_split_between_two_confirmed_sides_heals_on_the_first_failed_frame() {
+    let (lo, hi) = split_pair();
+    let (mut owner, owner_h) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    let owner_rx = received_contents(&mut owner);
+    let adopter_rx = received_contents(&mut adopter);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+
+    both_create_losing_the_owners_welcome(&mut owner, &owner_h, &mut adopter, &adopter_h);
+    owner.clear_both_create_awaiting_decrypt(&id(hi));
+    owner
+        .confirm_session_state(&id(hi), "decrypt_success")
+        .unwrap();
+    adopter
+        .confirm_session_state(&id(lo), "decrypt_success")
+        .unwrap();
+    owner.flush_pending_messages(&id(hi)).unwrap();
+    adopter.flush_pending_messages(&id(lo)).unwrap();
+
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+    owner
+        .send_message(&id(hi), "healed-owner", None, None::<String>)
+        .unwrap();
+    adopter
+        .send_message(&id(lo), "healed-adopter", None, None::<String>)
+        .unwrap();
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+
+    let adopter_got = adopter_rx.lock().unwrap().clone();
+    let owner_got = owner_rx.lock().unwrap().clone();
+    for (got, want) in [
+        (&adopter_got, "healed-owner"),
+        (&owner_got, "healed-adopter"),
+    ] {
+        assert!(got.iter().any(|c| c == want), "{want} missing from {got:?}");
+    }
 }

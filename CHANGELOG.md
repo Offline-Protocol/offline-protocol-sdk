@@ -71,7 +71,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   exporter tag that only a member of the same group computes. A match
   confirms, including the session owner, which before only a decrypted
   message could. A mismatch is a split, and the greater side heals it with
-  the existing re-key. An older peer sends no tag and keeps the old rules. See
+  the existing re-key. An older peer sends no tag and keeps the old rules.
+  A split between two sides that had both confirmed is found too: an ordinary
+  decrypt failure on a 1:1 session now sends a probe, at most once per peer
+  every 30 seconds, and the tags decide. The failure itself still tears
+  nothing down. See
   [ADR 0033](docs/adr/0033-a-session-is-confirmed-only-by-proof-of-the-same-group.md).
 
 ## [0.30.0] — 2026-10-21

@@ -834,6 +834,12 @@ pub struct OfflineProtocol {
     /// action, and a fresh desync after restart simply re-arms it.
     rekey_due_at: HashMap<String, DateTime<Utc>>,
 
+    /// When each peer may next be asked to corroborate a session that is
+    /// failing ordinary decrypts (`request_session_corroboration`). Keyed by
+    /// the wire-claimed sender, so bounded like `rekey_due_at`. In memory
+    /// only: the next failure re-arms it.
+    corroboration_due_at: HashMap<String, DateTime<Utc>>,
+
     /// Outbound welcome lifecycle records keyed by peer id.
     welcome_lifecycles: HashMap<String, WelcomeLifecycleRecord>,
 
@@ -1292,6 +1298,7 @@ impl OfflineProtocol {
             retry_drain_tokens: 0.0,
             retry_drain_last: None,
             rekey_due_at: HashMap::new(),
+            corroboration_due_at: HashMap::new(),
             welcome_lifecycles: HashMap::new(),
             pending_connection_requests: HashMap::new(),
             welcome_presence_rescue: HashMap::new(),

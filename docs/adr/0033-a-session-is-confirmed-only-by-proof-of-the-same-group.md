@@ -33,6 +33,11 @@ split, stated under the peer's identity signature, and the greater side ends
 it with the existing re-key. An empty body is an older peer, held to the
 plaintext rules.
 
+Confirmation probes stop once a session confirms, so an ordinary decrypt
+failure on a 1:1 session sends one too, at most once per peer per re-key
+interval. That finds a split between two sides that both confirmed. The
+failure only asks; the tag in the answer decides.
+
 ## Consequences
 
 **Good.** The split cannot form through confirmation, and one that exists is

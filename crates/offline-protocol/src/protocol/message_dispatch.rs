@@ -1598,6 +1598,12 @@ impl OfflineProtocol {
                             session_established_at_ms,
                         ));
                     }
+                    if retriable && group_id.starts_with("session:") {
+                        // A pair holding two groups for its slot fails here on
+                        // every frame and never as a desync: ask whether that
+                        // is what this is.
+                        self.request_session_corroboration(&sender_owned);
+                    }
                     if retriable {
                         // Not enqueued: like a desync, this ciphertext is dead.
                         // OpenMLS consumed the ratchet generation on the
