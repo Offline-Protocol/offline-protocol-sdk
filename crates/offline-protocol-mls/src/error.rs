@@ -605,12 +605,65 @@ impl MlsError {
             }
         }
     }
+
+    /// The fixed name of the OpenMLS failure behind a [`MlsError::Decryption`]
+    /// raised by a 1:1 or group decrypt, such as `aead` or
+    /// `too_distant_in_the_past`. `None` for every other error.
+    ///
+    /// Read back only from a closed list of names, so an error text written
+    /// anywhere else never becomes a detail: the value is safe to put in a
+    /// reason that reaches telemetry.
+    pub fn decryption_detail(&self) -> Option<&'static str> {
+        let Self::Decryption(text) = self else {
+            return None;
+        };
+        let (head, _) = text.split_once(": ")?;
+        DECRYPTION_DETAILS.iter().copied().find(|d| *d == head)
+    }
 }
+
+/// Every value [`MlsError::decryption_detail`] can return.
+pub(crate) const DECRYPTION_DETAILS: &[&str] = &[
+    "aead",
+    "generation_out_of_bound",
+    "malformed_content",
+    "too_distant_in_the_past",
+    "secret_reuse",
+    "secret_tree",
+    "unable_to_decrypt",
+    "validation",
+    "other",
+];
 
 #[cfg(test)]
 mod privacy_safe_reason_tests {
     use super::*;
     use crate::storage::StorageError;
+
+    /// Only the fixed names come back: an error text that merely looks like
+    /// `name: rest` is not a detail unless the name is on the list.
+    #[test]
+    fn decryption_detail_reads_only_the_listed_names() {
+        for name in DECRYPTION_DETAILS {
+            let err = MlsError::Decryption(format!("{name}: anything"));
+            assert_eq!(err.decryption_detail(), Some(*name));
+        }
+        for text in [
+            "Failed to merge commit: x",
+            "Invalid protocol message: x",
+            "aead",
+            "",
+        ] {
+            assert_eq!(
+                MlsError::Decryption(text.to_string()).decryption_detail(),
+                None
+            );
+        }
+        assert_eq!(
+            MlsError::SessionDesync("aead: x".to_string()).decryption_detail(),
+            None
+        );
+    }
 
     /// A stand-in for an address the sink must not learn, and for wire-chosen
     /// text. Both are checked because the two leak routes are different: an

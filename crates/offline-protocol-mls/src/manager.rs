@@ -4161,6 +4161,36 @@ mod tests {
             matches!(err, MlsError::Decryption(_)),
             "a frame behind the tolerance must stay Decryption, got {err:?}"
         );
+        assert_eq!(err.decryption_detail(), Some("too_distant_in_the_past"));
+    }
+
+    /// A pair holding two different groups for one slot, each side the
+    /// creator of its own, agrees on the slot and on the epoch, so its frames
+    /// pass framing validation and fail as an ordinary decryption failure.
+    /// This is the split session: never a desync, so never re-keyed by the
+    /// epoch path, and named `aead` so a field log can tell it from a frame
+    /// that is merely too old.
+    #[test]
+    fn test_a_split_session_fails_as_aead_at_the_same_epoch() {
+        let alice = create_test_manager("alice");
+        let bob = create_test_manager("bob");
+        let alice_kp = alice.generate_key_package().unwrap();
+        let bob_kp = bob.generate_key_package().unwrap();
+        alice
+            .import_key_package(&addr("bob"), &bob_kp.key_package_data)
+            .unwrap();
+        bob.import_key_package(&addr("alice"), &alice_kp.key_package_data)
+            .unwrap();
+        alice.create_session(&addr("bob")).unwrap();
+        bob.create_session(&addr("alice")).unwrap();
+
+        let frame = alice.encrypt_for_user(&addr("bob"), b"hello").unwrap();
+        let err = bob.decrypt_from_user(&frame, &addr("alice")).unwrap_err();
+        assert!(
+            matches!(err, MlsError::Decryption(_)),
+            "a split session must fail as Decryption, got {err:?}"
+        );
+        assert_eq!(err.decryption_detail(), Some("aead"));
     }
 
     /// The seal count is what bounds a sender's re-seals, so it must move

@@ -1168,6 +1168,9 @@ impl OfflineProtocol {
                     sender: String,
                     group_id: String,
                     kind: DecryptionFailureKind,
+                    /// The OpenMLS failure's fixed name, when MLS gave one
+                    /// (`MlsError::decryption_detail`).
+                    detail: Option<&'static str>,
                     /// Whether the sender can still recover this message by
                     /// resending it. True for a genuine crypto/transport
                     /// failure while crypto recovery is enabled: the ACK is
@@ -1332,6 +1335,7 @@ impl OfflineProtocol {
                                         sender: sender.to_string(),
                                         group_id: encrypted.group_id.as_str().to_string(),
                                         kind,
+                                        detail: e.decryption_detail(),
                                         retriable: true,
                                     }
                                 }
@@ -1359,6 +1363,7 @@ impl OfflineProtocol {
                                         sender: sender.to_string(),
                                         group_id: encrypted.group_id.as_str().to_string(),
                                         kind,
+                                        detail: e.decryption_detail(),
                                         retriable: false,
                                     }
                                 }
@@ -1523,6 +1528,7 @@ impl OfflineProtocol {
                     sender: sender_owned,
                     group_id,
                     kind,
+                    detail,
                     retriable,
                 } => {
                     self.emit_mls_decryption_failed(
@@ -1554,12 +1560,16 @@ impl OfflineProtocol {
                         // so the sender re-seals the message under its current
                         // session, and a resend that still fails reports again. The sender's retry ladder settles it
                         // as an honest `MessageFailed` if it never decrypts.
+                        let cause = match detail {
+                            Some(detail) => format!("{kind:?}, {detail}"),
+                            None => format!("{kind:?}"),
+                        };
                         let reason = if retriable {
                             format!(
-                                "Failed to decrypt MLS message ({kind:?}); not delivery-ACKed, so the sender can re-seal it"
+                                "Failed to decrypt MLS message ({cause}); not delivery-ACKed, so the sender can re-seal it"
                             )
                         } else {
-                            format!("Failed to decrypt MLS message ({kind:?})")
+                            format!("Failed to decrypt MLS message ({cause})")
                         };
                         state.emit_event(Event::message_decryption_failed_for_frame(
                             message.id.clone(),

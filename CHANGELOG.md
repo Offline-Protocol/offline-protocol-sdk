@@ -49,6 +49,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 - **`account_storage_namespace` no longer needs the `file-store` feature.**
   The browser's store derives its folder with it, and a browser build has no
   POSIX files. It is still re-exported from `offline_protocol::file_store`.
+- **A decrypt failure names its cause.** The `reason` of
+  `message_decryption_failed` now carries the OpenMLS failure as a fixed name
+  beside the kind, for example `(InvalidCiphertext, aead)` or
+  `(InvalidCiphertext, too_distant_in_the_past)`. A pair holding two
+  different sessions for one slot fails as `aead` on every frame, where a
+  frame too far behind a healthy session does not, and the two were
+  indistinguishable before. Only names from a closed list are written, so
+  nothing the error renders reaches telemetry. `MlsError::decryption_detail`
+  reads it.
 
 ## [0.30.0] — 2026-10-21
 
