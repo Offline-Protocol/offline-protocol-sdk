@@ -1284,7 +1284,7 @@ wire-format change, Android untouched.
 `pending_message_max_lifetime_ms` on `RetryConfig`.
 
 ```bash
-./scripts/generate-bindings.sh   # after UDL changes — Swift, Kotlin, Python
+./scripts/generate-bindings.sh   # after UDL changes — Swift, Kotlin, Python, Ruby, Java
 
 cd bindings/react-native
 npm run build:uniffi:all         # or :ios / :android

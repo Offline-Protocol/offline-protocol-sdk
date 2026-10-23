@@ -11,6 +11,26 @@ This file holds unreleased changes and the current release. Older releases are
 archived by series under [docs/changelog/](docs/changelog/); see the
 [archive index](docs/changelog/README.md).
 
+## [Unreleased]
+
+### Added
+
+- **A Ruby binding.** `bindings/ruby` is one generated file,
+  `lib/offline_protocol.rb`, written by UniFFI's own Ruby generator from the
+  interface definition with the other bindings, so it needs no generator
+  beyond the `uniffi-bindgen` the rest already use. It calls the native
+  library through the `ffi` gem, with no glue of its own and not through the C
+  API. `OfflineProtocol::OfflineProtocol`, `MeshServices`, `DataStore`, every
+  record and enum, the objects a host implements (events, transports, storage
+  providers) and an exception per engine refusal. Unlike the generated Java,
+  the records keep the definition's field defaults. CI regenerates and diffs
+  the Ruby with the rest, and runs a minitest consumer check against the
+  library on Linux and macOS. A config names the library, because the
+  generator's default is a name no build produces. An engine that Ruby's
+  garbage collector frees while it holds a callback leaks the callback and
+  warns, which is a defect in the generator and is documented as such. The
+  contract is `docs/bridges/ruby.md`.
+
 ## [0.30.0] — 2026-10-21
 
 > **Update if you enable telemetry.** The telemetry uploader in 0.26.0 to

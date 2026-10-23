@@ -103,7 +103,7 @@ test(dors): add tests for transport switching
 2. **Tests**: Add comprehensive unit tests
 3. **UniFFI**: Expose via UDL if needed for mobile platforms
 4. **Regenerate**: After any UDL change run `./scripts/generate-bindings.sh` and commit
-   **all four** generated sets (Swift, Kotlin, Python, Java). They are one artifact set off one
+   **all five** generated sets (Swift, Kotlin, Python, Ruby, Java). They are one artifact set off one
    UDL and carry the FFI checksums of the library they were generated against — committing a
    subset leaves the rest describing a different ABI, which no build catches; the app fails
    at its first FFI call instead.
