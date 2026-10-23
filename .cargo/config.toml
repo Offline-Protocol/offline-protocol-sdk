@@ -32,3 +32,10 @@ rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384", "-C", "link-arg=-Wl,-z
 [target.aarch64-unknown-linux-gnu]
 linker = "aarch64-linux-gnu-gcc"
 
+
+# The browser. getrandom 0.3 selects its JavaScript backend only under this
+# cfg, and only the final build can set it (a library that sets it changes
+# nothing for its consumers). Without it the build fails, which is the safe
+# direction; the danger is a backend that compiles and returns no entropy.
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", 'getrandom_backend="wasm_js"']

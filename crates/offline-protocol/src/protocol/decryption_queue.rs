@@ -3,10 +3,10 @@
 //! and configurable overflow policies.
 
 use crate::config::{OverflowPolicy, PendingQueueConfig};
+use offline_protocol_core::time::{Duration as StdDuration, Instant};
 use offline_protocol_core::Message;
 use offline_protocol_transport::TransportType;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::{Duration as StdDuration, Instant};
 use tracing::{debug, warn};
 
 const TTL_SPIKE_WARN_THRESHOLD: usize = 25;

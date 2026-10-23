@@ -16,6 +16,7 @@ use crate::protocol::{
 };
 use crate::{Error, Event, Result};
 use chrono::{DateTime, Utc};
+use offline_protocol_core::time::{Duration as StdDuration, Instant};
 use offline_protocol_core::{
     ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority,
 };
@@ -23,7 +24,6 @@ use offline_protocol_mls::GroupRole;
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::{Duration as StdDuration, Instant};
 use tracing::{debug, error, info, warn};
 
 /// TTL for group message dedup entries (5 minutes).

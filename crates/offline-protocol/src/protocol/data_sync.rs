@@ -73,8 +73,8 @@
 //! until it has survived, so a blob that kills the process kills it once
 //! rather than every time the sender retries.
 
+use offline_protocol_core::time::{Duration, Instant};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use offline_protocol_data::{CatchUp, RemoteImport, VersionToken};

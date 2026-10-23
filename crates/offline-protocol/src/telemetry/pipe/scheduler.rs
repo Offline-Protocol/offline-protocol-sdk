@@ -10,9 +10,9 @@
 //! pipe's durable queue until it exits, and a pipe started over the same
 //! storage in the meantime waits for it; `store.rs` gives the reason.
 
+use offline_protocol_core::time::{Duration, Instant};
 use std::sync::{Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
 
 /// Why the worker woke. Bits, so several reasons coalesce into one cycle.
 pub(crate) mod wake {

@@ -36,8 +36,8 @@
 //! Eviction is O(1): entries leave in insertion order, which for a
 //! fixed retention window is also expiry order.
 
+use offline_protocol_core::time::{Duration, Instant};
 use std::collections::{HashMap, VecDeque};
-use std::time::{Duration, Instant};
 
 /// Maximum ids tracked before the oldest is dropped.
 pub const DEFAULT_RELAY_SEEN_CAPACITY: usize = 8192;

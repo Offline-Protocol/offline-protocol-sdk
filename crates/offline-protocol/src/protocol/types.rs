@@ -6,6 +6,7 @@ use crate::telemetry::{
 };
 use crate::Error;
 use chrono::{DateTime, Utc};
+use offline_protocol_core::time::Instant;
 use offline_protocol_core::{
     AppId, ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority,
     ReplyContext,
@@ -14,7 +15,6 @@ use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use tracing::warn;
 
 /// A carrier that speaks the gateway contract, and can therefore answer about
@@ -1290,7 +1290,7 @@ pub(crate) struct PendingConnectionRequest {
     pub(crate) recipient: String,
     /// When the request was sent — entries older than
     /// [`PENDING_CONNECTION_REQUEST_TTL`] are pruned on insert.
-    pub(crate) sent_at: std::time::Instant,
+    pub(crate) sent_at: offline_protocol_core::time::Instant,
 }
 
 /// How long an outbound connection request stays correlatable to a
@@ -1525,7 +1525,7 @@ pub(crate) struct CoalescedAcks {
     /// over. A frame from another carrier starts a new batch.
     pub(crate) transport: offline_protocol_transport::TransportType,
     /// When the first held ACK was owed.
-    pub(crate) since: std::time::Instant,
+    pub(crate) since: offline_protocol_core::time::Instant,
     /// The first answered frame's hop count, as a single ACK reports it.
     pub(crate) hop_count: String,
     /// The answered message ids, oldest first.

@@ -33,9 +33,9 @@
 //! message, so a lying or broken gateway costs latency and battery, never a
 //! lost message.
 
+use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_transport::TransportType;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
 
 /// How many recipients the table tracks before it evicts.
 ///

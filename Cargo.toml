@@ -13,6 +13,7 @@ members = [
     "crates/offline-protocol-telemetry-wire",
     "crates/offline-protocol",
     "crates/offline-protocol-uniffi",
+    "crates/offline-protocol-web",
     "crates/offline-protocol-bench",
 ]
 
@@ -79,6 +80,11 @@ uuid = { version = "1.6", features = ["v4", "serde"] }
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
+# The browser clock behind `offline_protocol_core::time`. On every other target
+# it re-exports `std::time` and pulls in nothing. Core declares it locally (it
+# is dual std/no_std, ADR 0020), so no crate inherits this entry; it is the
+# version `local_dep_versions_match_the_workspace_table` holds core's copy to.
+web-time = "1.1"
 
 # Async runtime
 tokio = "1.35"

@@ -26,12 +26,12 @@
 use super::{internal_prefixes, storage_keys, OfflineProtocol};
 use crate::events::SecurityWarningCode;
 use crate::{Error, Result};
+use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_core::{Message, MessagePriority};
 use offline_protocol_transport::constants::NOSTR_KEY_PACKAGE_SLOTS;
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 /// How often the publication slots are re-scanned. See

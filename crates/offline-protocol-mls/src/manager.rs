@@ -781,8 +781,8 @@ impl MlsManager {
         else {
             return false;
         };
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        offline_protocol_core::time::SystemTime::now()
+            .duration_since(offline_protocol_core::time::UNIX_EPOCH)
             .map(|now| now.as_secs() >= not_after)
             .unwrap_or(false)
     }
@@ -5173,8 +5173,8 @@ mod tests {
     }
 
     fn now_secs() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        offline_protocol_core::time::SystemTime::now()
+            .duration_since(offline_protocol_core::time::UNIX_EPOCH)
             .unwrap()
             .as_secs()
     }

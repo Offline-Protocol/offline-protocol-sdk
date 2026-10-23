@@ -18,10 +18,10 @@
 
 use crate::constants::RETICULUM_PENDING_CONFIRMATION_TIMEOUT_SECS;
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
+use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_core::{Message, MutexExt};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use crate::common::recalculate_delivery_ratios;
 

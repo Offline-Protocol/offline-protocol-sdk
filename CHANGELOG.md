@@ -15,6 +15,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **The engine runs in a browser (experimental).** `offline-protocol-web`
+  compiles the full engine, MLS included, for `wasm32-unknown-unknown`, and
+  `bindings/web` runs it in a dedicated Web Worker. Tabs of one origin find
+  each other over a `BroadcastChannel`, prove their identities with the
+  peer-stream preamble, and exchange end-to-end encrypted direct and group
+  messages with no server; see [docs/bridges/web.md](docs/bridges/web.md) and
+  [examples/web-two-tabs](examples/web-two-tabs). Storage is in memory for
+  now, so a reload is a new device.
+
 - **A Ruby binding.** `bindings/ruby` is one generated file,
   `lib/offline_protocol.rb`, written by UniFFI's own Ruby generator from the
   interface definition with the other bindings, so it needs no generator
@@ -32,6 +41,14 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   release builds it as the `offline_protocol` gem, which carries no native
   code, and publishes it to RubyGems with trusted publishing under the
   `RUBYGEMS_PUBLISH` switch. The contract is `docs/bridges/ruby.md`.
+
+### Changed
+
+- **The workspace reads the clock through `offline_protocol_core::time`.** It
+  is `std::time` on every target but the browser, where `std::time` compiles
+  and panics on first use; there it is `web-time`. Nothing changes on any
+  existing platform: the types are the standard library's own.
+  `clocks_are_read_through_core_time_only` refuses a direct import.
 
 ## [0.30.0] — 2026-10-21
 

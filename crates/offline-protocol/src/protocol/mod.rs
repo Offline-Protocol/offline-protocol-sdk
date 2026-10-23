@@ -57,6 +57,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use mesh_relay::{MeshRelayGovernor, RelayActivity};
+use offline_protocol_core::time::Instant;
 use offline_protocol_core::{LamportClock, Message, MessageId, MutexExt, Username};
 use offline_protocol_mls::{EncryptedMessage, MlsManager, MlsStorage, WelcomeMessage};
 use offline_protocol_reliability::{AckManager, Deduplicator, RetryQueue};
@@ -67,7 +68,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 

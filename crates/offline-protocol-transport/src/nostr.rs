@@ -29,12 +29,12 @@ use crate::{
     Error, Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType,
 };
 use base64::Engine;
+use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_core::{Address, Message, MutexExt, RwLockExt, Username};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
 
 use crate::common::recalculate_delivery_ratios;
 

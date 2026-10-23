@@ -7,7 +7,7 @@
 //! states can be read off the call sites: nothing here touches the suppression
 //! cache, settles an outbox entry, or requests an acknowledgement.
 
-use std::time::{Duration, Instant};
+use offline_protocol_core::time::{Duration, Instant};
 
 use chrono::Utc;
 use offline_protocol_core::{Message, MessageId, MessagePriority};

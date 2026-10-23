@@ -1838,30 +1838,40 @@ jobs:
             | jq -r '.packages[] | select(.name == "offline-protocol") | .version')"
 
           # All workspace crates version in lockstep, and offline-protocol-uniffi
-          # sits atop the internal dependency graph — it is what the topological
-          # publish below reaches last — so if it is already published at this
-          # version, every other crate is too and the whole run is a no-op. Say
+          # and offline-protocol-web sit atop the internal dependency graph; the
+          # topological publish below reaches them last, so if both are already
+          # published at this version, every other crate is too and the whole
+          # run is a no-op. Say
           # so as a warning annotation rather than letting a screenful of
           # "skipping" lines scroll by. Since `version-gate` pins the version
           # to the tag, this can only mean a re-run of a release that published,
           # which is exactly what the skip below exists to make safe — but it is
           # worth saying out loud, because the run reports success either way.
           #
-          # Probing the *last* crate rather than offline-protocol is what makes
+          # Probing the *last* crates rather than offline-protocol is what makes
           # the annotation true during the incident it is read in: a run that
           # died partway leaves the lower crates published and the top one not,
           # and a probe aimed lower would tell the operator resuming it that
           # nothing was left to do while the resume went on to publish.
           #
-          # This URL is the one place in the job that names a crate — the
-          # publish itself is topological and needs no list — so if a workspace
-          # member is ever added *above* offline-protocol-uniffi in the internal
-          # dependency graph, this has to move with it or the annotation goes
-          # quietly wrong. Nothing else breaks; it is a warning, not a gate.
-          url="https://index.crates.io/of/fl/offline-protocol-uniffi"
-          if curl -fsS --retry 3 "$url" 2>/dev/null \
-            | jq -e --arg v "$VERSION" 'select(.vers == $v)' >/dev/null; then
-            echo "::warning title=crates.io publish is a no-op::offline-protocol-uniffi@$VERSION already exists, and it is the last crate this job publishes, so every other crate does too. This run published nothing — expected when re-running a release that already reached crates.io."
+          # These URLs are the one place in the job that names a crate (the
+          # publish itself is topological and needs no list). Two crates sit at
+          # the top of the internal dependency graph, depended on by nothing:
+          # offline-protocol-uniffi and offline-protocol-web. Either can be the
+          # last one published, so the run is a no-op only when both exist. If
+          # a member is ever added above them, this list has to move with it or
+          # the annotation goes quietly wrong. Nothing else breaks; it is a
+          # warning, not a gate.
+          published=0
+          for crate in offline-protocol-uniffi offline-protocol-web; do
+            url="https://index.crates.io/of/fl/$crate"
+            if curl -fsS --retry 3 "$url" 2>/dev/null \
+              | jq -e --arg v "$VERSION" 'select(.vers == $v)' >/dev/null; then
+              published=$((published + 1))
+            fi
+          done
+          if [ "$published" -eq 2 ]; then
+            echo "::warning title=crates.io publish is a no-op::offline-protocol-uniffi@$VERSION and offline-protocol-web@$VERSION already exist, and they are the last crates this job publishes, so every other crate does too. This run published nothing — expected when re-running a release that already reached crates.io."
           fi
 
           cargo workspaces publish --publish-as-is --no-verify --yes

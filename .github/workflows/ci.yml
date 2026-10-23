@@ -346,7 +346,9 @@ jobs:
       # entropy backend would supply a symbol nothing calls and the module
       # would import browser glue. A green build there proves nothing about a
       # non-browser host, which is why this job builds the one target where
-      # the claim is true and no other.
+      # the claim is true and no other. The browser is claimed by the full
+      # engine instead, through `offline-protocol-web` in the `web-binding`
+      # job, where that same `js` backend is the right one.
       - name: Build the leaf node for WASI
         run: >
           cargo build --package offline-protocol-leaf
@@ -675,6 +677,46 @@ jobs:
         run: |
           bundle install
           bundle exec rake run
+
+  web-binding:
+    name: Web Binding
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-web-binding
+
+      # Node 24 because release.yml is pinned there. The test runner uses its
+      # built-in WebSocket and fetch, so there is nothing to `npm ci`.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      # Exactly the lockfile's wasm-bindgen: the CLI and the crate share an
+      # unversioned schema. `the_wasm_bindgen_pins_agree` holds this line, the
+      # crate's `=` pin, the build script and Cargo.lock to one version.
+      - name: Install wasm-bindgen
+        run: cargo install wasm-bindgen-cli --version 0.2.105 --locked
+
+      - name: Build the module
+        run: bash bindings/web/scripts/build.sh | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Two nodes in two workers of one page, over the origin's
+      # BroadcastChannel: identity preambles, an MLS session both ways, an
+      # encrypted direct message, a group message, and a loss on stop. The
+      # Rust tests cover the same paths on the host; only this run proves the
+      # module's clock, entropy and glue work in a browser.
+      - name: Run the browser tests
+        env:
+          CHROME: google-chrome
+          CHROME_FLAGS: --no-sandbox
+        run: bash bindings/web/scripts/test-browser.sh
 
   security:
     name: Dependency Audit
