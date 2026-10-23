@@ -43,6 +43,8 @@ hkdf = { workspace = true }
 sha2 = { workspace = true }
 rand_core = { workspace = true }
 zeroize = { workspace = true }
+# The signalling events' sealed content (W11).
+base64 = { workspace = true }
 # The OPFS handle calls take an options object (`{ at }`).
 js-sys = "0.3.82"
 
@@ -56,3 +58,21 @@ getrandom = { version = "0.2", features = ["js"] }
 getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 uuid = { workspace = true, features = ["js"] }
 openmls = { workspace = true, features = ["js"] }
+
+# The in-browser storage conformance test (tests/browser_conformance.rs). The
+# test crate pins the wasm-bindgen it was released with exactly, so these move
+# only with the `=` pin above; cargo refuses a pair that disagrees.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = "=0.3.55"
+wasm-bindgen-futures = "0.4.55"
+web-sys = { version = "0.3.82", features = [
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemGetFileOptions",
+    "FileSystemRemoveOptions",
+    "FileSystemSyncAccessHandle",
+    "StorageManager",
+    "WorkerGlobalScope",
+    "WorkerNavigator",
+] }

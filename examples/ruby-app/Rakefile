@@ -1,0 +1,25 @@
+# frozen_string_literal: true
+
+# The library is loaded by name, and the loader reads its search path when the
+# process starts, so `rake run` sets it and then starts Ruby: the same rule as
+# bindings/ruby/Rakefile (docs/bridges/ruby.md, R6). Default: the debug build of
+# this repository; OFFLINE_PROTOCOL_LIBRARY_DIR for another.
+library_dir = File.expand_path(
+  ENV.fetch("OFFLINE_PROTOCOL_LIBRARY_DIR", "../../target/debug"), __dir__
+)
+search_path = if Gem.win_platform?
+  library_dir = library_dir.tr("/", "\\")
+  %w[PATH RUBY_DLL_PATH]
+else
+  %w[LD_LIBRARY_PATH DYLD_LIBRARY_PATH]
+end
+
+desc "Run the two-device example"
+task :run do
+  search_path.each do |name|
+    ENV[name] = [library_dir, ENV[name]].compact.reject(&:empty?).join(File::PATH_SEPARATOR)
+  end
+  ruby File.expand_path("main.rb", __dir__)
+end
+
+task default: :run

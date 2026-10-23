@@ -38,6 +38,44 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   [W9](docs/bridges/web.md#w9-webrtc-lives-on-the-page-and-is-set-up-offline),
   [R27](docs/security/threat-model.md#r27-a-webrtc-connection-code-is-unauthenticated-and-names-local-addresses)
   and [examples/web-lobby](examples/web-lobby), a two-player Pong game.
+- **Ephemeral sends for state the next send replaces.**
+  `SendMessageOptions::ephemeral` and `GroupSendOptions::ephemeral` (and
+  `{ ephemeral: true }` on the browser's `sendMessage` and
+  `sendGroupMessage`) send once over a live direct link, ask for no
+  acknowledgement and keep nothing to retry, so a game's positions never
+  arrive late. With no link, or no confirmed session, the call fails at once.
+  A group member who keeps missing them gets a reliable message every 256
+  sends, so their ratchet never falls out of reach, and is handed nothing
+  newer until that message is acknowledged. On the browser's store an
+  ephemeral group message costs the sender two flushes against four. Not yet
+  on the native bindings. See
+  [ADR 0032](docs/adr/0032-ephemeral-sends-go-once-over-a-live-link.md) and
+  [W10](docs/bridges/web.md#w10-an-ephemeral-send-goes-once-over-a-live-link).
+- **Browsers can meet by room code through Nostr relays.** `NostrSignaller`
+  carries the two WebRTC codes through relays the application names, sealed
+  under a key derived from a room code and signed by single-use keys. See
+  [W11](docs/bridges/web.md#w11-signalling-can-ride-a-nostr-room) and
+  [R28](docs/security/threat-model.md#r28-a-signalling-room-code-admits-whoever-holds-it).
+- **`WebRtcCarrier` takes the application's STUN and TURN servers**
+  (`iceServers`), for links between networks. The default is still none.
+
+- **A Ruby binding.** `bindings/ruby` is one generated file,
+  `lib/offline_protocol.rb`, written by UniFFI's own Ruby generator from the
+  interface definition with the other bindings, so it needs no generator
+  beyond the `uniffi-bindgen` the rest already use. It calls the native
+  library through the `ffi` gem, with no glue of its own and not through the C
+  API. `OfflineProtocol::OfflineProtocol`, `MeshServices`, `DataStore`, every
+  record and enum, the objects a host implements (events, transports, storage
+  providers) and an exception per engine refusal. Unlike the generated Java,
+  the records keep the definition's field defaults. CI regenerates and diffs
+  the Ruby with the rest, and runs a minitest consumer check against the
+  library on Linux, macOS and Windows. A config names the library, because the
+  generator's default is a name no build produces. An engine that Ruby's
+  garbage collector frees while it holds a callback leaks the callback and
+  warns, which is a defect in the generator and is documented as such. The
+  release builds it as the `offline_protocol` gem, which carries no native
+  code, and publishes it to RubyGems with trusted publishing under the
+  `RUBYGEMS_PUBLISH` switch. The contract is `docs/bridges/ruby.md`.
 
 ### Changed
 
@@ -58,6 +96,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   indistinguishable before. Only names from a closed list are written, so
   nothing the error renders reaches telemetry. `MlsError::decryption_detail`
   reads it.
+- **Telemetry counts only acknowledged sends as sent.** An ephemeral message
+  is never delivered or failed, so counting it would lower the delivery ratio
+  by every game update.
+- **The browser tests run in Chromium, Firefox and WebKit.** Playwright drives
+  every page in `bindings/web/test` in all three, and both storage
+  conformance suites now run against the log store over real OPFS files in a
+  worker of Chrome and Firefox, with a reopen through compaction. On a target
+  with no threads, the MLS suite's concurrent-writers check runs its writers
+  in turns instead of failing to start them. A two-device checklist for the
+  lobby is in [docs/bridges/web-devices.md](docs/bridges/web-devices.md).
 
 ### Fixed
 
@@ -95,6 +143,34 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   than the frame that built the session is refused, and the same rule now
   refuses a late `session_reset`. A Welcome given up in
   the both-create tiebreak is discarded, so it is never sent again.
+- **A durable browser node starts in Firefox.** `OfflineNode.start` awaited
+  `navigator.storage.persist()`, which Firefox answers by asking the user, so
+  the start waited for the prompt (and never finished in a headless
+  browser). The request is now made without waiting for its answer.
+
+- **A browser log store whose compaction fails no longer retries it on every
+  write.** The next attempt waits for another mebibyte of log.
+- **A corrupted length prefix in the browser log store is refused, not cut.**
+  It read as a torn tail, so acknowledged records after it were truncated.
+  The log is now refused untouched whenever an intact record follows the
+  damage anywhere. Replay also reads the log in one call instead of two per
+  record.
+- **A slow WebRTC peer no longer grows the page's memory without bound.** A
+  connection with more than 8 MiB waiting behind the channel is closed.
+- **A browser node's calls after `stop()` reject** instead of waiting for
+  ever, and the tab carrier no longer throws on a frame queued as it closed.
+- **One unreachable Nostr relay no longer stops a signalling room from
+  opening on the others.** A refused socket was counted as two failed
+  relays.
+- **A signalling host no longer forgets a joiner whose offer is still
+  fresh.** It held each session for two minutes from the first offer, while
+  a republished offer, or one from a joiner whose clock runs ahead, stays
+  acceptable for longer, so a relay's late repeat opened a second
+  connection. The worker now reports when each offer stops being fresh, and
+  the host holds the session until the newest one does.
+- **A signalling room that fails to open closes its relay sockets.** A relay
+  that took the connection and never confirmed the subscription left its
+  socket open after `host()` rejected.
 
 ## [0.30.0] — 2026-10-21
 

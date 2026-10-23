@@ -1186,6 +1186,16 @@ pub struct SendMessageOptions {
     /// Held to the same rules as the configured id; an invalid value fails
     /// the call with `InvalidArgument` before anything is queued.
     pub app_id: Option<String>,
+    /// Send once over the live direct link to the recipient, never
+    /// acknowledged or retried (ADR 0032): for state the next send replaces,
+    /// such as a game's positions. Fails with `PeerNotReachable` when there
+    /// is no such link and with `SessionNotReady` when encryption is on and
+    /// no confirmed session exists; nothing is queued either way. The
+    /// message produces `MessageSent` and never `MessageDelivered` or
+    /// `MessageFailed`. Plain content only: reply threading, rich extras, a
+    /// non-Text content type or `via_transport` is refused with
+    /// `InvalidArgument`.
+    pub ephemeral: bool,
 }
 
 /// Options for `OfflineProtocol::send_media_with`: the chunk-0 media

@@ -14,4 +14,6 @@ python3 -m http.server 8000 --bind 0.0.0.0                   # from the reposito
 
 The identity survives a reload: the same profile is the same `off1…` address, and still a member of the group.
 
+Before a release, [docs/bridges/web-devices.md](../../docs/bridges/web-devices.md) is the checklist for running this page on a laptop and a phone.
+
 The stats line shows what the game costs, including the durable store's flushes per second. Every state update is an ordinary acknowledged, retried MLS send, and each one writes the sender's ratchet state and the delivery state before it returns. That is the cost an unacknowledged send for game state would remove. See [docs/bridges/web.md](../../docs/bridges/web.md).

@@ -1,8 +1,8 @@
 # Bridge contracts
 
-The Rust core is exposed to Swift, Kotlin, Python, TypeScript, C, Java and the
-browser. This directory states what each binding owes the core and what the
-core owes each binding.
+The Rust core is exposed to Swift, Kotlin, Python, TypeScript, C, Java, Ruby
+and the browser. This directory states what each binding owes the core and
+what the core owes each binding.
 
 | Document | Scope |
 |----------|-------|
@@ -15,6 +15,7 @@ core owes each binding.
 | [Local API](local-api.md) | A server fronting one engine for several local clients over a socket, and the reference server |
 | [C](c.md) | The C API in `bindings/c`: the local API called in process |
 | [Java](java.md) | The generated Java binding in `bindings/java` |
+| [Ruby](ruby.md) | The generated Ruby binding in `bindings/ruby` |
 | [Web](web.md) | The engine in a browser worker: `crates/offline-protocol-web` and `bindings/web` |
 
 Integration **guides** live elsewhere: [iOS](../ios-integration.md),
@@ -34,9 +35,9 @@ green `tsc` say nothing about any of them.
 
 ## C1. Regenerate every binding together
 
-The Swift, Kotlin, Python and Java bindings are **one artifact set**, not four
+The Swift, Kotlin, Python, Ruby and Java bindings are **one artifact set**, not five
 independent ones. They come from one interface definition, through
-`uniffi-bindgen` for the first three and `uniffi-bindgen-java` for the last, and
+`uniffi-bindgen` for the first four and `uniffi-bindgen-java` for the last, and
 carry the FFI checksums of the library they were generated against.
 
 ```bash
@@ -359,7 +360,7 @@ and they are fast enough that there is no excuse:
 | Kotlin | Gradle unit tests, Robolectric where a platform type is needed | tens of seconds |
 | Python | pytest against the built desktop library | seconds |
 | TypeScript | `tsc` plus the JS harness | seconds |
-| Web | `bindings/web/scripts/test-browser.sh` in headless Chrome | seconds |
+| Web | `bindings/web/scripts/test-browser.sh` in Chromium, Firefox and WebKit, `test-conformance.sh` in Chrome and Firefox | minutes |
 
 **After a rename, grep for the old identifier across every binding.** The
 compiler will not find it in the three languages that do not share a type system

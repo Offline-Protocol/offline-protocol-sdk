@@ -622,6 +622,63 @@ jobs:
         working-directory: examples/java-app
         run: gradle --no-daemon --stacktrace run
 
+  # The Ruby binding (docs/bridges/ruby.md). Its source is generated from the
+  # UDL and its drift is gated with the other bindings (python-bindings). This
+  # is the other side: the generated Ruby, run against the library built from
+  # the same definition. The Ruby generator compares no FFI checksums at load
+  # (docs/bridges/ruby.md, R1), so this run is what proves the two agree: it
+  # fails if they were produced from different definitions, or if the config
+  # names the wrong library.
+  ruby-binding:
+    name: Ruby Binding (${{ matrix.os }}, Ruby ${{ matrix.ruby }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        ruby: ["4.0"]
+        # The gemspec's required_ruby_version, which only this run proves.
+        include:
+          - os: ubuntu-latest
+            ruby: "3.3"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-ruby-binding
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+          working-directory: bindings/ruby
+
+      - name: Build the library
+        run: cargo build --locked --package offline-protocol-uniffi
+
+      # The Rakefile puts target/debug on the loader's search path and runs the
+      # consumer check against the library built above.
+      - name: Test the Ruby binding
+        working-directory: bindings/ruby
+        run: bundle exec rake test
+
+      # The gem the release publishes, so a gemspec error shows on the pull
+      # request and not on a tag.
+      - name: Build the gem
+        working-directory: bindings/ruby
+        run: bundle exec rake build
+
+      # The example app against the same library, so it cannot rot: two
+      # engines pair, encrypt and exchange messages in one Ruby process.
+      - name: Run the Ruby example
+        working-directory: examples/ruby-app
+        run: |
+          bundle install
+          bundle exec rake run
+
   web-binding:
     name: Web Binding
     runs-on: ubuntu-latest
@@ -636,33 +693,53 @@ jobs:
         with:
           shared-key: ci-web-binding
 
-      # Node 24 because release.yml is pinned there. The test runner uses its
-      # built-in WebSocket and fetch, so there is nothing to `npm ci`.
+      # Node 24 because release.yml is pinned there.
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
 
       # Exactly the lockfile's wasm-bindgen: the CLI and the crate share an
       # unversioned schema. `the_wasm_bindgen_pins_agree` holds this line, the
-      # crate's `=` pin, the build script and Cargo.lock to one version.
+      # crate's `=` pin, the build script and Cargo.lock to one version. The
+      # same install carries wasm-bindgen-test-runner, which the conformance
+      # step uses.
       - name: Install wasm-bindgen
         run: cargo install wasm-bindgen-cli --version 0.2.105 --locked
 
       - name: Build the module
         run: bash bindings/web/scripts/build.sh | tee -a "$GITHUB_STEP_SUMMARY"
 
-      # Every page in bindings/web/test: two nodes over the origin's
-      # BroadcastChannel (preambles, an MLS session both ways, a direct and a
-      # group message, a loss on stop); a refused link's close reaching the
-      # other end; a durable node killed and restarted as the same member;
-      # and two nodes linked only by WebRTC, at game rate. The Rust tests
-      # cover the engine paths on the host; only this run proves the module's
-      # clock, entropy, OPFS store and glue work in a browser.
+      # Playwright and the three engines it pins: Chromium, Firefox and
+      # WebKit (Safari's engine, not Safari).
+      - name: Install Playwright and its browsers
+        working-directory: bindings/web
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium firefox webkit
+
+      # Every page in bindings/web/test, in each of the three engines: two
+      # nodes over the origin's BroadcastChannel (preambles, an MLS session
+      # both ways, a direct and a group message, a loss on stop); a refused
+      # link's close reaching the other end; a durable node killed and
+      # restarted as the same member; two nodes linked only by WebRTC, at game
+      # rate acknowledged and ephemeral; and two nodes meeting by room code
+      # through a local Nostr relay the script starts. The Rust tests cover
+      # the engine paths on the host; only this run proves the module's clock,
+      # entropy, OPFS store and glue work in a browser, and only a run in more
+      # than one engine catches what one engine forgives (Firefox's
+      # persist() waits for the user, so awaiting it hung every durable start).
       - name: Run the browser tests
-        env:
-          CHROME: google-chrome
-          CHROME_FLAGS: --no-sandbox
         run: bash bindings/web/scripts/test-browser.sh
+
+      # Both storage conformance suites, and a reopen through compaction,
+      # against the log store over real OPFS files in a dedicated worker of
+      # Chrome and Firefox (C11). The runner image carries both drivers,
+      # matched to its browsers.
+      - name: Run the storage conformance suites in browsers
+        run: |
+          CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver" \
+          GECKODRIVER="$GECKOWEBDRIVER/geckodriver" \
+            bash bindings/web/scripts/test-conformance.sh
 
   security:
     name: Dependency Audit
@@ -743,6 +820,7 @@ jobs:
           rm -rf bindings/react-native/ios/Generated \
                  bindings/react-native/android/src/main/java/uniffi
           rm -f bindings/python/offline_protocol_sdk/offline_protocol.py
+          rm -f bindings/ruby/lib/offline_protocol.rb
           rm -rf bindings/java/src/main/java/com/offlineprotocol/sdk
 
       # Regenerate before building anything. Bindgen reads the UDL and nothing
@@ -752,7 +830,7 @@ jobs:
       - name: Regenerate all UniFFI bindings
         run: bash scripts/generate-bindings.sh
 
-      # One regeneration, one gate: the four sets are one artifact set off one
+      # One regeneration, one gate: the five sets are one artifact set off one
       # UDL, so checking them separately would let a half-updated commit pass
       # the half of the gate it happened to satisfy.
       - name: Fail on stale bindings
@@ -761,9 +839,10 @@ jobs:
             bindings/python/offline_protocol_sdk/offline_protocol.py \
             bindings/react-native/ios/Generated/ \
             bindings/react-native/android/src/main/java/uniffi/ \
+            bindings/ruby/lib/offline_protocol.rb \
             bindings/java/src/main/java/com/offlineprotocol/sdk/; then
             echo "::error::Committed UniFFI bindings are out of date."
-            echo "Run: bash scripts/generate-bindings.sh and commit all four."
+            echo "Run: bash scripts/generate-bindings.sh and commit all five."
             exit 1
           fi
 

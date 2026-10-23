@@ -2297,6 +2297,7 @@ impl OfflineProtocol {
                     self.group_mesh
                         .roster_invisible_generations
                         .remove(&payload.group_id);
+                    self.group_mesh.ephemeral_rungs.remove(&payload.group_id);
                     let was_synced = self.group_mesh.relay_synced.remove(&payload.group_id);
                     // The outstanding-registration correlation goes too, as
                     // in every other membership-teardown path: a pending

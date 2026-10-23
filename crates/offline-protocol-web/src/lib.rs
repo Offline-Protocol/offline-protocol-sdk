@@ -9,6 +9,9 @@
 //! log over origin-private files ([`opfs`]), so an identity outlives the
 //! worker. [`memory_store`] remains for a node that should not.
 //!
+//! [`signal`] lets two pages that share a room code exchange their WebRTC
+//! connection codes through Nostr relays instead of by hand.
+//!
 //! The crate also builds on every host, so the workspace's lint, docs and test
 //! runs cover it: everything below the bindings is plain Rust, and the tests
 //! in [`node`] run two engines against each other without a browser.
@@ -21,6 +24,7 @@ pub mod log_store;
 pub mod memory_store;
 pub mod node;
 pub mod opfs;
+pub mod signal;
 
 #[cfg(test)]
 mod tests;

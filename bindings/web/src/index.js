@@ -1,6 +1,7 @@
 // The page's handle on a node running in its own worker.
 
 export { WebRtcCarrier } from "./webrtc.js";
+export { NostrSignaller } from "./nostr-signal.js";
 
 export class OfflineNode extends EventTarget {
   #worker;
@@ -52,8 +53,11 @@ export class OfflineNode extends EventTarget {
     if (!appId) throw new Error("appId is required");
     if (storage === "durable") {
       // Best effort: without it the browser may evict the origin's files
-      // under storage pressure, identity included.
-      await navigator.storage?.persist?.().catch(() => false);
+      // under storage pressure, identity included. Never awaited: Firefox
+      // answers by asking the user, and the promise stays pending until they
+      // do, so a node that waited for it would not start while the prompt
+      // is ignored (or ever, in a headless browser).
+      navigator.storage?.persist?.().catch(() => false);
     }
     const url = workerUrl ?? new URL("./worker.js", import.meta.url);
     const instance = crypto.randomUUID();
@@ -71,8 +75,11 @@ export class OfflineNode extends EventTarget {
     return node;
   }
 
-  sendMessage(to, content) {
-    return this.#call("sendMessage", { to, content });
+  /// `ephemeral: true` sends once over the live link and never retries:
+  /// for state the next send replaces, such as a game's positions. It fails
+  /// at once with no link or no session (docs/bridges/web.md, W10).
+  sendMessage(to, content, { ephemeral = false } = {}) {
+    return this.#call("sendMessage", { to, content, ephemeral });
   }
 
   createGroup(name) {
@@ -83,8 +90,30 @@ export class OfflineNode extends EventTarget {
     return this.#call("inviteToGroup", { groupId, member });
   }
 
-  sendGroupMessage(groupId, content) {
-    return this.#call("sendGroupMessage", { groupId, content });
+  /// `ephemeral` as for sendMessage, to every member holding a live link.
+  sendGroupMessage(groupId, content, { ephemeral = false } = {}) {
+    return this.#call("sendGroupMessage", { groupId, content, ephemeral });
+  }
+
+  /// A fresh room code for NostrSignaller: eighty bits a person can read out.
+  newRoom() {
+    return this.#call("signalNewRoom");
+  }
+
+  /// NostrSignaller's half in the worker (W11): the relay REQ text for a
+  /// room, a sealed and signed EVENT text, and the signal a relay message
+  /// carries (`{ role, session, code, freshUntilMs }`, where `freshUntilMs` is
+  /// when the offer stops being fresh, or null for anything else).
+  signalSubscription(room, subscriptionId) {
+    return this.#call("signalSubscription", { room, subscriptionId });
+  }
+
+  signalEvent(room, role, session, code) {
+    return this.#call("signalEvent", { room, role, session, code });
+  }
+
+  signalOpen(room, message) {
+    return this.#call("signalOpen", { room, message });
   }
 
   /// What the durable store has cost since the node started (flushes, log
@@ -117,12 +146,19 @@ export class OfflineNode extends EventTarget {
     return this.#call("closeLink", { link }).catch(() => {});
   }
 
+  /// Stops the engine and ends its worker. Every later call rejects: the
+  /// worker is gone, so a call that waited for its reply would wait for ever.
+  /// No `fatal` event, as nothing failed.
   async stop() {
     removeEventListener("pagehide", this.#onPageHide);
     removeEventListener("pageshow", this.#onPageShow);
-    await this.#call("stop");
-    this.#worker.terminate();
-    this.#closeAllCarriers();
+    try {
+      await this.#call("stop");
+    } finally {
+      this.#failed ??= new Error("the node was stopped");
+      this.#worker.terminate();
+      this.#closeAllCarriers();
+    }
   }
 
   /// Ends the worker at once, without stopping the engine: what a crash or a

@@ -177,8 +177,8 @@ case "$TARGET" in
         ;;
 esac
 
-# Generate the bindings. This regenerates Swift and Kotlin alongside Python:
-# the four are one artifact set off one UDL, and the whole point of the shared
+# Generate the bindings. This regenerates the other four alongside Python:
+# the five are one artifact set off one UDL, and the whole point of the shared
 # script is that no entry point can refresh a subset. See its header.
 echo ""
 bash "$PROJECT_ROOT/scripts/generate-bindings.sh"

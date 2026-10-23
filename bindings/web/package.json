@@ -14,5 +14,8 @@
   "scripts": {
     "build": "bash scripts/build.sh",
     "test": "bash scripts/test-browser.sh"
+  },
+  "devDependencies": {
+    "playwright": "1.64.1"
   }
 }

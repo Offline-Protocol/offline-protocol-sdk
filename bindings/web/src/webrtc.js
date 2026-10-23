@@ -12,9 +12,11 @@
 //   carrier never interprets a byte.
 // - Signalling needs no network. Each side's description waits for ICE
 //   gathering to finish, so one code carries every candidate, and the two
-//   codes cross by whatever the people have: a QR code, a paste, a chat.
-//   No ICE server is configured, so the connection is made on the local
-//   network or not at all.
+//   codes cross by whatever the people have: a QR code, a paste, a chat, or
+//   a NostrSignaller room. With no ICE server (the default) the connection
+//   is made on the local network or not at all; the application may name its
+//   own STUN and TURN servers, and every candidate they yield goes in the
+//   code.
 // - A carrier address proves nothing. The connection only carries bytes; the
 //   engine's preamble proves who is on the other end.
 
@@ -24,6 +26,10 @@ const CHUNK_BYTES = 16 * 1024;
 const GATHER_MS = 5000;
 // Above this many bytes buffered on the channel, sends wait for it to drain.
 const HIGH_WATER_BYTES = 1024 * 1024;
+// Above this many bytes waiting behind the channel, the peer is not keeping
+// up and the connection is closed. The engine keeps every acknowledged
+// message for a retry, so closing loses only what was never promised.
+const MAX_BACKLOG_BYTES = 8 * 1024 * 1024;
 
 async function compress(text) {
   const stream = new Blob([text]).stream().pipeThrough(new CompressionStream("deflate-raw"));
@@ -84,16 +90,18 @@ class Connection {
   #link = null;
   #inbound = []; // bytes that arrived before the link id
   #outbound = Promise.resolve();
+  // Bytes handed to #send and not yet on the channel.
+  #backlog = 0;
   // Sends waiting for the channel to drain; close() releases them, as a
   // closed channel never fires bufferedamountlow.
   #draining = new Set();
   #closed = false;
   #onClose;
 
-  constructor(node, onClose) {
+  constructor(node, iceServers, onClose) {
     this.#node = node;
     this.#onClose = onClose;
-    this.#pc = new RTCPeerConnection({ iceServers: [] });
+    this.#pc = new RTCPeerConnection({ iceServers });
     this.#channel = this.#pc.createDataChannel("offline-protocol", {
       negotiated: true,
       id: CHANNEL_ID,
@@ -159,23 +167,34 @@ class Connection {
   }
 
   #send(bytes) {
+    if (this.#closed) return;
+    this.#backlog += bytes.length;
+    if (this.#backlog > MAX_BACKLOG_BYTES) return this.close();
     // Chained, so a wait for the buffer to drain never reorders bytes.
     this.#outbound = this.#outbound.then(async () => {
-      for (let at = 0; at < bytes.length && !this.#closed; at += CHUNK_BYTES) {
-        if (this.#channel.bufferedAmount > HIGH_WATER_BYTES) {
-          await new Promise((resolve) => {
-            const done = () => {
-              this.#draining.delete(done);
-              resolve();
-            };
-            this.#draining.add(done);
-            this.#channel.addEventListener("bufferedamountlow", done, { once: true });
-          });
-        }
-        if (this.#channel.readyState !== "open") return;
-        this.#channel.send(bytes.subarray(at, at + CHUNK_BYTES));
+      try {
+        await this.#transmit(bytes);
+      } finally {
+        this.#backlog -= bytes.length;
       }
     });
+  }
+
+  async #transmit(bytes) {
+    for (let at = 0; at < bytes.length && !this.#closed; at += CHUNK_BYTES) {
+      if (this.#channel.bufferedAmount > HIGH_WATER_BYTES) {
+        await new Promise((resolve) => {
+          const done = () => {
+            this.#draining.delete(done);
+            resolve();
+          };
+          this.#draining.add(done);
+          this.#channel.addEventListener("bufferedamountlow", done, { once: true });
+        });
+      }
+      if (this.#channel.readyState !== "open") return;
+      this.#channel.send(bytes.subarray(at, at + CHUNK_BYTES));
+    }
   }
 
   /// Closes the connection. The other end sees its channel close, which is
@@ -196,16 +215,22 @@ class Connection {
 /// reads the offer and shows its answer.
 export class WebRtcCarrier {
   #node;
+  #iceServers;
   #connections = new Set();
 
-  constructor(node) {
+  /// `iceServers` is RTCPeerConnection's list, for networks where devices
+  /// cannot reach each other directly: a STUN server for addresses behind a
+  /// NAT, a TURN server to relay. The default is none, so links stay on the
+  /// local network and no server learns of them (W9).
+  constructor(node, { iceServers = [] } = {}) {
     this.#node = node;
+    this.#iceServers = iceServers;
   }
 
   /// Starts a connection. Resolves to `{ code, accept(answerCode), close() }`:
   /// show `code` to the other device, then pass its answer to `accept`.
   async offer() {
-    const connection = this.#track(new Connection(this.#node, (c) => this.#connections.delete(c)));
+    const connection = this.#track(this.#connection());
     try {
       const code = await connection.offer();
       return {
@@ -222,7 +247,7 @@ export class WebRtcCarrier {
   /// Answers another device's offer. Resolves to `{ code, close() }`: show
   /// `code` to the device that offered.
   async answer(offerCode) {
-    const connection = this.#track(new Connection(this.#node, (c) => this.#connections.delete(c)));
+    const connection = this.#track(this.#connection());
     try {
       const code = await connection.answer(offerCode);
       return { code, close: () => connection.close() };
@@ -235,6 +260,10 @@ export class WebRtcCarrier {
   /// Closes every connection.
   close() {
     for (const connection of [...this.#connections]) connection.close();
+  }
+
+  #connection() {
+    return new Connection(this.#node, this.#iceServers, (c) => this.#connections.delete(c));
   }
 
   #track(connection) {

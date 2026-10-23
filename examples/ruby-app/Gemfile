@@ -1,0 +1,7 @@
+source "https://rubygems.org"
+
+# The binding in this checkout, so the example runs against the source it
+# documents. In your own project, depend on the published gem instead:
+#   gem "offline_protocol", "~> <version>"
+gem "offline_protocol", path: "../../bindings/ruby"
+gem "rake", "~> 13.0"
