@@ -1298,10 +1298,10 @@ impl MeshRelayGovernor {
 
         // Strongest links first: a fan-out slot spent on a barely-connected
         // neighbor is one the frame probably does not survive, and there are
-        // only a few slots. Quality is live: on Bluetooth LE it follows the
-        // scan's signal readings, smoothed by the transport so that a
-        // reading's noise does not reorder links and only a lasting change in
-        // signal does.
+        // only a few slots. On Bluetooth LE quality is the reading at
+        // discovery, or, while the app takes live readings (`PeerRssi`), the
+        // scan's readings smoothed by the transport, so that a reading's noise
+        // does not reorder links and only a lasting change in signal does.
         //
         // Ties break on a hash of (id, peer, self), which does two things.
         // Within a group of equally good links it spreads different messages

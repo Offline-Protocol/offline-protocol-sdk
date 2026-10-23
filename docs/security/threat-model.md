@@ -1257,22 +1257,36 @@ An Android device whose application sets `transports.ble.advertiseNodeHash`
 address, as service data under the mesh UUID in its scan response. It is
 how a scanner attributes a signal reading to a linked peer when the link
 was opened from the other side, which on iOS runs under a CoreBluetooth
-identifier the advertisement does not share. The digest is stable, so any
-device in radio range that sends a scan request (A1) can follow the phone
-across Bluetooth address rotation, and anyone who knows the address can
-recognise it. Signal strength itself carries no proof of who transmitted
+identifier the advertisement does not share. The digest is stable across
+restarts and unsalted, so any device in radio range that sends a scan
+request (A1) can follow the phone across Bluetooth address rotation, and
+anyone who knows the address can recognise it: every contact and group
+member, and every relay operator that has carried its traffic. Signal strength itself carries no proof of who transmitted
 it: a device that advertises another peer's digest, or answers on a link's
 address, has its readings attributed to that peer, which moves the peer's
-`peer_rssi` and the link quality the relay ranks neighbours by.
+`peer_rssi` and, while that application takes live readings, the link
+quality the relay ranks neighbours by.
 
 **Why it stands:** the address is already served to anyone who connects,
 in the `DEVICE_ID` characteristic, and is stable and linkable like the app
 tag beside it ([R15](#r15-the-bluetooth-le-app-tag-is-unsigned-and-readable)).
 The digest makes that passive, which is the cost, and why an application
-opts in: one that builds no proximity feature never pays it. A rotating
-digest would close tracking by strangers, but it means re-advertising on a
-schedule every scanner shares, and the SDK's advertising duty cycle is
-tuned for discovery.
+opts in: one that builds no proximity feature never pays it. Two
+alternatives were weighed. A digest rotating on a schedule would close
+tracking by strangers but not recognition by anyone who knows the address,
+and means re-advertising on a schedule every scanner shares, against an
+advertising duty cycle tuned for discovery. A random token per transport
+start, handed to each linked peer over the link, would close recognition
+and tracking across restarts, leaving only tracking within one run. It is
+the better design and the upgrade path, and it was deferred, not rejected,
+because it changes what every bridge says on a link: the only signed field
+the link carries today is the identity assertion's `signed_data`, whose
+content the bridges define and the verifier does not return, so a token
+needs a new field there (and in the browser engine and the leaf, which
+share the codec) or a new control frame. A token would be advertised at a
+length other than eight bytes, which current scanners ignore rather than
+misread
+([BLE framing](../spec/ble-framing.md#the-node-hash-in-the-scan-response)).
 
 **What bounds it:** a reading is attributed only to a peer that already
 proved its address on a link, so a forged digest never introduces anyone.

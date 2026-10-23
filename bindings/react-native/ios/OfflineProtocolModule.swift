@@ -1195,7 +1195,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     }
 
     /// `peer_rssi` events, which the TypeScript layer turns on while it has a
-    /// listener for them. Off by default; readings update link quality anyway.
+    /// listener for them. Off by default, and off the core ignores readings.
     @objc func setPeerRssiEvents(_ enabled: Bool,
                                  resolver: @escaping RCTPromiseResolveBlock,
                                  rejecter: @escaping RCTPromiseRejectBlock) {

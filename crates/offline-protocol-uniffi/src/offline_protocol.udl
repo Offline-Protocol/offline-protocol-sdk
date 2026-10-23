@@ -1276,8 +1276,8 @@ interface OfflineProtocol {
     // never introduces one and is outside the identity contract above.
     void ble_peer_rssi(string? peer_id, sequence<u8>? node_hash, i16 rssi);
 
-    // `PeerRssi` events, off by default; readings update link quality
-    // either way.
+    // Live readings, off by default: `PeerRssi` events and the link
+    // quality they keep current. Off, `ble_peer_rssi` returns at once.
     void set_peer_rssi_events(boolean enabled);
 
     // What this device advertises as service data under the mesh service

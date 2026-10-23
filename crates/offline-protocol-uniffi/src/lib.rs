@@ -4232,14 +4232,19 @@ impl OfflineProtocol {
     /// Cheap and safe to call for every scan result, unlike
     /// [`Self::ble_peer_discovered`], which starts key exchange and flushes
     /// the outbox. The platform passes what it has: the peer its link to the
-    /// advertiser names, and the node hash the advertisement carried. The
-    /// reading updates that peer's link quality, and reaches the app as
-    /// `PeerRssi` when [`Self::set_peer_rssi_events`] is on, at most four
-    /// a second per peer. Neither value can name a peer that
-    /// has not proved its address on a link; such a reading is dropped.
+    /// advertiser names, and the node hash the advertisement carried. While
+    /// [`Self::set_peer_rssi_events`] is on, the reading updates that peer's
+    /// link quality and reaches the app as `PeerRssi`, at most four a second
+    /// per peer. Neither value can name a peer that has not proved its
+    /// address on a link; such a reading is dropped.
+    ///
+    /// While it is off the reading is dropped at once, under the BLE state
+    /// lock alone: an app that never asked for readings keeps the relay
+    /// ranking it had before they existed, and its scan path never waits on
+    /// the protocol lock.
     pub fn ble_peer_rssi(&self, peer_id: Option<String>, node_hash: Option<Vec<u8>>, rssi: i16) {
         // CoreBluetooth's "no reading", not a signal of +127 dBm.
-        if rssi == 127 {
+        if rssi == 127 || !recover_mutex(&self.ble_state, "ble_state").rssi_events {
             return;
         }
         let Some(peer_id) = self
@@ -4252,6 +4257,7 @@ impl OfflineProtocol {
         };
         {
             let mut ble = recover_mutex(&self.ble_state, "ble_state");
+            // Switched off while the transport was being updated.
             if !ble.rssi_events {
                 return;
             }
@@ -4276,9 +4282,10 @@ impl OfflineProtocol {
         });
     }
 
-    /// Turns `PeerRssi` events on or off. Off by default, because they fire
-    /// from every advertisement and an app that is not listening should not
-    /// pay for them. Readings update link quality either way.
+    /// Turns live readings on or off: `PeerRssi` events, and the link quality
+    /// they keep current. Off by default, because they fire from every
+    /// advertisement and an app that is not listening should not pay for
+    /// them, nor have its relay ranking change under it.
     pub fn set_peer_rssi_events(&self, enabled: bool) {
         let mut ble = recover_mutex(&self.ble_state, "ble_state");
         ble.rssi_events = enabled;
@@ -10642,8 +10649,8 @@ mod tests {
     }
 
     /// Live readings are opt-in, capped per peer, never name an unlinked
-    /// peer, and stay silent for a blocked one, while the link quality the
-    /// relay ranks by follows them regardless.
+    /// peer, and stay silent for a blocked one. Off, they do not touch the
+    /// link quality the relay ranks by either.
     #[test]
     fn test_ble_peer_rssi_is_opt_in_capped_and_linked_only() {
         let protocol = OfflineProtocol::new(create_test_config()).unwrap();
@@ -10670,11 +10677,20 @@ mod tests {
 
         protocol.ble_peer_rssi(Some("near".to_string()), None, -45);
         assert!(readings(&protocol).is_empty(), "off by default");
+        assert_eq!(
+            link_rssi(&protocol),
+            -60,
+            "off leaves the relay ranking as it was"
+        );
+
+        protocol.set_peer_rssi_events(true);
+        protocol.ble_peer_rssi(Some("near".to_string()), None, -45);
+        drained_events(&protocol);
         let smoothed = link_rssi(&protocol);
-        assert!(smoothed > -60, "link quality follows anyway: {smoothed}");
+        assert!(smoothed > -60, "on, link quality follows: {smoothed}");
         protocol.ble_peer_rssi(Some("near".to_string()), None, 127);
         assert_eq!(link_rssi(&protocol), smoothed, "127 is no reading");
-
+        protocol.set_peer_rssi_events(false);
         protocol.set_peer_rssi_events(true);
         let hash = offline_protocol_transport::node_hash("near").to_vec();
         protocol.ble_peer_rssi(None, Some(hash.clone()), -44);
@@ -10697,8 +10713,10 @@ mod tests {
         );
 
         protocol.set_peer_rssi_events(false);
+        let before = link_rssi(&protocol);
         protocol.ble_peer_rssi(Some("near".to_string()), None, -42);
         assert!(readings(&protocol).is_empty());
+        assert_eq!(link_rssi(&protocol), before);
     }
 
     /// A peer that leaves the Wi-Fi Direct group but is still linked over
