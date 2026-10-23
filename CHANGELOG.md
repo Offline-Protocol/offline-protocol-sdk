@@ -29,7 +29,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   generator's default is a name no build produces. An engine that Ruby's
   garbage collector frees while it holds a callback leaks the callback and
   warns, which is a defect in the generator and is documented as such. The
-  contract is `docs/bridges/ruby.md`.
+  release builds it as the `offline_protocol` gem, which carries no native
+  code, and publishes it to RubyGems with trusted publishing under the
+  `RUBYGEMS_PUBLISH` switch. The contract is `docs/bridges/ruby.md`.
 
 ## [0.30.0] — 2026-10-21
 

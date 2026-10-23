@@ -135,6 +135,28 @@ Ruby such as `/usr/bin/ruby` drops `DYLD_LIBRARY_PATH` at launch, so use a Ruby
 you installed, or install the library in a directory the loader already
 searches.
 
+## R7. The gem is published to RubyGems, and does not carry the library
+
+`offline_protocol` is the Ruby binding, published at the release's version by
+`release.yml` under the `RUBYGEMS_PUBLISH` switch, with trusted publishing and
+no stored credential. A prerelease such as `0.31.0-rc.1` is numbered the way
+RubyGems numbers one, `0.31.0.pre.rc.1`.
+
+The gem contains the generated binding, its README and the license notices.
+It contains no native code, for the reason the Java jar does not
+([J6](java.md#j6-the-jar-is-published-to-maven-central-and-does-not-carry-the-library)):
+a gem that appeared to work and failed at the first call on a platform it did
+not carry would be worse than one that says what it needs. The host supplies
+the library for its platform from the release's desktop archives and puts it
+on the loader's search path (R6).
+
+The release tests the committed binding against the release profile's library,
+builds the gem at the release's version, and checks it carries the binding and
+the license before anything is pushed. A re-run of a release that already
+reached RubyGems pushes nothing. `bundle exec rake build` builds the same gem,
+and the Ruby Binding job in CI runs it on every pull request, so a gemspec
+error shows there and not on a tag.
+
 ## What the host owes
 
 The same things every binding owes, with nothing provided: the transports, two

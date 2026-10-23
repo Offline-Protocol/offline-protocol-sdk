@@ -359,7 +359,7 @@ all four ABIs and a minified application, and each wheel installed by pip and
 run through the whole suite on the system it is tagged for. All of that runs on
 every release and every dry run, and a failure stops npm and crates.io too.
 
-Maven Central and PyPI then publish after the `release` job, only from a
+Maven Central, PyPI and RubyGems then publish after the `release` job, only from a
 `v*` tag that is not a dry run, and only when the channel's repository
 variable is `true`. A channel switched on with its secret missing fails the
 run rather than skipping, because a skipped channel is a release that looks
@@ -375,7 +375,24 @@ release.
 | --- | --- | --- | --- |
 | Maven Central | `MAVEN_CENTRAL_PUBLISH` | `MAVEN_CENTRAL_USERNAME` and `MAVEN_CENTRAL_PASSWORD` (a Central Portal user token), `MAVEN_SIGNING_KEY` (armored private key) and `MAVEN_SIGNING_KEY_PASSWORD` | uploads a deployment Central validates, then drops it |
 | PyPI | `PYPI_PUBLISH` | none: trusted publishing from `release.yml` in the `pypi` environment | checks the wheels' metadata only: PyPI has no rehearsal |
+| RubyGems | `RUBYGEMS_PUBLISH` | none: trusted publishing from `release.yml` in the `rubygems` environment | builds and tests the gem only: RubyGems has no rehearsal |
 | Service image (ghcr.io) | `PYPI_PUBLISH`, since it installs what PyPI published | none: the workflow's own `GITHUB_TOKEN` with `packages: write` | not built: it needs the release on PyPI |
+
+**RubyGems needs its trusted publisher before the first release.** The gem
+`offline_protocol` does not exist until the first push creates it, so register
+a pending trusted publisher on rubygems.org (your profile, Trusted Publishers,
+Create): gem name `offline_protocol`, repository
+`Offline-Protocol/offline-protocol-sdk`, workflow `release.yml`, environment
+`rubygems`. Create the `rubygems` environment on this repository, then set the
+switch:
+
+```bash
+gh variable set RUBYGEMS_PUBLISH --body true -R Offline-Protocol/offline-protocol-sdk
+```
+
+The first push turns the pending publisher into the gem's own. A release
+candidate is the safe first exercise: it publishes a prerelease
+(`0.31.0.pre.rc.1`), which `gem install` skips unless asked with `--pre`.
 
 **The Swift package is pulled, not pushed.** Nothing in this repository can
 write to `Offline-Protocol/offline-protocol-swift`, and no credential for it

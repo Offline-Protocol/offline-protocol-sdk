@@ -23,7 +23,7 @@ callback or a storage provider.
 | What | Where it comes from |
 |---|---|
 | Ruby 3.3 or later and the `ffi` gem, `~> 1.17` | Yours; `bundle install` in this directory installs the gem |
-| This binding's source | [`lib/offline_protocol.rb`](lib/offline_protocol.rb), on your load path |
+| This binding | The [`offline_protocol`](https://rubygems.org/gems/offline_protocol) gem once a release publishes it (R7), or [`lib/offline_protocol.rb`](lib/offline_protocol.rb) on your load path |
 | `liboffline_protocol_uniffi.so` / `.dylib`, `offline_protocol_uniffi.dll` | The release's desktop archives, or `cargo build --release -p offline-protocol-uniffi` |
 
 The library is found on the loader's search path, and the loader reads the
