@@ -28,10 +28,13 @@ copy of the race was the lost frame, did not.
 
 A probe and an acknowledgement carry an MLS exporter tag over a fresh nonce,
 which only a member of the same group at the same epoch computes. A match is
-group-aware proof, as good as a decrypt. A mismatch at the same epoch is the
-split, stated under the peer's identity signature, and the greater side ends
-it with the existing re-key. An empty body is an older peer, held to the
-plaintext rules.
+group-aware proof, as good as a decrypt. A mismatch at the same epoch is a
+split, stated under the peer's identity signature. The greater side ends it
+with the existing re-key, but only on an acknowledgement answering a
+challenge it issued under its current session: a probe's nonce is the
+challenge, and the acknowledgement echoes it. Any other mismatching frame may
+be stale or replayed, and only prompts a challenge. An empty body is an older
+peer, held to the plaintext rules.
 
 Confirmation probes stop once a session confirms, so an ordinary decrypt
 failure on a 1:1 session sends one too, at most once per peer per re-key
@@ -44,7 +47,10 @@ carries `no_session`. The holder resends its Welcome when that Welcome names
 the package, since the sender never processed it, and otherwise drops its
 session and rebuilds. Repeating the reset flag instead would tear down a
 replacement whose Welcome is in flight; the package comparison is what tells
-that case apart.
+that case apart. The flag is refused when it is older than the key packages
+and Welcomes that built the session, and a Welcome given up in the
+both-create tiebreak is discarded, so neither a stale flag nor a dead Welcome
+reaches the comparison.
 
 ## Consequences
 
@@ -59,9 +65,14 @@ failure; the trigger is a signed statement, not a corrupted frame.
 **Cost.** One exporter call per probe and acknowledgement, and about 160
 bytes on each.
 
-**Residual.** A replayed probe from an earlier group mismatches, and so can
-drive a re-key. The freshness window and the shared re-key floor bound it to
-one teardown per window, as for a replayed reset.
+**Cost.** A split found by a probe heals one round trip later than it would
+if probes were acted on, because the greater side first issues its own
+challenge.
+
+**Residual.** None from stale or replayed corroborations: only a fresh
+answer to a live challenge drives a heal. A `no_session` frame is bounded
+like a reset, by the spent mark, which every key package and Welcome now
+moves.
 
 ## What would undo this
 
@@ -71,6 +82,9 @@ the peer clearly holds a session. It does, and possibly a different one.
 Repeating `session_reset` on a re-push instead of `no_session`, on the
 reasoning that a reset already means "drop yours". It does, unconditionally,
 including the replacement session a Welcome is still carrying.
+
+Healing on a mismatching probe, or on any acknowledgement, on the reasoning
+that the frame is signed. It is, and it may be from before the last heal.
 
 Letting both sides heal a mismatch. Both would tear down at once, each would
 rebuild from the other's package, and the pair would race again.

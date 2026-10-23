@@ -433,20 +433,29 @@ group at the same epoch computes (see
 | What the frame shows | What the receiver does |
 |----------------------|------------------------|
 | Same epoch, same tag | Confirms, as group-aware proof. The both-create owner included |
-| Same epoch, different tag | Does not confirm. The split: the side whose address is greater re-keys |
+| Same epoch, different tag, on an acknowledgement answering our live challenge | Does not confirm. The split: the side whose address is greater re-keys |
+| Same epoch, different tag, on anything else | Does not confirm, tears nothing down. The greater side issues a challenge of its own |
 | Different epoch, or nothing this side can compare | Does not confirm, and does nothing. The epoch-desync path owns an epoch mismatch |
 | Empty body | An older peer or a leaf: the plaintext rules above |
 
 **Only the greater side heals**, the side that adopts in the tiebreak. If both
 did, both would tear down at once, each would rebuild from the other's
-package, and the pair would race again. The lesser side still answers every
-probe with its own tag, so whichever side probes, the greater side learns.
+package, and the pair would race again.
+
+**And only on an answer to its own live challenge.** A probe's nonce is a
+challenge, remembered with the session it was issued under, and an
+acknowledgement answers with the responder's tag over that same nonce. Any
+other mismatching frame may be stale: a probe sealed under a group that has
+since been healed and delivered late, an outbox retry carrying an earlier
+group's tag, or a recording. Acting on those tore healthy sessions down, so
+they only make the greater side issue a challenge of its own. Whichever side
+probes first, the greater side learns within one round trip, and a challenge
+is spent by its first answer.
 
 The heal is the re-key, through the same shared step as a desync: the reset
-key package first, then the local group dropped. It shares the re-key floor,
-so a replayed probe from an earlier group buys at most one teardown per
-window. A reset that could not be sent drops nothing and gives the floor back,
-because the peer was told nothing and the next probe asks again.
+key package first, then the local group dropped. It shares the re-key floor.
+A reset that could not be sent drops nothing and gives the floor back,
+because the peer was told nothing and the next challenge asks again.
 
 ### A peer that holds no session
 
@@ -465,7 +474,18 @@ spent-reset rules as a reset, since it can end in the same teardown:
 | Names another package, or there is none | Drops its session as for a reset, and builds a new one from the package |
 
 The comparison is what makes the flag safe where repeating the reset flag is
-not: a replacement whose Welcome is in flight is recognised and kept.
+not: a replacement whose Welcome is in flight is recognised and kept. Two
+rules keep the comparison honest:
+
+- **A flag older than the session is refused.** The spent mark moves up to the
+  signed stamp of every key package and Welcome admitted from the peer, so a
+  `no_session` (or reset) frame older than the frames that built the session
+  is refused: a first-contact push delivered late, or a recording.
+- **An adopted Welcome retires our own.** Adopting the peer's Welcome in the
+  both-create tiebreak gives up our group, and our outbound Welcome for it is
+  dropped. It names a package the peer never processed and still offers, so
+  kept, it would answer a `no_session` with a Welcome for a group nobody
+  holds.
 
 The flag states the sender's view when the frame left. One that arrives after
 its sender gained a session, because a frame crossed it in flight or the

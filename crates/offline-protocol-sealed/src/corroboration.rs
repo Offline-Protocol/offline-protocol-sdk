@@ -30,8 +30,10 @@ pub const SESSION_CORROBORATION_TAG_LEN: usize = 16;
 
 /// Body of a [`SESSION_CONFIRM_PROBE`] or [`SESSION_CONFIRM_ACK`] frame.
 ///
-/// The nonce is fresh per frame and is the exporter context, so a tag says
-/// nothing about the group and links no two frames. The frame itself is
+/// The nonce is the exporter context, so a tag says nothing about the group.
+/// A probe's nonce is fresh and is a challenge; an acknowledgement carries the
+/// nonce of the probe it answers, which is how the prober tells an answer to
+/// its own challenge from a stale or replayed frame. The frame itself is
 /// signed by its sender's identity key, so a tag cannot be put in a peer's
 /// mouth by anyone else.
 ///
@@ -41,7 +43,8 @@ pub const SESSION_CORROBORATION_TAG_LEN: usize = 16;
 pub struct SessionCorroboration {
     /// The sender's MLS epoch for the session.
     pub epoch: u64,
-    /// The exporter context, [`SESSION_CORROBORATION_NONCE_LEN`] bytes.
+    /// The exporter context, [`SESSION_CORROBORATION_NONCE_LEN`] bytes: fresh in
+    /// a probe, echoed in an acknowledgement.
     pub nonce: Vec<u8>,
     /// The exporter output, [`SESSION_CORROBORATION_TAG_LEN`] bytes.
     pub tag: Vec<u8>,

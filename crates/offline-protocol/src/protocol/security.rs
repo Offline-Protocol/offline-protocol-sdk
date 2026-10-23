@@ -1496,6 +1496,24 @@ impl OfflineProtocol {
             .is_none_or(|seen| signed_ms > *seen)
     }
 
+    /// Moves the spent mark up to the signed stamp of a key package or a
+    /// Welcome from `peer_id`, never down.
+    ///
+    /// Invariant: a destructive directive (a `session_reset`, or a
+    /// `no_session` key package) is acted on only when it is newer than every
+    /// key package and Welcome already admitted from that peer. Those frames
+    /// are how a session gets built, so a directive older than them predates
+    /// the session it would destroy: a first-contact push carried slowly
+    /// through the mesh, or a recording. Marking only the resets acted on
+    /// left such a frame unspent and able to tear a healthy session down.
+    /// The stamps are the peer's own clock throughout, so skew does not
+    /// enter.
+    pub(crate) fn note_session_frame_stamp(&mut self, peer_id: &str, signed_ms: i64) {
+        if self.reset_is_unspent(peer_id, signed_ms) {
+            self.record_reset_spent(peer_id, signed_ms);
+        }
+    }
+
     /// Records a session reset as spent, in memory and durably.
     ///
     /// **Call this before acting on the reset, never after.** The teardown it

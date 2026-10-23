@@ -66,7 +66,7 @@ The body is JSON, `{"epoch": E, "nonce": [...], "tag": [...]}`:
 | Field | Meaning |
 |-------|---------|
 | `epoch` | The sender's MLS epoch for the session |
-| `nonce` | 16 bytes, fresh per frame, as a JSON byte array |
+| `nonce` | 16 bytes, as a JSON byte array. Fresh in a probe, which makes it a challenge; in an acknowledgement, the nonce of the probe it answers |
 | `tag` | 16 bytes: `MLS-Exporter("offline-protocol session corroboration v1", nonce, 16)` over the session's current epoch |
 
 A receiver holding a session computes the exporter over the same nonce and:
@@ -75,19 +75,27 @@ A receiver holding a session computes the exporter over the same nonce and:
   successful decrypt. That includes the both-create owner, which no plaintext
   frame could confirm before.
 - **MUST NOT** confirm on a matching epoch with a different tag. That is a
-  split. The side whose address is greater (the side that adopts in the
-  both-create tiebreak) **MUST** end it with the re-key: a `session_reset`
-  key package, then dropping its own group. The lesser side does nothing,
-  and its answer to the greater side's probe is how the greater side learns.
+  split, but only an acknowledgement answering a challenge the receiver
+  issued under the session it holds now is evidence of a split *now*. A
+  probe, or an answer to an older challenge, may be sealed before a heal and
+  delivered late, retried from an outbox, or replayed.
+  - On such an acknowledgement, the side whose address is greater (the side
+    that adopts in the both-create tiebreak) **MUST** end the split with the
+    re-key: a `session_reset` key package, then dropping its own group.
+  - On a probe or any other acknowledgement it **MUST NOT** tear anything
+    down. The greater side **SHOULD** issue a challenge of its own instead.
+  - The lesser side does nothing; its answer to the greater side's challenge
+    is how the greater side learns.
 - **MUST NOT** act on a different epoch, which the epoch-desync path owns, or
   on a tag it cannot compute.
 - **MUST** read an empty or unparseable body as an older peer and apply the
   plaintext rules it always had.
 
-Every probe is answered with the receiver's own corroboration. A leaf answers
-with an empty body and is held to the plaintext rules. The frames are signed,
-so a mismatch is the peer's own statement; the re-key floor bounds what a
-replayed one can do to one teardown per window.
+Every probe is answered with the receiver's tag over the probe's nonce. A
+leaf answers with an empty body and is held to the plaintext rules. The
+frames are signed, so a mismatch is the peer's own statement, and a challenge
+is spent by its first answer, so neither a late frame nor a recording can
+drive a teardown.
 
 ### Prefixes that never appear on the wire
 
@@ -425,6 +433,18 @@ under the two rules above exactly as a `session_reset` would be:
   processed the Welcome, and still can.
 - **MUST** otherwise drop its session as for a reset, recording the stamp
   first, and build a new one from the package.
+
+The spent mark of rule 3 **MUST** also be moved up, never down, to the signed
+stamp of every key package and Welcome admitted from the peer. Those frames
+are how a session is built, so a `no_session` or `session_reset` frame older
+than them predates the session it would destroy: a first-contact push
+carried slowly, or a recording. The stamps are all the peer's own clock, so
+skew does not enter.
+
+A receiver that adopted the peer's Welcome in the both-create tiebreak gave
+up its own group, and **MUST** then discard its own Welcome: it names a
+package the peer never processed and still offers, so keeping it would
+answer a later `no_session` with a Welcome for a group nobody holds.
 
 A leaf never sets it.
 

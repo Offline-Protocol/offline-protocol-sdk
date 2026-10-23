@@ -71,7 +71,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   exporter tag that only a member of the same group computes. A match
   confirms, including the session owner, which before only a decrypted
   message could. A mismatch is a split, and the greater side heals it with
-  the existing re-key. An older peer sends no tag and keeps the old rules.
+  the existing re-key, but only when the mismatch answers a challenge it
+  issued under its current session, so a late or replayed probe can never
+  tear a healthy session down. An older peer sends no tag and keeps the old
+  rules.
   A split between two sides that had both confirmed is found too: an ordinary
   decrypt failure on a 1:1 session now sends a probe, at most once per peer
   every 30 seconds, and the tags decide. The failure itself still tears
@@ -86,7 +89,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   receivers see the payload they always did). The holder sends its Welcome
   again when that Welcome was built on the very package offered, since the
   sender never processed it, and otherwise drops its session and rebuilds,
-  under the same freshness and spent-reset rules as a reset.
+  under the same freshness and spent-reset rules as a reset. A flag older
+  than the key packages and Welcomes that built the session is refused, and
+  the same rule now refuses a late `session_reset`. A Welcome given up in
+  the both-create tiebreak is discarded, so it is never sent again.
 
 ## [0.30.0] — 2026-10-21
 

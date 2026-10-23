@@ -840,6 +840,15 @@ pub struct OfflineProtocol {
     /// only: the next failure re-arms it.
     corroboration_due_at: HashMap<String, DateTime<Utc>>,
 
+    /// The corroboration challenges this side issued to each peer, newest
+    /// last, each with the session it was issued under
+    /// (`session_challenge_body`). Only an acknowledgement answering one of
+    /// these under the current session may heal a split. Bounded per peer by
+    /// `MAX_CORROBORATION_CHALLENGES` and overall like `rekey_due_at`. In
+    /// memory only: an answer arriving after a restart is not acted on, and
+    /// the next challenge asks again.
+    corroboration_challenges: HashMap<String, Vec<CorroborationChallenge>>,
+
     /// Outbound welcome lifecycle records keyed by peer id.
     welcome_lifecycles: HashMap<String, WelcomeLifecycleRecord>,
 
@@ -1299,6 +1308,7 @@ impl OfflineProtocol {
             retry_drain_last: None,
             rekey_due_at: HashMap::new(),
             corroboration_due_at: HashMap::new(),
+            corroboration_challenges: HashMap::new(),
             welcome_lifecycles: HashMap::new(),
             pending_connection_requests: HashMap::new(),
             welcome_presence_rescue: HashMap::new(),
@@ -3569,7 +3579,8 @@ impl OfflineProtocol {
 
         // Handle welcome messages (session invitation)
         if let Some(data) = content.strip_prefix(internal_prefixes::WELCOME) {
-            self.handle_welcome_message(sender, data);
+            let freshness = freshness_bound.then(|| message.timestamp.as_millis());
+            self.handle_welcome_message(sender, data, freshness);
             return Some(InternalMessageResult::Consumed);
         }
 

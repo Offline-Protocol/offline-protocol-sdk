@@ -44641,3 +44641,210 @@ fn a_captured_no_session_frame_can_be_spent_exactly_once() {
         "a newer one must still be honoured"
     );
 }
+
+/// A `no_session` key package older than the Welcome that built the session
+/// predates that session: a first-contact push carried slowly, or a
+/// recording. It must not tear the session down. One newer than every frame
+/// the peer has sent still does.
+#[test]
+fn a_no_session_frame_older_than_the_session_is_refused() {
+    let (mut alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&proof, None);
+
+    let bob_kp = {
+        let m = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap()
+    };
+    let welcome = {
+        let m = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        m.import_key_package(&id("bob"), &bob_kp.key_package_data)
+            .unwrap();
+        m.create_session(&id("bob")).unwrap()
+    };
+    let welcome_stamp = Utc::now().timestamp_millis() - 30_000;
+    bob.handle_welcome_message(
+        &id("alice"),
+        &serde_json::to_string(&welcome).unwrap(),
+        Some(welcome_stamp),
+    );
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "precondition: bob joined"
+    );
+
+    let body = key_package_frame_body(&id("alice"), false, Vec::new());
+    let mut payload: KeyPackagePayload =
+        serde_json::from_str(body.strip_prefix(internal_prefixes::KEY_PACKAGE).unwrap()).unwrap();
+    payload.no_session = true;
+    let data = serde_json::to_string(&payload).unwrap();
+
+    bob.handle_key_package_message(&id("alice"), &data, true, Some(welcome_stamp - 1_000));
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "a no_session frame from before the session must not tear it down"
+    );
+
+    bob.handle_key_package_message(&id("alice"), &data, true, Some(welcome_stamp + 1));
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "one newer than the session is the peer saying it lost it"
+    );
+}
+
+/// A probe or acknowledgement whose tag disagrees but that answers no
+/// challenge of ours may be stale (sealed before a heal, retried from an
+/// outbox) or replayed. It must not tear a healthy session down. A probe
+/// like that makes the greater side ask for itself instead, and a healthy
+/// peer's answer agrees.
+#[test]
+fn a_split_shown_by_anything_but_an_answer_to_our_challenge_heals_nothing() {
+    let (lo, hi) = split_pair();
+    let (mut owner, owner_h) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+    establish_confirmed_session(&mut owner, &id(lo), &mut adopter, &id(hi));
+    owner_h.clear_sent_messages();
+    adopter_h.clear_sent_messages();
+    let built_at = adopter
+        .mls_manager
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .session_established_at_ms(&id(lo))
+        .unwrap();
+
+    let nonce = [9u8; 16];
+    let (epoch, _) = adopter
+        .mls_manager
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .session_corroboration(&id(lo), &nonce)
+        .unwrap()
+        .unwrap();
+    let stale = offline_protocol_sealed::SessionCorroboration {
+        epoch,
+        nonce: nonce.to_vec(),
+        tag: vec![0u8; 16],
+    }
+    .to_body();
+
+    adopter.handle_session_confirm_ack(
+        &id(lo),
+        &format!("{}{}", internal_prefixes::SESSION_CONFIRM_ACK, stale),
+    );
+    adopter.handle_session_confirm_probe(
+        &id(lo),
+        &format!("{}{}", internal_prefixes::SESSION_CONFIRM_PROBE, stale),
+    );
+    let still = adopter
+        .mls_manager
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .session_established_at_ms(&id(lo))
+        .unwrap();
+    assert_eq!(
+        still, built_at,
+        "a stale tag must not tear the session down"
+    );
+    assert!(
+        adopter_h.sent_messages().iter().any(|m| m
+            .content
+            .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)),
+        "the greater side must ask with a challenge of its own"
+    );
+
+    // The healthy peer answers the challenge, the tags agree, nothing moves.
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 10);
+    let after = adopter
+        .mls_manager
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .session_established_at_ms(&id(lo))
+        .unwrap();
+    assert_eq!(
+        after, built_at,
+        "a healthy answer must leave the session alone"
+    );
+}
+
+/// Adopting the peer's Welcome gives up our own group, so our outbound
+/// Welcome for it must go. Kept, it named a package the peer never
+/// processed and still offers, and a `no_session` push after a lost reset
+/// was answered with that dead Welcome.
+#[test]
+fn adopting_the_peers_welcome_drops_our_own() {
+    let (lo, hi) = split_pair();
+    let (mut owner, owner_h) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    let owner_rx = received_contents(&mut owner);
+    let adopter_rx = received_contents(&mut adopter);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+
+    // Both create, and every frame arrives: the adopter adopts.
+    let package = |p: &OfflineProtocol| {
+        let m = p.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap().key_package_data
+    };
+    let expires = Utc::now().timestamp_millis() as u64 + 60_000;
+    let (owner_kp, adopter_kp) = (package(&owner), package(&adopter));
+    owner.pending_key_packages.insert(
+        id(hi),
+        ReceivedKeyPackage {
+            key_package_data: adopter_kp,
+            local_expires_at_ms: expires,
+        },
+    );
+    adopter.pending_key_packages.insert(
+        id(lo),
+        ReceivedKeyPackage {
+            key_package_data: owner_kp,
+            local_expires_at_ms: expires,
+        },
+    );
+    owner
+        .send_message(&id(hi), "first-owner", None, None::<String>)
+        .unwrap();
+    adopter
+        .send_message(&id(lo), "first-adopter", None, None::<String>)
+        .unwrap();
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+    assert!(
+        !adopter.welcome_lifecycles.contains_key(&id(lo)),
+        "the adopter's Welcome names a group it gave up"
+    );
+
+    // The owner loses its session, as to a lost reset, and pushes again.
+    owner.manual_mls_delete_session(&id(hi)).unwrap();
+    owner
+        .send_message(&id(hi), "after-loss", None, None::<String>)
+        .unwrap();
+    make_key_package_repush_due(&mut owner, &id(hi));
+    owner.rearm_key_package_for_peer(&id(hi));
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+    adopter
+        .send_message(&id(lo), "after-heal", None, None::<String>)
+        .unwrap();
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+
+    let adopter_got = adopter_rx.lock().unwrap().clone();
+    let owner_got = owner_rx.lock().unwrap().clone();
+    assert!(
+        adopter_got.iter().any(|c| c == "after-loss"),
+        "after-loss missing from {adopter_got:?}"
+    );
+    assert!(
+        owner_got.iter().any(|c| c == "after-heal"),
+        "after-heal missing from {owner_got:?}"
+    );
+}

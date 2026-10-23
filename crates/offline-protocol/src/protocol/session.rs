@@ -4,10 +4,10 @@ use super::{
     classify_transport_send_error, internal_prefixes, key_package_resend_wait_secs,
     lock_shared_state, send_failure_token, GatewayCarrier, OfflineProtocol, PresenceRescueThrottle,
     PruneAllowance, RestorableRecord, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
-    CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS, MAX_REKEY_TRACKED_PEERS,
-    RECONCILIATION_THROTTLE_MS, REKEY_INTERVAL_SECS, SEND_FAIL_REASON_CONFIRM_TIMEOUT,
-    WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
-    WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
+    CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS,
+    MAX_CORROBORATION_CHALLENGES, MAX_REKEY_TRACKED_PEERS, RECONCILIATION_THROTTLE_MS,
+    REKEY_INTERVAL_SECS, SEND_FAIL_REASON_CONFIRM_TIMEOUT, WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS,
+    WELCOME_LIFECYCLE_TTL_SECS, WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
     WELCOME_PRESENCE_RESCUE_BASE_SECS, WELCOME_PRESENCE_RESCUE_MAX_SECS, WELCOME_RETRY_BATCH_SIZE,
     WELCOME_RETRY_JITTER_RATIO, WELCOME_UNREACHABLE_RETRY_CAP_SECS, WELCOME_WATCHLIST_MAX_AGE_SECS,
 };
@@ -605,7 +605,7 @@ impl OfflineProtocol {
         let probe = format!(
             "{}{}",
             internal_prefixes::SESSION_CONFIRM_PROBE,
-            self.session_corroboration_body(peer_id)
+            self.session_challenge_body(peer_id)
         );
         match self.send_internal_message(peer_id, probe, MessagePriority::High) {
             Ok(message_id) => {
@@ -1121,32 +1121,94 @@ impl OfflineProtocol {
         }
     }
 
-    /// The body of a confirmation probe or acknowledgement to `peer_id`: this
-    /// side's corroboration of the session, or empty when there is none to
-    /// give, which the peer reads as an older device.
-    pub(super) fn session_corroboration_body(&self, peer_id: &str) -> String {
-        let nonce = *uuid::Uuid::new_v4().as_bytes();
-        let Some(mls) = self.mls_manager.as_ref() else {
-            return String::new();
-        };
-        let Ok(manager) = mls.read() else {
-            return String::new();
-        };
-        match manager.session_corroboration(peer_id, &nonce) {
-            Ok(Some((epoch, tag))) => SessionCorroboration {
+    /// This side's corroboration of its session with `peer_id` over `nonce`,
+    /// as a frame body, or `None` without a session.
+    fn corroboration_body(&self, peer_id: &str, nonce: &[u8]) -> Option<String> {
+        let mls = self.mls_manager.as_ref()?;
+        let manager = mls.read().ok()?;
+        let (epoch, tag) = manager.session_corroboration(peer_id, nonce).ok()??;
+        Some(
+            SessionCorroboration {
                 epoch,
                 nonce: nonce.to_vec(),
                 tag,
             }
             .to_body(),
-            _ => String::new(),
-        }
+        )
     }
 
-    /// What a probe or acknowledgement body from `peer_id` says about the
-    /// session the two sides hold.
-    pub(super) fn corroborate_session(&self, peer_id: &str, body: &str) -> Corroboration {
-        let Some(theirs) = SessionCorroboration::parse(body) else {
+    /// When this side's session with `peer_id` was established, which names
+    /// that session: a new one is stamped on every create and join.
+    fn session_incarnation(&self, peer_id: &str) -> Option<u64> {
+        self.mls_manager
+            .as_ref()
+            .and_then(|mls| mls.read().ok())
+            .and_then(|manager| manager.session_established_at_ms(peer_id).ok())
+            .flatten()
+    }
+
+    /// The body of a confirmation probe to `peer_id`: a challenge over a
+    /// fresh nonce, remembered with the session it was issued under, or
+    /// empty when there is no session, which the peer reads as an older
+    /// device.
+    pub(super) fn session_challenge_body(&mut self, peer_id: &str) -> String {
+        let nonce = *uuid::Uuid::new_v4().as_bytes();
+        let Some(body) = self.corroboration_body(peer_id, &nonce) else {
+            return String::new();
+        };
+        let incarnation = self.session_incarnation(peer_id);
+        if !self.corroboration_challenges.contains_key(peer_id)
+            && self.corroboration_challenges.len() >= MAX_REKEY_TRACKED_PEERS
+        {
+            self.corroboration_challenges.clear();
+        }
+        let issued = self
+            .corroboration_challenges
+            .entry(peer_id.to_string())
+            .or_default();
+        if issued.len() >= MAX_CORROBORATION_CHALLENGES {
+            issued.remove(0);
+        }
+        issued.push((nonce, incarnation));
+        body
+    }
+
+    /// The body of an acknowledgement answering `probe`: this side's tag over
+    /// the prober's own nonce, so the prober can tell an answer to its
+    /// challenge from any other frame. Empty for a probe with no
+    /// corroboration, from an older peer that reads no body.
+    pub(super) fn session_answer_body(
+        &self,
+        peer_id: &str,
+        probe: Option<&SessionCorroboration>,
+    ) -> String {
+        probe
+            .and_then(|probe| self.corroboration_body(peer_id, &probe.nonce))
+            .unwrap_or_default()
+    }
+
+    /// Whether `nonce` is a challenge this side issued to `peer_id` under the
+    /// session it holds now. Spent by the asking: each answers once.
+    pub(super) fn answers_live_challenge(&mut self, peer_id: &str, nonce: &[u8]) -> bool {
+        let incarnation = self.session_incarnation(peer_id);
+        let Some(issued) = self.corroboration_challenges.get_mut(peer_id) else {
+            return false;
+        };
+        let Some(at) = issued.iter().position(|(n, _)| n.as_slice() == nonce) else {
+            return false;
+        };
+        let (_, issued_under) = issued.remove(at);
+        issued_under == incarnation
+    }
+
+    /// What a probe or acknowledgement's corroboration from `peer_id` says
+    /// about the session the two sides hold.
+    pub(super) fn corroborate_session(
+        &self,
+        peer_id: &str,
+        theirs: Option<&SessionCorroboration>,
+    ) -> Corroboration {
+        let Some(theirs) = theirs else {
             return Corroboration::Absent;
         };
         let ours = self
@@ -1165,7 +1227,8 @@ impl OfflineProtocol {
     }
 
     /// Asks `peer_id` to corroborate a session that just failed an ordinary
-    /// decrypt, at most once per re-key interval.
+    /// decrypt, or that a probe showed split, at most once per re-key
+    /// interval.
     ///
     /// Invariant: a split between two sides that have both confirmed is
     /// found by the first frame that fails between them. Confirmation probes
@@ -1195,35 +1258,41 @@ impl OfflineProtocol {
             peer_id.to_string(),
             now + ChronoDuration::seconds(REKEY_INTERVAL_SECS),
         );
-        self.send_session_confirmation_probe(peer_id, "decrypt_failed");
+        self.send_session_confirmation_probe(peer_id, "corroboration_requested");
     }
 
-    /// Heals a pair that holds two different groups for its slot.
+    /// Acts on a corroboration from `peer_id` that shows a split.
     ///
     /// Invariant: a split is ended by exactly one side, the one that
-    /// [`gives_way_to`](Self::gives_way_to) the other, so the pair rebuilds in
-    /// one round rather than both tearing down at once. The other side's own
-    /// probe or acknowledgement is what tells it, since each answers the
-    /// other with its tag.
+    /// [`gives_way_to`](Self::gives_way_to) the other, and only on an
+    /// acknowledgement answering a challenge it issued under the session it
+    /// holds now (`answered_our_challenge`). Anything else, a probe, or an
+    /// acknowledgement of an older challenge, may be a frame sealed before a
+    /// heal and delivered late, an outbox retry carrying an earlier group's
+    /// tag, or a replay: acting on those tore down healthy sessions. Such a
+    /// frame only makes the greater side ask for itself, so a real split is
+    /// still healed one round trip later.
     ///
     /// The heal is the re-key: the reset key package goes out first, then the
     /// local group is dropped, and the peer drops its own and Welcomes this
-    /// side back. It shares the re-key floor, so a replayed probe from an
-    /// earlier session buys at most one teardown per window, and a reset that
-    /// could not be sent discards nothing and gives the slot back: the peer
-    /// was told nothing, and the next probe asks again.
-    ///
-    /// The evidence is the peer's identity signature on a tag only a member
-    /// of a different group at the same epoch would send, which is why this
-    /// is safe to act on where an ordinary decrypt failure is not (ADR 0006).
-    pub(super) fn heal_split_session(&mut self, peer_id: &str) {
-        let acts = self.gives_way_to(peer_id);
+    /// side back. It shares the re-key floor, and a reset that could not be
+    /// sent discards nothing and gives the slot back: the peer was told
+    /// nothing, and the next challenge asks again.
+    pub(super) fn heal_split_session(&mut self, peer_id: &str, answered_our_challenge: bool) {
+        let gives_way = self.gives_way_to(peer_id);
+        let acts = gives_way && answered_our_challenge;
         self.emit_event(Event::convergence_diag(
             "session_split_detected".to_string(),
             peer_id.to_string(),
             format!("heals={acts}"),
         ));
-        if !acts || !self.claim_rekey_slot(peer_id) {
+        if !acts {
+            if gives_way && !answered_our_challenge {
+                self.request_session_corroboration(peer_id);
+            }
+            return;
+        }
+        if !self.claim_rekey_slot(peer_id) {
             return;
         }
         if self
