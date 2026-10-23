@@ -599,10 +599,9 @@ impl OfflineProtocol {
                     Ok(Some(_)) => {
                         info!(sender = %sender, "Auto-established secure session after key package exchange");
                         // The session is built on this frame, so a directive
-                        // older than it predates the session.
-                        // ponytail: a session the send path builds later from
-                        // the cached package records nothing; the Welcome the
-                        // peer joins it with is not seen on this side.
+                        // older than it predates the session. A session the
+                        // send path builds later from the cached package
+                        // records nothing (ADR 0033, Residual).
                         if let Some(stamp) = freshness {
                             self.note_session_frame_stamp(sender, stamp);
                         }
@@ -1829,6 +1828,15 @@ impl OfflineProtocol {
     /// group-aware decrypt (text or media chunk). No-op when confirmation is
     /// gated or already recorded.
     pub(super) fn confirm_session_from_successful_decrypt(&mut self, sender: &str, group_id: &str) {
+        // Only a decrypt in the 1:1 group says anything about the 1:1 session.
+        // A multi-party group decrypt from the same peer proves nothing about
+        // it: confirming on one let a pair that shares a group confirm a
+        // split 1:1 session, past even the both-create owner's gate, and
+        // retiring the challenge on one held a heal off for as long as the
+        // pair kept talking in the group.
+        if !group_id.starts_with("session:") {
+            return;
+        }
         // The groups agree now, so any challenge out was answered: an answer
         // sealed under an older group of the peer's and delivered late must
         // not find it live.
@@ -1875,21 +1883,17 @@ impl OfflineProtocol {
                 // sends and receives) but the app never receives
                 // `secure_session_established`, so UI gated on a known secure
                 // session — e.g. the demo's group-creation contact list —
-                // silently excludes the peer. Gate on `session:` so multi-party
-                // group decrypts (which also reach this arm) are not reported as
-                // 1:1 sessions. Reaching `Ok(true)` here implies we own the 1:1
-                // group (an adopter would already be Confirmed via
-                // `welcome_received` and return `Ok(false)`), so
+                // silently excludes the peer. Reaching `Ok(true)` here implies
+                // we own the 1:1 group (an adopter would already be Confirmed
+                // via `welcome_received` and return `Ok(false)`), so
                 // `initiated_by_local` is true.
-                if group_id.starts_with("session:") {
-                    if let Ok(state) = lock_shared_state(&self.shared_state) {
-                        state.emit_event(Event::secure_session_established(
-                            sender.to_string(),
-                            group_id.to_string(),
-                            true,
-                            true,
-                        ));
-                    }
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::secure_session_established(
+                        sender.to_string(),
+                        group_id.to_string(),
+                        true,
+                        true,
+                    ));
                 }
             }
             Ok(false) => {}

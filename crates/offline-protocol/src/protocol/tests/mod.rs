@@ -45207,3 +45207,32 @@ fn a_failed_media_chunk_asks_the_peer_to_corroborate() {
         "a failed chunk must send a corroboration probe"
     );
 }
+
+/// A decrypt in a multi-party group the pair shares says nothing about their
+/// 1:1 session. It must neither retire the 1:1 challenge, which held a heal
+/// off for as long as the pair kept talking in the group, nor confirm a 1:1
+/// session that may be split.
+#[test]
+fn a_group_decrypt_neither_retires_the_challenge_nor_confirms_the_session() {
+    let (lo, hi) = split_pair();
+    let (mut owner, owner_h) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+    both_create_losing_the_owners_welcome(&mut owner, &owner_h, &mut adopter, &adopter_h);
+
+    let challenge = offline_protocol_sealed::SessionCorroboration::parse(
+        &owner.session_challenge_body(&id(hi)),
+    )
+    .unwrap()
+    .nonce;
+    owner.confirm_session_from_successful_decrypt(&id(hi), "group:shared");
+    assert!(
+        !owner.confirmed_sessions.contains(&id(hi)),
+        "a group decrypt must not confirm the 1:1 session"
+    );
+    assert!(
+        owner.answers_live_challenge(&id(hi), &challenge),
+        "a group decrypt must not retire the 1:1 challenge"
+    );
+}

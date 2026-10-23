@@ -1310,19 +1310,20 @@ impl OfflineProtocol {
         if !self.claim_rekey_slot(peer_id) {
             return;
         }
-        // Here and not on every mismatching frame: an unconfirmed split side
-        // is probed every few seconds, and the event reaches the application
-        // and telemetry. Once per heal, bounded by the re-key floor.
-        self.emit_event(Event::convergence_diag(
-            "session_split_detected".to_string(),
-            peer_id.to_string(),
-            "heals=true".to_string(),
-        ));
         if let Err(err) = self.push_key_package(peer_id, false, true) {
             debug!(peer_id = %peer_id, error = %err, "Split heal deferred");
             self.release_rekey_slot(peer_id);
             return;
         }
+        // Here and not on every mismatching frame: an unconfirmed split side
+        // is probed every few seconds, and the event reaches the application
+        // and telemetry. Once per heal that went out, bounded by the re-key
+        // floor.
+        self.emit_event(Event::convergence_diag(
+            "session_split_detected".to_string(),
+            peer_id.to_string(),
+            "heals=true".to_string(),
+        ));
         info!(peer_id = %peer_id, "Gave up our group of a split session to join the peer's");
         self.discard_local_session(peer_id);
     }

@@ -79,7 +79,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   A split between two sides that had both confirmed is found too: an ordinary
   decrypt failure on a 1:1 session now sends a probe, at most once per peer
   every 30 seconds, and the tags decide. The failure itself still tears
-  nothing down. See
+  nothing down. A message decrypted in a multi-party group the pair shares
+  no longer confirms their 1:1 session, which let a split confirm. See
   [ADR 0033](docs/adr/0033-a-session-is-confirmed-only-by-proof-of-the-same-group.md).
 - **A lost re-key no longer leaves one side without a session for good.**
   When the reset frame of a re-key or an unblock never arrived, the side that

@@ -855,7 +855,10 @@ pub(crate) const MAX_REKEY_TRACKED_PEERS: usize = 1000;
 
 /// A corroboration challenge's nonce, and the session it was issued under
 /// (its establishment stamp).
-pub(crate) type CorroborationChallenge = ([u8; 16], Option<u64>);
+pub(crate) type CorroborationChallenge = (
+    [u8; offline_protocol_sealed::SESSION_CORROBORATION_NONCE_LEN],
+    Option<u64>,
+);
 
 /// Maximum lifetime (in milliseconds) honored for a *received* peer key
 /// package's cached expiry.
