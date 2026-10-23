@@ -1822,9 +1822,10 @@ fn test_on_neighbor_lost_clears_tracking() {
     let mut protocol = OfflineProtocol::new(config).unwrap();
 
     // Simulate that we've sent a key package to a peer (by inserting into tracking set)
-    protocol
-        .key_package_sent_to
-        .insert(id("peer123"), (std::time::Instant::now(), 0));
+    protocol.key_package_sent_to.insert(
+        id("peer123"),
+        (offline_protocol_core::time::Instant::now(), 0),
+    );
     assert!(protocol.key_package_sent_to.contains_key(&id("peer123")));
 
     // Neighbor lost should remove from tracking
@@ -4722,7 +4723,7 @@ fn test_stale_pending_connection_request_does_not_emit_undeliverable() {
     // Age the entry past the TTL. On a host whose monotonic clock started
     // more recently than the TTL no such Instant exists — skip, the
     // scenario cannot occur there either.
-    let Some(stale) = std::time::Instant::now()
+    let Some(stale) = offline_protocol_core::time::Instant::now()
         .checked_sub(PENDING_CONNECTION_REQUEST_TTL + Duration::from_secs(1))
     else {
         return;
@@ -4877,7 +4878,7 @@ fn test_max_retries_on_stale_pending_connection_request_does_not_emit_undelivera
     // Age the entry past the TTL. On a host whose monotonic clock started
     // more recently than the TTL no such Instant exists — skip, the
     // scenario cannot occur there either.
-    let Some(stale) = std::time::Instant::now()
+    let Some(stale) = offline_protocol_core::time::Instant::now()
         .checked_sub(PENDING_CONNECTION_REQUEST_TTL + Duration::from_secs(1))
     else {
         return;
@@ -11238,7 +11239,7 @@ fn test_unpark_cancel_spares_connection_request_ack() {
         conn_id.as_str(),
         PendingConnectionRequest {
             recipient: "bob".to_string(),
-            sent_at: std::time::Instant::now(),
+            sent_at: offline_protocol_core::time::Instant::now(),
         },
     );
 
@@ -16733,7 +16734,7 @@ fn pair_with_both_first_key_packages_lost() -> (
 /// few minutes at most: `Instant` counts from boot, so a larger offset has no
 /// representation on a freshly booted CI runner.
 fn age_key_package_pushes_by(protocol: &mut OfflineProtocol, secs: u64) {
-    let aged = std::time::Instant::now()
+    let aged = offline_protocol_core::time::Instant::now()
         .checked_sub(Duration::from_secs(secs))
         .unwrap();
     for (sent_at, _) in protocol.key_package_sent_to.values_mut() {
@@ -18663,9 +18664,10 @@ fn test_on_neighbor_lost_clears_confirmed_session() {
 
     // Add a confirmed session
     protocol.confirmed_sessions.insert("peer123".to_string());
-    protocol
-        .key_package_sent_to
-        .insert(id("peer123"), (std::time::Instant::now(), 0));
+    protocol.key_package_sent_to.insert(
+        id("peer123"),
+        (offline_protocol_core::time::Instant::now(), 0),
+    );
 
     assert!(protocol.confirmed_sessions.contains("peer123"));
 
@@ -23368,9 +23370,10 @@ fn test_known_peers_capacity_evicts_least_recently_seen() {
 
     // Backdate one entry so the eviction victim is deterministic
     *protocol.known_peers.get_mut("peer-7").unwrap() -= Duration::from_secs(60);
-    protocol
-        .key_package_sent_to
-        .insert("peer-7".to_string(), (std::time::Instant::now(), 0));
+    protocol.key_package_sent_to.insert(
+        "peer-7".to_string(),
+        (offline_protocol_core::time::Instant::now(), 0),
+    );
 
     // A new peer discovered at capacity is tracked; the least-recently-seen
     // entry is evicted (issue #140: a local BLE neighbor must never be
@@ -23395,17 +23398,19 @@ fn test_known_peers_ttl_eviction() {
 
     protocol.on_neighbor_discovered("alice");
     protocol.on_neighbor_discovered("bob");
-    protocol
-        .key_package_sent_to
-        .insert("alice".to_string(), (std::time::Instant::now(), 0));
+    protocol.key_package_sent_to.insert(
+        "alice".to_string(),
+        (offline_protocol_core::time::Instant::now(), 0),
+    );
 
     // Fresh entries survive a sweep at the current instant
-    protocol.prune_stale_known_peers(std::time::Instant::now());
+    protocol.prune_stale_known_peers(offline_protocol_core::time::Instant::now());
     assert_eq!(protocol.known_peers.len(), 2);
 
     // Beyond the TTL, unseen entries are evicted together with their
     // key-package markers
-    let past_ttl = std::time::Instant::now() + Duration::from_secs(KNOWN_PEER_TTL_SECS + 1);
+    let past_ttl =
+        offline_protocol_core::time::Instant::now() + Duration::from_secs(KNOWN_PEER_TTL_SECS + 1);
     protocol.prune_stale_known_peers(past_ttl);
     assert!(protocol.known_peers.is_empty());
     assert!(!protocol.is_known_peer("alice"));
@@ -23426,7 +23431,8 @@ fn test_known_peers_rediscovery_refreshes_last_seen() {
     protocol.on_neighbor_discovered("alice");
 
     // At this sweep point bob's age exceeds the TTL but alice's does not
-    let sweep_at = std::time::Instant::now() + Duration::from_secs(KNOWN_PEER_TTL_SECS - 30);
+    let sweep_at =
+        offline_protocol_core::time::Instant::now() + Duration::from_secs(KNOWN_PEER_TTL_SECS - 30);
     protocol.prune_stale_known_peers(sweep_at);
     assert!(protocol.known_peers.contains_key("alice"));
     assert!(!protocol.known_peers.contains_key("bob"));
@@ -25268,7 +25274,7 @@ fn a_carrier_that_said_unreachable_stops_answering_for_that_recipient() {
         TransportType::Internet,
         crate::protocol::reachability::Claim::Unreachable,
         crate::protocol::reachability::FactSource::GatewayVerdict,
-        std::time::Instant::now(),
+        offline_protocol_core::time::Instant::now(),
     );
 
     assert!(
@@ -25307,7 +25313,7 @@ fn a_live_link_outranks_a_carrier_that_said_unreachable() {
         TransportType::Internet,
         crate::protocol::reachability::Claim::Unreachable,
         crate::protocol::reachability::FactSource::GatewayVerdict,
-        std::time::Instant::now(),
+        offline_protocol_core::time::Instant::now(),
     );
 
     assert!(
@@ -25341,7 +25347,7 @@ fn a_carrier_that_never_answers_keeps_its_blanket_claim() {
         TransportType::Internet,
         crate::protocol::reachability::Claim::Unreachable,
         crate::protocol::reachability::FactSource::GatewayVerdict,
-        std::time::Instant::now(),
+        offline_protocol_core::time::Instant::now(),
     );
 
     assert!(
@@ -25375,9 +25381,11 @@ fn a_relay_verdict_records_the_fact_that_drove_the_park() {
         .unwrap();
 
     assert_eq!(
-        protocol
-            .reachability
-            .claim_for("bob", TransportType::Internet, std::time::Instant::now()),
+        protocol.reachability.claim_for(
+            "bob",
+            TransportType::Internet,
+            offline_protocol_core::time::Instant::now()
+        ),
         Some(crate::protocol::reachability::Claim::Unreachable),
         "the verdict that parked the message must also be recorded as a fact"
     );
@@ -25414,9 +25422,11 @@ fn a_verdict_from_any_carrier_parks_the_message() {
         "any carrier's unreachable verdict must park the message"
     );
     assert_eq!(
-        protocol
-            .reachability
-            .claim_for("bob", TransportType::Reticulum, std::time::Instant::now()),
+        protocol.reachability.claim_for(
+            "bob",
+            TransportType::Reticulum,
+            offline_protocol_core::time::Instant::now()
+        ),
         Some(crate::protocol::reachability::Claim::Unreachable),
         "and be recorded against the carrier that reported it"
     );
@@ -25436,7 +25446,7 @@ fn a_gateway_presence_answer_is_recorded_against_the_gateway_that_made_it() {
 
     protocol.on_peer_presence_via("bob", false, None, GatewayCarrier::Reticulum);
 
-    let now = std::time::Instant::now();
+    let now = offline_protocol_core::time::Instant::now();
     assert_eq!(
         protocol
             .reachability
@@ -25519,9 +25529,11 @@ fn a_reticulum_presence_answer_redrives_over_reticulum() {
         "and not over the internet transport, which proved nothing"
     );
     assert_eq!(
-        protocol
-            .reachability
-            .claim_for("bob", TransportType::Reticulum, std::time::Instant::now()),
+        protocol.reachability.claim_for(
+            "bob",
+            TransportType::Reticulum,
+            offline_protocol_core::time::Instant::now()
+        ),
         Some(crate::protocol::reachability::Claim::Reachable),
         "and the later answer supersedes the verdict for that carrier"
     );
@@ -25603,7 +25615,7 @@ fn a_presence_answer_supersedes_an_earlier_verdict() {
         TransportType::Internet,
         crate::protocol::reachability::Claim::Unreachable,
         crate::protocol::reachability::FactSource::GatewayVerdict,
-        std::time::Instant::now(),
+        offline_protocol_core::time::Instant::now(),
     );
     assert!(!protocol.can_reach_recipient("bob"));
 
@@ -29867,8 +29879,8 @@ fn stored_nostr_watermark(storage: &crate::mls::InMemoryStorage) -> Option<i64> 
 }
 
 fn now_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    offline_protocol_core::time::SystemTime::now()
+        .duration_since(offline_protocol_core::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
 }
@@ -33571,11 +33583,14 @@ fn test_peer_overflow_hits_pruned_when_last_entry_evicted() {
     assert!(protocol.pending_queue.has_overflow_hits("peer"));
 
     // Age the sole remaining entry past its TTL and prune it.
-    let past = std::time::Instant::now() - std::time::Duration::from_millis(10_000);
+    let past =
+        offline_protocol_core::time::Instant::now() - std::time::Duration::from_millis(10_000);
     protocol.pending_queue.set_front_received_at("peer", past);
-    protocol
-        .pending_queue
-        .prune_expired_for_peer(&queue_config, "peer", std::time::Instant::now());
+    protocol.pending_queue.prune_expired_for_peer(
+        &queue_config,
+        "peer",
+        offline_protocol_core::time::Instant::now(),
+    );
     assert!(!protocol.pending_queue.contains_peer("peer"));
     assert!(!protocol.pending_queue.has_overflow_hits("peer"));
 }
@@ -39793,9 +39808,10 @@ fn begin_resolution(
     query_id: &str,
     username: &offline_protocol_core::Username,
 ) {
-    protocol
-        .nostr_resolution_requests
-        .insert(username.clone(), std::time::Instant::now());
+    protocol.nostr_resolution_requests.insert(
+        username.clone(),
+        offline_protocol_core::time::Instant::now(),
+    );
     protocol.begin_username_resolution(query_id.to_string(), username.clone());
 }
 
@@ -40192,7 +40208,7 @@ fn test_username_lookup_that_never_reached_a_relay_still_answers() {
     let events = capture_events(&mut protocol);
 
     let username: offline_protocol_core::Username = "alice".parse().unwrap();
-    let stale = std::time::Instant::now()
+    let stale = offline_protocol_core::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(120))
         .expect("monotonic clock must be at least two minutes past boot");
     protocol
@@ -40399,7 +40415,7 @@ fn test_a_swept_lookup_can_be_requested_again() {
     );
 
     let username: offline_protocol_core::Username = name.parse().unwrap();
-    let stale = std::time::Instant::now()
+    let stale = offline_protocol_core::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(120))
         .expect("monotonic clock must be at least two minutes past boot");
     protocol
@@ -40426,7 +40442,7 @@ fn test_a_query_minted_after_its_lookup_was_swept_emits_nothing_further() {
     let events = capture_events(&mut protocol);
 
     let username: offline_protocol_core::Username = "alice".parse().unwrap();
-    let stale = std::time::Instant::now()
+    let stale = offline_protocol_core::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(120))
         .expect("monotonic clock must be at least two minutes past boot");
     protocol
@@ -42208,9 +42224,11 @@ fn a_late_verdict_on_a_superseded_probe_still_backs_off() {
     alice.send_session_confirmation_probe(&bob, "test");
     assert!(!alice.note_superseded_probe_verdict(&too_late, Some(TransportType::Internet)));
     assert_eq!(
-        alice
-            .reachability
-            .claim_for(&bob, TransportType::Internet, std::time::Instant::now()),
+        alice.reachability.claim_for(
+            &bob,
+            TransportType::Internet,
+            offline_protocol_core::time::Instant::now()
+        ),
         None,
         "a verdict past the remembered probe records nothing"
     );
@@ -42236,9 +42254,11 @@ fn a_late_verdict_on_a_superseded_probe_still_backs_off() {
                 .unwrap();
         }
         assert_eq!(
-            alice
-                .reachability
-                .claim_for(&bob, TransportType::Internet, std::time::Instant::now()),
+            alice.reachability.claim_for(
+                &bob,
+                TransportType::Internet,
+                offline_protocol_core::time::Instant::now()
+            ),
             Some(crate::protocol::reachability::Claim::Unreachable),
             "a late {verdict} verdict is recorded as a fact too"
         );
@@ -42564,7 +42584,7 @@ fn enable_telemetry_does_no_storage_io_on_the_caller_even_with_storage_attached(
     use crate::protocol::state_crypto::StateRecordCipher;
     use crate::protocol_state_storage::{ProtocolStateResult, ProtocolStateStorage};
     use crate::telemetry::{AppState, TelemetryHost, TelemetryOs};
-    use std::time::Instant;
+    use offline_protocol_core::time::Instant;
 
     /// Every read sleeps, as a slow disk would. One reaching the caller is
     /// worth 100 ms; the load path makes several.
@@ -43914,7 +43934,7 @@ fn a_partial_ack_batch_goes_out_when_its_window_passes() {
     assert!(ack_frames(&ble).is_empty(), "not yet due");
 
     protocol.coalesced_acks_out.get_mut("bob").unwrap().since =
-        std::time::Instant::now() - ACK_COALESCE_WINDOW;
+        offline_protocol_core::time::Instant::now() - ACK_COALESCE_WINDOW;
     protocol.process().unwrap();
     let acks = ack_frames(&ble);
     assert_eq!(acks.len(), 1);

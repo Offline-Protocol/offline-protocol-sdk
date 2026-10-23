@@ -32,6 +32,7 @@ use crate::protocol::reachability::{Claim, FactSource};
 use crate::transport_manager::TransportManager;
 use crate::{Error, Result};
 use chrono::{DateTime, Utc};
+use offline_protocol_core::time::{Duration as StdDuration, Instant};
 use offline_protocol_core::{
     AppId, ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority, UserId,
     TTL,
@@ -40,7 +41,6 @@ use offline_protocol_mls::{EncryptedMessage, MlsManager};
 use offline_protocol_transport::TransportType;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration as StdDuration, Instant};
 use tracing::{debug, error, info, warn};
 
 /// Most delivery acknowledgements held for want of a route (see
@@ -6478,7 +6478,7 @@ impl OfflineProtocol {
     /// (see `on_transport_send_failed`). TTL-prunes and caps the map here,
     /// on the write path, so it needs no periodic sweep.
     fn track_pending_connection_request(&mut self, message_id: &MessageId, recipient: &str) {
-        let now = std::time::Instant::now();
+        let now = offline_protocol_core::time::Instant::now();
         self.pending_connection_requests
             .retain(|_, p| now.duration_since(p.sent_at) <= PENDING_CONNECTION_REQUEST_TTL);
         if self.pending_connection_requests.len() >= MAX_PENDING_CONNECTION_REQUESTS {

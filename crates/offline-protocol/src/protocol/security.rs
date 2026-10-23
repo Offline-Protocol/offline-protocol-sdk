@@ -10,10 +10,10 @@ use super::{
 use crate::events::{Event, SecurityWarningCode};
 use crate::{Error, Result};
 use chrono::Utc;
+use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_core::{Address, Message, UserId};
 use offline_protocol_sealed::{gateway_address_proof_payload, Freshness};
 use offline_protocol_transport::TransportType;
-use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 /// Minimum gap between [`SecurityWarningCode::PushKeyPackagePoolExhausted`]

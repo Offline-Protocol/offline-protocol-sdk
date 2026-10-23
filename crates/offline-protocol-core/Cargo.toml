@@ -43,10 +43,11 @@ std = [
     "uuid/std",
     "uuid/v4",
     "dep:tracing",
+    "dep:web-time",
 ]
 
 [dependencies]
-# The seven entries below are declared locally rather than inherited from the
+# The entries below are declared locally rather than inherited from the
 # workspace table, and that is load-bearing rather than untidy: a member crate
 # CANNOT drop default features from a `{ workspace = true }` dependency. Cargo
 # accepts `default-features = false` next to `workspace = true` and silently
@@ -73,6 +74,15 @@ tracing = { version = "0.1", optional = true }
 # to be exactly the shape a bare-metal build needs.
 postcard = { workspace = true }
 bech32 = { workspace = true }
+
+# The browser's clock. `std::time::Instant::now()` and `SystemTime::now()`
+# compile on wasm32-unknown-unknown and panic when called, because that target
+# has no host clock; `web-time` reads `performance.now()` and `Date.now()`
+# instead. `crate::time` is the one place the rest of the workspace takes its
+# clock from, and it names this crate only on that target. Locally declared
+# for the same reason as the entries above.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+web-time = { version = "1.1", optional = true }
 
 [dev-dependencies]
 

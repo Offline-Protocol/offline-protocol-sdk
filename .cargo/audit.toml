@@ -21,6 +21,13 @@
 
 [advisories]
 ignore = [
+    # --- The browser build ----------------------------------------------
+    #
+    # RUSTSEC-2024-0384: instant unmaintained. wasm32 only, through OpenMLS's
+    # mandatory `js` feature (fluvio-wasm-timer -> parking_lot 0.11). Mirrors
+    # deny.toml, where the full rationale is.
+    "RUSTSEC-2024-0384",
+
     # --- Lockfile-only: the libcrux HPKE backend is never compiled ---------
     #
     # `hpke-rs-libcrux` and its `libcrux-aesgcm` dependency appear in Cargo.lock

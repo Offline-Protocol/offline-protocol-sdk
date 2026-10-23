@@ -4,12 +4,12 @@ use crate::protocol::{base64_decode, base64_encode, internal_prefixes, InternalM
 use crate::protocol::{DATA_GROUP_BLOB_V1, DATA_GROUP_V1};
 use crate::test_identity::{id, session_slot};
 use crate::{Event, OfflineProtocol};
+use offline_protocol_core::time::{Duration as StdDuration, Instant};
 use offline_protocol_core::{AppId, UserId};
 use offline_protocol_mls::GroupRole;
 use offline_protocol_transport::{Transport, TransportType};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration as StdDuration, Instant};
 
 /// Creates a protocol instance with MLS initialized and started, plus an event collector.
 fn setup_started_with_events() -> (OfflineProtocol, Arc<Mutex<Vec<Event>>>) {
@@ -9045,7 +9045,7 @@ fn test_key_package_sent_to_cleared_after_invite_consumption() {
     // Simulate that Alice has already sent a key package to Bob
     alice
         .key_package_sent_to
-        .insert(id("bob"), (std::time::Instant::now(), 0));
+        .insert(id("bob"), (offline_protocol_core::time::Instant::now(), 0));
 
     // Simulate Alice consuming Bob's key package for an invite.
     // After invite_to_group, the key_package_sent_to for the invitee
@@ -9068,8 +9068,10 @@ fn test_welcome_handler_clears_key_package_sent_to() {
     // processing the Welcome (so he can send a fresh key package).
     // In setup_alice_bob_group, bob manually joins, so let's verify
     // the behavior by checking that the field can be cleared.
-    bob.key_package_sent_to
-        .insert(id("alice"), (std::time::Instant::now(), 0));
+    bob.key_package_sent_to.insert(
+        id("alice"),
+        (offline_protocol_core::time::Instant::now(), 0),
+    );
 
     // Simulate the clear that happens in handle_group_mls_welcome
     bob.key_package_sent_to.remove(&id("alice"));

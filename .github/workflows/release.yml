@@ -1794,15 +1794,24 @@ jobs:
           # and a probe aimed lower would tell the operator resuming it that
           # nothing was left to do while the resume went on to publish.
           #
-          # This URL is the one place in the job that names a crate — the
-          # publish itself is topological and needs no list — so if a workspace
-          # member is ever added *above* offline-protocol-uniffi in the internal
-          # dependency graph, this has to move with it or the annotation goes
-          # quietly wrong. Nothing else breaks; it is a warning, not a gate.
-          url="https://index.crates.io/of/fl/offline-protocol-uniffi"
-          if curl -fsS --retry 3 "$url" 2>/dev/null \
-            | jq -e --arg v "$VERSION" 'select(.vers == $v)' >/dev/null; then
-            echo "::warning title=crates.io publish is a no-op::offline-protocol-uniffi@$VERSION already exists, and it is the last crate this job publishes, so every other crate does too. This run published nothing — expected when re-running a release that already reached crates.io."
+          # These URLs are the one place in the job that names a crate (the
+          # publish itself is topological and needs no list). Two crates sit at
+          # the top of the internal dependency graph, depended on by nothing:
+          # offline-protocol-uniffi and offline-protocol-web. Either can be the
+          # last one published, so the run is a no-op only when both exist. If
+          # a member is ever added above them, this list has to move with it or
+          # the annotation goes quietly wrong. Nothing else breaks; it is a
+          # warning, not a gate.
+          published=0
+          for crate in offline-protocol-uniffi offline-protocol-web; do
+            url="https://index.crates.io/of/fl/$crate"
+            if curl -fsS --retry 3 "$url" 2>/dev/null \
+              | jq -e --arg v "$VERSION" 'select(.vers == $v)' >/dev/null; then
+              published=$((published + 1))
+            fi
+          done
+          if [ "$published" -eq 2 ]; then
+            echo "::warning title=crates.io publish is a no-op::offline-protocol-uniffi@$VERSION and offline-protocol-web@$VERSION already exist, and they are the last crates this job publishes, so every other crate does too. This run published nothing — expected when re-running a release that already reached crates.io."
           fi
 
           cargo workspaces publish --publish-as-is --no-verify --yes

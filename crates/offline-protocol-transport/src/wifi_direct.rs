@@ -55,10 +55,10 @@
 //! is informational and never routed by.
 
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
+use offline_protocol_core::time::SystemTime;
 use offline_protocol_core::{Message, MutexExt};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
 
 /// Peer device information for Wi-Fi Direct
 #[derive(Debug, Clone)]

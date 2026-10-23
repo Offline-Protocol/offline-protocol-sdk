@@ -39,6 +39,8 @@ pub mod message;
 pub mod service;
 #[cfg(feature = "std")]
 pub mod sync;
+#[cfg(feature = "std")]
+pub mod time;
 pub mod types;
 pub mod username;
 pub mod wire;
@@ -75,6 +77,7 @@ mod manifest_guard_tests {
         "thiserror",
         "uuid",
         "tracing",
+        "web-time",
     ];
 
     /// Extracts the version requirement a manifest states for `name`.

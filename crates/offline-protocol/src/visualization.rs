@@ -5,10 +5,10 @@
 
 use crate::constants::{HISTORY_CLEANUP_BATCH_SIZE, MAX_MESSAGE_HISTORY};
 use crate::{Error, Result};
+use offline_protocol_core::time::SystemTime;
 use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::SystemTime;
 
 /// Node in the network topology.
 #[derive(Debug, Clone, Serialize, Deserialize)]

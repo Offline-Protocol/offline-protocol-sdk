@@ -11,11 +11,11 @@ use crate::file_transfer::FileChunk;
 use crate::media_envelope::{decode_media_envelope, is_media_envelope, MediaChunkPlaintext};
 use crate::mls_observability::{DecryptionFailureKind, MlsErrorCategory, MlsOperationContext};
 use crate::SessionStateError;
+use offline_protocol_core::time::Instant;
 use offline_protocol_core::{ContentType, MediaMetadata, Message};
 use offline_protocol_mls::{EncryptedMessage, GroupId};
 use offline_protocol_router::relay::RelayPriority;
 use offline_protocol_transport::TransportType;
-use std::time::Instant;
 use tracing::{debug, error, info, warn};
 
 impl OfflineProtocol {

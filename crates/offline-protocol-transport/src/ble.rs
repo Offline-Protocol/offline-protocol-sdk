@@ -27,13 +27,13 @@ use crate::constants::{
     FRAGMENT_VERSION, MAX_REASONABLE_BLE_PAYLOAD,
 };
 use crate::{Result, SharedCallback, Transport, TransportMetrics, TransportStatus, TransportType};
+use offline_protocol_core::time::{Duration as StdDuration, SystemTime};
 use offline_protocol_core::{Message, MutexExt};
 use offline_protocol_sealed::ACK_FOR_KEY;
 use std::collections::{HashMap, VecDeque};
 use std::convert::TryInto;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration as StdDuration, SystemTime};
 
 /// Information about a fragment assembly that was evicted due to capacity pressure.
 #[derive(Debug, Clone)]
@@ -58,7 +58,7 @@ pub struct PeerDevice {
     /// Signal strength in dBm
     pub rssi: i16,
     /// Last seen timestamp
-    pub last_seen: std::time::SystemTime,
+    pub last_seen: offline_protocol_core::time::SystemTime,
     /// Connection status
     pub connected: bool,
 }
@@ -1422,7 +1422,7 @@ mod tests {
             device_id: id.to_string(),
             address: "AA:BB:CC:DD:EE:FF".to_string(),
             rssi: -60,
-            last_seen: std::time::SystemTime::now(),
+            last_seen: offline_protocol_core::time::SystemTime::now(),
             connected: false,
         }
     }

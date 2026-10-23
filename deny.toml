@@ -50,6 +50,15 @@ ignore = [
     # unfixed dependency re-enables the flag for everyone. Drop this waiver as
     # soon as a serde_columnar release carries the fix.
     { id = "RUSTSEC-2023-0089", reason = "atomic-polyfill unmaintained; reaches the lockfile via heapless 0.7 under serde_columnar's default-featured postcard, and is target-conditional so it never compiles for any shipped target; upstream fix unreleased (loro-dev/columnar#48)" },
+    # Unmaintained-crate notice (not a vulnerability) for `instant`, which
+    # reaches us only through the browser build: OpenMLS refuses to compile
+    # for wasm32 without its `js` feature (a compile_error! in its lib.rs),
+    # and `js` adds fluvio-wasm-timer for its key-package lifetime clock,
+    # which depends on parking_lot 0.11, which depends on instant. Nothing in
+    # that chain is compiled for any other target. The advisory's own
+    # successor is web-time, which is what our code reads the clock through.
+    # Drop this waiver when an OpenMLS release replaces fluvio-wasm-timer.
+    { id = "RUSTSEC-2024-0384", reason = "instant unmaintained; wasm32-only, via openmls `js` -> fluvio-wasm-timer -> parking_lot 0.11; openmls cannot build for wasm without it; no safe upgrade exists" },
     # The `im` persistent-collections family: all three crates were archived
     # by the same upstream author in 2026 and flagged unmaintained together.
     # They reach us as

@@ -65,10 +65,10 @@ pub(crate) mod wire;
 #[cfg(test)]
 mod tests;
 
+use offline_protocol_core::time::{Duration, Instant};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
 
 use offline_protocol_telemetry_wire::{
     Batch, BatchId, DeviceId, RawEvent, SessionId, CURRENT_WIRE_VERSION,

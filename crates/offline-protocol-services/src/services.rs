@@ -8,9 +8,9 @@ use crate::payloads::{
     MAX_SERVICE_PAYLOAD_SIZE, SVC_DISCOVER_QUERY, SVC_DISCOVER_RESPONSE, SVC_REQUEST, SVC_RESPONSE,
     VALID_SERVICE_STATUSES,
 };
+use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_core::{MessagePriority, ServiceDescriptor};
 use std::collections::{HashMap, VecDeque};
-use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 /// A message to send to a peer.
