@@ -1209,10 +1209,37 @@ An attacker who swaps a code gets a link announced under the attacker's own
 address, never the intended peer's, and MLS keeps every session and group
 message from them. An application that admits members to a group should show
 the joining address to the people involved, as the lobby example does: it
-lists every address it admits, and a player sees the host's. No ICE
-server is configured, so the codes never reach a third party unless people
-send them through one, and a connection is made on the local network or not
-at all.
+lists every address it admits, and a player sees the host's. By default no
+ICE server is configured, so the codes never reach a third party unless
+people send them through one, and a connection is made on the local network
+or not at all. An application that names STUN or TURN servers adds its
+public addresses to the codes and tells those servers who is connecting; one
+that signals through a Nostr room is R28.
+
+### R28. A signalling room code admits whoever holds it
+
+`NostrSignaller` derives a room's topic and sealing key from its code
+([web bridge W11](../bridges/web.md#w11-signalling-can-ride-a-nostr-room)).
+Anyone who holds the code reads the connection codes published in the room,
+and with them the addresses R27 describes, and can join: the host answers
+every session that offers. The relays the application names see the topic,
+the times and sizes of the events, and the network address of every client
+that publishes or subscribes.
+
+**Why it stands:** a room code is the thing a person reads out across a
+table, so it must be short enough to say, and anything that can be said can
+be overheard.
+
+**What bounds it:** the code admits a carrier, not an identity. A joiner is
+announced under the address its preamble proves, and MLS admits it to
+nothing until the host invites it (R27). The topic is public, so the code
+must not be findable from it: generated codes carry eighty bits and the
+binding refuses one under ten characters (fifty bits). Content is sealed with
+the topic and the role bound in, and each event is signed by a key used once,
+so a relay cannot read the codes or link a room's events by author, and an
+event more than two minutes from the reader's clock is refused, so a relay
+that holds one back cannot replay it later. A leaked code costs the host at
+most sixteen answered sessions a minute, below the engine's link ceiling.
 
 ## Network egress
 
@@ -1265,6 +1292,12 @@ and peers, never reaches logcat or the unified log whatever its level. A
 device log is readable by anything on the device that can run `logcat`, which
 is why the filter is on the target and not on a level. See
 [the debug tap](../telemetry.md#the-debug-tap).
+
+The browser binding's page code opens connections only where the application
+says: WebSockets to the Nostr relays it names for `NostrSignaller` (R28), and
+ICE traffic to the STUN or TURN servers it names for `WebRtcCarrier` (R27).
+With neither, a browser node opens nothing beyond its own origin and the
+devices it links to.
 
 The bound is on the core, not on the whole SDK. The React Native bridge
 sources log through `android.util.Log` and `print` on their own account, and

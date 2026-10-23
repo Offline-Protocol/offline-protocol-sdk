@@ -143,7 +143,10 @@ which commits by writing its header last. An I/O error once that header
 write has begun empties the spare again, because a header that did reach
 the disk would make the next open take the spare and drop every later
 append; if the spare cannot be emptied, the log refuses every later write
-rather than acknowledge one a restart would lose.
+rather than acknowledge one a restart would lose. A failed compaction is
+retried only once the log has grown by another mebibyte, because compacting
+seals every live record again and retrying it on each write would multiply
+the cost of every write for as long as the cause lasts.
 
 **Every record is sealed and bound to its place.** ChaCha20-Poly1305 under a
 key derived per category and per generation from a 32-byte store key, with
@@ -159,9 +162,13 @@ truncating on that would destroy the identity. A file shorter than a header
 is a crash during the first header write, not a wrong key, and starts a
 fresh log. Once the header authenticates, the first record that is short or
 does not authenticate ends the log, which is what a crash during a write
-leaves. A damaged record with an intact one after it is not a tear, and the
-log is refused untouched: cutting there would roll back acknowledged ratchet
-state, and a reused ratchet generation is a reused AEAD nonce.
+leaves. A damaged record with an intact one anywhere after it is not a tear,
+and the log is refused untouched: cutting there would roll back acknowledged
+ratchet state, and a reused ratchet generation is a reused AEAD nonce. The
+search for that intact record tries every offset rather than the one the
+damaged record's length prefix names, because a corrupted prefix is the
+damage that otherwise reads exactly as a tear. Damage to the last record
+alone cannot be told from a tear, and is cut.
 
 **The store key is sealed too.** The worker seals it under a non-extractable
 AES-GCM key kept in IndexedDB and stores the sealed copy beside the logs. A
@@ -206,15 +213,76 @@ link is a byte stream: the preamble arrives first and a frame's bytes in
 order. Outbound bytes are cut into chunks of at most 16 KiB, a size every
 browser accepts, and the engine's stream reader joins them; nothing in the
 carrier reads a byte. Sends wait while more than 1 MiB is buffered on the
-channel, so a slow peer holds the page's memory to that.
+channel, and the frames behind that wait are held on the page. A peer that
+lets more than 8 MiB pile up there has its connection closed, so a slow or
+stalled peer holds the page's memory to about 9 MiB rather than without
+bound. Closing loses nothing the engine promised: an acknowledged message
+waits in its outbox for the next link, and an unacknowledged one (W10) was
+never promised.
 
 Signalling needs no network. Each side's description waits for ICE gathering
 to finish, so one code carries every candidate, and the two codes cross by
-whatever the people have: a QR code, a paste. No ICE server is configured,
-so a connection is made on the local network or not at all. The codes are
-unauthenticated and name local addresses
+whatever the people have: a QR code, a paste, or a Nostr room (W11). By
+default no ICE server is configured, so a connection is made on the local
+network or not at all. `new WebRtcCarrier(node, { iceServers })` takes the
+application's own STUN and TURN servers for networks where devices cannot
+reach each other directly; the project runs none, and every server named
+learns which addresses are connecting. The codes are unauthenticated and name
+addresses
 ([R27](../security/threat-model.md#r27-a-webrtc-connection-code-is-unauthenticated-and-names-local-addresses));
 who is on the other end is still what the preamble proves (W3).
+
+### W10. An ephemeral send goes once, over a live link
+
+`sendMessage(to, content, { ephemeral: true })` and the same option on
+`sendGroupMessage` are for state the next send replaces, such as a game's
+positions ([ADR 0032](../adr/0032-ephemeral-sends-go-once-over-a-live-link.md)).
+The frame asks for no acknowledgement and is handed once to the link
+straight to each recipient; nothing is kept to retry it, park it or give it
+to the relay, so it never arrives late. With no link, or for a direct message
+no confirmed session, the call rejects at once and nothing was encrypted.
+It carries plain content only.
+
+A group send that misses a member still moves this device's ratchet for
+them, so once 256 such sends have missed someone, one goes out reliable and
+waits in their outbox: a rung they can decrypt across the gap when they come
+back. The first ephemeral send to a group after the node starts is one of
+those. On the browser's sealed log an ephemeral group message costs the
+sender two flushes, against four for a reliable one.
+
+### W11. Signalling can ride a Nostr room
+
+`NostrSignaller` moves the two connection codes through Nostr relays the
+application names, so a player types a short room code instead of carrying
+two long ones. The host listens in the room and answers every joiner; each
+join becomes one `WebRtcCarrier` link.
+
+**The room code is a shared secret, not an identity.** Both sides derive the
+room's public topic and its sealing key from it, in Rust (`signal.rs`). A
+relay sees the topic and ciphertext: the connection code is sealed under the
+room key, with the topic and the role as associated data so an answer cannot
+pass as an offer, and each event is signed by a key used once. Generated
+codes carry eighty bits, and a code under ten characters is refused, because
+the topic is public and a short code could be found from it. Whoever holds
+the code can open a carrier toward the host and learn the addresses in the
+codes; who is on that carrier is still what the preamble and the MLS session
+prove ([R28](../security/threat-model.md#r28-a-signalling-room-code-admits-whoever-holds-it)).
+
+**The page moves text.** The relay sockets live on the page beside the
+WebRTC carrier, and every REQ, EVENT and relay message crosses to the worker
+to be built or opened; the page reads only a relay's EOSE, to know its
+subscription is live before it publishes. Signalling events use an ephemeral
+kind (25912), which a relay forwards to whoever is subscribed and never
+stores, and an event more than two minutes from this clock is refused, so a
+relay cannot hold one and replay it later.
+
+**The host is bounded.** It answers each joiner's session once (again only
+when that session asks again, as its answer may have been lost), holds at
+most sixteen answered sessions for a minute each, and the engine's link
+ceiling stands behind that. A joiner republishes its offer as a new event
+every two seconds until an answer for its session arrives or its deadline
+passes, because a host that subscribed after an ephemeral event was sent
+never sees it.
 
 ## Which shared rules apply
 
@@ -237,8 +305,10 @@ who is on the other end is still what the preamble proves (W3).
   `localhost`.
 - A `fatal` listener that starts the node again, or tells the user the node
   ended (W5).
-- A way to move two WebRTC codes between devices, and the joining address
-  shown to the people involved before anything is shared with it (R27).
+- A way to move two WebRTC codes between devices (by hand, or a
+  `NostrSignaller` room and the relays it names), and the joining address
+  shown to the people involved before anything is shared with it (R27, R28).
+- Its own STUN or TURN servers, if links must cross networks (W9).
 - Nothing about framing, identity, encryption or storage: those are the
   engine's. The client posts `stop` to the worker on `pagehide` itself.
 
@@ -268,10 +338,18 @@ bash bindings/web/scripts/test-browser.sh                   # headless Chrome
   the page fail, which is how the page was checked.
 - `webrtc.html`: two nodes with no tab carrier, linked only by a data channel
   set up from two codes. A session, an encrypted direct message, a 100 KiB
-  message that crosses in chunks, a group at 10 Hz with its delivery
-  latency and the sender's store flushes, and a loss when the connection
-  closes (W9). Chrome runs with `WebRtcHideLocalIpsWithMdns` off, so the
-  candidates are addresses a runner can reach.
+  message that crosses in chunks, a group at 10 Hz sent acknowledged and
+  then ephemeral, each with its delivery latency and the sender's store
+  flushes (the ephemeral phase must cost fewer), and a loss when the
+  connection closes (W9, W10). Chrome runs with `WebRtcHideLocalIpsWithMdns`
+  off, so the candidates are addresses a runner can reach.
+- `nostr-signal.html`: two nodes that share only a room code meet through
+  a Nostr relay, link over WebRTC and send an ephemeral direct message. A
+  join to a room nobody hosts gives up at its deadline, and a call to a
+  stopped node rejects instead of hanging (W10, W11). The relay is
+  `test/nostr-relay.mjs`, a NIP-01 relay in Node's standard library that
+  stores and verifies nothing, so the page's own checks are what refuse a
+  forged event.
 
 CI's `web-binding` job runs them all.
 
@@ -281,10 +359,13 @@ two-player game between devices over WebRTC with durable nodes.
 
 ## What is not built yet
 
-An unacknowledged send for game state. Today every state update is an
-acknowledged, retried MLS send, and the sender writes its ratchet and
-delivery state for each: about four flushes per group message to one member,
-so 40 a second at 10 Hz, at a p50 delivery of about 5 ms on one machine.
-Those numbers, from `webrtc.html`, are the evidence the decision needs.
-Also not built: signalling through the relay or Nostr, and a TURN server for
-networks that block direct connections.
+- **A TURN server.** The carrier takes the application's own (W9); the
+  project runs none, and no page tests one.
+- **Signalling through the Offline Protocol relay.** Nostr carries it (W11);
+  the relay's protocol has no frame for an unauthenticated room.
+- **Ephemeral sends on the native bindings.** The engine has them and the
+  browser exposes them; the UDL record does not yet carry the field
+  ([ADR 0032](../adr/0032-ephemeral-sends-go-once-over-a-live-link.md)).
+- **Coverage beyond Chrome on one machine.** No page runs in Safari or
+  Firefox, and no run has crossed two physical devices. The storage
+  conformance suites run on the host only (W8).

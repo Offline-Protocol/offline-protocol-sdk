@@ -11,6 +11,7 @@ use wasm_bindgen::prelude::*;
 use crate::log_store::{Category, LogStats, LogStore, STORE_KEY_BYTES};
 use crate::node::{LinkId, Node, NodeError};
 use crate::opfs::{OpfsFile, SyncAccessHandle};
+use crate::signal;
 
 /// The folder an account's files live in, under the origin's OPFS root: the
 /// namespace every binding derives for one application id and profile, so
@@ -18,6 +19,50 @@ use crate::opfs::{OpfsFile, SyncAccessHandle};
 #[wasm_bindgen(js_name = storageNamespace)]
 pub fn storage_namespace(app_id: &str, profile: &str) -> String {
     offline_protocol::account_storage_namespace(app_id, profile)
+}
+
+/// A fresh room code for signalling through Nostr (W11): eighty bits, in
+/// letters and digits a person can read out.
+#[wasm_bindgen(js_name = signalNewRoom)]
+pub fn signal_new_room() -> String {
+    signal::new_room()
+}
+
+/// The relay `REQ` text that receives `room`'s signalling from `since`
+/// (Unix seconds) on.
+#[wasm_bindgen(js_name = signalSubscription)]
+pub fn signal_subscription(
+    room: &str,
+    subscription_id: &str,
+    since: f64,
+) -> Result<String, JsError> {
+    signal::subscription(room, subscription_id, since as i64).map_err(|e| JsError::new(&e))
+}
+
+/// The relay `EVENT` text carrying one connection code for `room`, sealed
+/// under the room key and signed by a key used once. `role` is "offer" or
+/// "answer"; `session` is the joiner's 32 hex characters.
+#[wasm_bindgen(js_name = signalEvent)]
+pub fn signal_event(room: &str, role: &str, session: &str, code: &str) -> Result<String, JsError> {
+    let signal = signal::Signal {
+        role: signal::Role::parse(role).map_err(|e| JsError::new(&e))?,
+        session: session.to_string(),
+        code: code.to_string(),
+    };
+    signal::event(room, &signal).map_err(|e| JsError::new(&e))
+}
+
+/// Opens one message a relay sent: `{role, session, code}` as JSON when it
+/// is an authentic, fresh signal for `room`, otherwise `undefined`.
+#[wasm_bindgen(js_name = signalOpen)]
+pub fn signal_open(room: &str, relay_message: &str) -> Option<String> {
+    signal::open(room, relay_message, signal::now_unix_secs()).map(|s| s.to_json())
+}
+
+/// This clock in Unix seconds, for a subscription's `since`.
+#[wasm_bindgen(js_name = signalNow)]
+pub fn signal_now() -> f64 {
+    signal::now_unix_secs() as f64
 }
 
 type DurableStores = (Arc<LogStore<OpfsFile>>, Arc<LogStore<OpfsFile>>);
@@ -187,10 +232,18 @@ impl WebEngine {
         self.node.next_closed()
     }
 
-    /// Sends a direct message; returns its id.
+    /// Sends a direct message; returns its id. `ephemeral` sends it once
+    /// over the live link, never acknowledged or retried (W10).
     #[wasm_bindgen(js_name = sendMessage)]
-    pub fn send_message(&mut self, recipient: &str, content: &str) -> Result<String, JsError> {
-        self.node.send_message(recipient, content).map_err(js)
+    pub fn send_message(
+        &mut self,
+        recipient: &str,
+        content: &str,
+        ephemeral: bool,
+    ) -> Result<String, JsError> {
+        self.node
+            .send_message(recipient, content, ephemeral)
+            .map_err(js)
     }
 
     /// Creates a group; returns its info as JSON.
@@ -206,8 +259,16 @@ impl WebEngine {
     }
 
     /// Sends to a group; returns the per-member message ids as JSON.
+    /// `ephemeral` as for [`WebEngine::send_message`].
     #[wasm_bindgen(js_name = sendGroupMessage)]
-    pub fn send_group_message(&mut self, group_id: &str, content: &str) -> Result<String, JsError> {
-        self.node.send_group_message(group_id, content).map_err(js)
+    pub fn send_group_message(
+        &mut self,
+        group_id: &str,
+        content: &str,
+        ephemeral: bool,
+    ) -> Result<String, JsError> {
+        self.node
+            .send_group_message(group_id, content, ephemeral)
+            .map_err(js)
     }
 }

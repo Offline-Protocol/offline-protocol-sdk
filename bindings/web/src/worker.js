@@ -22,7 +22,15 @@
 //   ticked on would drive a module whose state stopped mid-update. The worker
 //   says so once and stops.
 
-import init, { WebEngine, storageNamespace } from "../pkg/offline_protocol_web.js";
+import init, {
+  WebEngine,
+  storageNamespace,
+  signalNewRoom,
+  signalSubscription,
+  signalEvent,
+  signalOpen,
+  signalNow,
+} from "../pkg/offline_protocol_web.js";
 import { openDurableStore } from "./store.js";
 import { TabCarrier } from "./tab-carrier.js";
 
@@ -156,8 +164,8 @@ const handlers = {
     const stats = engine.storeStats();
     return stats === undefined ? null : JSON.parse(stats);
   },
-  sendMessage({ to, content }) {
-    return engine.sendMessage(to, content);
+  sendMessage({ to, content, ephemeral = false }) {
+    return engine.sendMessage(to, content, Boolean(ephemeral));
   },
   createGroup({ name }) {
     return JSON.parse(engine.createGroup(name));
@@ -165,8 +173,24 @@ const handlers = {
   inviteToGroup({ groupId, member }) {
     engine.inviteToGroup(groupId, member);
   },
-  sendGroupMessage({ groupId, content }) {
-    return JSON.parse(engine.sendGroupMessage(groupId, content));
+  // Signalling through Nostr (W11). The page holds the relay sockets; these
+  // build and open what crosses them.
+  signalNewRoom() {
+    return signalNewRoom();
+  },
+  signalSubscription({ room, subscriptionId }) {
+    // A little before now, for a relay whose clock runs behind this one.
+    return signalSubscription(room, subscriptionId, signalNow() - 30);
+  },
+  signalEvent({ room, role, session, code }) {
+    return signalEvent(room, role, session, code);
+  },
+  signalOpen({ room, message }) {
+    const opened = signalOpen(room, message);
+    return opened === undefined ? null : JSON.parse(opened);
+  },
+  sendGroupMessage({ groupId, content, ephemeral = false }) {
+    return JSON.parse(engine.sendGroupMessage(groupId, content, Boolean(ephemeral)));
   },
   stop() {
     clearInterval(timer);
