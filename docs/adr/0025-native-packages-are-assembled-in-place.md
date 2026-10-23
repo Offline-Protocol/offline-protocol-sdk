@@ -44,7 +44,9 @@ that does not exist yet.
 2. **The packages are assembled.** The Swift package is a directory written
    by `scripts/assemble-swift-package.sh`. The Android library is a Gradle
    build under `bindings/kotlin` whose source sets point at the directories
-   above. Both builds run in CI on every pull request.
+   above. Both builds run in CI on every pull request that touches the
+   bridge sources or the package (the Swift package also on any engine
+   change), and on every push to main.
 3. **What needs React is a short, named list of what to leave out.** Not a
    list of what to take: a new bridge source is part of both packages without
    being registered anywhere, where the React Native package already takes

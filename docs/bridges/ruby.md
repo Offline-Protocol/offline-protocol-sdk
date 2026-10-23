@@ -184,8 +184,9 @@ The release tests the committed binding against the release profile's library,
 builds the gem at the release's version, and checks it carries the binding and
 the license before anything is pushed. A re-run of a release that already
 reached RubyGems pushes nothing. `bundle exec rake build` builds the same gem,
-and the Ruby Binding job in CI runs it on every pull request, so a gemspec
-error shows there and not on a tag.
+and the Ruby Binding job in CI runs it on every pull request that touches the
+binding, its example or the library under it, so a gemspec error shows there
+and not on a tag.
 
 ## R8. Bytes come back signed, and must be masked before they go back in
 
