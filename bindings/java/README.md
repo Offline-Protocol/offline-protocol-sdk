@@ -49,7 +49,7 @@ ProtocolConfig config = new ProtocolConfig(
     "com.example.app", "default",
     false, false, true, false, false, false, // ble, wifi direct, internet, reticulum, nostr, prefer online
     (byte) 8, true, true, true, true,        // ttl, encryption, auto key exchange, store pending, require encryption
-    64L, 4096L, 60_000L, OverflowPolicy.DROP_OLDEST,
+    64L, 4096L, 86_400_000L, OverflowPolicy.DROP_OLDEST, // pending queue: per peer, global, ttl (24 h), overflow
     false, 256, true, true, false, false,
     true, true, true, false, true, true, true,
     null, null,
