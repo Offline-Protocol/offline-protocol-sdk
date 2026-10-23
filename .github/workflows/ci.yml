@@ -682,6 +682,9 @@ jobs:
   web-binding:
     name: Web Binding
     runs-on: ubuntu-latest
+    # About five minutes when healthy. Without a limit, a stalled mirror holds
+    # the runner, and the PR's checks, for up to six hours.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -709,13 +712,42 @@ jobs:
       - name: Build the module
         run: bash bindings/web/scripts/build.sh | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # `--with-deps` apt-installs about 190 packages (112 MB, mostly WebKit's
+      # media and GTK libraries) from the runner's Ubuntu mirror, which now and
+      # then serves them at tens of kB/s: a step that takes under a minute took
+      # 52 (`Fetched 112 MB in 51min 26s`), in about one run in four. The
+      # browsers come from Playwright's CDN and were never the slow part. So
+      # apt's download directory is pointed at a cached one, and a warm run
+      # fetches nothing. The image version is the last part of the key so a
+      # new image restores the previous set, fetches only the packages Ubuntu
+      # has updated since, and saves the result under its own key.
+      - name: Name the runner image
+        id: image
+        run: echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright's system packages
+        uses: actions/cache@v6
+        with:
+          path: ~/playwright-debs/*.deb
+          key: playwright-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bindings/web/package-lock.json') }}-${{ steps.image.outputs.version }}
+          restore-keys: |
+            playwright-debs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('bindings/web/package-lock.json') }}-
+            playwright-debs-${{ runner.os }}-${{ runner.arch }}-
+
       # Playwright and the three engines it pins: Chromium, Firefox and
-      # WebKit (Safari's engine, not Safari).
+      # WebKit (Safari's engine, not Safari). `autoclean` drops the versions
+      # the mirror no longer carries, so the cached set does not grow with
+      # every image.
       - name: Install Playwright and its browsers
         working-directory: bindings/web
         run: |
+          debs="$HOME/playwright-debs"
+          mkdir -p "$debs/partial"
+          echo "Dir::Cache::Archives \"$debs\";" \
+            | sudo tee /etc/apt/apt.conf.d/90playwright-debs
           npm ci
           npx playwright install --with-deps chromium firefox webkit
+          sudo apt-get autoclean
 
       # Every page in bindings/web/test, in each of the three engines: two
       # nodes over the origin's BroadcastChannel (preambles, an MLS session
