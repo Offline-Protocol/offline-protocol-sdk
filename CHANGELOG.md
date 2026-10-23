@@ -26,8 +26,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   so an iPhone can name an Android peer that linked to it as central; the
   digest lets anyone who knows the address recognise the phone passively
   ([R29](docs/security/threat-model.md#r29-the-bluetooth-le-scan-response-names-the-device-and-rssi-is-unauthenticated)).
-  Readings also keep each link's quality current, which the mesh relay ranks
-  neighbours by; it used the reading from discovery until now.
+  Readings also keep each link's quality current, smoothed so that one
+  reading's noise does not reorder neighbours; the mesh relay ranks
+  neighbours by it, and used the reading from discovery until now.
 
 - **The engine runs in a browser (experimental).** `offline-protocol-web`
   compiles the full engine, MLS included, for `wasm32-unknown-unknown`, and

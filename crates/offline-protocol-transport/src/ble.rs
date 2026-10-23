@@ -410,6 +410,13 @@ impl BleTransport {
     /// Records a signal reading taken from an advertisement, and returns the
     /// peer it was attributed to.
     ///
+    /// The stored value is smoothed (`0.7 * stored + 0.3 * reading`), not
+    /// replaced. It is what the mesh relay ranks fan-out targets by, and a raw
+    /// reading swings about ±8 dB from one sample to the next, which would
+    /// hand the retransmissions of one frame to different neighbours. Smoothed,
+    /// that swing shrinks to under 2 dB and the ranking follows only a lasting
+    /// change in signal. The caller reports the raw reading to the app.
+    ///
     /// `peer_id` is the peer the platform's link to that advertiser names;
     /// `node_hash` is the [`node_hash`] the advertisement carried. Either
     /// may be absent, and the link wins when both are present. A reading is
@@ -432,7 +439,7 @@ impl BleTransport {
             }
         };
         let peer = peers.get_mut(&id)?;
-        peer.rssi = rssi;
+        peer.rssi = ((7 * i32::from(peer.rssi) + 3 * i32::from(rssi)) as f32 / 10.0).round() as i16;
         peer.last_seen = SystemTime::now();
         Some(id)
     }
@@ -1504,7 +1511,7 @@ mod tests {
             transport.on_peer_rssi(Some("carol"), None, -41),
             Some("carol".into())
         );
-        assert_eq!(rssi_of("carol"), -41);
+        assert_eq!(rssi_of("carol"), -54, "0.7 * -60 + 0.3 * -41, rounded");
         // The link wins over a hash naming someone else.
         let dave = node_hash("dave");
         assert_eq!(
@@ -1516,7 +1523,7 @@ mod tests {
             transport.on_peer_rssi(Some("eve"), Some(&dave), -70),
             Some("dave".into())
         );
-        assert_eq!(rssi_of("dave"), -70);
+        assert_eq!(rssi_of("dave"), -63);
         assert_eq!(
             transport
                 .connected_peers()
@@ -1524,7 +1531,7 @@ mod tests {
                 .find(|l| l.peer_id == "dave")
                 .unwrap()
                 .rssi,
-            Some(-70)
+            Some(-63)
         );
         // Neither an unlinked address, its hash, nor a malformed hash is named.
         assert_eq!(
@@ -1533,6 +1540,42 @@ mod tests {
         );
         assert_eq!(transport.on_peer_rssi(None, Some(&dave[..4]), -30), None);
         assert_eq!(transport.get_peer("eve").map(|p| p.rssi), None);
+    }
+
+    /// Raw readings swing about ±8 dB between samples. Two links 10 dB apart
+    /// must keep their order through that noise, or the mesh relay hands the
+    /// retransmissions of one frame to different neighbours.
+    #[test]
+    fn reading_noise_does_not_reorder_links() {
+        let transport = BleTransport::new("me");
+        transport.start().unwrap();
+        transport.on_peer_discovered(peer_device("strong"));
+        transport.on_peer_discovered(peer_device("weak"));
+        let quality = |id: &str| {
+            let link = transport
+                .connected_peers()
+                .into_iter()
+                .find(|l| l.peer_id == id)
+                .unwrap();
+            link.link_quality().value()
+        };
+        for i in 0..60 {
+            // Opposite phases, so the two readings cross every sample.
+            let swing = if i % 2 == 0 { 8 } else { -8 };
+            transport.on_peer_rssi(Some("strong"), None, -60 + swing);
+            transport.on_peer_rssi(Some("weak"), None, -70 - swing);
+            if i >= 10 {
+                assert!(
+                    quality("strong") > quality("weak"),
+                    "reordered at sample {i}"
+                );
+            }
+        }
+        // A lasting change still moves the ranking.
+        for _ in 0..30 {
+            transport.on_peer_rssi(Some("weak"), None, -45);
+        }
+        assert!(quality("weak") > quality("strong"));
     }
 
     #[test]

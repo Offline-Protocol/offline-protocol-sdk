@@ -1298,14 +1298,18 @@ impl MeshRelayGovernor {
 
         // Strongest links first: a fan-out slot spent on a barely-connected
         // neighbor is one the frame probably does not survive, and there are
-        // only a few slots.
+        // only a few slots. Quality is live: on Bluetooth LE it follows the
+        // scan's signal readings, smoothed by the transport so that a
+        // reading's noise does not reorder links and only a lasting change in
+        // signal does.
         //
         // Ties break on a hash of (id, peer, self), which does two things.
         // Within a group of equally good links it spreads different messages
         // across different neighbors rather than pinning every frame to the
-        // same one. And it is stable per frame: a second copy of the same
-        // message picks the same neighbors instead of a fresh set, so a
-        // retransmission does not widen its own footprint.
+        // same one. And it is stable per frame: while the links' qualities
+        // hold, a second copy of the same message picks the same neighbors
+        // instead of a fresh set, so a retransmission does not widen its own
+        // footprint.
         candidates.sort_by(|(a_peer, a_quality), (b_peer, b_quality)| {
             b_quality.cmp(a_quality).then_with(|| {
                 Self::hash_of(&[message_id, a_peer, &self.local_id]).cmp(&Self::hash_of(&[

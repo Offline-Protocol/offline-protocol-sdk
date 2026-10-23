@@ -10670,8 +10670,10 @@ mod tests {
 
         protocol.ble_peer_rssi(Some("near".to_string()), None, -45);
         assert!(readings(&protocol).is_empty(), "off by default");
+        let smoothed = link_rssi(&protocol);
+        assert!(smoothed > -60, "link quality follows anyway: {smoothed}");
         protocol.ble_peer_rssi(Some("near".to_string()), None, 127);
-        assert_eq!(link_rssi(&protocol), -45, "link quality follows anyway");
+        assert_eq!(link_rssi(&protocol), smoothed, "127 is no reading");
 
         protocol.set_peer_rssi_events(true);
         let hash = offline_protocol_transport::node_hash("near").to_vec();
@@ -10685,10 +10687,12 @@ mod tests {
             1,
             "one per peer per interval, none for shy or a stranger: {got:?}"
         );
-        assert!(got[0].contains("\"peer_id\":\"near\"") && got[0].contains("\"rssi\":-44"));
-        assert_eq!(
-            link_rssi(&protocol),
-            -43,
+        assert!(
+            got[0].contains("\"peer_id\":\"near\"") && got[0].contains("\"rssi\":-44"),
+            "the event carries the raw reading: {got:?}"
+        );
+        assert!(
+            link_rssi(&protocol) > smoothed,
             "the cap is on events, not on readings"
         );
 

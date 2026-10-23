@@ -1275,10 +1275,14 @@ schedule every scanner shares, and the SDK's advertising duty cycle is
 tuned for discovery.
 
 **What bounds it:** a reading is attributed only to a peer that already
-proved its address on a link, so a forged digest never introduces anyone,
-and it moves only a number. Relay ranking orders neighbours for fan-out
-and never decides whether a frame is sent, and every frame is still
-authenticated above this layer. An application must not treat `peer_rssi`
+proved its address on a link, so a forged digest never introduces anyone.
+What it can do is move that peer's place in relay ranking, which chooses
+the neighbours a frame fans out to when there are more neighbours than
+slots: a sustained forged signal (the transport smooths readings, so one
+spike does not) can push the peer out of the fan-out or into it. Ranking
+never decides whether a frame is sent at all, the frame still goes to the
+other neighbours, and every frame is still authenticated above this
+layer. An application must not treat `peer_rssi`
 as evidence of who is physically near.
 
 ## Network egress
