@@ -162,13 +162,15 @@ truncating on that would destroy the identity. A file shorter than a header
 is a crash during the first header write, not a wrong key, and starts a
 fresh log. Once the header authenticates, the first record that is short or
 does not authenticate ends the log, which is what a crash during a write
-leaves. A damaged record with an intact one anywhere after it is not a tear,
-and the log is refused untouched: cutting there would roll back acknowledged
-ratchet state, and a reused ratchet generation is a reused AEAD nonce. The
-search for that intact record tries every offset rather than the one the
-damaged record's length prefix names, because a corrupted prefix is the
-damage that otherwise reads exactly as a tear. Damage to the last record
-alone cannot be told from a tear, and is cut.
+leaves. A damaged record followed, at any offset, by an intact record sealed
+under the next sequence number is not a tear, and the log is refused
+untouched: cutting there would roll back acknowledged ratchet state, and a
+reused ratchet generation is a reused AEAD nonce. The search tries every
+offset rather than the one the damaged record's length prefix names, because
+a corrupted prefix is the damage that otherwise reads exactly as a tear. Two
+cases still read as a tear and are cut: damage to the last record, and two
+damaged records in a row, since the search looks for the next sequence
+number only.
 
 **The store key is sealed too.** The worker seals it under a non-extractable
 AES-GCM key kept in IndexedDB and stores the sealed copy beside the logs. A

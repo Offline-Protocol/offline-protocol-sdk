@@ -31,14 +31,15 @@
 //!   first record that is short or does not authenticate ends the log, and
 //!   the file is truncated there. A crash during a write leaves exactly that
 //!   (a partial record after the last whole one), and the record it was
-//!   writing was never acknowledged. A damaged record with an intact one
-//!   anywhere after it is not a tear: cutting there would roll back
-//!   acknowledged state (ratchet generations an AEAD nonce depends on), so
-//!   the log is refused and left untouched, as for a wrong key. The search
-//!   for that intact record does not trust the damaged record's length
-//!   prefix, because a corrupted prefix is the damage that otherwise looks
-//!   exactly like a tear. Damage to the very last record is still
-//!   indistinguishable from a tear and is cut.
+//!   writing was never acknowledged. A damaged record followed, at any
+//!   offset, by an intact record sealed under the next sequence number is
+//!   not a tear: cutting there would roll back acknowledged state (ratchet
+//!   generations an AEAD nonce depends on), so the log is refused and left
+//!   untouched, as for a wrong key. The search does not trust the damaged
+//!   record's length prefix, because a corrupted prefix is the damage that
+//!   otherwise looks exactly like a tear. What still reads as a tear and is
+//!   cut: damage to the very last record, and two damaged records in a row,
+//!   since the search looks for the next sequence number only.
 //! - **Compaction commits by its header.** It truncates the spare file, writes
 //!   every live record into it, flushes, and only then writes and flushes the
 //!   header that makes it valid, under the next generation. A crash at any
