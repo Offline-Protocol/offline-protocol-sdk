@@ -3223,28 +3223,24 @@ extension BleManager: CBCentralManagerDelegate {
         
         // Live signal strength, above the duplicate check: that check skips a
         // repeat within the same 5 dB bucket for a second, which sheds work
-        // but would also bias the readings toward bucket changes. Its own
-        // throttle keeps this to four calls a second per peripheral instead.
+        // but would also bias the readings toward bucket changes. The policy's
+        // own throttle keeps this to about four calls a second per peripheral.
         // The core attributes the reading to a linked peer, by this link or by
         // the node hash an Android peer carries in its scan response (a peer
         // linked to us as central advertises from an identifier no link of
         // ours has), and drops anything else, so no mesh gate is needed in
         // front of it. Off the main thread, like every protocol call here.
-        if now.timeIntervalSince(lastRssiFeedAt[peripheral.identifier] ?? .distantPast) >= 0.25 {
-            let linkedPeerId = connections.peripheralDeviceId(for: peripheral.identifier)
-            let advertisedHash = (advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data])?[SERVICE_UUID]
-            if linkedPeerId != nil || advertisedHash != nil {
-                // ponytail: cleared rather than aged out; costs one early reading.
-                if lastRssiFeedAt.count > 100 { lastRssiFeedAt.removeAll() }
-                lastRssiFeedAt[peripheral.identifier] = now
-                let reading = rssiValue
-                onProtocolQueue { [weak self] in
-                    self?.protocolInstance.blePeerRssi(
-                        peerId: linkedPeerId,
-                        nodeHash: advertisedHash.map { [UInt8]($0) },
-                        rssi: reading
-                    )
-                }
+        let linkedPeerId = connections.peripheralDeviceId(for: peripheral.identifier)
+        let advertisedHash = (advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data])?[SERVICE_UUID]
+        if PeerRssiFeedPolicy.admit(&lastRssiFeedAt, id: peripheral.identifier, now: now,
+                                    linked: linkedPeerId != nil, hasServiceData: advertisedHash != nil) {
+            let reading = rssiValue
+            onProtocolQueue { [weak self] in
+                self?.protocolInstance.blePeerRssi(
+                    peerId: linkedPeerId,
+                    nodeHash: advertisedHash.map { [UInt8]($0) },
+                    rssi: reading
+                )
             }
         }
 

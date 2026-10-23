@@ -39,6 +39,7 @@ Pod::Spec.new do |s|
     "ios/AddressDeclarationPolicy.swift",
     "ios/BleAppTag.swift",
     "ios/BleDensityPolicy.swift",
+    "ios/PeerRssiFeedPolicy.swift",
     "ios/BleHelloPolicy.swift",
     "ios/BleWriteStallPolicy.swift",
     "ios/BleMessageNotificationPolicy.swift",

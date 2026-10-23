@@ -1283,9 +1283,9 @@ because it changes what every bridge says on a link: the only signed field
 the link carries today is the identity assertion's `signed_data`, whose
 content the bridges define and the verifier does not return, so a token
 needs a new field there (and in the browser engine and the leaf, which
-share the codec) or a new control frame. A token would be advertised at a
-length other than eight bytes, which current scanners ignore rather than
-misread
+share the codec) or a new control frame. A token would be advertised at 9
+to 18 bytes, which current scanners ignore: 8 is read as this digest and
+19 or more as mesh metadata
 ([BLE framing](../spec/ble-framing.md#the-node-hash-in-the-scan-response)).
 
 **What bounds it:** a reading is attributed only to a peer that already

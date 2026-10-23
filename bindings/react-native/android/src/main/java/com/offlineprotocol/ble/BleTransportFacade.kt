@@ -20,6 +20,7 @@ import androidx.core.content.ContextCompat
 import com.offlineprotocol.BleAppTag
 import com.offlineprotocol.BleDensityPolicy
 import com.offlineprotocol.BleDiscoveryBootstrapPolicy
+import com.offlineprotocol.PeerRssiFeedPolicy
 import com.offlineprotocol.TransportException
 import com.offlineprotocol.TransportManager
 import com.offlineprotocol.TransportManagerListener
@@ -206,9 +207,6 @@ class BleTransportFacade(
         // Fallback interval for fragment polling. Primary send path is event-driven
         // via onFragmentsAvailable(); this timer only catches edge cases.
         private const val FRAGMENT_POLL_INTERVAL_MS = 2000L
-        // The core caps `peer_rssi` at four a second per peer; feeding it
-        // faster per address only costs protocol-lock round trips.
-        private const val RSSI_FEED_INTERVAL_MS = 250L
         private const val MAX_FRAGMENT_SIZE = 185
         /**
          * Hard cap on the number of fragments [drainAndSendFragments] will
@@ -2343,31 +2341,13 @@ class BleTransportFacade(
     }
     
     /**
-     * Builds the scan response data for BLE advertising.
-     * 
-     * iOS's CoreBluetooth actively queries for scan responses during BLE scanning.
-     * Including the service UUID in the scan response makes Android devices more
-     * reliably visible to iOS devices, which have known issues recognizing 128-bit
-     * service UUIDs from Android's main advertisement packet format.
+     * Builds the scan response data for BLE advertising: the service UUID,
+     * or, once the app opted in ([advertiseNodeHash]) and the identity is
+     * open, the node hash as service data under it. See
+     * [PeerRssiFeedPolicy.scanResponse] for the byte budget and why.
      */
-    private fun buildScanResponse(): AdvertiseData {
-        // With the identity open and the app opted in
-        // ([advertiseNodeHash]), the node hash goes in as service data under
-        // the mesh UUID instead of the bare UUID: 2 + 16 + 8 = 26 of the 31
-        // bytes, where both would need 44. The UUID still travels, inside the
-        // service data, the main packet still lists it, and both scanners'
-        // gates accept service data under it. Service data under our own
-        // 128-bit UUID needs no SIG assignment, unlike a 16-bit UUID or a
-        // company id. It names this device to a scanner that hears it, which
-        // is why it is opt-in (R29).
-        val builder = AdvertiseData.Builder().setIncludeDeviceName(false)
-        val nodeHash = cachedNodeHash
-        return if (nodeHash != null) {
-            builder.addServiceData(ParcelUuid(SERVICE_UUID), nodeHash).build()
-        } else {
-            builder.addServiceUuid(ParcelUuid(SERVICE_UUID)).build()
-        }
-    }
+    private fun buildScanResponse(): AdvertiseData =
+        PeerRssiFeedPolicy.scanResponse(SERVICE_UUID, cachedNodeHash)
     
     private fun handleScanResult(result: ScanResult) {
         // Scan results are posted here from a binder thread, so one produced
@@ -2397,20 +2377,15 @@ class BleTransportFacade(
 
         // Live signal strength, above the duplicate check: that check skips a
         // repeat within the same 5 dB bucket for a second, which sheds work
-        // but would also bias the readings toward bucket changes. Its own
-        // throttle keeps this to four calls a second per address instead.
+        // but would also bias the readings toward bucket changes. The policy's
+        // own throttle keeps this to about four calls a second per address.
         // The core attributes the reading to a linked peer, by this address's
         // link or by the node hash an Android peer's scan response carries,
         // and drops anything else, so no mesh gate is needed in front of it.
-        if (now - (lastRssiFeedAt[address] ?: 0L) >= RSSI_FEED_INTERVAL_MS) {
-            val linkedPeerId = connections.deviceIdForAddress(address)
-            val advertisedHash = result.scanRecord?.getServiceData(ParcelUuid(SERVICE_UUID))
-            if (linkedPeerId != null || advertisedHash != null) {
-                // ponytail: cleared rather than aged out; costs one early reading.
-                if (lastRssiFeedAt.size > 100) lastRssiFeedAt.clear()
-                lastRssiFeedAt[address] = now
-                protocol.blePeerRssi(linkedPeerId, advertisedHash?.map { it.toUByte() }, rssi.toShort())
-            }
+        val linkedPeerId = connections.deviceIdForAddress(address)
+        val advertisedHash = result.scanRecord?.getServiceData(ParcelUuid(SERVICE_UUID))
+        if (PeerRssiFeedPolicy.admit(lastRssiFeedAt, address, now, linkedPeerId != null, advertisedHash != null)) {
+            protocol.blePeerRssi(linkedPeerId, advertisedHash?.map { it.toUByte() }, rssi.toShort())
         }
 
         // Duplicate advertisement detection - avoid processing identical advertisements

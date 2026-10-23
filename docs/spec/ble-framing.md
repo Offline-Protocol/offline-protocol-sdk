@@ -150,11 +150,14 @@ bytes: the first eight of SHA-256 over its `off1…` address as UTF-8
 signal reading only, and a scanner MUST match it only against peers that
 already proved their address on a link: it proves nothing itself, and it
 never starts a link or names a new peer. A scanner MUST NOT read service data
-of any other length under this UUID as a node hash. That rule is what lets a
-later form (a token per transport start, delivered over the link, as
+of any other length under this UUID as a node hash. Service data of 19 bytes
+or more under this UUID is already read by the shipped scanners as mesh
+metadata (`MeshAdvertisementData`, version byte `0x02`), so the lengths a
+current scanner ignores are 1 to 7 and 9 to 18. A later form (a token per
+transport start, delivered over the link, as
 [R29](../security/threat-model.md#r29-the-bluetooth-le-scan-response-names-the-device-and-rssi-is-unauthenticated)
-describes) be introduced at another length without a current scanner
-misreading it.
+describes) MUST use one of those, 9 to 18 bytes, so that no current scanner
+misreads it.
 
 The shipped Android peripheral puts it in its scan response when the
 application sets `transports.ble.advertiseNodeHash` (off by default) and its
