@@ -283,12 +283,17 @@ relay cannot hold one and replay it later.
 
 **The host is bounded.** It answers each joiner's session once (again only
 when that session asks again, as its answer may have been lost), holds at
-most sixteen answered sessions for two minutes each, and the engine's link
-ceiling (also sixteen) stands behind that. The hold is at least the
-two-minute freshness window, so an offer a relay re-sends late reaches the
-session it belongs to instead of opening a second connection. A relay that
-refuses the connection counts once, so one dead relay in the list does not
-stop the room opening on the others. A joiner republishes its offer as a
+most sixteen sessions, and the engine's link ceiling (also sixteen) stands
+behind that. It remembers a session until the newest offer it has seen for
+that session stops being fresh, which the worker reports with each signal
+(the offer's `created_at` plus two minutes), so an offer a relay re-sends
+late reaches the session it belongs to instead of opening a second
+connection. A fixed hold counted from the first offer forgets too early: the
+joiner republishes for up to thirty seconds, and a joiner whose clock runs
+ahead sends offers that stay fresh for up to four minutes after the host
+first sees them. A relay that refuses the connection counts once, so one dead
+relay in the list does not stop the room opening on the others, and a room
+that fails to open, on either side, closes every socket it opened. A joiner republishes its offer as a
 new event every two seconds until an answer for its session arrives or its
 deadline passes, because a host that subscribed after an ephemeral event was
 sent never sees it.
