@@ -129,4 +129,64 @@ mod manifest_guard_tests {
             );
         }
     }
+
+    /// The `version` of the `[workspace.package]` table.
+    fn workspace_version(root_manifest: &str) -> Option<String> {
+        let table = root_manifest.split("[workspace.package]").nth(1)?;
+        let table = table.split("\n[").next()?;
+        let line = table.lines().find(|l| l.starts_with("version = \""))?;
+        let rest = &line["version = \"".len()..];
+        rest.find('"').map(|end| rest[..end].to_string())
+    }
+
+    /// A crate that cannot inherit an internal dependency (the dual std/no_std
+    /// crates, and the browser crate, all for the `default-features` reason
+    /// above) names the sibling's version by hand. A release cut bumps the
+    /// workspace version, and a missed hand-written pin fails the cut at its
+    /// first cargo command, after the tag is planned. This turns that into a
+    /// test failure on the bump commit itself.
+    #[test]
+    fn local_internal_pins_name_the_workspace_version() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let Ok(root_manifest) = std::fs::read_to_string(crates.join("../Cargo.toml")) else {
+            return;
+        };
+        // Normalised so a Windows checkout's CRLF cannot hide a line.
+        let root_manifest = root_manifest.replace("\r\n", "\n");
+        let version = workspace_version(&root_manifest).expect("[workspace.package] version");
+        let pinned = format!("version = \"{version}\"");
+
+        let mut checked = 0;
+        let mut drifted = Vec::new();
+        for entry in std::fs::read_dir(&crates)
+            .expect("crates directory")
+            .flatten()
+        {
+            let manifest = entry.path().join("Cargo.toml");
+            let Ok(text) = std::fs::read_to_string(&manifest) else {
+                continue;
+            };
+            for line in text.lines() {
+                let internal = line.starts_with("offline-protocol")
+                    && line.contains("path = \"../")
+                    && line.contains("version = \"");
+                if !internal {
+                    continue;
+                }
+                checked += 1;
+                if !line.contains(&pinned) {
+                    drifted.push(format!("{}: {}", manifest.display(), line.trim()));
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "found no hand-pinned internal dependency to check"
+        );
+        assert!(
+            drifted.is_empty(),
+            "these internal dependencies must name the workspace version {version}:\n{}",
+            drifted.join("\n")
+        );
+    }
 }
