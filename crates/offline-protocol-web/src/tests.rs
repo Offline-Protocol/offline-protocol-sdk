@@ -335,6 +335,29 @@ fn the_browser_tests_run_in_ci() {
     }
 }
 
+/// The page remembers an answered signalling session for at least as long
+/// as the worker accepts an event as fresh. A shorter hold makes an offer a
+/// relay re-sends late look like a new joiner, and the host opens a second
+/// connection for it (W11).
+#[test]
+fn the_host_remembers_a_session_as_long_as_its_offer_is_fresh() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let Some(page) = read_repo_file(&root.join("bindings/web/src/nostr-signal.js")) else {
+        return;
+    };
+    let hold_ms: i64 = page
+        .lines()
+        .find_map(|line| line.strip_prefix("const SESSION_HOLD_MS = "))
+        .and_then(|rest| rest.strip_suffix(';'))
+        .and_then(|value| value.replace('_', "").parse().ok())
+        .expect("nostr-signal.js declares `const SESSION_HOLD_MS = <ms>;`");
+    assert!(
+        hold_ms >= crate::signal::MAX_EVENT_AGE_SECS * 1000,
+        "SESSION_HOLD_MS {hold_ms} is shorter than the {} s an offer stays fresh",
+        crate::signal::MAX_EVENT_AGE_SECS
+    );
+}
+
 /// The files of one node's two logs, kept across a restart.
 struct Disk {
     mls: (MemoryFile, MemoryFile),

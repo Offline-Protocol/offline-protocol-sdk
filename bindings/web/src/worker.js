@@ -29,7 +29,6 @@ import init, {
   signalSubscription,
   signalEvent,
   signalOpen,
-  signalNow,
 } from "../pkg/offline_protocol_web.js";
 import { openDurableStore } from "./store.js";
 import { TabCarrier } from "./tab-carrier.js";
@@ -179,8 +178,7 @@ const handlers = {
     return signalNewRoom();
   },
   signalSubscription({ room, subscriptionId }) {
-    // A little before now, for a relay whose clock runs behind this one.
-    return signalSubscription(room, subscriptionId, signalNow() - 30);
+    return signalSubscription(room, subscriptionId);
   },
   signalEvent({ room, role, session, code }) {
     return signalEvent(room, role, session, code);

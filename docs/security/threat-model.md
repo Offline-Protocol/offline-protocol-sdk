@@ -1233,13 +1233,17 @@ be overheard.
 **What bounds it:** the code admits a carrier, not an identity. A joiner is
 announced under the address its preamble proves, and MLS admits it to
 nothing until the host invites it (R27). The topic is public, so the code
-must not be findable from it: generated codes carry eighty bits and the
-binding refuses one under ten characters (fifty bits). Content is sealed with
+must not be findable from it: generated codes carry eighty bits, and the
+binding refuses one under ten characters. Ten characters is fifty bits only
+for a generated code; a code a person chose is as strong as its entropy, so
+an application should show the generated one rather than ask for a name. Content is sealed with
 the topic and the role bound in, and each event is signed by a key used once,
 so a relay cannot read the codes or link a room's events by author, and an
 event more than two minutes from the reader's clock is refused, so a relay
 that holds one back cannot replay it later. A leaked code costs the host at
-most sixteen answered sessions a minute, below the engine's link ceiling.
+most sixteen answered sessions every two minutes, which equals the engine's
+link ceiling: a leaked code can occupy every link the host has, though MLS
+admits none of those joiners to anything until the host invites them.
 
 ## Network egress
 

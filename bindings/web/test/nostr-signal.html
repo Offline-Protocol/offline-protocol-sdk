@@ -5,9 +5,9 @@
 <script type="module">
 // Two nodes that share only a room code find each other through a Nostr
 // relay (the runner's local one), link over WebRTC, and send an ephemeral
-// direct message across. A join to a room nobody hosts gives up, and a
-// stopped node refuses calls instead of hanging. The title ends as PASS or
-// FAIL: <step>.
+// direct message across, with a dead relay listed ahead of the live one. A
+// join to a room nobody hosts gives up, and a stopped node refuses calls
+// instead of hanging. The title ends as PASS or FAIL: <step>.
 import { OfflineNode, WebRtcCarrier, NostrSignaller } from "../src/index.js";
 import { log, waitFor, run } from "./common.js";
 
@@ -19,7 +19,10 @@ await run(async (step) => {
     OfflineNode.start({ appId, profile: "host", storage: "memory", tabs: false }),
     OfflineNode.start({ appId, profile: "joiner", storage: "memory", tabs: false }),
   ]);
-  const relays = [relay];
+  // A relay that refuses the connection ahead of the live one: a failed
+  // socket fires both error and close, and the room must still open on the
+  // relay that answers.
+  const relays = ["ws://127.0.0.1:9", relay];
 
   step.name = "host";
   const room = await a.newRoom();

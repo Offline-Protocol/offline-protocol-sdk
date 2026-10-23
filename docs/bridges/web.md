@@ -281,11 +281,15 @@ relay cannot hold one and replay it later.
 
 **The host is bounded.** It answers each joiner's session once (again only
 when that session asks again, as its answer may have been lost), holds at
-most sixteen answered sessions for a minute each, and the engine's link
-ceiling stands behind that. A joiner republishes its offer as a new event
-every two seconds until an answer for its session arrives or its deadline
-passes, because a host that subscribed after an ephemeral event was sent
-never sees it.
+most sixteen answered sessions for two minutes each, and the engine's link
+ceiling (also sixteen) stands behind that. The hold is at least the
+two-minute freshness window, so an offer a relay re-sends late reaches the
+session it belongs to instead of opening a second connection. A relay that
+refuses the connection counts once, so one dead relay in the list does not
+stop the room opening on the others. A joiner republishes its offer as a
+new event every two seconds until an answer for its session arrives or its
+deadline passes, because a host that subscribed after an ephemeral event was
+sent never sees it.
 
 ## Which shared rules apply
 

@@ -28,15 +28,15 @@ pub fn signal_new_room() -> String {
     signal::new_room()
 }
 
-/// The relay `REQ` text that receives `room`'s signalling from `since`
-/// (Unix seconds) on.
+/// The relay `REQ` text that receives `room`'s signalling.
+///
+/// It asks from as far back as [`signal::open`] accepts an event, so a peer
+/// whose clock runs behind this one by anything inside that window is
+/// forwarded and then accepted, rather than filtered out by the relay first.
 #[wasm_bindgen(js_name = signalSubscription)]
-pub fn signal_subscription(
-    room: &str,
-    subscription_id: &str,
-    since: f64,
-) -> Result<String, JsError> {
-    signal::subscription(room, subscription_id, since as i64).map_err(|e| JsError::new(&e))
+pub fn signal_subscription(room: &str, subscription_id: &str) -> Result<String, JsError> {
+    let since = signal::now_unix_secs().saturating_sub(signal::MAX_EVENT_AGE_SECS);
+    signal::subscription(room, subscription_id, since).map_err(|e| JsError::new(&e))
 }
 
 /// The relay `EVENT` text carrying one connection code for `room`, sealed
@@ -57,12 +57,6 @@ pub fn signal_event(room: &str, role: &str, session: &str, code: &str) -> Result
 #[wasm_bindgen(js_name = signalOpen)]
 pub fn signal_open(room: &str, relay_message: &str) -> Option<String> {
     signal::open(room, relay_message, signal::now_unix_secs()).map(|s| s.to_json())
-}
-
-/// This clock in Unix seconds, for a subscription's `since`.
-#[wasm_bindgen(js_name = signalNow)]
-pub fn signal_now() -> f64 {
-    signal::now_unix_secs() as f64
 }
 
 type DurableStores = (Arc<LogStore<OpfsFile>>, Arc<LogStore<OpfsFile>>);

@@ -86,6 +86,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   connection with more than 8 MiB waiting behind the channel is closed.
 - **A browser node's calls after `stop()` reject** instead of waiting for
   ever, and the tab carrier no longer throws on a frame queued as it closed.
+- **One unreachable Nostr relay no longer stops a signalling room from
+  opening on the others.** A refused socket was counted as two failed
+  relays.
 
 ## [0.30.0] — 2026-10-21
 

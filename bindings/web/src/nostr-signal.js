@@ -14,6 +14,11 @@
 //   at most MAX_SESSIONS answered sessions, each for SESSION_HOLD_MS, so a
 //   room code that leaked cannot make the host open connections without
 //   bound; the engine's own link ceiling stands behind that.
+// - SESSION_HOLD_MS is at least the worker's freshness window (signal.rs,
+//   MAX_EVENT_AGE_SECS). An offer the worker still accepts is one the host
+//   still remembers, so a relay that re-sends an offer late reaches the
+//   session it belongs to rather than opening a second connection. A Rust
+//   test reads this file and holds the two together.
 // - A joiner publishes its offer until an answer for its session arrives or
 //   its deadline passes, with a new event each time: relays drop an event id
 //   they have seen, and the event is ephemeral, so a host that subscribed late
@@ -23,7 +28,7 @@ const OPEN_TIMEOUT_MS = 10000;
 const REPUBLISH_MS = 2000;
 const JOIN_TIMEOUT_MS = 30000;
 const MAX_SESSIONS = 16;
-const SESSION_HOLD_MS = 60000;
+const SESSION_HOLD_MS = 120000;
 
 function randomHex(bytes) {
   return Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) =>
@@ -54,10 +59,10 @@ class RoomChannel {
   async open() {
     const request = await this.#node.signalSubscription(this.#room, this.#subscriptionId);
     await new Promise((resolve, reject) => {
-      let failed = 0;
+      let failedRelays = 0;
       const timer = setTimeout(() => reject(new Error("no Nostr relay answered")), OPEN_TIMEOUT_MS);
       const fail = () => {
-        if (++failed === this.#relays.length) {
+        if (++failedRelays === this.#relays.length) {
           clearTimeout(timer);
           reject(new Error("every Nostr relay refused the connection"));
         }
@@ -72,9 +77,16 @@ class RoomChannel {
         }
         this.#sockets.push(socket);
         let live = false;
+        // A socket that fails fires both error and close; it is one relay.
+        let failed = false;
+        const failOnce = () => {
+          if (live || failed) return;
+          failed = true;
+          fail();
+        };
         socket.onopen = () => socket.send(request);
-        socket.onerror = () => !live && fail();
-        socket.onclose = () => !live && fail();
+        socket.onerror = failOnce;
+        socket.onclose = failOnce;
         socket.onmessage = ({ data }) => {
           if (typeof data !== "string") return;
           if (!live && this.#isEose(data)) {
