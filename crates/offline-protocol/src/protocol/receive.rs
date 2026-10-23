@@ -1658,6 +1658,11 @@ impl OfflineProtocol {
                             error_code = classification.code(),
                             "Failed to decrypt media chunk, dropping"
                         );
+                        // As in the recoverable arm: asking destroys nothing,
+                        // and with recovery off a split is otherwise never found.
+                        if group_id.starts_with("session:") {
+                            self.request_session_corroboration(sender);
+                        }
                         let kind = DecryptionFailureKind::from_mls_error(&e);
                         self.emit_mls_decryption_failed(
                             sender,

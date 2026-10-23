@@ -1734,10 +1734,12 @@ impl OfflineProtocol {
                             session_established_at_ms,
                         ));
                     }
-                    if retriable && group_id.starts_with("session:") {
+                    if group_id.starts_with("session:") {
                         // A pair holding two groups for its slot fails here on
                         // every frame and never as a desync: ask whether that
-                        // is what this is.
+                        // is what this is. Whether or not crypto recovery is
+                        // on, because asking destroys nothing and a split with
+                        // recovery off would otherwise never be found.
                         self.request_session_corroboration(&sender_owned);
                     }
                     if retriable {

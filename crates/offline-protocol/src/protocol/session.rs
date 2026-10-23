@@ -1268,6 +1268,11 @@ impl OfflineProtocol {
         {
             return;
         }
+        // Built first, so a tag that could not be computed this time does not
+        // spend the window: the next failure asks again.
+        let Some(challenge) = self.session_challenge_body(peer_id) else {
+            return;
+        };
         if !self.corroboration_due_at.contains_key(peer_id)
             && self.corroboration_due_at.len() >= MAX_REKEY_TRACKED_PEERS
         {
@@ -1277,9 +1282,6 @@ impl OfflineProtocol {
             peer_id.to_string(),
             now + ChronoDuration::seconds(REKEY_INTERVAL_SECS),
         );
-        let Some(challenge) = self.session_challenge_body(peer_id) else {
-            return;
-        };
         let probe = format!("{}{}", internal_prefixes::SESSION_CONFIRM_PROBE, challenge);
         if let Err(err) = self.send_internal_message(peer_id, probe, MessagePriority::High) {
             debug!(peer_id = %peer_id, error = %err, "Corroboration probe deferred");

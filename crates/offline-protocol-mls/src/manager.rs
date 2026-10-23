@@ -46,6 +46,17 @@ const _: () = assert!(
     "this install mints a key package it would refuse from a peer"
 );
 
+// A holder answers a peer that says it holds no session by resending the
+// original signed Welcome built on the package the peer still offers. The
+// Welcome is no older than that package, so it stays inside the control-frame
+// freshness window only while a package lives no longer than the window: past
+// it, the resend would be refused as stale while the holder kept choosing it
+// over a rebuild, and the pair could not heal.
+const _: () = assert!(
+    DEFAULT_KEY_PACKAGE_LIFETIME_SECS * 1000 <= offline_protocol_sealed::CTRL_FRESHNESS_PAST_MS,
+    "a resent Welcome could fall outside the freshness window while its package is still offered"
+);
+
 /// How far into the past a key package's validity window starts.
 ///
 /// `Lifetime::new` backdates by exactly this much, so a package handed to a

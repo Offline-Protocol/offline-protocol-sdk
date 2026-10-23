@@ -45287,3 +45287,50 @@ fn an_untaggable_corroboration_is_withheld_not_sent_empty() {
         "a probe with no challenge to carry must not be sent"
     );
 }
+
+/// With crypto recovery switched off a failed decrypt is dropped and
+/// acknowledged, but it still asks: asking destroys nothing, and a split
+/// between two confirmed sides is otherwise never found.
+#[test]
+fn a_split_heals_with_crypto_recovery_switched_off() {
+    let (lo, hi) = split_pair();
+    let (mut owner, owner_h) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    owner.config.encryption.crypto_recovery_enabled = false;
+    adopter.config.encryption.crypto_recovery_enabled = false;
+    let owner_rx = received_contents(&mut owner);
+    let adopter_rx = received_contents(&mut adopter);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+
+    both_create_losing_the_owners_welcome(&mut owner, &owner_h, &mut adopter, &adopter_h);
+    owner.clear_both_create_awaiting_decrypt(&id(hi));
+    owner
+        .confirm_session_state(&id(hi), "decrypt_success")
+        .unwrap();
+    adopter
+        .confirm_session_state(&id(lo), "decrypt_success")
+        .unwrap();
+    owner.flush_pending_messages(&id(hi)).unwrap();
+    adopter.flush_pending_messages(&id(lo)).unwrap();
+
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+    owner
+        .send_message(&id(hi), "healed-owner", None, None::<String>)
+        .unwrap();
+    adopter
+        .send_message(&id(lo), "healed-adopter", None, None::<String>)
+        .unwrap();
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+
+    let adopter_got = adopter_rx.lock().unwrap().clone();
+    let owner_got = owner_rx.lock().unwrap().clone();
+    assert!(
+        adopter_got.iter().any(|c| c == "healed-owner"),
+        "healed-owner missing from {adopter_got:?}"
+    );
+    assert!(
+        owner_got.iter().any(|c| c == "healed-adopter"),
+        "healed-adopter missing from {owner_got:?}"
+    );
+}

@@ -95,18 +95,17 @@ A receiver holding a session computes the exporter over the same nonce and:
 - **MUST** read an empty or unparseable body as an older peer and apply the
   plaintext rules it always had.
 
-Every probe is answered with the receiver's tag over the probe's nonce. A
-leaf answers with an empty body and is held to the plaintext rules. An
-implementation that holds a session but cannot compute its tag (a store read
-or export that failed) **MUST NOT** send an empty body in its place, neither
-in a probe nor in an answer to a probe that carried one: the peer would read
-it as an older device and confirm on the plaintext rules. It sends nothing,
-and the next probe asks again. The
-frames are signed, so a mismatch is the peer's own statement, and a challenge
-is spent by its first answer, so neither a late frame nor a recording can
-drive a teardown. A challenge is repeated rather than replaced by each probe,
-because an unconfirmed session is probed every few seconds and an answer over
-the mesh or a relay can take longer.
+Every probe is answered with the receiver's tag over the probe's nonce. A leaf
+answers with an empty body and is held to the plaintext rules. An
+implementation that holds a session but cannot compute its tag (a store read or
+export that failed) **MUST NOT** send an empty body in its place, neither in a
+probe nor in an answer to a probe that carried one: the peer would read it as
+an older device and confirm on the plaintext rules. It sends nothing, and the
+next probe asks again. The frames are signed, so a mismatch is the peer's own
+statement, and a challenge is spent by its first answer, so neither a late
+frame nor a recording can drive a teardown. A challenge is repeated rather than
+replaced by each probe, because an unconfirmed session is probed every few
+seconds and an answer over the mesh or a relay can take longer.
 
 ### Prefixes that never appear on the wire
 
@@ -449,18 +448,21 @@ dropping its group. A receiver holding a session that gets one, signed:
   refused here, because every first-contact push carries the flag and the
   mark could not refuse a recording of one.
 
-The spent mark of rule 3 **MUST** also be moved up, never down, to the signed
-stamp of the frame the current session was built from: the key package it was
-created from, or the Welcome it was joined from. A `no_session` or
-`session_reset` frame older than that predates the session it would destroy: a
-first-contact push carried slowly, or a recording. Only those frames, and
-never more than five minutes past the receiver's own clock: the mark is
-durable, so a stamp from a peer whose clock ran fast, and was then set back,
-would have that peer's resets refused until its clock caught up, and neither
-side could heal meanwhile. Not at the receiver's clock itself, because
-ordinary skew would then set the mark below the peer's own stamp, and an
-honest `no_session` push sent just before the session was built, delivered
-late, would tear it down.
+The spent mark of rule 3 **MUST** also be moved when a session is built, and
+only then: on the key package the session was created from, or the Welcome it
+was joined from, to that frame's signed stamp clamped to five minutes past the
+receiver's own clock, and never down. A `no_session` or `session_reset` frame
+older than the frame that built the session predates the session it would
+destroy, such as a first-contact push carried slowly or a recording, and the
+mark refuses it.
+
+Two failures fix those bounds. Moving the mark on every key package would let
+a peer whose clock ran fast, and was then set back, have its resets refused
+until its clock caught up, with neither side able to heal meanwhile; the clamp
+limits that to five minutes. Clamping at the receiver's clock itself would let
+ordinary skew put the mark below the peer's own stamp, so an honest
+`no_session` push sent just before the session was built, and delivered late,
+would tear it down.
 
 A receiver that adopted the peer's Welcome in the both-create tiebreak gave
 up its own group, and **MUST** then discard its own Welcome: it names a

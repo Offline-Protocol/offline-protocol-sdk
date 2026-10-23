@@ -491,13 +491,13 @@ rules keep the comparison honest:
 - **A flag older than the session is refused.** The spent mark moves up to the
   signed stamp of the frame the session was built from (the key package it was
   created from, or the Welcome it was joined from), so a `no_session` (or
-  reset) frame older than that is refused: a first-contact push delivered
-  late, or a recording. Only those frames, and never more than five minutes
-  past this device's own clock, since the mark is durable and a peer clock
-  that ran fast and was set back would otherwise lock that peer's resets out.
-  Five minutes rather than none, so ordinary skew between the two clocks does
-  not put the mark below the session's own stamp. The teardown also needs the frame's stamp to be signed at all;
-  resending a Welcome needs neither.
+  reset) frame older than that is refused: a first-contact push delivered late,
+  or a recording. Only those frames, and never more than five minutes past this
+  device's own clock, since the mark is durable and a peer clock that ran fast
+  and was set back would otherwise lock that peer's resets out. Five minutes
+  rather than none, so ordinary skew between the two clocks does not put the
+  mark below the session's own stamp. The teardown also needs the frame's stamp
+  to be signed at all; resending a Welcome needs neither.
 - **An adopted Welcome retires our own.** Adopting the peer's Welcome in the
   both-create tiebreak gives up our group, and our outbound Welcome for it is
   dropped. It names a package the peer never processed and still offers, so
@@ -518,11 +518,11 @@ plaintext confirmation or a restored store, would otherwise fail every frame
 for the life of the pair.
 
 So an ordinary decrypt failure on a 1:1 session, of a message or of a media
-chunk, sends a confirmation probe, at most once per peer per re-key interval. It only asks. A healthy session
-answers with a matching tag and nothing happens; a split answers with a
-different one and is healed as above. Nothing is torn down on the failure
-itself, which is what ADR 0006 requires of a class that anyone corrupting a
-frame can reach.
+chunk, sends a confirmation probe, at most once per peer per re-key interval.
+It only asks. A healthy session answers with a matching tag and nothing
+happens; a split answers with a different one and is healed as above. Nothing
+is torn down on the failure itself, which is what ADR 0006 requires of a class
+that anyone corrupting a frame can reach.
 
 ## Session reset semantics
 
