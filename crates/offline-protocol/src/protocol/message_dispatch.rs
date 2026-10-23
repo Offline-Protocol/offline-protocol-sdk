@@ -54,8 +54,8 @@ impl OfflineProtocol {
     /// readable by every hop. See the comments at those uses for why each
     /// earns a separate trust level from the capability lists around them.
     ///
-    /// `freshness` gates **only** `session_reset`, which is the one field here
-    /// that destroys state: `Some(stamp)` when the frame's signature covers
+    /// `freshness` gates **only** the two fields here that destroy state,
+    /// `session_reset` and `no_session`: `Some(stamp)` when the frame's signature covers
     /// that timestamp and this node checked it, `None` otherwise. It is an
     /// option rather than a flag beside a number so that the stamp is
     /// unreachable in exactly the case where trusting it would be a bug — on
@@ -485,11 +485,13 @@ impl OfflineProtocol {
 
             // The sender holds no session with us. Answered under the same
             // two rules as a reset, since it can end in the same teardown.
-            if payload.no_session && signed && reset_admissible && reset_unspent {
-                self.answer_peer_without_session(sender, &payload.key_package_data, freshness);
-            }
-            if let Some(stamp) = freshness {
-                self.note_session_frame_stamp(sender, stamp);
+            if payload.no_session && signed {
+                self.answer_peer_without_session(
+                    sender,
+                    &payload.key_package_data,
+                    freshness,
+                    reset_unspent,
+                );
             }
 
             let now_ms = Utc::now().timestamp_millis() as u64;
@@ -596,6 +598,14 @@ impl OfflineProtocol {
                 match self.establish_secure_session(sender) {
                     Ok(Some(_)) => {
                         info!(sender = %sender, "Auto-established secure session after key package exchange");
+                        // The session is built on this frame, so a directive
+                        // older than it predates the session.
+                        // ponytail: a session the send path builds later from
+                        // the cached package records nothing; the Welcome the
+                        // peer joins it with is not seen on this side.
+                        if let Some(stamp) = freshness {
+                            self.note_session_frame_stamp(sender, stamp);
+                        }
                     }
                     Ok(None) => {
                         // A session already exists. If it is unconfirmed and
@@ -659,12 +669,18 @@ impl OfflineProtocol {
     /// again: tearing down here would destroy a replacement whose Welcome
     /// is merely in flight. Otherwise our session is one the peer will never
     /// hold, and it is dropped as for a reset; the caller then builds a new
-    /// one from the package. A freshness stamp is spent only by the teardown.
+    /// one from the package. Only the teardown spends the frame's stamp.
+    ///
+    /// Only the teardown needs the frame's age to be established
+    /// (`freshness`) and newer than the session (`unspent`): resending a
+    /// Welcome destroys nothing, while without a stamp the spent mark could
+    /// not refuse a recording, and every first-contact push carries the flag.
     fn answer_peer_without_session(
         &mut self,
         peer_id: &str,
         key_package_data: &[u8],
         freshness: Option<i64>,
+        unspent: bool,
     ) {
         if !self.has_mls_session(peer_id).unwrap_or(false) {
             return;
@@ -692,9 +708,11 @@ impl OfflineProtocol {
             self.resend_welcome(peer_id, "peer_holds_no_session", true);
             return;
         }
-        if let Some(stamp) = freshness {
-            self.record_reset_spent(peer_id, stamp);
-        }
+        let Some(stamp) = freshness.filter(|_| unspent) else {
+            debug!(sender = %peer_id, "Not dropping our session on an unstamped or spent no_session frame");
+            return;
+        };
+        self.record_reset_spent(peer_id, stamp);
         info!(sender = %peer_id, "Peer holds no session we can reach, deleting ours to rebuild");
         self.drop_session_for_reset(peer_id);
     }
@@ -800,13 +818,13 @@ impl OfflineProtocol {
         theirs: Option<&SessionCorroboration>,
         plaintext_source: &str,
     ) {
+        // Asked before the comparison, so any answer retires the challenge.
+        let answered = plaintext_source == "confirmation_ack_received"
+            && theirs.is_some_and(|theirs| self.answers_live_challenge(peer_id, &theirs.nonce));
         let source = match self.corroborate_session(peer_id, theirs) {
             Corroboration::Agrees => SESSION_CORROBORATED,
             Corroboration::Absent => plaintext_source,
             Corroboration::Split => {
-                let answered = plaintext_source == "confirmation_ack_received"
-                    && theirs
-                        .is_some_and(|theirs| self.answers_live_challenge(peer_id, &theirs.nonce));
                 self.heal_split_session(peer_id, answered);
                 return;
             }
@@ -845,8 +863,8 @@ impl OfflineProtocol {
     /// Handles an MLS welcome message (session invitation).
     ///
     /// `freshness` is the frame's signed stamp when its age was established,
-    /// as for a key package; it moves the spent mark
-    /// (`note_session_frame_stamp`).
+    /// as for a key package; a Welcome that builds our session moves the spent
+    /// mark with it (`note_session_frame_stamp`).
     pub(crate) fn handle_welcome_message(
         &mut self,
         sender: &str,
@@ -1082,8 +1100,14 @@ impl OfflineProtocol {
             // adopt it. Gating on success would leave the plaintext gate open
             // for exactly the peers whose handshake is failing.
             self.mark_encryption_capable(&sender_owned);
-            if let Some(stamp) = freshness {
-                self.note_session_frame_stamp(&sender_owned, stamp);
+            // A Welcome we joined or adopted built our session, so a directive
+            // older than it predates the session. Not any other Welcome: the
+            // mark is durable, and a peer clock that ran fast and was set back
+            // would otherwise lock that peer's resets out until it caught up.
+            if should_flush {
+                if let Some(stamp) = freshness {
+                    self.note_session_frame_stamp(&sender_owned, stamp);
+                }
             }
 
             // Our own outbound Welcome named a group we just gave up, built on

@@ -26,15 +26,18 @@ copy of the race was the lost frame, did not.
 
 ## Decision
 
-A probe and an acknowledgement carry an MLS exporter tag over a fresh nonce,
-which only a member of the same group at the same epoch computes. A match is
-group-aware proof, as good as a decrypt. A mismatch at the same epoch is a
-split, stated under the peer's identity signature. The greater side ends it
-with the existing re-key, but only on an acknowledgement answering a
-challenge it issued under its current session: a probe's nonce is the
-challenge, and the acknowledgement echoes it. Any other mismatching frame may
-be stale or replayed, and only prompts a challenge. An empty body is an older
-peer, held to the plaintext rules.
+A probe and an acknowledgement carry an MLS exporter tag over a nonce, which
+only a member of the same group at the same epoch computes. A probe's nonce is
+a challenge, repeated by every probe until it is answered; an acknowledgement
+echoes it. A match is group-aware proof, as good as a decrypt.
+
+A mismatch at the same epoch is a split, stated under the peer's identity
+signature. Only an acknowledgement answering a challenge issued under the
+current session is acted on, and only by the greater side, which gives up its
+own group with a `no_session` key package (below), so the peer resends its
+Welcome and keeps its group. Any other mismatching frame may be stale or
+replayed, and only prompts a challenge. An empty body is an older peer, held
+to the plaintext rules.
 
 Confirmation probes stop once a session confirms, so an ordinary decrypt
 failure on a 1:1 session sends one too, at most once per peer per re-key
@@ -47,8 +50,8 @@ carries `no_session`. The holder resends its Welcome when that Welcome names
 the package, since the sender never processed it, and otherwise drops its
 session and rebuilds. Repeating the reset flag instead would tear down a
 replacement whose Welcome is in flight; the package comparison is what tells
-that case apart. The flag is refused when it is older than the key packages
-and Welcomes that built the session, and a Welcome given up in the
+that case apart. The teardown is refused when the flag is unstamped or older
+than the frame that built the session, and a Welcome given up in the
 both-create tiebreak is discarded, so neither a stale flag nor a dead Welcome
 reaches the comparison.
 
@@ -70,9 +73,10 @@ if probes were acted on, because the greater side first issues its own
 challenge.
 
 **Residual.** None from stale or replayed corroborations: only a fresh
-answer to a live challenge drives a heal. A `no_session` frame is bounded
-like a reset, by the spent mark, which every key package and Welcome now
-moves.
+answer to a live challenge drives a heal. A `no_session` teardown is bounded
+like a reset, by the spent mark, which the frame that built the session now
+moves. A session the send path builds later from a cached package records no
+stamp, so a recording older than it is bounded only as a reset always was.
 
 ## What would undo this
 
@@ -85,6 +89,10 @@ including the replacement session a Welcome is still carrying.
 
 Healing on a mismatching probe, or on any acknowledgement, on the reasoning
 that the frame is signed. It is, and it may be from before the last heal.
+
+Healing with `session_reset` because the heal is a re-key. The peer then
+rebuilds on the package its own delayed Welcome was built on, and the
+Welcome splits the pair again when it lands.
 
 Letting both sides heal a mismatch. Both would tear down at once, each would
 rebuild from the other's package, and the pair would race again.

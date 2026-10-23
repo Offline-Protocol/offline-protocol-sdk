@@ -4,10 +4,10 @@ use super::{
     classify_transport_send_error, internal_prefixes, key_package_resend_wait_secs,
     lock_shared_state, send_failure_token, GatewayCarrier, OfflineProtocol, PresenceRescueThrottle,
     PruneAllowance, RestorableRecord, SessionState, WelcomeDeliveryState, WelcomeLifecycleRecord,
-    CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS,
-    MAX_CORROBORATION_CHALLENGES, MAX_REKEY_TRACKED_PEERS, RECONCILIATION_THROTTLE_MS,
-    REKEY_INTERVAL_SECS, SEND_FAIL_REASON_CONFIRM_TIMEOUT, WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS,
-    WELCOME_LIFECYCLE_TTL_SECS, WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
+    CONFIRMATION_PROBE_INTERVAL_SECS, CONFIRMATION_RETRY_INTERVAL_SECS, MAX_REKEY_TRACKED_PEERS,
+    RECONCILIATION_THROTTLE_MS, REKEY_INTERVAL_SECS, SEND_FAIL_REASON_CONFIRM_TIMEOUT,
+    WELCOME_INTERNET_CONFIRM_TIMEOUT_SECS, WELCOME_LIFECYCLE_TTL_SECS,
+    WELCOME_MESH_CONFIRM_TIMEOUT_SECS, WELCOME_NO_CARRIER_RETRY_SECS,
     WELCOME_PRESENCE_RESCUE_BASE_SECS, WELCOME_PRESENCE_RESCUE_MAX_SECS, WELCOME_RETRY_BATCH_SIZE,
     WELCOME_RETRY_JITTER_RATIO, WELCOME_UNREACHABLE_RETRY_CAP_SECS, WELCOME_WATCHLIST_MAX_AGE_SECS,
 };
@@ -1147,29 +1147,30 @@ impl OfflineProtocol {
             .flatten()
     }
 
-    /// The body of a confirmation probe to `peer_id`: a challenge over a
-    /// fresh nonce, remembered with the session it was issued under, or
-    /// empty when there is no session, which the peer reads as an older
-    /// device.
+    /// The body of a confirmation probe to `peer_id`: a challenge, or empty
+    /// when there is no session, which the peer reads as an older device.
+    ///
+    /// One challenge per peer and session, carried by every probe until it
+    /// is answered: an unconfirmed session is probed every few seconds, and a
+    /// fresh nonce per probe would retire each challenge before an answer
+    /// over a slow path (the mesh, a relay) could come back, so a split
+    /// there would never heal.
     pub(super) fn session_challenge_body(&mut self, peer_id: &str) -> String {
-        let nonce = *uuid::Uuid::new_v4().as_bytes();
+        let incarnation = self.session_incarnation(peer_id);
+        let nonce = match self.corroboration_challenges.get(peer_id) {
+            Some((nonce, issued_under)) if *issued_under == incarnation => *nonce,
+            _ => *uuid::Uuid::new_v4().as_bytes(),
+        };
         let Some(body) = self.corroboration_body(peer_id, &nonce) else {
             return String::new();
         };
-        let incarnation = self.session_incarnation(peer_id);
         if !self.corroboration_challenges.contains_key(peer_id)
             && self.corroboration_challenges.len() >= MAX_REKEY_TRACKED_PEERS
         {
             self.corroboration_challenges.clear();
         }
-        let issued = self
-            .corroboration_challenges
-            .entry(peer_id.to_string())
-            .or_default();
-        if issued.len() >= MAX_CORROBORATION_CHALLENGES {
-            issued.remove(0);
-        }
-        issued.push((nonce, incarnation));
+        self.corroboration_challenges
+            .insert(peer_id.to_string(), (nonce, incarnation));
         body
     }
 
@@ -1187,18 +1188,19 @@ impl OfflineProtocol {
             .unwrap_or_default()
     }
 
-    /// Whether `nonce` is a challenge this side issued to `peer_id` under the
-    /// session it holds now. Spent by the asking: each answers once.
+    /// Whether `nonce` is the challenge this side has out to `peer_id`, issued
+    /// under the session it holds now. Spent by the asking: the first answer
+    /// retires it, and the next probe carries a new one.
     pub(super) fn answers_live_challenge(&mut self, peer_id: &str, nonce: &[u8]) -> bool {
         let incarnation = self.session_incarnation(peer_id);
-        let Some(issued) = self.corroboration_challenges.get_mut(peer_id) else {
-            return false;
-        };
-        let Some(at) = issued.iter().position(|(n, _)| n.as_slice() == nonce) else {
-            return false;
-        };
-        let (_, issued_under) = issued.remove(at);
-        issued_under == incarnation
+        match self.corroboration_challenges.get(peer_id) {
+            Some((issued, issued_under)) if issued.as_slice() == nonce => {
+                let live = *issued_under == incarnation;
+                self.corroboration_challenges.remove(peer_id);
+                live
+            }
+            _ => false,
+        }
     }
 
     /// What a probe or acknowledgement's corroboration from `peer_id` says
@@ -1238,8 +1240,12 @@ impl OfflineProtocol {
     ///
     /// A failure only asks; it never tears anything down, which is what ADR
     /// 0006 requires of a class anyone corrupting a frame can reach. A
-    /// healthy session answers with a matching tag and nothing happens. The
-    /// probe is the ordinary one, so at most one is in the outbox.
+    /// healthy session answers with a matching tag and nothing happens.
+    ///
+    /// Sent apart from the confirmation probes, because a confirmed session
+    /// has none: one tracked as a confirmation probe was withdrawn from the
+    /// outbox by the next reconciliation scan, so a first send that did not
+    /// leave was never retried.
     pub(super) fn request_session_corroboration(&mut self, peer_id: &str) {
         let now = Utc::now();
         if self
@@ -1258,7 +1264,14 @@ impl OfflineProtocol {
             peer_id.to_string(),
             now + ChronoDuration::seconds(REKEY_INTERVAL_SECS),
         );
-        self.send_session_confirmation_probe(peer_id, "corroboration_requested");
+        let probe = format!(
+            "{}{}",
+            internal_prefixes::SESSION_CONFIRM_PROBE,
+            self.session_challenge_body(peer_id)
+        );
+        if let Err(err) = self.send_internal_message(peer_id, probe, MessagePriority::High) {
+            debug!(peer_id = %peer_id, error = %err, "Corroboration probe deferred");
+        }
     }
 
     /// Acts on a corroboration from `peer_id` that shows a split.
@@ -1273,11 +1286,18 @@ impl OfflineProtocol {
     /// frame only makes the greater side ask for itself, so a real split is
     /// still healed one round trip later.
     ///
-    /// The heal is the re-key: the reset key package goes out first, then the
-    /// local group is dropped, and the peer drops its own and Welcomes this
-    /// side back. It shares the re-key floor, and a reset that could not be
-    /// sent discards nothing and gives the slot back: the peer was told
-    /// nothing, and the next challenge asks again.
+    /// The heal gives up this side's group: a key package saying this side
+    /// holds no session goes out first, then the local group is dropped. The
+    /// peer answers as for any `no_session` package. When its own Welcome
+    /// names the package, which it does after a both-create race because
+    /// that package was never consumed, it sends that Welcome again and
+    /// keeps its group, and this side joins it. A Welcome merely delayed
+    /// rather than lost is then joined too, where a reset would have made the
+    /// peer rebuild on the same package and left the delayed Welcome to split
+    /// the pair again. Otherwise the peer rebuilds from the package. It
+    /// shares the re-key floor, and a push that could not be sent drops
+    /// nothing and gives the slot back: the peer was told nothing, and the
+    /// next challenge asks again.
     pub(super) fn heal_split_session(&mut self, peer_id: &str, answered_our_challenge: bool) {
         let gives_way = self.gives_way_to(peer_id);
         let acts = gives_way && answered_our_challenge;
@@ -1295,12 +1315,13 @@ impl OfflineProtocol {
         if !self.claim_rekey_slot(peer_id) {
             return;
         }
-        if self
-            .drive_session_rekey(peer_id, "after a split session")
-            .is_err()
-        {
+        if let Err(err) = self.push_key_package(peer_id, false, true) {
+            debug!(peer_id = %peer_id, error = %err, "Split heal deferred");
             self.release_rekey_slot(peer_id);
+            return;
         }
+        info!(peer_id = %peer_id, "Gave up our group of a split session to join the peer's");
+        self.discard_local_session(peer_id);
     }
 
     pub(super) fn abort_pending_session_for_peer(

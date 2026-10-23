@@ -44505,6 +44505,10 @@ fn a_lost_reset_push_heals_on_the_next_repush() {
     alice.start().unwrap();
     bob.start().unwrap();
     establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+    // A pair that held a session has exchanged key packages, so each signs
+    // the freshness-bound payload at the other.
+    alice.peer_ctrl_freshness.insert(id("bob"));
+    bob.peer_ctrl_freshness.insert(id("alice"));
 
     assert!(alice.rekey_session(&id("bob")).unwrap());
     alice_h.clear_sent_messages();
@@ -44648,7 +44652,7 @@ fn a_captured_no_session_frame_can_be_spent_exactly_once() {
 /// the peer has sent still does.
 #[test]
 fn a_no_session_frame_older_than_the_session_is_refused() {
-    let (mut alice, _ah) = make_encrypted_protocol("alice");
+    let (alice, _ah) = make_encrypted_protocol("alice");
     let (mut bob, _bh) = make_encrypted_protocol("bob");
     let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
     bob.security_gate_control_message(&proof, None);
@@ -44846,5 +44850,147 @@ fn adopting_the_peers_welcome_drops_our_own() {
     assert!(
         owner_got.iter().any(|c| c == "after-heal"),
         "after-heal missing from {owner_got:?}"
+    );
+}
+
+/// The owner's Welcome is only delayed, not lost, and the owner's answer to
+/// the adopter's challenge overtakes it. The adopter heals by giving up its
+/// own group, so the owner keeps its group and resends the Welcome, and the
+/// delayed one is simply joined. A reset there made the owner rebuild on the
+/// same unconsumed package, and the late Welcome then split the pair again.
+#[test]
+fn a_delayed_owner_welcome_is_joined_and_the_owner_keeps_its_group() {
+    let (lo, hi) = split_pair();
+    let (mut owner, owner_h) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    let owner_rx = received_contents(&mut owner);
+    let adopter_rx = received_contents(&mut adopter);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+
+    let package = |p: &OfflineProtocol| {
+        let m = p.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap().key_package_data
+    };
+    let expires = Utc::now().timestamp_millis() as u64 + 60_000;
+    let (owner_kp, adopter_kp) = (package(&owner), package(&adopter));
+    owner.pending_key_packages.insert(
+        id(hi),
+        ReceivedKeyPackage {
+            key_package_data: adopter_kp,
+            local_expires_at_ms: expires,
+        },
+    );
+    adopter.pending_key_packages.insert(
+        id(lo),
+        ReceivedKeyPackage {
+            key_package_data: owner_kp,
+            local_expires_at_ms: expires,
+        },
+    );
+    owner
+        .send_message(&id(hi), "from-owner", None, None::<String>)
+        .unwrap();
+    adopter
+        .send_message(&id(lo), "from-adopter", None, None::<String>)
+        .unwrap();
+    // Everything the owner sent so far, its Welcome among it, is held back.
+    let delayed = owner_h.sent_messages();
+    owner_h.clear_sent_messages();
+    let owners_group = owner
+        .mls_manager
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .session_established_at_ms(&id(hi))
+        .unwrap();
+
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+    for m in delayed {
+        adopter_h.queue_message_from(m, id(lo));
+    }
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+    owner
+        .send_message(&id(hi), "after-owner", None, None::<String>)
+        .unwrap();
+    adopter
+        .send_message(&id(lo), "after-adopter", None, None::<String>)
+        .unwrap();
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+
+    let still = owner
+        .mls_manager
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .session_established_at_ms(&id(hi))
+        .unwrap();
+    assert_eq!(still, owners_group, "the owner must keep its group");
+    let adopter_got = adopter_rx.lock().unwrap().clone();
+    let owner_got = owner_rx.lock().unwrap().clone();
+    for (got, want) in [
+        (&adopter_got, "from-owner"),
+        (&adopter_got, "after-owner"),
+        (&owner_got, "from-adopter"),
+        (&owner_got, "after-adopter"),
+    ] {
+        assert!(got.iter().any(|c| c == want), "{want} missing from {got:?}");
+    }
+}
+
+/// An unconfirmed session is probed every few seconds, and an answer over a
+/// slow path takes longer than that. Every probe carries the same challenge
+/// until it is answered, so a slow answer is still live; the first answer
+/// retires it.
+#[test]
+fn a_challenge_outlives_the_probes_that_repeat_it() {
+    let (mut alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+
+    let nonce_of = |body: String| {
+        offline_protocol_sealed::SessionCorroboration::parse(&body)
+            .unwrap()
+            .nonce
+    };
+    let first = nonce_of(alice.session_challenge_body(&id("bob")));
+    for _ in 0..10 {
+        assert_eq!(nonce_of(alice.session_challenge_body(&id("bob"))), first);
+    }
+    assert!(alice.answers_live_challenge(&id("bob"), &first));
+    assert!(
+        !alice.answers_live_challenge(&id("bob"), &first),
+        "the first answer retires the challenge"
+    );
+    assert_ne!(nonce_of(alice.session_challenge_body(&id("bob"))), first);
+}
+
+/// Only the frames that built the session move the spent mark. An ordinary
+/// key package stamped by a peer whose clock ran fast must not lock that
+/// peer's later resets out once its clock is set back.
+#[test]
+fn an_ordinary_key_package_does_not_move_the_spent_mark() {
+    let (mut alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+    let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&proof, None);
+
+    let now = Utc::now().timestamp_millis();
+    let refresh = key_package_frame_body(&id("alice"), false, Vec::new());
+    let refresh = refresh
+        .strip_prefix(internal_prefixes::KEY_PACKAGE)
+        .unwrap();
+    bob.handle_key_package_message(&id("alice"), refresh, true, Some(now + 86_400_000));
+    assert!(bob_has_session(&bob, &id("alice")));
+
+    let reset = key_package_frame_body(&id("alice"), true, Vec::new());
+    let reset = reset.strip_prefix(internal_prefixes::KEY_PACKAGE).unwrap();
+    bob.handle_key_package_message(&id("alice"), reset, true, Some(now));
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "a reset after the peer's clock was set back must still be honoured"
     );
 }

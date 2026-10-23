@@ -66,7 +66,7 @@ The body is JSON, `{"epoch": E, "nonce": [...], "tag": [...]}`:
 | Field | Meaning |
 |-------|---------|
 | `epoch` | The sender's MLS epoch for the session |
-| `nonce` | 16 bytes, as a JSON byte array. Fresh in a probe, which makes it a challenge; in an acknowledgement, the nonce of the probe it answers |
+| `nonce` | 16 bytes, as a JSON byte array. In a probe, the prober's challenge: one per peer and session, repeated by every probe until it is answered; in an acknowledgement, the nonce of the probe it answers |
 | `tag` | 16 bytes: `MLS-Exporter("offline-protocol session corroboration v1", nonce, 16)` over the session's current epoch |
 
 A receiver holding a session computes the exporter over the same nonce and:
@@ -80,8 +80,12 @@ A receiver holding a session computes the exporter over the same nonce and:
   probe, or an answer to an older challenge, may be sealed before a heal and
   delivered late, retried from an outbox, or replayed.
   - On such an acknowledgement, the side whose address is greater (the side
-    that adopts in the both-create tiebreak) **MUST** end the split with the
-    re-key: a `session_reset` key package, then dropping its own group.
+    that adopts in the both-create tiebreak) **MUST** end the split by giving
+    up its own group: a key package with `no_session` set, then dropping the
+    group. The peer answers it as below, usually by resending the Welcome it
+    built, which the greater side joins. A `session_reset` there would make
+    the peer rebuild on the same unconsumed package, and a Welcome of the
+    peer's that was only delayed would then split the pair again.
   - On a probe or any other acknowledgement it **MUST NOT** tear anything
     down. The greater side **SHOULD** issue a challenge of its own instead.
   - The lesser side does nothing; its answer to the greater side's challenge
@@ -95,7 +99,9 @@ Every probe is answered with the receiver's tag over the probe's nonce. A
 leaf answers with an empty body and is held to the plaintext rules. The
 frames are signed, so a mismatch is the peer's own statement, and a challenge
 is spent by its first answer, so neither a late frame nor a recording can
-drive a teardown.
+drive a teardown. A challenge is repeated rather than replaced by each probe,
+because an unconfirmed session is probed every few seconds and an answer over
+the mesh or a relay can take longer.
 
 ### Prefixes that never appear on the wire
 
@@ -424,22 +430,28 @@ Welcome would tear that down too.
 
 So a key package sent while the sender holds no session with the receiver
 SHOULD set `no_session`, and MUST NOT set it otherwise, including when it
-cannot tell. A receiver holding a session that gets one, signed, and admitted
-under the two rules above exactly as a `session_reset` would be:
+cannot tell, except as the split heal above, which sets it just before
+dropping its group. A receiver holding a session that gets one, signed:
 
 - **MUST**, when the Welcome it built for the session names this very key
   package, send that Welcome again and keep its session. The package is
   consumed by the Welcome built on it, so a peer still offering it has not
-  processed the Welcome, and still can.
-- **MUST** otherwise drop its session as for a reset, recording the stamp
-  first, and build a new one from the package.
+  processed the Welcome, and still can. This destroys nothing and needs no
+  stamp.
+- **MUST** otherwise drop its session as for a reset and build a new one from
+  the package, but only on a frame whose stamp is signed and newer than the
+  spent mark of rule 3, recording the stamp first. An unstamped frame is
+  refused here, because every first-contact push carries the flag and the
+  mark could not refuse a recording of one.
 
 The spent mark of rule 3 **MUST** also be moved up, never down, to the signed
-stamp of every key package and Welcome admitted from the peer. Those frames
-are how a session is built, so a `no_session` or `session_reset` frame older
-than them predates the session it would destroy: a first-contact push
-carried slowly, or a recording. The stamps are all the peer's own clock, so
-skew does not enter.
+stamp of the frame the current session was built from: the key package it was
+created from, or the Welcome it was joined from. A `no_session` or
+`session_reset` frame older than that predates the session it would destroy: a
+first-contact push carried slowly, or a recording. Only those frames: the mark
+is durable, so moving it on every key package would let a peer whose clock ran
+fast, and was then set back, have its resets refused until its clock caught
+up.
 
 A receiver that adopted the peer's Welcome in the both-create tiebreak gave
 up its own group, and **MUST** then discard its own Welcome: it names a

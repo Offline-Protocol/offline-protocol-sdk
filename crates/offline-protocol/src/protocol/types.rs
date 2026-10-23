@@ -853,11 +853,6 @@ pub(crate) const MAX_KEY_PACKAGE_SENT_TO: usize = 1000;
 /// peer only costs one extra re-key being allowed through early.
 pub(crate) const MAX_REKEY_TRACKED_PEERS: usize = 1000;
 
-/// Corroboration challenges remembered per peer. A probe supersedes the last
-/// in the outbox, but an earlier one may still be crossing, so a few are kept:
-/// an answer to one already forgotten only costs a heal one challenge later.
-pub(crate) const MAX_CORROBORATION_CHALLENGES: usize = 4;
-
 /// A corroboration challenge's nonce, and the session it was issued under
 /// (its establishment stamp).
 pub(crate) type CorroborationChallenge = ([u8; 16], Option<u64>);

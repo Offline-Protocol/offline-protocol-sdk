@@ -35,8 +35,8 @@ stateDiagram-v2
     Owner --> Confirmed: successful decrypt, or a corroborated probe/ack
     Joined --> Confirmed: Welcome processed, probe/ack, or decrypt
 
-    Owner --> None: split detected, greater side re-keys
-    Joined --> None: split detected, greater side re-keys
+    Owner --> None: split answered, greater side gives up its group
+    Joined --> None: split answered, greater side gives up its group
 
     Confirmed --> Desynced: WrongEpoch / NoPastEpochData
     Desynced --> None: session_reset, tear down + advertise
@@ -433,7 +433,7 @@ group at the same epoch computes (see
 | What the frame shows | What the receiver does |
 |----------------------|------------------------|
 | Same epoch, same tag | Confirms, as group-aware proof. The both-create owner included |
-| Same epoch, different tag, on an acknowledgement answering our live challenge | Does not confirm. The split: the side whose address is greater re-keys |
+| Same epoch, different tag, on an acknowledgement answering our live challenge | Does not confirm. The split: the side whose address is greater gives up its group |
 | Same epoch, different tag, on anything else | Does not confirm, tears nothing down. The greater side issues a challenge of its own |
 | Different epoch, or nothing this side can compare | Does not confirm, and does nothing. The epoch-desync path owns an epoch mismatch |
 | Empty body | An older peer or a leaf: the plaintext rules above |
@@ -443,8 +443,10 @@ did, both would tear down at once, each would rebuild from the other's
 package, and the pair would race again.
 
 **And only on an answer to its own live challenge.** A probe's nonce is a
-challenge, remembered with the session it was issued under, and an
-acknowledgement answers with the responder's tag over that same nonce. Any
+challenge, remembered with the session it was issued under and repeated by
+every probe until it is answered (probes run every few seconds, and an answer
+over the mesh can take longer), and an acknowledgement answers with the
+responder's tag over that same nonce. Any
 other mismatching frame may be stale: a probe sealed under a group that has
 since been healed and delivered late, an outbox retry carrying an earlier
 group's tag, or a recording. Acting on those tore healthy sessions down, so
@@ -452,10 +454,16 @@ they only make the greater side issue a challenge of its own. Whichever side
 probes first, the greater side learns within one round trip, and a challenge
 is spent by its first answer.
 
-The heal is the re-key, through the same shared step as a desync: the reset
-key package first, then the local group dropped. It shares the re-key floor.
-A reset that could not be sent drops nothing and gives the floor back,
-because the peer was told nothing and the next challenge asks again.
+**The heal gives up the greater side's group, not the pair's.** It sends a key
+package saying it holds no session, then drops its group, and the peer answers
+as for any `no_session` package (below). After a both-create race the peer's
+Welcome names that very package, because it was never consumed, so the peer
+resends it and keeps its group, and the greater side joins. A Welcome that was
+only delayed is joined the same way. A reset there made the peer rebuild on
+the same package, and the delayed Welcome then split the pair again. The heal
+shares the re-key floor; a push that could not be sent drops nothing and gives
+the floor back, because the peer was told nothing and the next challenge asks
+again.
 
 ### A peer that holds no session
 
@@ -478,9 +486,13 @@ not: a replacement whose Welcome is in flight is recognised and kept. Two
 rules keep the comparison honest:
 
 - **A flag older than the session is refused.** The spent mark moves up to the
-  signed stamp of every key package and Welcome admitted from the peer, so a
-  `no_session` (or reset) frame older than the frames that built the session
-  is refused: a first-contact push delivered late, or a recording.
+  signed stamp of the frame the session was built from (the key package it was
+  created from, or the Welcome it was joined from), so a `no_session` (or
+  reset) frame older than that is refused: a first-contact push delivered
+  late, or a recording. Only those frames, since the mark is durable and a
+  peer clock that ran fast and was set back would otherwise lock that peer's
+  resets out. The teardown also needs the frame's stamp to be signed at all;
+  resending a Welcome needs neither.
 - **An adopted Welcome retires our own.** Adopting the peer's Welcome in the
   both-create tiebreak gives up our group, and our outbound Welcome for it is
   dropped. It names a package the peer never processed and still offers, so

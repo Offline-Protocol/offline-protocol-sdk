@@ -70,10 +70,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   on an epoch mismatch. A probe and its acknowledgement now carry an MLS
   exporter tag that only a member of the same group computes. A match
   confirms, including the session owner, which before only a decrypted
-  message could. A mismatch is a split, and the greater side heals it with
-  the existing re-key, but only when the mismatch answers a challenge it
-  issued under its current session, so a late or replayed probe can never
-  tear a healthy session down. An older peer sends no tag and keeps the old
+  message could. A mismatch is a split, and the greater side heals it by
+  giving up its own group, so the other side resends its Welcome and keeps
+  its group. It does so only when the mismatch answers a challenge it issued
+  under its current session, so a late or replayed probe can never tear a
+  healthy session down. An older peer sends no tag and keeps the old
   rules.
   A split between two sides that had both confirmed is found too: an ordinary
   decrypt failure on a 1:1 session now sends a probe, at most once per peer
@@ -90,8 +91,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   again when that Welcome was built on the very package offered, since the
   sender never processed it, and otherwise drops its session and rebuilds,
   under the same freshness and spent-reset rules as a reset. A flag older
-  than the key packages and Welcomes that built the session is refused, and
-  the same rule now refuses a late `session_reset`. A Welcome given up in
+  than the frame that built the session is refused, and the same rule now
+  refuses a late `session_reset`. A Welcome given up in
   the both-create tiebreak is discarded, so it is never sent again.
 
 ## [0.30.0] — 2026-10-21

@@ -840,14 +840,12 @@ pub struct OfflineProtocol {
     /// only: the next failure re-arms it.
     corroboration_due_at: HashMap<String, DateTime<Utc>>,
 
-    /// The corroboration challenges this side issued to each peer, newest
-    /// last, each with the session it was issued under
-    /// (`session_challenge_body`). Only an acknowledgement answering one of
-    /// these under the current session may heal a split. Bounded per peer by
-    /// `MAX_CORROBORATION_CHALLENGES` and overall like `rekey_due_at`. In
-    /// memory only: an answer arriving after a restart is not acted on, and
-    /// the next challenge asks again.
-    corroboration_challenges: HashMap<String, Vec<CorroborationChallenge>>,
+    /// The corroboration challenge this side has out to each peer, with the
+    /// session it was issued under (`session_challenge_body`). Only an
+    /// acknowledgement answering it under the current session may heal a
+    /// split. Bounded like `rekey_due_at`. In memory only: an answer arriving
+    /// after a restart is not acted on, and the next challenge asks again.
+    corroboration_challenges: HashMap<String, CorroborationChallenge>,
 
     /// Outbound welcome lifecycle records keyed by peer id.
     welcome_lifecycles: HashMap<String, WelcomeLifecycleRecord>,
