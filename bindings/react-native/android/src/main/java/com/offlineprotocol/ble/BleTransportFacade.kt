@@ -632,6 +632,11 @@ class BleTransportFacade(
     @Volatile
     private var cachedLocalAddress: String? = null
 
+    // The core's digest of [cachedLocalAddress], carried in the scan response
+    // so a scanner can attribute its RSSI readings to us. Primed with it.
+    @Volatile
+    private var cachedNodeHash: ByteArray? = null
+
     // Backoff state for updateSignedIdentity retries when MLS is not yet
     // initialized or signing fails. BLE-thread only.
     private var identityRefreshRetryScheduled: Boolean = false
@@ -1666,6 +1671,7 @@ class BleTransportFacade(
             // `localAddress()` as `Message.sender` — also made our own control
             // frames fail the receiver's `validate_transport_sender`.
             cachedLocalAddress = protocol.localAddress()
+            cachedNodeHash = protocol.bleNodeHash()?.map { it.toByte() }?.toByteArray()
 
             val publicKey = protocol.getIdentityPublicKey()
             val meshData = meshController.toAdvertisement()
@@ -2332,10 +2338,21 @@ class BleTransportFacade(
      * service UUIDs from Android's main advertisement packet format.
      */
     private fun buildScanResponse(): AdvertiseData {
-        return AdvertiseData.Builder()
-            .setIncludeDeviceName(false)
-            .addServiceUuid(ParcelUuid(SERVICE_UUID))
-            .build()
+        // With the identity open, the node hash goes in as service data under
+        // the mesh UUID instead of the bare UUID: 2 + 16 + 8 = 26 of the 31
+        // bytes, where both would need 44. The UUID still travels, inside the
+        // service data, the main packet still lists it, and both scanners'
+        // gates accept service data under it. Service data under our own
+        // 128-bit UUID needs no SIG assignment, unlike a 16-bit UUID or a
+        // company id. It names this device to a scanner that hears it, which
+        // the threat model records.
+        val builder = AdvertiseData.Builder().setIncludeDeviceName(false)
+        val nodeHash = cachedNodeHash
+        return if (nodeHash != null) {
+            builder.addServiceData(ParcelUuid(SERVICE_UUID), nodeHash).build()
+        } else {
+            builder.addServiceUuid(ParcelUuid(SERVICE_UUID)).build()
+        }
     }
     
     private fun handleScanResult(result: ScanResult) {
@@ -2398,6 +2415,17 @@ class BleTransportFacade(
         
         if (!shouldProcessDiscoveredDevice(address, scanRecord, rssi, isConnectable, now)) {
             return
+        }
+
+        // Live signal strength, after the gate and above the two filters for
+        // the same reason as the count below: they shed work, not readings.
+        // The core attributes the reading to a linked peer, by this address's
+        // link or by the node hash another Android peer's scan response
+        // carries, and rate-caps the event.
+        val linkedPeerId = connections.deviceIdForAddress(address)
+        val advertisedHash = scanRecord?.getServiceData(ParcelUuid(SERVICE_UUID))
+        if (linkedPeerId != null || advertisedHash != null) {
+            protocol.blePeerRssi(linkedPeerId, advertisedHash?.map { it.toUByte() }, rssi.toShort())
         }
 
         // Counted after the gate, which is what makes this a mesh candidate

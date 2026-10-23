@@ -1194,6 +1194,15 @@ class OfflineProtocolModule: RCTEventEmitter {
         resolver(nil)
     }
 
+    /// `peer_rssi` events, which the TypeScript layer turns on while it has a
+    /// listener for them. Off by default; readings update link quality anyway.
+    @objc func setPeerRssiEvents(_ enabled: Bool,
+                                 resolver: @escaping RCTPromiseResolveBlock,
+                                 rejecter: @escaping RCTPromiseRejectBlock) {
+        protocolInstance?.setPeerRssiEvents(enabled: enabled)
+        resolver(nil)
+    }
+
     @objc func telemetryInstallId(_ resolver: @escaping RCTPromiseResolveBlock,
                                   rejecter: @escaping RCTPromiseRejectBlock) {
         guard let proto = protocolInstance else {

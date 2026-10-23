@@ -563,6 +563,8 @@ export class OfflineProtocol {
    */
   private cachedLocalAddress: string | null = null;
   private isCreated: boolean = false;
+  /** What the engine was last told about `peer_rssi`; see {@link syncPeerRssiEvents}. */
+  private peerRssiEventsOn: boolean = false;
   private initialRuntimeConfig: InitialRuntimeConfig | null = null;
   private initialRuntimeConfigApplied: boolean = false;
 
@@ -1339,6 +1341,7 @@ export class OfflineProtocol {
       this.eventListeners.set(eventType, new Set());
     }
     this.eventListeners.get(eventType)!.add(listener as EventListener);
+    this.syncPeerRssiEvents();
     this.replayHeldOneShotEvents(eventType);
     this.replayHeldInboundEvents(eventType);
     return this;
@@ -1446,7 +1449,27 @@ export class OfflineProtocol {
         this.eventListeners.delete(eventType);
       }
     }
+    this.syncPeerRssiEvents();
     return this;
+  }
+
+  /**
+   * Has the engine emit `peer_rssi` while a listener for it exists, and stop
+   * when the last one goes, so an app that never asks pays nothing: the
+   * events fire from every Bluetooth LE advertisement. An `'all'` listener
+   * does not count, because logging every event should not switch on four
+   * readings a second per peer. Before the engine exists this only records
+   * the wish; creation calls it again.
+   */
+  private syncPeerRssiEvents(): void {
+    const wanted = this.eventListeners.has('peer_rssi');
+    if (!this.isCreated || wanted === this.peerRssiEventsOn) {
+      return;
+    }
+    this.peerRssiEventsOn = wanted;
+    OfflineProtocolNativeModule.setPeerRssiEvents(wanted).catch((error: unknown) => {
+      console.warn('[OfflineProtocol] Could not switch peer_rssi events:', error);
+    });
   }
 
   /**
@@ -1480,6 +1503,7 @@ export class OfflineProtocol {
     } else {
       this.eventListeners.clear();
     }
+    this.syncPeerRssiEvents();
     return this;
   }
 
@@ -1511,6 +1535,7 @@ export class OfflineProtocol {
       const nativeConfig = this.transformConfigForNative();
       await OfflineProtocolNativeModule.create(JSON.stringify(nativeConfig));
       this.isCreated = true;
+      this.syncPeerRssiEvents();
       await this.applyInitialRuntimeConfig();
     }
 
@@ -1689,6 +1714,7 @@ export class OfflineProtocol {
       const nativeConfig = this.transformConfigForNative();
       await OfflineProtocolNativeModule.create(JSON.stringify(nativeConfig));
       this.isCreated = true;
+      this.syncPeerRssiEvents();
       await this.applyInitialRuntimeConfig();
     }
     await OfflineProtocolNativeModule.emitTestEvent();

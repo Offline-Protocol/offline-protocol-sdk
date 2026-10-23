@@ -1292,6 +1292,20 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         }
     }
 
+    /**
+     * `peer_rssi` events, which the TypeScript layer turns on while it has a
+     * listener for them. Off by default; readings update link quality anyway.
+     */
+    @ReactMethod
+    fun setPeerRssiEvents(enabled: Boolean, promise: Promise) {
+        try {
+            protocol?.setPeerRssiEvents(enabled)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject("PEER_RSSI_EVENTS_FAILED", e.message, e)
+        }
+    }
+
     @ReactMethod
     fun telemetryInstallId(promise: Promise) {
         val proto = protocol

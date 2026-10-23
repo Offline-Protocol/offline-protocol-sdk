@@ -15,6 +15,18 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Live Bluetooth LE signal strength.** A new `peer_rssi` event
+  (`{ peer_id, transport, rssi }`) reports a linked peer's RSSI from every
+  scan, at most four a second per peer, and only while the app listens for
+  it; see [peer_rssi](bindings/react-native/README.md#peer_rssi). The engine
+  attributes each reading to the peer itself, so an app no longer joins
+  scans to peers. Android now advertises an 8-byte digest of its address as
+  service data under the mesh UUID in its scan response, in place of the
+  bare UUID, so an iPhone can name an Android peer that linked to it as
+  central ([R29](docs/security/threat-model.md#r29-the-bluetooth-le-scan-response-names-the-device-and-rssi-is-unauthenticated)).
+  Readings also keep each link's quality current, which the mesh relay ranks
+  neighbours by; it used the reading from discovery until now.
+
 - **The engine runs in a browser (experimental).** `offline-protocol-web`
   compiles the full engine, MLS included, for `wasm32-unknown-unknown`, and
   `bindings/web` runs it in a dedicated Web Worker. Tabs of one origin find

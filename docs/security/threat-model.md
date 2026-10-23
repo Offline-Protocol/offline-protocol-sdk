@@ -1250,6 +1250,35 @@ most sixteen answered sessions every two minutes, which equals the engine's
 link ceiling: a leaked code can occupy every link the host has, though MLS
 admits none of those joiners to anything until the host invites them.
 
+### R29. The Bluetooth LE scan response names the device, and RSSI is unauthenticated
+
+An Android device advertises the first eight bytes of SHA-256 over its own
+address, as service data under the mesh UUID in its scan response. It is
+how a scanner attributes a signal reading to a linked peer when the link
+was opened from the other side, which on iOS runs under a CoreBluetooth
+identifier the advertisement does not share. The digest is stable, so any
+device in radio range that sends a scan request (A1) can follow the phone
+across Bluetooth address rotation, and anyone who knows the address can
+recognise it. Signal strength itself carries no proof of who transmitted
+it: a device that advertises another peer's digest, or answers on a link's
+address, has its readings attributed to that peer, which moves the peer's
+`peer_rssi` and the link quality the relay ranks neighbours by.
+
+**Why it stands:** the address is already served to anyone who connects,
+in the `DEVICE_ID` characteristic, and is stable and linkable like the app
+tag beside it ([R15](#r15-the-bluetooth-le-app-tag-is-unsigned-and-readable)).
+The digest makes that passive, which is the cost. A rotating digest would
+close tracking by strangers, but it means re-advertising on a schedule
+every scanner shares, and the SDK's advertising duty cycle is tuned for
+discovery.
+
+**What bounds it:** a reading is attributed only to a peer that already
+proved its address on a link, so a forged digest never introduces anyone,
+and it moves only a number. Relay ranking orders neighbours for fan-out
+and never decides whether a frame is sent, and every frame is still
+authenticated above this layer. An application must not treat `peer_rssi`
+as evidence of who is physically near.
+
 ## Network egress
 
 Until 0.26 the Rust crates opened no socket: every byte that left a device

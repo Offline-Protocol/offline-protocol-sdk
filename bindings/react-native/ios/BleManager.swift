@@ -3280,6 +3280,25 @@ extension BleManager: CBCentralManagerDelegate {
         peripheralRestorationPolicy.recordSeen(uuid: peripheral.identifier, at: now, source: .advertisement)
         lastAdvertisedAt[peripheral.identifier] = now
 
+        // Live signal strength, above the two filters for the same reason:
+        // they shed work, not readings. The core attributes the reading to a
+        // linked peer, by this link or by the node hash an Android peer
+        // carries in its scan response (a peer linked to us as central
+        // advertises from an identifier no link of ours has), and rate-caps
+        // the event. Off the main thread, like every protocol call here.
+        let linkedPeerId = connections.peripheralDeviceId(for: peripheral.identifier)
+        let advertisedHash = (advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data])?[SERVICE_UUID]
+        if linkedPeerId != nil || advertisedHash != nil {
+            let reading = rssiValue
+            onProtocolQueue { [weak self] in
+                self?.protocolInstance.blePeerRssi(
+                    peerId: linkedPeerId,
+                    nodeHash: advertisedHash.map { [UInt8]($0) },
+                    rssi: reading
+                )
+            }
+        }
+
         // Mesh density is counted here too, for the same reasons: after the
         // gate, so it counts mesh candidates and not every Bluetooth device in
         // range, and above the filters it drives.

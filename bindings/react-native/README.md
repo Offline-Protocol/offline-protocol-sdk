@@ -925,6 +925,42 @@ interface NeighborLostEvent {
 }
 ```
 
+#### peer_rssi
+
+```typescript
+interface PeerRssiEvent {
+  type: 'peer_rssi';
+  peer_id: string;   // canonical address, as in neighbor_discovered
+  transport: string; // 'BLE'
+  rssi: number;      // dBm, raw
+}
+```
+
+Live signal strength to a linked Bluetooth LE peer, for proximity features
+such as "who is closest". Readings come from the scans the SDK already runs,
+so they cost no extra radio time.
+
+- **Opt-in by listening.** The engine emits it only while at least one
+  `on('peer_rssi', ...)` listener is registered; an `'all'` listener does not
+  turn it on. With no listener nothing crosses the bridge.
+- **Bounded.** At most four a second per peer. Expect about 1.5 a second on
+  iOS and 3 to 4 on Android: iOS reports advertisements less often, and both
+  platforms skip a repeat within 5 dB inside a second.
+- **Only linked peers.** A reading is named only for a peer that proved its
+  address on a link, matched by that link or by the digest of its address an
+  Android peer advertises. iOS cannot advertise one, so an iPhone linked to
+  another iPhone as central is not named on that side.
+- **Raw.** Readings swing by about ±8 dB between samples. Smooth them for a
+  display, for example with an exponential moving average:
+
+```typescript
+const smoothed = new Map<string, number>();
+protocol.on('peer_rssi', ({ peer_id, rssi }) => {
+  const prev = smoothed.get(peer_id);
+  smoothed.set(peer_id, prev === undefined ? rssi : 0.7 * prev + 0.3 * rssi);
+});
+```
+
 #### network_metrics
 
 ```typescript
