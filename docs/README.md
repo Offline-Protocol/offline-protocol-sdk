@@ -137,6 +137,7 @@ in here fails **silently** when violated.
 | [Service Discovery](../examples/service-discovery-app/README.md) | React Native app registering, discovering and invoking services over the mesh |
 | [Nostr Transport](../examples/nostr-example/README.md) | Minimal React Native app using the Nostr relay transport |
 | [Java](../examples/java-app/README.md) | Two devices in one JVM pairing, messaging, sending a file and forming a group over the Java binding |
+| [Ruby](../examples/ruby-app/README.md) | The same two devices in one Ruby process, over the Ruby binding |
 | `cargo run -p offline-protocol --example replicated_notes` | Replicated documents: open a store, edit, persist, reopen |
 | `cargo run -p offline-protocol-data --example offline_merge` | What two people editing the same document offline actually get back |
 

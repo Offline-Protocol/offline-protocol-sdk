@@ -668,6 +668,14 @@ jobs:
         working-directory: bindings/ruby
         run: bundle exec rake build
 
+      # The example app against the same library, so it cannot rot: two
+      # engines pair, encrypt and exchange messages in one Ruby process.
+      - name: Run the Ruby example
+        working-directory: examples/ruby-app
+        run: |
+          bundle install
+          bundle exec rake run
+
   security:
     name: Dependency Audit
     runs-on: ubuntu-latest

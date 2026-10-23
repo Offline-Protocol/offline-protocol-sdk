@@ -75,6 +75,11 @@ engine.emit_test_event
 Keep the engine reachable for as long as the process runs. See R3 in the
 contract for what a collected engine costs.
 
+A byte array the engine returns comes back signed, -128 to 127, and has to be
+masked with `map { |b| b & 0xFF }` before it goes back in (R8).
+
+A complete, runnable program is in [examples/ruby-app](../../examples/ruby-app/README.md).
+
 ## Storage
 
 The engine needs somewhere to keep key material and protocol state. Either hand
