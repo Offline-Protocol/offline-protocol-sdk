@@ -37,6 +37,7 @@ Every channel carries the version number of the release it came from.
 | C, and any language that calls C | `offline_protocol.h` and the native library in each [GitHub release](https://github.com/Offline-Protocol/offline-protocol-sdk/releases)'s desktop archives | See [bindings/c](bindings/c/README.md) |
 | Flutter (iOS, Android, preview) | [`offline_protocol`](bindings/flutter/README.md) plugin in this repository | Path dependency; see [bindings/flutter](bindings/flutter/README.md) |
 | Java (JVM 22+, desktop and server) | [`com.offlineprotocol:offline-protocol-java`](https://central.sonatype.com/artifact/com.offlineprotocol/offline-protocol-java) on Maven Central, over the native library in each release's desktop archives | `implementation("com.offlineprotocol:offline-protocol-java:0.30.0")`, see [bindings/java](bindings/java/README.md) |
+| Ruby (desktop and server) | Generated source in [bindings/ruby](bindings/ruby/README.md), over the native library in each release's desktop archives; not on RubyGems yet | See [bindings/ruby](bindings/ruby/README.md) |
 | Browser (Chrome, experimental) | [`bindings/web`](bindings/web) in this repository, over the `offline-protocol-web` crate; not yet published | Build from source; see [docs/bridges/web.md](docs/bridges/web.md) |
 
 **Python.** Wheels are published for Python 3.10 or later on macOS arm64
@@ -216,12 +217,12 @@ npm run build:uniffi:android  # Android only
 ./scripts/generate-bindings.sh
 ```
 
-One script generates all four languages — Swift, Kotlin, Python and Java — because
+One script generates all five languages — Swift, Kotlin, Python, Ruby and Java — because
 they are one artifact set produced from one UDL and carry the FFI checksums of
 the library they were generated against. Regenerating a subset leaves the rest
 describing a different ABI, which no build catches; the app fails at the first
 call instead. `npm run generate:bindings` and the platform build scripts
-delegate here, so every path produces the whole set. Commit all four together.
+delegate here, so every path produces the whole set. Commit all five together.
 
 ### Build Python Desktop Bindings
 
@@ -232,7 +233,7 @@ pip install -e .
 ```
 
 The desktop build produces the native `.dylib`, `.so`, or `.dll` for the host
-platform and regenerates the bindings (all four languages, via the shared
+platform and regenerates the bindings (all five languages, via the shared
 script above).
 
 
@@ -298,8 +299,8 @@ behaviour:
   sessions, groups, and transports
 - [Architecture Decision Records](docs/adr/README.md), why the non-obvious
   choices are what they are
-- [Bridge Contracts](docs/bridges/README.md) for Swift, Kotlin, Python, and
-  TypeScript
+- [Bridge Contracts](docs/bridges/README.md) for Swift, Kotlin, Python, Ruby, Java,
+  C and TypeScript
 
 ## Development
 

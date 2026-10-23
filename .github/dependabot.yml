@@ -46,6 +46,17 @@ updates:
     cooldown:
       default-days: 7
 
+  # The Ruby binding's test gems and the example's. ffi is the one runtime
+  # dependency; both lockfiles pin it.
+  - package-ecosystem: bundler
+    directories:
+      - /bindings/ruby
+      - /examples/ruby-app
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

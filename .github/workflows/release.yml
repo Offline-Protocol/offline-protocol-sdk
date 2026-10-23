@@ -546,7 +546,7 @@ jobs:
           cargo install uniffi --version ${{ env.UNIFFI_VERSION }} --features cli --locked --force
           cargo install uniffi-bindgen-java --version ${{ env.UNIFFI_BINDGEN_JAVA_VERSION }} --locked --force
 
-      # Generates all four languages; only the Python file is uploaded here.
+      # Generates all five languages; only the Python file is uploaded here.
       # Going through the shared script keeps the released wheel's bindings
       # produced exactly the way CI's drift gate verified them, and picks up its
       # check that uniffi-bindgen agrees with the crate's uniffi pin to the
@@ -860,6 +860,65 @@ jobs:
           path: bindings/java/build/maven/
           retention-days: 1
 
+  # The Ruby gem a release publishes: the committed generated binding, tested
+  # against the release profile's library and built at the release's version.
+  # Credential-free: `publish-rubygems` pushes what this tested. The gem holds
+  # no native code (docs/bridges/ruby.md, R7).
+  ruby-library:
+    name: Build Ruby Gem
+    needs: [version-gate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: stable
+
+      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+          working-directory: bindings/ruby
+
+      - name: Build the native library the tests load
+        run: cargo build --release --locked --package offline-protocol-uniffi
+
+      - name: Test the binding and build the gem
+        working-directory: bindings/ruby
+        env:
+          OFFLINE_PROTOCOL_LIBRARY_DIR: ${{ github.workspace }}/target/release
+          OFFLINE_PROTOCOL_VERSION: ${{ needs.version-gate.outputs.VERSION }}
+        run: bundle exec rake test build
+
+      # RubyGems takes whatever it is given, so the check is here: one gem, at
+      # the release's version, carrying the binding and the license.
+      - name: Check what is in the gem
+        working-directory: bindings/ruby
+        env:
+          VERSION: ${{ needs.version-gate.outputs.VERSION }}
+        run: |
+          set -euo pipefail
+          GEM_VERSION=$(ruby -e 'puts Gem::Version.new(ARGV[0])' "$VERSION")
+          GEM="pkg/offline_protocol-$GEM_VERSION.gem"
+          [ "$(ls pkg/*.gem | wc -l)" -eq 1 ] && [ -s "$GEM" ] || {
+            echo "::error title=Ruby gem incomplete::expected exactly $GEM, found: $(ls pkg)"
+            exit 1
+          }
+          CONTENTS=$(tar -xOf "$GEM" data.tar.gz | tar -tz)
+          for file in lib/offline_protocol.rb LICENSE LICENSE-COMMERCIAL.md THIRD-PARTY-NOTICES.md EXPORT.md; do
+            grep -qx "$file" <<<"$CONTENTS" || {
+              echo "::error title=Ruby gem incomplete::the gem does not carry $file."
+              exit 1
+            }
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ruby-gem
+          path: bindings/ruby/pkg/
+          retention-days: 1
+
   # The Swift package a release publishes, built from the release's own
   # libraries and tested on a simulator: its suites, the bridge's, and an
   # application that depends on it. Assembled here with the XCFramework in
@@ -1132,7 +1191,7 @@ jobs:
     # their tests: the GitHub release carries the wheels, the Swift package and
     # the archive it names, and Maven Central and PyPI publish only after this
     # job, so one that fails its tests stops everything before npm.
-    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, java-library, swift-package, test-c-library]
+    needs: [version-gate, build-ios, build-android, android-bindings, build-desktop-macos, build-desktop-linux, build-desktop-windows, python-bindings, test-python, audit-python, python-package, test-python-wheels, android-library, java-library, ruby-library, swift-package, test-c-library]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1818,10 +1877,11 @@ jobs:
           cargo workspaces publish --publish-as-is --no-verify --yes
 
   # ---------------------------------------------------------------------------
-  # Maven Central and PyPI
+  # Maven Central, PyPI and RubyGems
   #
-  # Two more channels, and neither takes a version back: a version on Maven
-  # Central or PyPI is permanent. So each publishes only after the `release`
+  # Three more channels, and none takes a version back: a version on Maven
+  # Central, PyPI or RubyGems is permanent (RubyGems can yank one, and never
+  # takes its number again). So each publishes only after the `release`
   # job has created the GitHub release and published npm, only from a `v*`
   # tag that is not a dry run (`REAL_RELEASE`), and only when its repository
   # variable switches it on. A dry run with Maven Central on rehearses it
@@ -1832,6 +1892,7 @@ jobs:
   #                          secrets: MAVEN_CENTRAL_USERNAME, MAVEN_CENTRAL_PASSWORD,
   #                                   MAVEN_SIGNING_KEY, MAVEN_SIGNING_KEY_PASSWORD
   #   PYPI_PUBLISH           no secret: trusted publishing, environment `pypi`
+  #   RUBYGEMS_PUBLISH       no secret: trusted publishing, environment `rubygems`
   #
   # A channel switched on with its secret missing fails loudly rather than
   # skipping: a silent skip is a release that looks shipped and is not.
@@ -2004,6 +2065,54 @@ jobs:
         with:
           packages-dir: dist/
           skip-existing: true
+
+  # offline_protocol on RubyGems, from the gem the `ruby-library` job built and
+  # tested. Trusted publishing, as for PyPI: the job's OIDC identity is the
+  # credential, so there is no API key to leak. The first release needs the
+  # gem's trusted publisher (this repository, this workflow, environment
+  # `rubygems`) registered on rubygems.org as a pending publisher.
+  publish-rubygems:
+    name: Publish to RubyGems
+    needs: [version-gate, ruby-library, release]
+    runs-on: ubuntu-latest
+    environment: rubygems
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      REAL_RELEASE: ${{ needs.version-gate.outputs.REAL_RELEASE }}
+    steps:
+      - name: Download the gem
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ruby-gem
+          path: pkg
+
+      - uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          ruby-version: "4.0"
+
+      - name: Channel off
+        if: vars.RUBYGEMS_PUBLISH != 'true' || env.REAL_RELEASE != 'true'
+        run: echo "::notice title=Ruby gem not published::Published only from a release tag with RUBYGEMS_PUBLISH set to 'true'. RubyGems has no rehearsal; the trusted publisher is first exercised by a release candidate."
+
+      - name: Configure the trusted publisher
+        if: vars.RUBYGEMS_PUBLISH == 'true' && env.REAL_RELEASE == 'true'
+        uses: rubygems/configure-rubygems-credentials@dc5a8d8553e6ee01fc26761a49e99e733d17954a # v2.1.0
+
+      # A re-run of a release whose gem is already on RubyGems succeeds instead
+      # of failing on the duplicate, as skip-existing does for PyPI.
+      - name: Publish to RubyGems
+        if: vars.RUBYGEMS_PUBLISH == 'true' && env.REAL_RELEASE == 'true'
+        run: |
+          set -euo pipefail
+          GEM=$(ls pkg/offline_protocol-*.gem)
+          GEM_VERSION=$(basename "$GEM" .gem | sed 's/^offline_protocol-//')
+          if curl -fsS -o /dev/null "https://rubygems.org/api/v2/rubygems/offline_protocol/versions/$GEM_VERSION.json"; then
+            echo "::warning title=RubyGems publish is a no-op::offline_protocol $GEM_VERSION is already on RubyGems. Expected when re-running a release that already reached it."
+            exit 0
+          fi
+          gem push "$GEM"
 
   # ghcr.io/offline-protocol/offline-protocol-service, built from
   # bindings/python/docker. The image installs the wheels `publish-pypi` just

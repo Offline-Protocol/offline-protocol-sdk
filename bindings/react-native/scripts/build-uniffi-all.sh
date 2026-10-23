@@ -60,18 +60,19 @@ echo ""
 
 # Unconditional: the bindgen check at the top exits rather than continuing, and
 # both platform scripts fail if generation does not happen, so reaching here
-# means all four were written. The iOS and Android scripts each delegate to the
+# means all five were written. The iOS and Android scripts each delegate to the
 # shared generator, so the full set is written twice — deliberate, since both
 # are also run on their own and idempotent regeneration is cheaper than letting
 # either emit only its own language.
-echo "Generated bindings (all four — one artifact set off one UDL):"
+echo "Generated bindings (all five — one artifact set off one UDL):"
 echo "  Swift:   bindings/react-native/ios/Generated/"
 echo "  Kotlin:  bindings/react-native/android/src/main/java/uniffi/"
 echo "  Python:  bindings/python/offline_protocol_sdk/"
+echo "  Ruby:    bindings/ruby/lib/"
 echo "  Java:    bindings/java/src/main/java/"
 echo ""
 echo "Next steps:"
-echo "  1. Commit all four together — a partial commit is drift"
+echo "  1. Commit all five together — a partial commit is drift"
 echo "  2. Test on iOS and Android"
 echo "  3. Run 'npm publish' to distribute the package"
 

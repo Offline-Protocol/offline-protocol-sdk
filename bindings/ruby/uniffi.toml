@@ -1,0 +1,8 @@
+# Configuration for the Ruby generator. scripts/generate-bindings.sh passes this
+# file with --config; see docs/bridges/ruby.md.
+#
+# The generator ignores a key it does not know without a warning (module_name is
+# one such), so the consumer check, which loads the library by this name, is what
+# proves this file took effect.
+[defaults.bindings.ruby]
+cdylib_name = "offline_protocol_uniffi"
