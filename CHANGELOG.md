@@ -88,7 +88,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   The browser's store derives its folder with it, and a browser build has no
   POSIX files. It is still re-exported from `offline_protocol::file_store`.
 - **A decrypt failure names its cause.** The `reason` of
-  `message_decryption_failed` now carries the OpenMLS failure as a fixed name
+  `message_decryption_failed`, for a message or a media chunk, now carries
+  the OpenMLS failure as a fixed name
   beside the kind, for example `(InvalidCiphertext, aead)` or
   `(InvalidCiphertext, too_distant_in_the_past)`. A pair holding two
   different sessions for one slot fails as `aead` on every frame, where a

@@ -455,7 +455,9 @@ dropping its group. A receiver holding a session that gets one, signed:
 The spent mark of rule 3 **MUST** also be moved when a session is built, and
 only then: on the key package the session was created from, or the Welcome it
 was joined from, to that frame's signed stamp clamped to five minutes past the
-receiver's own clock, and never down. A `no_session` or `session_reset` frame
+receiver's own clock, and never down. (A teardown that is acted on records the
+frame's own stamp under rule 3, unclamped, as a reset always has.) A
+`no_session` or `session_reset` frame
 older than the frame that built the session predates the session it would
 destroy, such as a first-contact push carried slowly or a recording, and the
 mark refuses it.

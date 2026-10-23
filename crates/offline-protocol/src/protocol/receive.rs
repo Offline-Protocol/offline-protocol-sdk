@@ -1644,8 +1644,9 @@ impl OfflineProtocol {
                                 sender.to_string(),
                                 Self::decryption_failure_code_from_kind(kind),
                                 format!(
-                                    "encrypted media chunk failed to decrypt ({}); its file transfer is stalled until the sender resends",
-                                    classification.code()
+                                    "encrypted media chunk failed to decrypt ({}{}); its file transfer is stalled until the sender resends",
+                                    classification.code(),
+                                    e.decryption_detail().map(|d| format!(", {d}")).unwrap_or_default()
                                 ),
                             ));
                         }
@@ -1681,8 +1682,9 @@ impl OfflineProtocol {
                                 sender.to_string(),
                                 Self::decryption_failure_code_from_kind(kind),
                                 format!(
-                                    "encrypted media chunk failed to decrypt ({}); its file transfer cannot complete",
-                                    classification.code()
+                                    "encrypted media chunk failed to decrypt ({}{}); its file transfer cannot complete",
+                                    classification.code(),
+                                    e.decryption_detail().map(|d| format!(", {d}")).unwrap_or_default()
                                 ),
                             ));
                         }

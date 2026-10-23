@@ -76,8 +76,14 @@ challenge.
 answer to a live challenge drives a heal, and a successful decrypt retires
 the challenge, so an answer the peer sealed under a group it has since left
 finds nothing live. The mark is clamped to five minutes past this device's
-clock, so a peer whose clock was set back is locked out of resetting for at
-most that long. With more skew than that, a `no_session` frame older than
+clock, so a session build never locks a peer whose clock was set back out of
+resetting for longer than that. A teardown that is acted on, a reset as
+always and now a `no_session` frame too, still records the frame's own
+stamp, up to the two days the freshness window admits ahead: a peer whose
+clock ran that fast when it lost its session, and was then corrected, has
+its later resets refused until its clock catches up. Clamping that record
+instead would let the same frame be replayed until ours did, and refusing
+directives stamped ahead would leave a fast peer unable to reset at all. With more skew than that, a `no_session` frame older than
 the frame that built the session is still refused for ten minutes on the
 unclamped stamp, which covers a first-contact push arriving behind its own
 Welcome; past that window, only a recording made just before the session

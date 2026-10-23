@@ -45388,3 +45388,30 @@ fn a_crossing_first_contact_push_is_refused_at_any_skew() {
         "a later push from a peer that really lost the session is answered"
     );
 }
+
+/// An answered challenge whose heal the re-key floor holds back asks again,
+/// rather than leaving a quiet confirmed pair split until a frame fails.
+#[test]
+fn a_heal_held_by_the_rekey_floor_asks_again() {
+    let (lo, hi) = split_pair();
+    let (mut owner, _oh) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+    establish_confirmed_session(&mut owner, &id(lo), &mut adopter, &id(hi));
+    assert!(adopter.gives_way_to(&id(lo)));
+
+    assert!(adopter.claim_rekey_slot(&id(lo)));
+    adopter_h.clear_sent_messages();
+    adopter.heal_split_session(&id(lo), true);
+    assert!(
+        adopter.has_mls_session(&id(lo)).unwrap(),
+        "the floor holds the heal back"
+    );
+    assert!(
+        adopter_h.sent_messages().iter().any(|m| m
+            .content
+            .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)),
+        "a held heal must ask again"
+    );
+}

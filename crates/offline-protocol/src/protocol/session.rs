@@ -1328,6 +1328,9 @@ impl OfflineProtocol {
             return;
         }
         if !self.claim_rekey_slot(peer_id) {
+            // The answer spent the challenge, and a quiet confirmed pair has no
+            // failing frame to ask again: ask now, under the ask's own limit.
+            self.request_session_corroboration(peer_id);
             return;
         }
         if let Err(err) = self.push_key_package(peer_id, false, true) {

@@ -497,7 +497,10 @@ rules keep the comparison honest:
   and was set back would otherwise lock that peer's resets out. Five minutes
   rather than none, so ordinary skew between the two clocks does not put the
   mark below the session's own stamp. The teardown also needs the frame's stamp
-  to be signed at all; resending a Welcome needs neither.
+  to be signed at all; resending a Welcome needs neither. A teardown that is
+  acted on records the frame's own stamp, unclamped, as a reset always has, so
+  a peer whose clock ran fast when it lost its session is refused until its
+  clock catches up.
 - **A push that crossed the Welcome is refused at any skew.** Every push from
   a side holding no session carries the flag, first contact included, so the
   peer's first-contact key package can arrive just behind the Welcome it sent
