@@ -25,7 +25,7 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   providers) and an exception per engine refusal. Unlike the generated Java,
   the records keep the definition's field defaults. CI regenerates and diffs
   the Ruby with the rest, and runs a minitest consumer check against the
-  library on Linux and macOS. A config names the library, because the
+  library on Linux, macOS and Windows. A config names the library, because the
   generator's default is a name no build produces. An engine that Ruby's
   garbage collector frees while it holds a callback leaks the callback and
   warns, which is a defect in the generator and is documented as such. The

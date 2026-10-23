@@ -7,10 +7,19 @@ require "rake/testtask"
 # reads that variable at launch, which is why it is set here, before the task
 # spawns Ruby, and not in a helper the test process runs. Default: the debug
 # build of this repository (`cargo build -p offline-protocol-uniffi`).
+#
+# Windows searches PATH, except that RubyInstaller takes PATH out of the DLL
+# search and reads RUBY_DLL_PATH instead, so both are set there.
 library_dir = File.expand_path(
   ENV.fetch("OFFLINE_PROTOCOL_LIBRARY_DIR", "../../target/debug"), __dir__
 )
-%w[LD_LIBRARY_PATH DYLD_LIBRARY_PATH].each do |name|
+search_path = if Gem.win_platform?
+  library_dir = library_dir.tr("/", "\\")
+  %w[PATH RUBY_DLL_PATH]
+else
+  %w[LD_LIBRARY_PATH DYLD_LIBRARY_PATH]
+end
+search_path.each do |name|
   ENV[name] = [library_dir, ENV[name]].compact.reject(&:empty?).join(File::PATH_SEPARATOR)
 end
 

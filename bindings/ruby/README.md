@@ -24,7 +24,7 @@ callback or a storage provider.
 |---|---|
 | Ruby (verified on 4.0) and the `ffi` gem, `~> 1.17` | Yours; `bundle install` in this directory installs the gem |
 | This binding's source | [`lib/offline_protocol.rb`](lib/offline_protocol.rb), on your load path |
-| `liboffline_protocol_uniffi.so` / `.dylib` | The release's desktop archives, or `cargo build --release -p offline-protocol-uniffi` |
+| `liboffline_protocol_uniffi.so` / `.dylib`, `offline_protocol_uniffi.dll` | The release's desktop archives, or `cargo build --release -p offline-protocol-uniffi` |
 
 The library is found on the loader's search path, and the loader reads the
 variable when the process starts, so set it before Ruby launches:
@@ -34,6 +34,8 @@ variable when the process starts, so set it before Ruby launches:
 LD_LIBRARY_PATH=/path/to/dir ruby -Ilib your_script.rb
 # macOS
 DYLD_LIBRARY_PATH=/path/to/dir ruby -Ilib your_script.rb
+# Windows (RubyInstaller reads RUBY_DLL_PATH, not PATH)
+$env:RUBY_DLL_PATH = "C:\path\to\dir"; ruby -Ilib your_script.rb
 ```
 
 A protected system Ruby on macOS (`/usr/bin/ruby`) drops `DYLD_LIBRARY_PATH`;

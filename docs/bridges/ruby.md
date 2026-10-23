@@ -29,7 +29,7 @@ warning.
 | [C2](README.md#c2-the-error-enum-is-append-only) | The generated `ProtocolError` and `MlsStorageError` decode by positional discriminant, like every other binding. Append-only keeps them correct |
 | [C3](README.md#c3-events-cross-as-opaque-json) | `on_event` and `poll_event` deliver the engine's JSON. An event's fields appear in no Ruby type, and a field added to an event is invisible here until the host reads it |
 | [C6](README.md#c6-config-parsers-must-not-default-to-literals) | Holds without a parser: the generated record carries the definition's own defaults. See R2 |
-| [C9](README.md#c9-bridge-behaviour-is-not-covered-by-the-rust-test-suite) | `cargo test` proves nothing about this binding. `bundle exec rake test` in `bindings/ruby` runs the consumer check against the real library, and CI runs it on Linux and macOS |
+| [C9](README.md#c9-bridge-behaviour-is-not-covered-by-the-rust-test-suite) | `cargo test` proves nothing about this binding. `bundle exec rake test` in `bindings/ruby` runs the consumer check against the real library, and CI runs it on Linux, macOS and Windows |
 | [C11](README.md#c11-a-storage-adapter-is-a-supported-extension-point-and-is-verified) | A protocol-state provider is an adapter like any other: `OfflineProtocol.run_storage_conformance` is the bar |
 | [C12](README.md#c12-telemetry-is-callback-free-and-the-binding-fills-the-platform) | The exception. See R4 |
 
@@ -125,8 +125,10 @@ The consumer check is verified on Ruby 4.0 only. The binding needs the `ffi`
 gem (`~> 1.17`) and nothing else.
 
 The native library is not bundled. The loader finds it on the library search
-path: `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on macOS, or a system
-directory. The loader reads the variable when the process starts, so it has to
+path: `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on macOS, `PATH` on
+Windows, or a system directory. RubyInstaller, the usual Ruby on Windows, takes
+`PATH` out of the DLL search and reads `RUBY_DLL_PATH` instead, so set that one
+there. The loader reads the variable when the process starts, so it has to
 be set before Ruby launches, not by the program. On macOS a protected system
 Ruby such as `/usr/bin/ruby` drops `DYLD_LIBRARY_PATH` at launch, so use a Ruby
 you installed, or install the library in a directory the loader already
