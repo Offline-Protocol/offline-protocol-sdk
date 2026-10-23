@@ -116,6 +116,34 @@ class ConsumerCheckTest < Minitest::Test
     end
   end
 
+  # The generator reads a u8 with a signed unpack, so bytes come back from the
+  # library as -128 to 127, and its own range check refuses them on the way back
+  # in (docs/bridges/ruby.md, R8). A key package is a few hundred random-looking
+  # bytes, so it holds one above 127. When this fails, the generator was fixed:
+  # drop the mask here, in the example and in R8.
+  def test_a_byte_sequence_comes_back_signed_and_masks_back
+    Dir.mktmpdir do |dir|
+      mls = File.join(dir, "mls")
+      state = File.join(dir, "state")
+      Dir.mkdir(mls)
+      Dir.mkdir(state)
+      e = engine
+      e.initialize_mls_with_file_stores(mls, state, STORE_KEY)
+      e.start
+      peer = "off1qyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyr4s29s"
+
+      signed = e.mls_get_or_create_key_package.key_package_data
+      assert_operator signed.min, :<, 0, "u8 now reads unsigned: the generator was fixed, retire R8"
+      assert_raises(RangeError) { e.send_connection_request(peer, "ruby", signed, nil) }
+
+      masked = signed.map { |b| b & 0xFF }
+      assert masked.all? { |b| b.between?(0, 255) }
+      refute_empty e.send_connection_request(peer, "ruby", masked, nil)
+      e.stop
+      e.close_file_stores
+    end
+  end
+
   def test_a_provider_that_raises_is_reported_as_a_storage_failure
     failing = Object.new
     def failing.store(_type, _id, _data) = raise(Sdk::MlsStorageError::StoreFailed, "disk full")

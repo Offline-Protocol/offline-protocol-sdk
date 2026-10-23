@@ -104,7 +104,7 @@ they carry bytes, and the difference is not checked:
 
 | Interface | `store` receives | `load` returns |
 |---|---|---|
-| Key material (`MlsStorageProvider`) | An `Array` of `Integer` | An `Array` of `Integer`, or `nil` |
+| Key material (`MlsStorageProvider`) | An `Array` of `Integer`, signed (R8) | An `Array` of `Integer` from 0 to 255, or `nil` |
 | Protocol state (`ProtocolStateStorageProvider`) | A binary `String` | A binary `String`, or `nil` |
 
 An adapter that returns the wrong one fails inside the library, not where it
@@ -156,6 +156,29 @@ the license before anything is pushed. A re-run of a release that already
 reached RubyGems pushes nothing. `bundle exec rake build` builds the same gem,
 and the Ruby Binding job in CI runs it on every pull request, so a gemspec
 error shows there and not on a tag.
+
+## R8. Bytes come back signed, and must be masked before they go back in
+
+Every `u8` the library hands to Ruby, alone or in a `sequence<u8>`, arrives as
+a signed value from -128 to 127: the generator reads it with a signed unpack
+(`'c'`, not `'C'`). Bytes going the other way are range-checked as 0 to 255,
+so a byte array taken from the engine and passed straight back, such as a key
+package from `mls_get_or_create_key_package` given to
+`send_connection_request`, raises `RangeError` before the call is made. Nothing
+is corrupted: the engine never sees the refused call, and every value fits a
+byte once masked.
+
+Mask such an array with `map { |b| b & 0xFF }` before handing it on, or before
+treating it as bytes (`pack("C*")` wraps a signed value correctly, which is why
+the consumer check's key-material store works unmasked). The same applies to
+the `data` an `MlsStorageProvider` receives in `store`. Byte arrays inside
+event JSON are not affected: the JSON carries them as 0 to 255.
+
+The defect is in the Ruby generator up to and including UniFFI 0.32.2, and in
+its upstream main when this was written. The generated file cannot be patched
+(the drift gate forbids it), so the host masks. The consumer check pins the
+signed read: when a UniFFI bump fixes it, that test fails, and the mask in the
+example and this section can go.
 
 ## What the host owes
 
