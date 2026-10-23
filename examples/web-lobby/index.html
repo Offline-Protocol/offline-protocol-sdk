@@ -59,6 +59,11 @@
 </section>
 
 <section>
+  <div class="meta">Players in the game, by address. A connection code proves nothing on its own: check that every address here is a device you meant to let in.</div>
+  <ul id="players" class="stats"></ul>
+</section>
+
+<section>
   <canvas id="court" width="800" height="450"></canvas>
   <div class="meta">Move your paddle with the mouse, a finger, or the arrow keys.</div>
 </section>
@@ -72,6 +77,13 @@ const RATE_HZ = 10;
 const PADDLE = 0.22;
 const $ = (id) => document.getElementById(id);
 const status = (text) => ($("status").textContent = text);
+// The threat model's R27: whoever swaps a connection code joins under their
+// own address, so every admitted address is shown to the people playing.
+function listPlayer(address, label) {
+  const item = document.createElement("li");
+  item.textContent = `${label}: ${address}`;
+  $("players").append(item);
+}
 
 // One durable node per account per origin: a second tab of this browser
 // needs its own profile (?profile=b).
@@ -100,6 +112,7 @@ $("host").onclick = async () => {
   hosting = true;
   $("role").textContent = "Hosting. You play the left paddle; the first device to join plays the right.";
   $("host").disabled = true;
+  listPlayer(node.address, "left paddle (you, hosting)");
   setInterval(broadcast, 1000 / RATE_HZ);
   for (const peer of sessions) admit(peer);
 };
@@ -115,7 +128,8 @@ async function admit(peer) {
     try {
       await node.inviteToGroup(groupId, peer);
       opponent ??= peer;
-      status(`${members.size} player${members.size === 1 ? "" : "s"} joined`);
+      listPlayer(peer, peer === opponent ? "right paddle" : "watching");
+      status(`${peer} joined`);
       return;
     } catch {
       await new Promise((r) => setTimeout(r, 200));
@@ -188,6 +202,10 @@ node.addEventListener("group_message_received", ({ detail }) => {
   try {
     const message = JSON.parse(detail.content);
     if (message.s) {
+      if (!host && detail.sender) {
+        $("role").textContent = `Joined the game hosted by ${detail.sender}.`;
+        listPlayer(detail.sender, "left paddle (host)");
+      }
       host = detail.sender ?? host;
       state = message.s;
       counters.statesIn++;

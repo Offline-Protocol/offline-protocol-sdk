@@ -1208,7 +1208,8 @@ preamble decides who is on the other end
 An attacker who swaps a code gets a link announced under the attacker's own
 address, never the intended peer's, and MLS keeps every session and group
 message from them. An application that admits members to a group should show
-the joining address to the people involved, as the lobby example does. No ICE
+the joining address to the people involved, as the lobby example does: it
+lists every address it admits, and a player sees the host's. No ICE
 server is configured, so the codes never reach a third party unless people
 send them through one, and a connection is made on the local network or not
 at all.
