@@ -16,4 +16,6 @@ The identity survives a reload: the same profile is the same `off1…` address, 
 
 Before a release, [docs/bridges/web-devices.md](../../docs/bridges/web-devices.md) is the checklist for running this page on a laptop and a phone.
 
-The stats line shows what the game costs, including the durable store's flushes per second. Every state update is an ordinary acknowledged, retried MLS send, and each one writes the sender's ratchet state and the delivery state before it returns. That is the cost an unacknowledged send for game state would remove. See [docs/bridges/web.md](../../docs/bridges/web.md).
+**When a device goes away.** A phone that leaves the page, locks its screen or loses the network drops its link. Both pages say so: "connection unstable" while the browser still waits for an answer, then that the other device disconnected, with what to press to carry on. Two new codes bring it back with no second invite, as both devices are still in the group. A host that reloads comes back hosting the same game; **End this game** forgets it.
+
+The stats line shows what the game costs, including the durable store's flushes per second. The game state and the paddle are ephemeral sends: each goes once over the live link, is never acknowledged or retried, and is never held for a link that is down, so an update that missed its moment does not arrive late. On the browser's store that is two flushes per state for the host instead of four. See [docs/bridges/web.md](../../docs/bridges/web.md), W9 and W10.

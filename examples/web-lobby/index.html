@@ -41,6 +41,7 @@
     <button id="host">Host a game</button>
     <button id="offer" class="quiet">Connect a device: make a code</button>
     <button id="answer" class="quiet">I have a code</button>
+    <button id="end" class="quiet" hidden>End this game</button>
   </div>
   <div id="offer-panel" hidden>
     <p>Show this code to the other device (paste it, or turn it into a QR code), then paste the code it gives back.</p>
@@ -56,6 +57,7 @@
     <div class="row"><button id="copy-answer" class="quiet" hidden>Copy</button></div>
   </div>
   <div class="meta" id="status"></div>
+  <div class="meta" id="link">no device connected</div>
 </section>
 
 <section>
@@ -77,13 +79,6 @@ const RATE_HZ = 10;
 const PADDLE = 0.22;
 const $ = (id) => document.getElementById(id);
 const status = (text) => ($("status").textContent = text);
-// The threat model's R27: whoever swaps a connection code joins under their
-// own address, so every admitted address is shown to the people playing.
-function listPlayer(address, label) {
-  const item = document.createElement("li");
-  item.textContent = `${label}: ${address}`;
-  $("players").append(item);
-}
 
 // One durable node per account per origin: a second tab of this browser
 // needs its own profile (?profile=b).
@@ -99,23 +94,90 @@ let hosting = false;
 let host = null; // the host's address, for a player
 let opponent = null; // the member who plays the right paddle
 const members = new Set();
+// Peers with a live link now. A lost link is the engine's neighbor_lost,
+// on both sides: a page that only watched for it while hosting left a
+// player looking connected over a frozen court.
+const linked = new Set();
 let state = { ball: { x: 0.5, y: 0.5, vx: 0.45, vy: 0.3 }, left: 0.5, right: 0.5, score: [0, 0] };
 let mine = 0.5;
 const counters = { statesIn: 0, statesOut: 0 };
 
+// --- Players -------------------------------------------------------------
+
+// The threat model's R27: whoever swaps a connection code joins under their
+// own address, so every admitted address is shown to the people playing.
+function renderPlayers() {
+  const rows = [];
+  if (hosting) {
+    rows.push(`left paddle (you, hosting): ${node.address}`);
+    for (const peer of members) {
+      const label = peer === opponent ? "right paddle" : "watching";
+      rows.push(`${label}: ${peer}${linked.has(peer) ? "" : " (not connected)"}`);
+    }
+  } else if (host) {
+    rows.push(`left paddle (host): ${host}${linked.has(host) ? "" : " (not connected)"}`);
+  }
+  $("players").replaceChildren(...rows.map((text) => Object.assign(document.createElement("li"), { textContent: text })));
+}
+
+// A host's game outlives a reload: the group is durable in the node, and
+// this remembers which group and who was in it, per profile. Without it a
+// reloaded host made a new group the other player was never in.
+const saved = `web-pong-lobby/${profile}/hosting`;
+function save() {
+  try {
+    localStorage.setItem(saved, JSON.stringify({ groupId, opponent, members: [...members] }));
+  } catch {
+    // Without storage a reload starts a new game, as before.
+  }
+}
+function restore() {
+  try {
+    return JSON.parse(localStorage.getItem(saved) ?? "null");
+  } catch {
+    return null;
+  }
+}
+
 // --- Lobby ----------------------------------------------------------------
+
+function startHosting(resumed) {
+  hosting = true;
+  $("role").textContent = resumed
+    ? "Hosting the same game as before the reload. Connect the other device again with two new codes."
+    : "Hosting. You play the left paddle; the first device to join plays the right.";
+  $("host").disabled = true;
+  $("end").hidden = false;
+  setInterval(broadcast, 1000 / RATE_HZ);
+  renderPlayers();
+}
 
 $("host").onclick = async () => {
   if (hosting) return;
   const group = await node.createGroup("pong");
   groupId = group.group_id;
-  hosting = true;
-  $("role").textContent = "Hosting. You play the left paddle; the first device to join plays the right.";
-  $("host").disabled = true;
-  listPlayer(node.address, "left paddle (you, hosting)");
-  setInterval(broadcast, 1000 / RATE_HZ);
-  for (const peer of sessions) admit(peer);
+  save();
+  startHosting(false);
+  // Devices already linked or in session when Host was pressed.
+  for (const peer of new Set([...sessions, ...linked])) admit(peer);
 };
+
+$("end").onclick = () => {
+  try {
+    localStorage.removeItem(saved);
+  } catch {
+    // Nothing was saved.
+  }
+  location.reload();
+};
+
+const previous = restore();
+if (previous?.groupId) {
+  groupId = previous.groupId;
+  opponent = previous.opponent ?? null;
+  for (const peer of previous.members ?? []) members.add(peer);
+  startHosting(true);
+}
 
 // The host invites every device it has a session with: those that formed
 // before it pressed Host, and every later one. The invite needs the device's
@@ -128,7 +190,8 @@ async function admit(peer) {
     try {
       await node.inviteToGroup(groupId, peer);
       opponent ??= peer;
-      listPlayer(peer, peer === opponent ? "right paddle" : "watching");
+      save();
+      renderPlayers();
       status(`${peer} joined`);
       return;
     } catch {
@@ -142,16 +205,67 @@ node.addEventListener("secure_session_established", ({ detail }) => {
   admit(detail.peer_id);
 });
 
+// A link proved by the engine's preamble. Sessions are durable, and a
+// restored one fires no secure_session_established, so the link is when the
+// host invites a device it already had a session with (a guest from an
+// earlier game, or a host and player that swapped roles). A member coming
+// back needs no invite at all: its group membership is durable on both sides.
+node.addEventListener("neighbor_discovered", ({ detail }) => {
+  const peer = detail.peer_id;
+  linked.add(peer);
+  if (hosting && members.has(peer)) {
+    opponent ??= peer;
+    save();
+    status(`${peer} is back`);
+  } else if (hosting) {
+    admit(peer);
+  } else if (host === null || peer === host) {
+    status("connected to the host");
+  }
+  renderPlayers();
+});
+
+node.addEventListener("neighbor_lost", ({ detail }) => {
+  const peer = detail.peer_id;
+  linked.delete(peer);
+  if (hosting && peer === opponent) {
+    status("the other player disconnected. To carry on, press Connect a device: make a code, and get it to them again.");
+  } else if (!hosting && (host === null || peer === host)) {
+    status("the host disconnected. To carry on, ask the host for a new code, then press I have a code.");
+  }
+  renderPlayers();
+});
+
 node.addEventListener("group_member_added", ({ detail }) => {
   if (hosting) return;
   groupId = detail.group_id;
   $("role").textContent = "Joined a game.";
 });
 
+// The connection's own state, ahead of the engine: "disconnected" comes
+// seconds before the browser gives up and the engine reports the peer lost,
+// and it may recover on its own.
+const connections = new Map();
+function renderLink() {
+  const states = [...connections.values()];
+  const up = states.filter((s) => s === "connected").length;
+  $("link").textContent = states.includes("disconnected")
+    ? "connection unstable: no answer from the other device. Waiting for it to recover…"
+    : up === 0
+      ? "no device connected"
+      : `${up} device${up === 1 ? "" : "s"} connected`;
+}
+rtc.addEventListener("connection", ({ detail: { state, connection } }) => {
+  if (state === "closed") connections.delete(connection);
+  else connections.set(connection, state);
+  renderLink();
+});
+
 $("offer").onclick = async () => {
   $("answer-panel").hidden = true;
   $("offer-panel").hidden = false;
   $("offer-code").value = "gathering…";
+  $("answer-in").value = "";
   const offer = await rtc.offer();
   $("offer-code").value = offer.code;
   $("accept").onclick = async () => {
@@ -167,9 +281,14 @@ $("offer").onclick = async () => {
 $("answer").onclick = () => {
   $("offer-panel").hidden = true;
   $("answer-panel").hidden = false;
+  // A code from an earlier round answers nothing now.
+  $("offer-in").value = "";
+  $("answer-code").value = "";
+  $("answer-code").hidden = $("copy-answer").hidden = true;
 };
 
 $("make-answer").onclick = async () => {
+  $("answer-code").value = "";
   try {
     const answer = await rtc.answer($("offer-in").value);
     $("answer-code").value = answer.code;
@@ -183,18 +302,17 @@ $("make-answer").onclick = async () => {
 $("copy-offer").onclick = () => navigator.clipboard.writeText($("offer-code").value);
 $("copy-answer").onclick = () => navigator.clipboard.writeText($("answer-code").value);
 
-node.addEventListener("neighbor_lost", ({ detail }) => {
-  if (detail.peer_id === opponent) status("the other player disconnected");
-});
-
 // --- Game -----------------------------------------------------------------
 
 // The host owns the state and sends all of it at RATE_HZ; a player sends its
-// paddle to the host. Every message is an ordinary, acknowledged MLS send.
+// paddle to the host. Both are ephemeral (W10): each update replaces the last,
+// so one that misses its moment is never retried, never queued for a link
+// that is down, and never arrives late. The host sends only while a member
+// has a link, so a long absence does not pile up group traffic either.
 function broadcast() {
-  if (!opponent) return;
+  if (!opponent || ![...members].some((peer) => linked.has(peer))) return;
   counters.statesOut++;
-  node.sendGroupMessage(groupId, JSON.stringify({ s: state })).catch(() => {});
+  node.sendGroupMessage(groupId, JSON.stringify({ s: state }), { ephemeral: true }).catch(() => {});
 }
 
 node.addEventListener("group_message_received", ({ detail }) => {
@@ -202,11 +320,11 @@ node.addEventListener("group_message_received", ({ detail }) => {
   try {
     const message = JSON.parse(detail.content);
     if (message.s) {
-      if (!host && detail.sender) {
-        $("role").textContent = `Joined the game hosted by ${detail.sender}.`;
-        listPlayer(detail.sender, "left paddle (host)");
+      if (detail.sender && detail.sender !== host) {
+        host = detail.sender;
+        $("role").textContent = `Joined the game hosted by ${host}.`;
+        renderPlayers();
       }
-      host = detail.sender ?? host;
       state = message.s;
       counters.statesIn++;
     }
@@ -225,11 +343,21 @@ node.addEventListener("message_received", ({ detail }) => {
   }
 });
 
+// The paddle goes when it moved, and again once a second, so a host that
+// reloaded learns where it is without waiting for the player to move.
 let sentPaddle = null;
+let sentAt = 0;
 setInterval(() => {
-  if (hosting || !host || sentPaddle === mine) return;
-  sentPaddle = mine;
-  node.sendMessage(host, JSON.stringify({ p: mine })).catch(() => {});
+  if (hosting || !host || !linked.has(host)) return;
+  if (sentPaddle === mine && performance.now() - sentAt < 1000) return;
+  const paddle = mine;
+  node.sendMessage(host, JSON.stringify({ p: paddle }), { ephemeral: true }).then(
+    () => {
+      sentPaddle = paddle;
+      sentAt = performance.now();
+    },
+    () => {},
+  );
 }, 1000 / RATE_HZ);
 
 const court = $("court");
@@ -286,11 +414,13 @@ function draw() {
   ctx.fillText(`${state.score[0]}   ${state.score[1]}`, w / 2, 44);
 }
 
+// The host plays on only while the other player is connected, so the ball
+// does not run on against a paddle nobody is moving.
 let last = performance.now();
 function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
-  if (hosting) step(dt);
+  if (hosting && opponent && linked.has(opponent)) step(dt);
   draw();
   requestAnimationFrame(frame);
 }

@@ -58,6 +58,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   [R28](docs/security/threat-model.md#r28-a-signalling-room-code-admits-whoever-holds-it).
 - **`WebRtcCarrier` takes the application's STUN and TURN servers**
   (`iceServers`), for links between networks. The default is still none.
+- **`WebRtcCarrier` reports each connection's state.** A `connection` event
+  says when a connection is up, when its checks stop being answered
+  ("disconnected", which may recover), and when it closed, naming the object
+  `offer()` or `answer()` resolved to. A page can warn about a link seconds
+  before the browser gives up on it and the engine reports the peer lost.
 
 - **A Ruby binding.** `bindings/ruby` is one generated file,
   `lib/offline_protocol.rb`, written by UniFFI's own Ruby generator from the
@@ -125,6 +130,14 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   acceptable for longer, so a relay's late repeat opened a second
   connection. The worker now reports when each offer stops being fresh, and
   the host holds the session until the newest one does.
+- **The Pong lobby shows a lost link on both sides.** A player whose phone
+  went to the background or locked its screen kept reading "Joined the game"
+  over a frozen court, because the page only watched for a lost peer while
+  hosting. Both sides now say the other device disconnected and how to carry
+  on, and warn while the connection is unstable. The game state and the
+  paddle are ephemeral sends, so a long absence no longer piles up states
+  that all arrive on the next link; a returning device is let back in without
+  a new invite; and a host that reloads resumes the same game.
 - **A signalling room that fails to open closes its relay sockets.** A relay
   that took the connection and never confirmed the subscription left its
   socket open after `host()` rejected.

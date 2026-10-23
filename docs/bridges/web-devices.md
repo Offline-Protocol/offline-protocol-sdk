@@ -96,20 +96,27 @@ Open the page on both devices. Each step names what to record.
    finger on A's screen. Record the stats line on both devices after ten
    seconds of play: states sent and received per second, store flushes per
    second, and log bytes. The host should send about ten states a second and
-   the player receive about as many.
+   the player receive about as many. Both are ephemeral sends (W10), so the
+   host's flushes should be about two per state.
 5. **Reload keeps the identity.** Reload B. It shows the same `off1…`
    address as before. The link is gone (a WebRTC connection does not survive
    a reload), so exchange two new codes. Record whether B receives game state
    again without being invited a second time: it is still a member of the
-   group, so it should.
+   group, so it should. Then reload A: it comes back hosting the same game,
+   and after two new codes B receives state again and A's players list names
+   B, still with no second invite.
 6. **Background and return.** On the phone, switch to another app for
    thirty seconds, then come back. Record what happened: the game resumed on
-   the same link; A showed "the other player disconnected" and two new codes
-   restored play; or the phone's page showed "the node ended" and needed a
-   reload. Repeat with the phone's screen locked for thirty seconds. None of
-   these is a failure on its own; what must not happen is a page that looks
-   connected and never moves again, or a reload that comes back as a new
-   address.
+   the same link; both pages said the other device disconnected and two new
+   codes restored play; or the phone's page showed "the node ended" and
+   needed a reload. Repeat with the phone's screen locked for thirty seconds.
+   On Chrome, A should show "connection unstable" within about 15 seconds
+   of the phone leaving the screen (Android keeps the page's network for a
+   few seconds first) and "the other player disconnected" 10 seconds after
+   that, and the phone the same about the other device once it is back. None
+   of these is a failure on its own; what must not happen is a page that
+   looks connected and never moves again, or a reload that comes back as a
+   new address.
 7. **Two tabs, one profile.** On the laptop, open the lobby in a second tab
    with the same URL. The second tab must not start a second engine over the
    same account (W8): it stays at "starting…", and its console shows
@@ -133,3 +140,4 @@ browser versions, and one line per check that did not go as written above.
 
 | Date | Commit | Devices | Notes |
 |------|--------|---------|-------|
+| 2026-10-23 | 6bca9e37 | MacBook, macOS 26.5.1, Chrome 155.0.8059.86 (host); Samsung Galaxy M36 (SM-M366B), Android 16, Chrome 152.0.7977.82 (player). Page over `adb reverse`, both on one 5 GHz Wi-Fi network. Laptop hosted only; the phone-hosts direction is not run yet. Both pages driven over the DevTools protocol, with real touch input on the phone | 1: address on the phone in about 0.45 s, fresh or durable. 2: link 0.24 s after Connect, a host-candidate pair to the phone's Wi-Fi address. 4: 10 states/s each way; host 40 store flushes/s, player about 20/s. 5: the backlog the host sent while the link was down arrived in the first second (30 states). 6: background and screen lock both drop the link within 3 s, and the host shows "the other player disconnected" after about 17 s. The phone's page shows nothing: it still reads "Joined the game hosted by…" over a frozen court, because the lobby reports a lost peer only when it hosts. Two new codes restored play after backgrounding. After the lock, recovery was not checked because the phone has a secure lock screen |
