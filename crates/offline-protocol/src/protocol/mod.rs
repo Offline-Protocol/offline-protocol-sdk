@@ -9,6 +9,7 @@ pub(crate) mod data;
 #[cfg(feature = "data")]
 mod data_sync;
 mod decryption_queue;
+mod ephemeral;
 pub(crate) mod mesh_relay;
 mod message_dispatch;
 mod nostr_discovery;

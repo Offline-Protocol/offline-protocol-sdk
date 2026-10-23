@@ -559,6 +559,19 @@ pub struct GroupSendOptions {
     /// Rich media metadata (cloud attachments — including the
     /// `encryption_key`/`iv` secrets), delivered sealed-only.
     pub media_metadata: Option<MediaMetadata>,
+    /// Send once to every member holding a live direct link, never
+    /// acknowledged or retried (ADR 0032): for state the next send replaces,
+    /// such as a game's positions. Members without a link miss it, and the
+    /// call fails with `PeerNotReachable` when no member has one. Plain
+    /// content only: a reply, a content type or media metadata is refused
+    /// with `InvalidArgument`.
+    ///
+    /// While a member keeps missing these, the sends still advance this
+    /// device's ratchet for them, so once the ratchet-gap budget is spent
+    /// one send is made reliable instead, which every member receives in
+    /// order (it returns the ids the reliable send does). The first ephemeral
+    /// send to a group after a launch is one of those.
+    pub ephemeral: bool,
 }
 
 /// Snapshot of whether a rich group send right now would seal its extras,
@@ -3845,6 +3858,18 @@ impl OfflineProtocol {
             ));
         }
         Self::check_group_rich_extras_size(options.media_metadata.as_ref(), None)?;
+        if options.ephemeral {
+            Self::check_ephemeral_group_options(
+                options.reply_to_msg.as_deref(),
+                options.content_type,
+                options.media_metadata.is_some(),
+            )?;
+            return self.send_group_message_ephemeral(
+                group_id,
+                content,
+                options.priority.unwrap_or(MessagePriority::Medium),
+            );
+        }
         self.send_group_message_inner(
             group_id,
             content,
@@ -4228,6 +4253,133 @@ impl OfflineProtocol {
             ));
         }
 
+        Ok(message_ids)
+    }
+
+    /// The ephemeral arm of [`Self::send_group_message_with`] (ADR 0032).
+    ///
+    /// One encryption, then one attempt per member over its live direct
+    /// link. Refused before encrypting when no member is linked, so a send
+    /// that reaches nobody spends no ratchet generation. A send that misses
+    /// a member is counted against the ratchet-gap budget like a directed
+    /// replication frame, and once the budget is spent this send goes out
+    /// reliable instead (relay broadcast or the per-member ladder), which
+    /// parks a decryptable rung in every absent member's outbox and resets
+    /// the count.
+    fn send_group_message_ephemeral(
+        &mut self,
+        group_id: &str,
+        content: &str,
+        priority: MessagePriority,
+    ) -> Result<Vec<MessageId>> {
+        let members = self.group_roster(group_id)?;
+        let self_id = self.local_id.clone();
+        let others: Vec<String> = members
+            .iter()
+            .filter(|member| **member != self_id)
+            .cloned()
+            .collect();
+        if others.is_empty() {
+            return Ok(Vec::new());
+        }
+        let linked: Vec<String> = others
+            .iter()
+            .filter(|member| {
+                self.transport_manager
+                    .mesh_transport_for(member.as_str())
+                    .is_some()
+            })
+            .cloned()
+            .collect();
+        if linked.is_empty() {
+            return Err(Error::Transport(
+                offline_protocol_transport::Error::PeerNotReachable(format!(
+                    "group {group_id}: no member holds a live direct link for an ephemeral send"
+                )),
+            ));
+        }
+        let epoch = self.group_epoch(group_id)?;
+        if self.group_generation_budget_spent(group_id, epoch) {
+            debug!(
+                group_id = %group_id,
+                "Ratchet-gap budget spent; this ephemeral group send goes out reliable"
+            );
+            return self.send_group_message_inner(
+                group_id,
+                content,
+                priority,
+                None,
+                None,
+                None,
+                ContentType::Text,
+            );
+        }
+
+        let encrypted = {
+            let mls_guard = self.read_mls_guard()?;
+            let gid = offline_protocol_mls::GroupId::new(group_id)?;
+            mls_guard.encrypt_for_group(&gid, content.as_bytes())?
+        };
+        let payload = GroupMlsMessagePayload {
+            group_id: group_id.to_string(),
+            ciphertext: base64_encode(&encrypted.ciphertext),
+            epoch: encrypted.epoch,
+            reply_to: None,
+            forward_info: None,
+            message_id: None,
+        };
+        let frame = format!(
+            "{}{}",
+            internal_prefixes::GROUP_MLS_MSG,
+            serde_json::to_string(&payload)
+                .map_err(|e| Error::Serialization(format!("Serialize group message: {}", e)))?
+        );
+
+        let mut message_ids = Vec::new();
+        let mut succeeded_members = Vec::new();
+        let mut failed_members: Vec<String> = others
+            .iter()
+            .filter(|member| !linked.contains(member))
+            .cloned()
+            .collect();
+        for member in linked {
+            match self.send_ephemeral_group_frame(&member, frame.clone(), priority) {
+                Ok(id) => {
+                    message_ids.push(id);
+                    succeeded_members.push(member);
+                }
+                Err(_) => failed_members.push(member),
+            }
+        }
+        // A member that missed this frame still had its view of this
+        // device's ratchet advanced by it.
+        self.note_group_generation(group_id, encrypted.epoch, failed_members.is_empty());
+
+        if message_ids.is_empty() {
+            self.emit_event(Event::group_message_partial_failure(
+                group_id.to_string(),
+                failed_members,
+                succeeded_members,
+            ));
+            return Err(Error::Transport(
+                offline_protocol_transport::Error::SendFailed(
+                    "All ephemeral group sends failed".to_string(),
+                ),
+            ));
+        }
+        if failed_members.is_empty() {
+            self.emit_event(Event::group_message_sent(
+                group_id.to_string(),
+                message_ids.iter().map(|m| m.as_str().to_string()).collect(),
+                succeeded_members.len() as u32,
+            ));
+        } else {
+            self.emit_event(Event::group_message_partial_failure(
+                group_id.to_string(),
+                failed_members,
+                succeeded_members,
+            ));
+        }
         Ok(message_ids)
     }
 

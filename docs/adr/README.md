@@ -42,6 +42,7 @@ silently undo it. Decisions that follow from the obvious default do not need one
 | [0029](0029-mobile-libraries-are-sized-not-aborting.md) | The mobile libraries are optimised for size and still unwind | Accepted |
 | [0030](0030-one-bluetooth-le-link-per-peer-pair.md) | One Bluetooth LE link per peer pair | Accepted |
 | [0031](0031-telemetry-trusts-only-the-ingests-issuers.md) | The telemetry uploader trusts only the ingest's issuers | Accepted |
+| [0032](0032-ephemeral-sends-go-once-over-a-live-link.md) | Ephemeral sends go once, over a live link | Accepted |
 
 ## Format
 

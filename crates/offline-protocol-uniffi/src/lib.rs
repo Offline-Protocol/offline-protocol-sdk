@@ -3683,6 +3683,9 @@ impl OfflineProtocol {
             forward_info,
             via_transport,
             app_id: options.app_id,
+            // Ephemeral sends reach the browser binding only so far; the UDL
+            // record gains the field when a native binding needs it (ADR 0032).
+            ephemeral: false,
         };
 
         let message_id = protocol
