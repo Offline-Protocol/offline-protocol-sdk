@@ -52,11 +52,13 @@ pub fn signal_event(room: &str, role: &str, session: &str, code: &str) -> Result
     signal::event(room, &signal).map_err(|e| JsError::new(&e))
 }
 
-/// Opens one message a relay sent: `{role, session, code}` as JSON when it
-/// is an authentic, fresh signal for `room`, otherwise `undefined`.
+/// Opens one message a relay sent: `{role, session, code, freshUntilMs}` as
+/// JSON when it is an authentic, fresh signal for `room`, otherwise
+/// `undefined`. `freshUntilMs` is when this clock stops accepting the event
+/// ([`signal::Opened::fresh_until`]).
 #[wasm_bindgen(js_name = signalOpen)]
 pub fn signal_open(room: &str, relay_message: &str) -> Option<String> {
-    signal::open(room, relay_message, signal::now_unix_secs()).map(|s| s.to_json())
+    signal::open(room, relay_message, signal::now_unix_secs()).map(|o| o.to_json())
 }
 
 type DurableStores = (Arc<LogStore<OpfsFile>>, Arc<LogStore<OpfsFile>>);

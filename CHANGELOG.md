@@ -89,6 +89,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 - **One unreachable Nostr relay no longer stops a signalling room from
   opening on the others.** A refused socket was counted as two failed
   relays.
+- **A signalling host no longer forgets a joiner whose offer is still
+  fresh.** It held each session for two minutes from the first offer, while
+  a republished offer, or one from a joiner whose clock runs ahead, stays
+  acceptable for longer, so a relay's late repeat opened a second
+  connection. The worker now reports when each offer stops being fresh, and
+  the host holds the session until the newest one does.
+- **A signalling room that fails to open closes its relay sockets.** A relay
+  that took the connection and never confirmed the subscription left its
+  socket open after `host()` rejected.
 
 ## [0.30.0] — 2026-10-21
 

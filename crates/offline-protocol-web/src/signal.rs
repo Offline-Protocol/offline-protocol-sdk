@@ -103,13 +103,27 @@ pub struct Signal {
     pub code: String,
 }
 
-impl Signal {
-    /// As JSON for the page.
+/// A signal a relay delivered, and until when it stays fresh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Opened {
+    /// What the event carried.
+    pub signal: Signal,
+    /// The last Unix second, on this clock, at which [`open`] still accepts
+    /// the event: its `created_at` plus [`MAX_EVENT_AGE_SECS`]. A relay can
+    /// deliver the same event again until then, so a host that forgot its
+    /// session sooner would take the repeat for a new joiner.
+    pub fresh_until: i64,
+}
+
+impl Opened {
+    /// As JSON for the page, with the freshness bound in milliseconds so the
+    /// page compares it with `Date.now()` directly.
     pub fn to_json(&self) -> String {
         serde_json::json!({
-            "role": self.role.as_str(),
-            "session": self.session,
-            "code": self.code,
+            "role": self.signal.role.as_str(),
+            "session": self.signal.session,
+            "code": self.signal.code,
+            "freshUntilMs": self.fresh_until.saturating_mul(1000),
         })
         .to_string()
     }
@@ -200,7 +214,7 @@ pub fn event(room: &str, signal: &Signal) -> Result<String, String> {
 /// Opens a relay message: the signal it carries for `room`, or `None` for
 /// anything else (another subscription's traffic, a notice, a forgery, an
 /// event too old).
-pub fn open(room: &str, relay_message: &str, now: i64) -> Option<Signal> {
+pub fn open(room: &str, relay_message: &str, now: i64) -> Option<Opened> {
     let room = Room::derive(room).ok()?;
     let message: serde_json::Value = serde_json::from_str(relay_message).ok()?;
     let parts = message.as_array()?;
@@ -251,7 +265,10 @@ pub fn open(room: &str, relay_message: &str, now: i64) -> Option<Signal> {
     };
     check_session(&signal.session).ok()?;
     check_code(&signal.code).ok()?;
-    Some(signal)
+    Some(Opened {
+        signal,
+        fresh_until: created_at.saturating_add(MAX_EVENT_AGE_SECS),
+    })
 }
 
 /// This clock in Unix seconds, through the seam the browser can read (W4).
@@ -321,7 +338,10 @@ mod tests {
     fn a_signal_opens_in_its_room_and_nowhere_else() {
         let sent = signal(Role::Offer);
         let message = forwarded(&event(ROOM, &sent).unwrap());
-        assert_eq!(open(ROOM, &message, now_unix_secs()), Some(sent));
+        assert_eq!(
+            open(ROOM, &message, now_unix_secs()).map(|o| o.signal),
+            Some(sent)
+        );
         assert_eq!(open("another-room-code", &message, now_unix_secs()), None);
     }
 
@@ -329,7 +349,10 @@ mod tests {
     fn spacing_and_case_do_not_change_the_room() {
         let sent = signal(Role::Answer);
         let message = forwarded(&event("PONG-TABLE 7X4K9Q", &sent).unwrap());
-        assert_eq!(open(ROOM, &message, now_unix_secs()), Some(sent));
+        assert_eq!(
+            open(ROOM, &message, now_unix_secs()).map(|o| o.signal),
+            Some(sent)
+        );
     }
 
     #[test]
@@ -354,6 +377,27 @@ mod tests {
             .to_relay_message()
             .unwrap();
         assert!(open(ROOM, &forwarded(&honest), now_unix_secs()).is_some());
+    }
+
+    #[test]
+    fn an_opened_signal_says_how_long_a_relay_can_repeat_it() {
+        let message = forwarded(&event(ROOM, &signal(Role::Offer)).unwrap());
+        let parsed: serde_json::Value = serde_json::from_str(&message).unwrap();
+        let created_at = parsed[2]["created_at"].as_i64().unwrap();
+        let opened = open(ROOM, &message, created_at).unwrap();
+        assert_eq!(opened.fresh_until, created_at + MAX_EVENT_AGE_SECS);
+        // The bound is exact: the event still opens at it, and not after.
+        assert!(open(ROOM, &message, opened.fresh_until).is_some());
+        assert_eq!(open(ROOM, &message, opened.fresh_until + 1), None);
+        // A joiner whose clock runs ahead is fresh for longer after the host
+        // first sees it, which a hold counted from receipt would miss.
+        let early = open(ROOM, &message, created_at - MAX_EVENT_AGE_SECS).unwrap();
+        assert_eq!(
+            early.fresh_until - (created_at - MAX_EVENT_AGE_SECS),
+            2 * MAX_EVENT_AGE_SECS
+        );
+        let json: serde_json::Value = serde_json::from_str(&opened.to_json()).unwrap();
+        assert_eq!(json["freshUntilMs"], opened.fresh_until * 1000);
     }
 
     #[test]

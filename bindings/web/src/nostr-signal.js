@@ -11,14 +11,20 @@
 //   preamble and MLS session prove, as for a pasted code.
 // - The host answers each joiner's session once, and again only when the
 //   same session asks again (its first answer may have been lost). It holds
-//   at most MAX_SESSIONS answered sessions, each for SESSION_HOLD_MS, so a
-//   room code that leaked cannot make the host open connections without
-//   bound; the engine's own link ceiling stands behind that.
-// - SESSION_HOLD_MS is at least the worker's freshness window (signal.rs,
-//   MAX_EVENT_AGE_SECS). An offer the worker still accepts is one the host
-//   still remembers, so a relay that re-sends an offer late reaches the
-//   session it belongs to rather than opening a second connection. A Rust
-//   test reads this file and holds the two together.
+//   at most MAX_SESSIONS sessions, so a room code that leaked cannot make the
+//   host open connections without bound; the engine's own link ceiling
+//   stands behind that.
+// - The host remembers a session until the newest offer it has seen for it
+//   stops being fresh: the `freshUntilMs` the worker reports (signal.rs,
+//   Opened::fresh_until), moved later by every repeat. An offer the worker
+//   still accepts is one the host still remembers, so a relay that re-sends
+//   an offer late reaches the session it belongs to rather than opening a
+//   second connection. A fixed hold from first sight is too short twice
+//   over: the joiner republishes for up to JOIN_TIMEOUT_MS, and a joiner
+//   whose clock runs ahead sends offers that stay fresh longer.
+// - A channel that fails to open closes every socket it opened. A relay that
+//   connects but never confirms the subscription would otherwise stay open,
+//   and keep delivering to a room nobody is answering.
 // - A joiner publishes its offer until an answer for its session arrives or
 //   its deadline passes, with a new event each time: relays drop an event id
 //   they have seen, and the event is ephemeral, so a host that subscribed late
@@ -28,7 +34,6 @@ const OPEN_TIMEOUT_MS = 10000;
 const REPUBLISH_MS = 2000;
 const JOIN_TIMEOUT_MS = 30000;
 const MAX_SESSIONS = 16;
-const SESSION_HOLD_MS = 120000;
 
 function randomHex(bytes) {
   return Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) =>
@@ -55,8 +60,17 @@ class RoomChannel {
   }
 
   /// Resolves once at least one relay has the subscription live, and rejects
-  /// when none does in time.
+  /// when none does in time, with every socket it opened closed.
   async open() {
+    try {
+      await this.#subscribe();
+    } catch (error) {
+      this.close();
+      throw error;
+    }
+  }
+
+  async #subscribe() {
     const request = await this.#node.signalSubscription(this.#room, this.#subscriptionId);
     await new Promise((resolve, reject) => {
       let failedRelays = 0;
@@ -162,18 +176,32 @@ export class NostrSignaller {
   /// connection's `{ close() }`. Closing stops answering; links already made
   /// stay up.
   async host(room, carrier, { onConnection } = {}) {
-    const sessions = new Map(); // session -> { answer, connection } once answered
+    // session -> { answer, connection, freshUntilMs, timer }
+    const sessions = new Map();
+    const forget = (session, entry) => {
+      clearTimeout(entry.timer);
+      if (sessions.get(session) === entry) sessions.delete(session);
+    };
+    // Keeps `entry` until its newest offer is no longer fresh; a repeat only
+    // ever moves that later.
+    const hold = (session, entry, freshUntilMs) => {
+      if (freshUntilMs <= entry.freshUntilMs) return;
+      entry.freshUntilMs = freshUntilMs;
+      clearTimeout(entry.timer);
+      entry.timer = setTimeout(() => forget(session, entry), Math.max(0, freshUntilMs - Date.now()));
+    };
     const channel = new RoomChannel(this.#node, this.#relays, room, async (signal) => {
       if (signal.role !== "offer") return;
       const known = sessions.get(signal.session);
       if (known) {
+        hold(signal.session, known, signal.freshUntilMs);
         if (known.answer) channel.publish(known.answer);
         return;
       }
       if (sessions.size >= MAX_SESSIONS) return;
-      const entry = { answer: null, connection: null };
+      const entry = { answer: null, connection: null, freshUntilMs: -Infinity, timer: undefined };
       sessions.set(signal.session, entry);
-      setTimeout(() => sessions.delete(signal.session), SESSION_HOLD_MS);
+      hold(signal.session, entry, signal.freshUntilMs);
       try {
         entry.connection = await carrier.answer(signal.code);
         entry.answer = await this.#node.signalEvent(room, "answer", signal.session, entry.connection.code);
@@ -181,11 +209,17 @@ export class NostrSignaller {
         onConnection?.(entry.connection);
       } catch {
         entry.connection?.close();
-        sessions.delete(signal.session);
+        forget(signal.session, entry);
       }
     });
     await channel.open();
-    return { room, close: () => channel.close() };
+    return {
+      room,
+      close: () => {
+        channel.close();
+        for (const [session, entry] of sessions) forget(session, entry);
+      },
+    };
   }
 
   /// Joins the device hosting `room`, through `carrier`. Resolves to the

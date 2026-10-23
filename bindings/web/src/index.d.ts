@@ -81,7 +81,7 @@ export class OfflineNode extends EventTarget {
   signalOpen(
     room: string,
     message: string,
-  ): Promise<{ role: "offer" | "answer"; session: string; code: string } | null>;
+  ): Promise<{ role: "offer" | "answer"; session: string; code: string; freshUntilMs: number } | null>;
   /** Registers a carrier the page opened; resolves to its link id. */
   openLink(carrier: PageCarrier): Promise<number>;
   /** Bytes the carrier delivered; resolves to the reason it was closed, if it was. */

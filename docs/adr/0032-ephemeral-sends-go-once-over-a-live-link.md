@@ -63,8 +63,9 @@ acknowledged, and the sender retries it until it fails. So ephemeral sends
 skip a member whose rung is still in the outbox, and the outbox flush on
 that member's reachability edge sends the rung first. Once it is
 acknowledged (or has expired or failed), the member takes ephemeral frames
-again. A member reached on a live link when the rung was sent got it in
-order and is never held. As with replication, the count is not persisted, so the first
+again. A member that held a live link when the rung was sent is never
+held: the rung went down that link ahead of any later frame. (When the link
+refused it, that is not true; see Consequences.) As with replication, the count is not persisted, so the first
 ephemeral send to a group in a process is reliable.
 
 Measured on the host over the browser node's sealed log store, one member:
@@ -97,6 +98,21 @@ restart never reuses a generation.
   relay broadcast is not held for, because the relay's copy is not in the
   outbox; the browser node has no relay, and a native binding that exposes
   ephemeral sends has to revisit this.
+- A member that held a live link when the rung was sent is not held even
+  when that link refused the rung. The hold is decided by who was linked,
+  not by what each carrier accepted, so a refused rung sits in the outbox
+  while the next ephemeral frames go down the same link. If more than 32 of
+  them arrive before the rung is retried, it can never be decrypted, is never
+  acknowledged, and is retried until `MessageFailed`, for an id the
+  application got back from `sendGroupMessage`. The member's ratchet is
+  still safe, because the rung is the only thing that gap needed. It is
+  narrow: a carrier that refuses on a live link is usually closing it, and
+  the member is then unlinked and held. Holding linked members too would
+  cost every game one round trip of `PeerNotReachable` at each rung (about
+  every 25 seconds at 10 Hz), which a two-player game sees as its only peer
+  dropping out. The fix, if it shows, is to hold a member only when its
+  carrier refused the rung, which needs the send path to report that per
+  member.
 - Only the browser binding exposes it. The FFI record does not have the field
   yet, so the UDL, the generated bindings and the C dispatcher are unchanged.
   Adding it is an append to `SendMessageOptions` in the UDL and every binding

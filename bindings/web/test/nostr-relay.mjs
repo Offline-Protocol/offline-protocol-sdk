@@ -2,8 +2,10 @@
 // WebSocket, filters on `kinds`, `since` and `#t`. It stores nothing, which is
 // all an ephemeral signalling event needs, and verifies nothing: the pages'
 // own code (signal.rs) is what refuses a forged event, and a relay that
-// forwards anything is the stricter test of that. Node's standard library
-// only, so the test runner installs nothing.
+// forwards anything is the stricter test of that. A client that connects on
+// the path `/silent` is never answered: the relay that accepts a socket and
+// never confirms a subscription. Node's standard library only, so the test
+// runner installs nothing.
 //
 // Usage: node test/nostr-relay.mjs <port>
 
@@ -49,8 +51,9 @@ class Client {
   #buffer = Buffer.alloc(0);
   #fragments = [];
 
-  constructor(socket) {
+  constructor(socket, silent) {
     this.socket = socket;
+    this.silent = silent;
     socket.on("data", (chunk) => this.#read(chunk));
     socket.on("close", () => clients.delete(this));
     socket.on("error", () => clients.delete(this));
@@ -112,6 +115,7 @@ class Client {
     } catch {
       return this.send(["NOTICE", "unreadable message"]);
     }
+    if (this.silent) return;
     const [type, ...rest] = message;
     if (type === "REQ") {
       const [id, ...filters] = rest;
@@ -140,6 +144,6 @@ server.on("upgrade", (request, socket) => {
     "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
       `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
   );
-  clients.add(new Client(socket));
+  clients.add(new Client(socket, request.url === "/silent"));
 });
 server.listen(port, "127.0.0.1", () => console.log(`nostr test relay on ${port}`));
