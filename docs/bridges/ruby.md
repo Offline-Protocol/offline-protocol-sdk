@@ -135,6 +135,20 @@ must not raise anything but the interface's own error. Copy the event, queue it,
 return. Storage providers are called from any thread, concurrently, so they must
 be thread-safe.
 
+No engine call releases Ruby's global VM lock: the generated code attaches
+every function without `blocking: true`, and that cannot be changed without
+editing the generated file. Two consequences follow. A slow call (`start`,
+`initialize_mls`, `flush_telemetry_blocking`) stops every Ruby thread in the
+process until it returns, and neither a signal nor `Thread#kill` interrupts
+it, so a server keeps such calls off its request threads or accepts the stall.
+And a callback is safe today only because no engine thread calls the host: the
+engine's one background thread, the telemetry scheduler, never does, so every
+callback runs on the Ruby thread that made the engine call. An engine thread
+that called a provider while a Ruby thread waited inside a native call for
+that same engine thread would deadlock the process, because the callback needs
+the lock the waiting thread holds. A change to the engine that adds such a
+call has to be checked against this binding.
+
 ## R6. Requirements the platform imposes
 
 CI runs the consumer check on Ruby 4.0 on Linux, macOS and Windows, and on
