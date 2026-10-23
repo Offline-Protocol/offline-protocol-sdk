@@ -222,6 +222,18 @@ bound. Closing loses nothing the engine promised: an acknowledged message
 waits in its outbox for the next link, and an unacknowledged one (W10) was
 never promised.
 
+A connection closes on `failed` or `closed`, never on `disconnected`, which
+the WebRTC specification lets recover on its own: closing there would turn a
+Wi-Fi blip into two new codes typed by hand. Chrome reaches `disconnected`
+5 seconds after the last answered connectivity check and `failed` 15 seconds
+after it (Firefox later), and only `failed` reaches the engine as a lost
+peer. So the carrier dispatches a `connection` event for every change,
+`connected`, `disconnected` and `closed`, naming the object `offer()` or
+`answer()` resolved to. A page that waits for `neighbor_lost` alone looks
+connected for those seconds, and a page that watches for it on one side only
+looks connected for ever: the lobby's player did, over a frozen court, until
+the [two-device run](web-devices.md#results) found it.
+
 Signalling needs no network. Each side's description waits for ICE gathering
 to finish, so one code carries every candidate, and the two codes cross by
 whatever the people have: a QR code, a paste, or a Nostr room (W11). By
