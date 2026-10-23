@@ -46,6 +46,17 @@ const _: () = assert!(
     "this install mints a key package it would refuse from a peer"
 );
 
+// A holder answers a peer that says it holds no session by resending the
+// original signed Welcome built on the package the peer still offers. The
+// Welcome is no older than that package, so it stays inside the control-frame
+// freshness window only while a package lives no longer than the window: past
+// it, the resend would be refused as stale while the holder kept choosing it
+// over a rebuild, and the pair could not heal.
+const _: () = assert!(
+    DEFAULT_KEY_PACKAGE_LIFETIME_SECS * 1000 <= offline_protocol_sealed::CTRL_FRESHNESS_PAST_MS,
+    "a resent Welcome could fall outside the freshness window while its package is still offered"
+);
+
 /// How far into the past a key package's validity window starts.
 ///
 /// `Lifetime::new` backdates by exactly this much, so a package handed to a
@@ -975,6 +986,44 @@ impl MlsManager {
     /// Checks if a session exists with another user.
     pub fn has_session(&self, other_user_id: &str) -> Result<bool> {
         self.session_manager.has_session(other_user_id)
+    }
+
+    /// The 1:1 session's epoch and its corroboration tag for `nonce`, or
+    /// `None` without a session. See [`SessionManager::corroboration`].
+    pub fn session_corroboration(
+        &self,
+        other_user_id: &str,
+        nonce: &[u8],
+    ) -> Result<Option<(u64, Vec<u8>)>> {
+        self.session_manager.corroboration(other_user_id, nonce)
+    }
+
+    /// Whether `welcome` was built for the peer holding `key_package_data`,
+    /// which is whether that peer can still join it.
+    ///
+    /// A peer that says it holds no session while this side holds one is
+    /// either still waiting on this side's Welcome, or lost the session the
+    /// Welcome built. The package it sends tells the two apart: a package is
+    /// consumed by the Welcome built on it, so a peer still offering the one
+    /// a retained Welcome names has not processed it.
+    pub fn welcome_targets_key_package(
+        &self,
+        welcome: &WelcomeMessage,
+        key_package_data: &[u8],
+    ) -> Result<bool> {
+        let reference = self
+            .validate_peer_key_package(key_package_data)?
+            .hash_ref(self.provider.crypto())
+            .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?;
+        let message = MlsMessageIn::tls_deserialize_exact(&welcome.welcome_data)
+            .map_err(|e| MlsError::Deserialization(e.to_string()))?;
+        let MlsMessageBodyIn::Welcome(welcome) = message.extract() else {
+            return Ok(false);
+        };
+        Ok(welcome
+            .secrets()
+            .iter()
+            .any(|secrets| secrets.new_member() == reference))
     }
 
     /// Creates a new 1:1 session with another user.
@@ -4161,6 +4210,105 @@ mod tests {
             matches!(err, MlsError::Decryption(_)),
             "a frame behind the tolerance must stay Decryption, got {err:?}"
         );
+        assert_eq!(err.decryption_detail(), Some("too_distant_in_the_past"));
+    }
+
+    /// A pair holding two different groups for one slot, each side the
+    /// creator of its own, agrees on the slot and on the epoch, so its frames
+    /// pass framing validation and fail as an ordinary decryption failure.
+    /// This is the split session: never a desync, so never re-keyed by the
+    /// epoch path, and named `aead` so a field log can tell it from a frame
+    /// that is merely too old.
+    #[test]
+    fn test_a_split_session_fails_as_aead_at_the_same_epoch() {
+        let alice = create_test_manager("alice");
+        let bob = create_test_manager("bob");
+        let alice_kp = alice.generate_key_package().unwrap();
+        let bob_kp = bob.generate_key_package().unwrap();
+        alice
+            .import_key_package(&addr("bob"), &bob_kp.key_package_data)
+            .unwrap();
+        bob.import_key_package(&addr("alice"), &alice_kp.key_package_data)
+            .unwrap();
+        alice.create_session(&addr("bob")).unwrap();
+        bob.create_session(&addr("alice")).unwrap();
+
+        let frame = alice.encrypt_for_user(&addr("bob"), b"hello").unwrap();
+        let err = bob.decrypt_from_user(&frame, &addr("alice")).unwrap_err();
+        assert!(
+            matches!(err, MlsError::Decryption(_)),
+            "a split session must fail as Decryption, got {err:?}"
+        );
+        assert_eq!(err.decryption_detail(), Some("aead"));
+    }
+
+    /// A Welcome names the package it was built on, and no other.
+    #[test]
+    fn test_a_welcome_targets_only_the_package_it_was_built_on() {
+        let alice = create_test_manager("alice");
+        let bob = create_test_manager("bob");
+        let bob_kp = bob.generate_key_package().unwrap();
+        let other_kp = bob.generate_key_package().unwrap();
+        alice
+            .import_key_package(&addr("bob"), &bob_kp.key_package_data)
+            .unwrap();
+        let welcome = alice.create_session(&addr("bob")).unwrap();
+        assert!(alice
+            .welcome_targets_key_package(&welcome, &bob_kp.key_package_data)
+            .unwrap());
+        assert!(!alice
+            .welcome_targets_key_package(&welcome, &other_kp.key_package_data)
+            .unwrap());
+    }
+
+    /// Both members of one session compute the same tag for a nonce, and a
+    /// different nonce gives a different tag, so tags over different nonces
+    /// cannot be linked.
+    #[test]
+    fn test_one_session_corroborates_on_both_sides() {
+        let (alice, bob) = create_test_session();
+        let nonce = [3u8; 16];
+        let ours = alice.session_corroboration(&addr("bob"), &nonce).unwrap();
+        let theirs = bob.session_corroboration(&addr("alice"), &nonce).unwrap();
+        assert!(ours.is_some());
+        assert_eq!(ours, theirs);
+        let other = alice
+            .session_corroboration(&addr("bob"), &[4u8; 16])
+            .unwrap();
+        assert_ne!(ours.unwrap().1, other.unwrap().1);
+        assert_eq!(
+            alice.session_corroboration(&addr("carol"), &nonce).unwrap(),
+            None
+        );
+    }
+
+    /// A split pair agrees on the epoch and not on the tag, which is the one
+    /// signal that tells it apart from a healthy session.
+    #[test]
+    fn test_a_split_session_agrees_on_the_epoch_and_not_the_tag() {
+        let alice = create_test_manager("alice");
+        let bob = create_test_manager("bob");
+        let alice_kp = alice.generate_key_package().unwrap();
+        let bob_kp = bob.generate_key_package().unwrap();
+        alice
+            .import_key_package(&addr("bob"), &bob_kp.key_package_data)
+            .unwrap();
+        bob.import_key_package(&addr("alice"), &alice_kp.key_package_data)
+            .unwrap();
+        alice.create_session(&addr("bob")).unwrap();
+        bob.create_session(&addr("alice")).unwrap();
+
+        let nonce = [3u8; 16];
+        let (alice_epoch, alice_tag) = alice
+            .session_corroboration(&addr("bob"), &nonce)
+            .unwrap()
+            .unwrap();
+        let (bob_epoch, bob_tag) = bob
+            .session_corroboration(&addr("alice"), &nonce)
+            .unwrap()
+            .unwrap();
+        assert_eq!(alice_epoch, bob_epoch);
+        assert_ne!(alice_tag, bob_tag);
     }
 
     /// The seal count is what bounds a sender's re-seals, so it must move

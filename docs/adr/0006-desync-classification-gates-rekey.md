@@ -96,3 +96,11 @@ guess hands an attacker a teardown per corrupted frame.
 
 Narrowing the withheld acknowledgement back to desync only, on the reasoning
 that "the others are not recoverable". They are, by re-sealing.
+
+## Later: a failure may ask, never act
+
+An ordinary failure on a 1:1 session now sends a confirmation probe, rate
+limited per peer, because a pair holding two groups for one slot fails there
+on every frame and never as a desync. The probe's answer, a signed tag, is
+what decides; the failure decides nothing. See
+[ADR 0033](0033-a-session-is-confirmed-only-by-proof-of-the-same-group.md).

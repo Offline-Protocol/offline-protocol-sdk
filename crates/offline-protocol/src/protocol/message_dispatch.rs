@@ -1,5 +1,6 @@
 //! Message dispatch handlers for internal protocol messages.
 
+use super::session::{Corroboration, SESSION_CORROBORATED};
 use super::{
     base64_decode, internal_prefixes, lock_shared_state, ConnectionAcceptedPayload,
     ConnectionRequestPayload, GroupCreatedPayload, GroupErrorPayload, GroupInfoPayload,
@@ -16,7 +17,7 @@ use crate::SessionStateError;
 use chrono::Utc;
 use offline_protocol_core::{Message, MessagePriority};
 use offline_protocol_mls::{EncryptedMessage, WelcomeMessage};
-use offline_protocol_sealed::SVC_SEALED_V1;
+use offline_protocol_sealed::{SessionCorroboration, SVC_SEALED_V1};
 use offline_protocol_services::{ServiceAction, SVC_MESSAGE_PREFIX, SVC_REQUEST, SVC_RESPONSE};
 use offline_protocol_transport::TransportType;
 use tracing::{debug, error, info, warn};
@@ -53,8 +54,8 @@ impl OfflineProtocol {
     /// readable by every hop. See the comments at those uses for why each
     /// earns a separate trust level from the capability lists around them.
     ///
-    /// `freshness` gates **only** `session_reset`, which is the one field here
-    /// that destroys state: `Some(stamp)` when the frame's signature covers
+    /// `freshness` gates **only** the two fields here that destroy state,
+    /// `session_reset` and `no_session`: `Some(stamp)` when the frame's signature covers
     /// that timestamp and this node checked it, `None` otherwise. It is an
     /// option rather than a flag beside a number so that the stamp is
     /// unreachable in exactly the case where trusting it would be a bug — on
@@ -476,39 +477,21 @@ impl OfflineProtocol {
                     // leaves this frame able to destroy the replacement too.
                     self.record_reset_spent(sender, stamp);
                 }
-                if let Some(mls) = self.mls_manager.clone() {
-                    if let Ok(manager) = mls.read() {
-                        if manager.has_session(sender).unwrap_or(false) {
-                            drop(manager); // release lock before mutating
-                            info!(sender = %sender, "Session reset requested — deleting stale local session");
-                            if let Err(e) = self.manual_mls_delete_session(sender) {
-                                debug!(sender = %sender, error = %e, "No MLS session to clean up for session reset");
-                            }
-                            // The outbound pending queue is deliberately KEPT.
-                            // `PendingMessage` holds original plaintext and is
-                            // sealed at flush time by `prepare_outbound_content`
-                            // against whatever session is current then — so
-                            // these entries are not bound to the epoch we just
-                            // discarded, and the reset is precisely what
-                            // produces the session they will seal against.
-                            // Dropping them here destroyed messages the app had
-                            // been handed ids for, and a re-key is remotely
-                            // triggerable (see `schedule_session_rekey`), which
-                            // made that reachable by an injected frame.
-                            //
-                            // Drain the inbound pending decryption queue though:
-                            // unlike the outbound side those really are
-                            // ciphertexts sealed to the session just deleted, so
-                            // they can never decrypt. Their persisted records go
-                            // too: left on disk, the next launch restores them and
-                            // drains them into the replacement session as
-                            // spurious decrypt failures.
-                            self.discard_pending_decryption_for_peer(sender);
-                            // Allow fresh key exchange
-                            self.key_package_sent_to.remove(sender);
-                        }
-                    }
+                if self.has_mls_session(sender).unwrap_or(false) {
+                    info!(sender = %sender, "Session reset requested — deleting stale local session");
+                    self.drop_session_for_reset(sender);
                 }
+            }
+
+            // The sender holds no session with us. Answered under the same
+            // two rules as a reset, since it can end in the same teardown.
+            if payload.no_session && signed {
+                self.answer_peer_without_session(
+                    sender,
+                    &payload.key_package_data,
+                    freshness,
+                    reset_unspent,
+                );
             }
 
             let now_ms = Utc::now().timestamp_millis() as u64;
@@ -615,6 +598,13 @@ impl OfflineProtocol {
                 match self.establish_secure_session(sender) {
                     Ok(Some(_)) => {
                         info!(sender = %sender, "Auto-established secure session after key package exchange");
+                        // The session is built on this frame, so a directive
+                        // older than it predates the session. A session the
+                        // send path builds later from the cached package
+                        // records nothing (ADR 0033, Residual).
+                        if let Some(stamp) = freshness {
+                            self.note_session_frame_stamp(sender, stamp);
+                        }
                     }
                     Ok(None) => {
                         // A session already exists. If it is unconfirmed and
@@ -640,37 +630,140 @@ impl OfflineProtocol {
         }
     }
 
+    /// Drops this side's session with `sender` for a peer that has let go of
+    /// its own, keeping what the rebuilt session will need.
+    fn drop_session_for_reset(&mut self, sender: &str) {
+        if let Err(e) = self.manual_mls_delete_session(sender) {
+            debug!(sender = %sender, error = %e, "No MLS session to clean up for session reset");
+        }
+        // The outbound pending queue is deliberately KEPT. `PendingMessage`
+        // holds original plaintext and is sealed at flush time by
+        // `prepare_outbound_content` against whatever session is current then,
+        // so these entries are not bound to the epoch we just discarded, and
+        // the reset is precisely what produces the session they will seal
+        // against. Dropping them here destroyed messages the app had been
+        // handed ids for, and a re-key is remotely triggerable (see
+        // `schedule_session_rekey`), which made that reachable by an injected
+        // frame.
+        //
+        // Drain the inbound pending decryption queue though: unlike the
+        // outbound side those really are ciphertexts sealed to the session just
+        // deleted, so they can never decrypt. Their persisted records go too:
+        // left on disk, the next launch restores them and drains them into the
+        // replacement session as spurious decrypt failures.
+        self.discard_pending_decryption_for_peer(sender);
+        // Allow fresh key exchange
+        self.key_package_sent_to.remove(sender);
+    }
+
+    /// Answers a key package from a peer that holds no session with us.
+    ///
+    /// Invariant: a pair where one side holds a session and the other none
+    /// is rebuilt, never left. The side without one cannot read anything
+    /// this side seals, and this side never re-enters the desync path,
+    /// because the other side sends nothing sealed.
+    ///
+    /// When our retained Welcome was built on the package the peer is
+    /// offering, the peer has not processed it and still can, so it is sent
+    /// again: tearing down here would destroy a replacement whose Welcome
+    /// is merely in flight. Otherwise our session is one the peer will never
+    /// hold, and it is dropped as for a reset; the caller then builds a new
+    /// one from the package. Only the teardown spends the frame's stamp.
+    ///
+    /// Only the teardown needs the frame's age to be established
+    /// (`freshness`) and newer than the session (`unspent`): resending a
+    /// Welcome destroys nothing, while without a stamp the spent mark could
+    /// not refuse a recording, and every first-contact push carries the flag.
+    fn answer_peer_without_session(
+        &mut self,
+        peer_id: &str,
+        key_package_data: &[u8],
+        freshness: Option<i64>,
+        unspent: bool,
+    ) {
+        if !self.has_mls_session(peer_id).unwrap_or(false) {
+            return;
+        }
+        let retained = self.welcome_lifecycles.get(peer_id).and_then(|record| {
+            record
+                .welcome_message
+                .content
+                .strip_prefix(internal_prefixes::WELCOME)
+                .and_then(|body| serde_json::from_str::<WelcomeMessage>(body).ok())
+        });
+        // Only a definite "no" tears down. A comparison that fails (the
+        // package refused for its validity window under clock skew, a
+        // poisoned lock) cannot tell, and tearing down a session whose
+        // Welcome the peer could still join would leave neither side one.
+        let still_joinable = match retained {
+            None => false,
+            Some(welcome) => match self.mls_manager.as_ref().map(|mls| {
+                mls.read()
+                    .ok()
+                    .map(|manager| manager.welcome_targets_key_package(&welcome, key_package_data))
+            }) {
+                Some(Some(Ok(targets))) => targets,
+                _ => {
+                    debug!(sender = %peer_id, "Cannot compare our Welcome with the peer's package, keeping our session");
+                    return;
+                }
+            },
+        };
+        if still_joinable {
+            info!(sender = %peer_id, "Peer holds no session and can still join ours, re-sending the Welcome");
+            self.resend_welcome(peer_id, "peer_holds_no_session", true);
+            return;
+        }
+        let Some(stamp) = freshness.filter(|_| unspent) else {
+            debug!(sender = %peer_id, "Not dropping our session on an unstamped or spent no_session frame");
+            return;
+        };
+        if self.no_session_predates_session(peer_id, stamp) {
+            debug!(sender = %peer_id, "Not dropping our session on a no_session frame older than the one that built it");
+            return;
+        }
+        self.record_reset_spent(peer_id, stamp);
+        info!(sender = %peer_id, "Peer holds no session we can reach, deleting ours to rebuild");
+        self.drop_session_for_reset(peer_id);
+    }
+
     /// Handles a session confirmation probe message.
-    pub(crate) fn handle_session_confirm_probe(&mut self, sender: &str, _content: &str) {
+    ///
+    /// A probe carrying a corroboration confirms only when the tag matches,
+    /// because a peer holding a group of its own for this slot would
+    /// otherwise confirm ours, and the pair would then fail every frame as an
+    /// ordinary decrypt failure that nothing heals. A mismatch is a split,
+    /// but a probe is never acted on directly: it may be stale or replayed,
+    /// so the greater side asks with a challenge of its own instead. An empty
+    /// body is an older peer, under the plaintext rules it always had. Every
+    /// probe is answered with this side's tag over the prober's nonce, which
+    /// is how the prober learns of a split.
+    pub(crate) fn handle_session_confirm_probe(&mut self, sender: &str, content: &str) {
         let sender_owned = sender.to_string();
         match self.has_mls_session(&sender_owned) {
             Ok(true) => {
-                if !self.can_confirm_from_source(&sender_owned, "confirmation_probe_received") {
+                let theirs = SessionCorroboration::parse(
+                    content
+                        .strip_prefix(internal_prefixes::SESSION_CONFIRM_PROBE)
+                        .unwrap_or_default(),
+                );
+                self.apply_session_corroboration(
+                    &sender_owned,
+                    theirs.as_ref(),
+                    "confirmation_probe_received",
+                );
+
+                let Some(answer) = self.session_answer_body(&sender_owned, theirs.as_ref()) else {
                     debug!(
                         sender = %sender_owned,
-                        "Skipping probe confirmation until welcome send is at least attempted"
+                        "Cannot corroborate our session; not answering the probe"
                     );
-                } else {
-                    match self.confirm_session_state(&sender_owned, "confirmation_probe_received") {
-                        Ok(_) => {
-                            let _ = self.flush_pending_messages(&sender_owned);
-                            self.process_pending_decryption(&sender_owned);
-                        }
-                        Err(err) => {
-                            warn!(
-                                sender = %sender_owned,
-                                error = %err,
-                                "Failed to persist session confirmation after probe"
-                            );
-                        }
-                    }
-                }
-
-                if let Err(err) = self.send_internal_message(
-                    &sender_owned,
-                    internal_prefixes::SESSION_CONFIRM_ACK.to_string(),
-                    MessagePriority::High,
-                ) {
+                    return;
+                };
+                let ack = format!("{}{}", internal_prefixes::SESSION_CONFIRM_ACK, answer);
+                if let Err(err) =
+                    self.send_internal_message(&sender_owned, ack, MessagePriority::High)
+                {
                     warn!(
                         sender = %sender_owned,
                         error = %err,
@@ -694,31 +787,23 @@ impl OfflineProtocol {
         }
     }
 
-    /// Handles a session confirmation acknowledgment message.
-    pub(crate) fn handle_session_confirm_ack(&mut self, sender: &str, _content: &str) {
+    /// Handles a session confirmation acknowledgment message, under the same
+    /// corroboration rules as a probe, except that a split shown by an
+    /// answer to one of this side's live challenges may be healed.
+    pub(crate) fn handle_session_confirm_ack(&mut self, sender: &str, content: &str) {
         let sender_owned = sender.to_string();
         match self.has_mls_session(&sender_owned) {
             Ok(true) => {
-                if !self.can_confirm_from_source(&sender_owned, "confirmation_ack_received") {
-                    debug!(
-                        sender = %sender_owned,
-                        "Skipping ack confirmation until welcome send is at least attempted"
-                    );
-                } else {
-                    match self.confirm_session_state(&sender_owned, "confirmation_ack_received") {
-                        Ok(_) => {
-                            let _ = self.flush_pending_messages(&sender_owned);
-                            self.process_pending_decryption(&sender_owned);
-                        }
-                        Err(err) => {
-                            warn!(
-                                sender = %sender_owned,
-                                error = %err,
-                                "Failed to persist session confirmation after ack"
-                            );
-                        }
-                    }
-                }
+                let theirs = SessionCorroboration::parse(
+                    content
+                        .strip_prefix(internal_prefixes::SESSION_CONFIRM_ACK)
+                        .unwrap_or_default(),
+                );
+                self.apply_session_corroboration(
+                    &sender_owned,
+                    theirs.as_ref(),
+                    "confirmation_ack_received",
+                );
             }
             Ok(false) => {
                 debug!(
@@ -736,8 +821,69 @@ impl OfflineProtocol {
         }
     }
 
+    /// Confirms, heals or ignores on a probe or acknowledgement's
+    /// corroboration. `plaintext_source` is the confirmation source an older
+    /// peer's empty body is held to, and also says which frame this is: only
+    /// an acknowledgement can answer a challenge.
+    fn apply_session_corroboration(
+        &mut self,
+        peer_id: &str,
+        theirs: Option<&SessionCorroboration>,
+        plaintext_source: &str,
+    ) {
+        // Asked before the comparison, so any answer retires the challenge.
+        let answered = plaintext_source == "confirmation_ack_received"
+            && theirs.is_some_and(|theirs| self.answers_live_challenge(peer_id, &theirs.nonce));
+        let source = match self.corroborate_session(peer_id, theirs) {
+            Corroboration::Agrees => SESSION_CORROBORATED,
+            Corroboration::Absent => plaintext_source,
+            Corroboration::Split => {
+                self.heal_split_session(peer_id, answered);
+                return;
+            }
+            Corroboration::Inconclusive => {
+                debug!(
+                    sender = %peer_id,
+                    "Not confirming on a corroboration this side cannot compare"
+                );
+                return;
+            }
+        };
+        if !self.can_confirm_from_source(peer_id, source) {
+            debug!(
+                sender = %peer_id,
+                source_event = %source,
+                "Skipping confirmation until welcome send is at least attempted"
+            );
+            return;
+        }
+        match self.confirm_session_state(peer_id, source) {
+            Ok(_) => {
+                let _ = self.flush_pending_messages(peer_id);
+                self.process_pending_decryption(peer_id);
+            }
+            Err(err) => {
+                warn!(
+                    sender = %peer_id,
+                    error = %err,
+                    source_event = %source,
+                    "Failed to persist session confirmation"
+                );
+            }
+        }
+    }
+
     /// Handles an MLS welcome message (session invitation).
-    pub(crate) fn handle_welcome_message(&mut self, sender: &str, data: &str) {
+    ///
+    /// `freshness` is the frame's signed stamp when its age was established,
+    /// as for a key package; a Welcome that builds our session moves the spent
+    /// mark with it (`note_session_frame_stamp`).
+    pub(crate) fn handle_welcome_message(
+        &mut self,
+        sender: &str,
+        data: &str,
+        freshness: Option<i64>,
+    ) {
         if let Ok(welcome) = serde_json::from_str::<WelcomeMessage>(data) {
             // Security: honest peers always set `inviter_id` to their own id
             // (see `SessionManager::create_session`), and the payload field is
@@ -762,6 +908,8 @@ impl OfflineProtocol {
             // re-send the encrypted confirm so a lost first confirm is retried in
             // lockstep with the owner's retransmission until it converges.
             let mut resend_confirm_on_retransmit = false;
+            // Adopter side: the remote Welcome replaced a group of our own.
+            let mut adopted_over_ours = false;
             let sender_owned = sender.to_string();
             let group_id = welcome.group_id.as_str().to_string();
             let is_session = group_id.starts_with("session:");
@@ -811,24 +959,8 @@ impl OfflineProtocol {
                         // *greater* id adopts the remote Welcome; the other
                         // keeps its own session. This guarantees both devices
                         // converge on the same MLS group.
-                        //
-                        // Addresses compare as addresses — hash bytes, the same
-                        // order `GroupId::for_session` canonicalizes slots with
-                        // — because the bech32 charset is not ASCII-monotonic,
-                        // so comparing the rendered strings would give a
-                        // different answer than every other address comparison.
-                        // Any total order converges as long as both peers use
-                        // the same one; ids that are not both addresses keep
-                        // string order.
                         let local_id: &str = &self.local_id;
-                        let remote_id: &str = sender;
-                        let local_adopts = match (
-                            local_id.parse::<offline_protocol_core::Address>(),
-                            remote_id.parse::<offline_protocol_core::Address>(),
-                        ) {
-                            (Ok(local), Ok(remote)) => local > remote,
-                            _ => local_id > remote_id,
-                        };
+                        let local_adopts = self.gives_way_to(sender);
                         if local_adopts {
                             info!(
                                 sender = %sender,
@@ -839,6 +971,7 @@ impl OfflineProtocol {
                                 Ok(_) => {
                                     info!(sender = %sender, "Replaced session with remote Welcome");
                                     should_flush = true;
+                                    adopted_over_ours = true;
                                 }
                                 Err(e) => {
                                     // A forged ratchet tree is tested for *before* the
@@ -980,6 +1113,31 @@ impl OfflineProtocol {
             // adopt it. Gating on success would leave the plaintext gate open
             // for exactly the peers whose handshake is failing.
             self.mark_encryption_capable(&sender_owned);
+            // A Welcome we joined or adopted built our session, so a directive
+            // older than it predates the session. Not any other Welcome: the
+            // mark is durable, and a peer clock that ran fast and was set back
+            // would otherwise lock that peer's resets out until it caught up.
+            if should_flush {
+                if let Some(stamp) = freshness {
+                    self.note_session_frame_stamp(&sender_owned, stamp);
+                }
+            }
+
+            // Our own outbound Welcome named a group we just gave up, built on
+            // a package of the peer's that it never processed and so still
+            // offers. Kept, it was taken as the session the peer could join: a
+            // `no_session` push from the peer, after a lost reset, was
+            // answered with this dead Welcome and the pair split again.
+            if adopted_over_ours {
+                self.welcome_lifecycles.remove(&sender_owned);
+                if let Err(err) = self.clear_welcome_lifecycle_entry(&sender_owned) {
+                    warn!(
+                        sender = %sender_owned,
+                        error = %err,
+                        "Failed to clear the Welcome lifecycle of an abandoned group"
+                    );
+                }
+            }
 
             // Owner side of a both-create race: record that this peer must prove
             // it adopted our group via a group-aware decrypt before we confirm
@@ -1168,6 +1326,9 @@ impl OfflineProtocol {
                     sender: String,
                     group_id: String,
                     kind: DecryptionFailureKind,
+                    /// The OpenMLS failure's fixed name, when MLS gave one
+                    /// (`MlsError::decryption_detail`).
+                    detail: Option<&'static str>,
                     /// Whether the sender can still recover this message by
                     /// resending it. True for a genuine crypto/transport
                     /// failure while crypto recovery is enabled: the ACK is
@@ -1332,6 +1493,7 @@ impl OfflineProtocol {
                                         sender: sender.to_string(),
                                         group_id: encrypted.group_id.as_str().to_string(),
                                         kind,
+                                        detail: e.decryption_detail(),
                                         retriable: true,
                                     }
                                 }
@@ -1359,6 +1521,7 @@ impl OfflineProtocol {
                                         sender: sender.to_string(),
                                         group_id: encrypted.group_id.as_str().to_string(),
                                         kind,
+                                        detail: e.decryption_detail(),
                                         retriable: false,
                                     }
                                 }
@@ -1523,6 +1686,7 @@ impl OfflineProtocol {
                     sender: sender_owned,
                     group_id,
                     kind,
+                    detail,
                     retriable,
                 } => {
                     self.emit_mls_decryption_failed(
@@ -1554,12 +1718,16 @@ impl OfflineProtocol {
                         // so the sender re-seals the message under its current
                         // session, and a resend that still fails reports again. The sender's retry ladder settles it
                         // as an honest `MessageFailed` if it never decrypts.
+                        let cause = match detail {
+                            Some(detail) => format!("{kind:?}, {detail}"),
+                            None => format!("{kind:?}"),
+                        };
                         let reason = if retriable {
                             format!(
-                                "Failed to decrypt MLS message ({kind:?}); not delivery-ACKed, so the sender can re-seal it"
+                                "Failed to decrypt MLS message ({cause}); not delivery-ACKed, so the sender can re-seal it"
                             )
                         } else {
-                            format!("Failed to decrypt MLS message ({kind:?})")
+                            format!("Failed to decrypt MLS message ({cause})")
                         };
                         state.emit_event(Event::message_decryption_failed_for_frame(
                             message.id.clone(),
@@ -1569,6 +1737,14 @@ impl OfflineProtocol {
                             encrypted.timestamp_ms,
                             session_established_at_ms,
                         ));
+                    }
+                    if group_id.starts_with("session:") {
+                        // A pair holding two groups for its slot fails here on
+                        // every frame and never as a desync: ask whether that
+                        // is what this is. Whether or not crypto recovery is
+                        // on, because asking destroys nothing and a split with
+                        // recovery off would otherwise never be found.
+                        self.request_session_corroboration(&sender_owned);
                     }
                     if retriable {
                         // Not enqueued: like a desync, this ciphertext is dead.
@@ -1661,6 +1837,19 @@ impl OfflineProtocol {
     /// group-aware decrypt (text or media chunk). No-op when confirmation is
     /// gated or already recorded.
     pub(super) fn confirm_session_from_successful_decrypt(&mut self, sender: &str, group_id: &str) {
+        // Only a decrypt in the 1:1 group says anything about the 1:1 session.
+        // A multi-party group decrypt from the same peer proves nothing about
+        // it: confirming on one let a pair that shares a group confirm a
+        // split 1:1 session, past even the both-create owner's gate, and
+        // retiring the challenge on one held a heal off for as long as the
+        // pair kept talking in the group.
+        if !group_id.starts_with("session:") {
+            return;
+        }
+        // The groups agree now, so any challenge out was answered: an answer
+        // sealed under an older group of the peer's and delivered late must
+        // not find it live.
+        self.corroboration_challenges.remove(sender);
         if !self.can_confirm_from_source(sender, "decrypt_success") {
             debug!(
                 sender = %sender,
@@ -1703,21 +1892,17 @@ impl OfflineProtocol {
                 // sends and receives) but the app never receives
                 // `secure_session_established`, so UI gated on a known secure
                 // session — e.g. the demo's group-creation contact list —
-                // silently excludes the peer. Gate on `session:` so multi-party
-                // group decrypts (which also reach this arm) are not reported as
-                // 1:1 sessions. Reaching `Ok(true)` here implies we own the 1:1
-                // group (an adopter would already be Confirmed via
-                // `welcome_received` and return `Ok(false)`), so
+                // silently excludes the peer. Reaching `Ok(true)` here implies
+                // we own the 1:1 group (an adopter would already be Confirmed
+                // via `welcome_received` and return `Ok(false)`), so
                 // `initiated_by_local` is true.
-                if group_id.starts_with("session:") {
-                    if let Ok(state) = lock_shared_state(&self.shared_state) {
-                        state.emit_event(Event::secure_session_established(
-                            sender.to_string(),
-                            group_id.to_string(),
-                            true,
-                            true,
-                        ));
-                    }
+                if let Ok(state) = lock_shared_state(&self.shared_state) {
+                    state.emit_event(Event::secure_session_established(
+                        sender.to_string(),
+                        group_id.to_string(),
+                        true,
+                        true,
+                    ));
                 }
             }
             Ok(false) => {}

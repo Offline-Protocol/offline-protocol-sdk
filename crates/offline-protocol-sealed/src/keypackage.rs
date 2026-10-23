@@ -58,6 +58,24 @@ pub struct KeyPackagePayload {
     #[serde(default)]
     pub session_reset: bool,
 
+    /// The sender holds no session with the receiver.
+    ///
+    /// A receiver that holds one can then never be read by the sender: the
+    /// sender lost it to a reset whose frame never arrived, or to its store.
+    /// It answers by resending its Welcome when that Welcome was built on
+    /// this very package, which the sender can still join, and otherwise by
+    /// dropping its session and building a new one from the package. Under
+    /// the same freshness and spent-reset rules as `session_reset`.
+    ///
+    /// Without it a lost reset left the pair split for good: the sender's
+    /// re-pushes could not carry the reset flag, because a reset that
+    /// overtook the replacement session's Welcome would tear that down too.
+    ///
+    /// Omitted when false, so every payload that does not set it is byte for
+    /// byte what it was, and an older receiver reads it as absent.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub no_session: bool,
+
     /// Wire-format versions the sender can decode (e.g. `[1]` for binary v1).
     /// Absent on legacy nodes (`#[serde(default)]` gives empty, meaning JSON
     /// only), so an old peer is never sent a binary frame it cannot parse.
@@ -393,6 +411,7 @@ mod spec_vectors {
             remaining_lifetime_ms: 0,
             timestamp_ms: 0,
             session_reset: false,
+            no_session: false,
             wire_versions: Vec::new(),
             env_versions: Vec::new(),
             rich_versions: Vec::new(),

@@ -49,8 +49,63 @@ vector.
 | `__MLS_KEY_PKG__` | peer to peer | Key package payload, JSON |
 | `__MLS_WELCOME__` | peer to peer | JSON `WelcomeMessage`; the MLS Welcome bytes are a JSON byte array inside it, not base64 |
 | `__MLS_ENC__` | peer to peer | Encrypted envelope, see [Encryption envelopes](encryption-envelopes.md) |
-| `__MLS_CONFIRM_PROBE__` | peer to peer | Session confirmation probe |
-| `__MLS_CONFIRM_ACK__` | peer to peer | Session confirmation acknowledgement |
+| `__MLS_CONFIRM_PROBE__` | peer to peer | Session confirmation probe: a [session corroboration](#session-corroboration), or empty from an older peer |
+| `__MLS_CONFIRM_ACK__` | peer to peer | Session confirmation acknowledgement, with the same body |
+
+### Session corroboration
+
+**A plaintext probe or acknowledgement confirms a session only if it shows
+the sender holds the same group.** A peer holding a group of its own for the
+same slot sits at the same epoch, because a 1:1 session never commits after it
+is created, so its frames pass MLS framing and fail as an ordinary decryption
+failure, which nothing re-keys on. A probe that said only "I hold a session"
+confirmed such a pair, and that is how a split session formed.
+
+The body is JSON, `{"epoch": E, "nonce": [...], "tag": [...]}`:
+
+| Field | Meaning |
+|-------|---------|
+| `epoch` | The sender's MLS epoch for the session |
+| `nonce` | 16 bytes, as a JSON byte array. In a probe, the prober's challenge: one per peer and session, repeated by every probe until it is answered; in an acknowledgement, the nonce of the probe it answers |
+| `tag` | 16 bytes: `MLS-Exporter("offline-protocol session corroboration v1", nonce, 16)` over the session's current epoch |
+
+A receiver holding a session computes the exporter over the same nonce and:
+
+- **MUST** treat a matching epoch and tag as group-aware proof, as it would a
+  successful decrypt. That includes the both-create owner, which no plaintext
+  frame could confirm before.
+- **MUST NOT** confirm on a matching epoch with a different tag. That is a
+  split, but only an acknowledgement answering a challenge the receiver
+  issued under the session it holds now is evidence of a split *now*. A
+  probe, or an answer to an older challenge, may be sealed before a heal and
+  delivered late, retried from an outbox, or replayed.
+  - On such an acknowledgement, the side whose address is greater (the side
+    that adopts in the both-create tiebreak) **MUST** end the split by giving
+    up its own group: a key package with `no_session` set, then dropping the
+    group. The peer answers it as below, usually by resending the Welcome it
+    built, which the greater side joins. A `session_reset` there would make
+    the peer rebuild on the same unconsumed package, and a Welcome of the
+    peer's that was only delayed would then split the pair again.
+  - On a probe or any other acknowledgement it **MUST NOT** tear anything
+    down. The greater side **SHOULD** issue a challenge of its own instead.
+  - The lesser side does nothing; its answer to the greater side's challenge
+    is how the greater side learns.
+- **MUST NOT** act on a different epoch, which the epoch-desync path owns, or
+  on a tag it cannot compute.
+- **MUST** read an empty or unparseable body as an older peer and apply the
+  plaintext rules it always had.
+
+Every probe is answered with the receiver's tag over the probe's nonce. A leaf
+answers with an empty body and is held to the plaintext rules. An
+implementation that holds a session but cannot compute its tag (a store read or
+export that failed) **MUST NOT** send an empty body in its place, neither in a
+probe nor in an answer to a probe that carried one: the peer would read it as
+an older device and confirm on the plaintext rules. It sends nothing, and the
+next probe asks again. The frames are signed, so a mismatch is the peer's own
+statement, and a challenge is spent by its first answer, so neither a late
+frame nor a recording can drive a teardown. A challenge is repeated rather than
+replaced by each probe, because an unconfirmed session is probed every few
+seconds and an answer over the mesh or a relay can take longer.
 
 ### Prefixes that never appear on the wire
 
@@ -367,6 +422,60 @@ A verifier MUST NOT apply either this rule or the ratchet to a peer that has
 never presented a v2 signature. A driven rekey *is* a reset, so a peer whose
 resets are ignored is a peer that can no longer heal a session; holding a peer
 to a payload it has never shown it can produce breaks exactly that.
+
+#### A peer that holds no session
+
+**A pair where one side holds a session and the other none is rebuilt, never
+left.** The side without one cannot read anything the other seals, and the
+other never re-enters the desync path, because the first sends nothing
+sealed. A lost reset leaves a pair exactly so, and a sender cannot repeat the
+reset flag to recover: a repeat that overtook the replacement session's
+Welcome would tear that down too.
+
+So a key package sent while the sender holds no session with the receiver
+SHOULD set `no_session`, and MUST NOT set it otherwise, including when it
+cannot tell, except as the split heal above, which sets it just before
+dropping its group. A receiver holding a session that gets one, signed:
+
+- **MUST**, when the Welcome it built for the session names this very key
+  package, send that Welcome again and keep its session. The package is
+  consumed by the Welcome built on it, so a peer still offering it has not
+  processed the Welcome, and still can. This destroys nothing and needs no
+  stamp.
+- **MUST** otherwise drop its session as for a reset and build a new one from
+  the package, but only on a frame whose stamp is signed and newer than the
+  spent mark of rule 3, recording the stamp first. For ten minutes after the
+  session was built it **MUST** also be newer than the unclamped stamp of the
+  frame that built it: with more skew than the mark's clamp, a first-contact
+  push the peer sent just before its Welcome would otherwise arrive behind
+  the Welcome and tear down the session it had just built. An unstamped frame is
+  refused here, because every first-contact push carries the flag and the
+  mark could not refuse a recording of one.
+
+The spent mark of rule 3 **MUST** also be moved when a session is built, and
+only then: on the key package the session was created from, or the Welcome it
+was joined from, to that frame's signed stamp clamped to five minutes past the
+receiver's own clock, and never down. (A teardown that is acted on records the
+frame's own stamp under rule 3, unclamped, as a reset always has.) A
+`no_session` or `session_reset` frame
+older than the frame that built the session predates the session it would
+destroy, such as a first-contact push carried slowly or a recording, and the
+mark refuses it.
+
+Two failures fix those bounds. Moving the mark on every key package would let
+a peer whose clock ran fast, and was then set back, have its resets refused
+until its clock caught up, with neither side able to heal meanwhile; the clamp
+limits that to five minutes. Clamping at the receiver's clock itself would let
+ordinary skew put the mark below the peer's own stamp, so an honest
+`no_session` push sent just before the session was built, and delivered late,
+would tear it down.
+
+A receiver that adopted the peer's Welcome in the both-create tiebreak gave
+up its own group, and **MUST** then discard its own Welcome: it names a
+package the peer never processed and still offers, so keeping it would
+answer a later `no_session` with a Welcome for a group nobody holds.
+
+A leaf never sets it.
 
 ### Exemption class 1: the data plane
 

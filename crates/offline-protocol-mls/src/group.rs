@@ -127,6 +127,78 @@ fn rendered_credential(credential: &Credential) -> String {
     rendered
 }
 
+/// Names the OpenMLS failure behind an ordinary decrypt failure, from the
+/// closed set [`MlsError::decryption_detail`] reads back.
+///
+/// The failures this tells apart look identical to an application otherwise:
+/// an AEAD failure is what a pair holding two different groups for one slot
+/// produces on every frame, while a frame too far in the past is a healthy
+/// session whose sender's re-sealed resend recovers it. A fixed name rather
+/// than the error's rendering, because the reason reaches telemetry verbatim.
+///
+/// Exhaustive, with no catch-all arm (ADR 0013): none of these OpenMLS enums
+/// is `#[non_exhaustive]`, so a variant a future OpenMLS adds fails to compile
+/// here, and is named, instead of being filed silently under a neighbour's
+/// name.
+fn decryption_detail<E>(e: &ProcessMessageError<E>) -> &'static str {
+    match e {
+        ProcessMessageError::ValidationError(validation) => match validation {
+            ValidationError::UnableToDecrypt(decryption) => match decryption {
+                MessageDecryptionError::AeadError => "aead",
+                MessageDecryptionError::GenerationOutOfBound => "generation_out_of_bound",
+                MessageDecryptionError::MalformedContent => "malformed_content",
+                MessageDecryptionError::SecretTreeError(tree) => match tree {
+                    SecretTreeError::TooDistantInThePast => "too_distant_in_the_past",
+                    SecretTreeError::SecretReuseError => "secret_reuse",
+                    SecretTreeError::TooDistantInTheFuture
+                    | SecretTreeError::IndexOutOfBounds
+                    | SecretTreeError::RatchetTypeError
+                    | SecretTreeError::RatchetTooLong
+                    | SecretTreeError::LibraryError
+                    | SecretTreeError::CodecError(_)
+                    | SecretTreeError::CryptoError(_) => "secret_tree",
+                },
+                MessageDecryptionError::LibraryError(_)
+                | MessageDecryptionError::WrongWireFormat => "unable_to_decrypt",
+            },
+            ValidationError::LibraryError(_)
+            | ValidationError::WrongGroupId
+            | ValidationError::WrongEpoch
+            | ValidationError::NotACommit
+            | ValidationError::NotAnExternalAddProposal
+            | ValidationError::NoPath
+            | ValidationError::UnencryptedApplicationMessage
+            | ValidationError::UnknownMember
+            | ValidationError::MissingMembershipTag
+            | ValidationError::InvalidMembershipTag
+            | ValidationError::MissingConfirmationTag
+            | ValidationError::WrongWireFormat
+            | ValidationError::InvalidSignature
+            | ValidationError::NonMemberApplicationMessage
+            | ValidationError::NoPastEpochData
+            | ValidationError::UnauthorizedExternalSender
+            | ValidationError::NoExternalSendersExtension
+            | ValidationError::KeyPackageVerifyError(_)
+            | ValidationError::UpdatePathError(_)
+            | ValidationError::InvalidLeafNodeSignature
+            | ValidationError::InvalidLeafNodeSourceType
+            | ValidationError::InvalidSenderType
+            | ValidationError::CommitterIncludedOwnUpdate
+            | ValidationError::InvalidAddProposalCiphersuite
+            | ValidationError::CannotDecryptOwnMessage
+            | ValidationError::ExternalCommitValidation(_) => "validation",
+        },
+        ProcessMessageError::LibraryError(_)
+        | ProcessMessageError::StorageError(_)
+        | ProcessMessageError::IncompatibleWireFormat
+        | ProcessMessageError::GroupStateError(_)
+        | ProcessMessageError::InvalidCommit(_)
+        | ProcessMessageError::UnauthorizedExternalApplicationMessage
+        | ProcessMessageError::UnauthorizedExternalCommitMessage
+        | ProcessMessageError::UnsupportedProposalType => "other",
+    }
+}
+
 /// Manages MLS groups for encrypted messaging.
 pub struct GroupManager {
     /// Storage backend for persisting group state.
@@ -427,7 +499,7 @@ impl GroupManager {
                             SecretTreeError::TooDistantInTheFuture,
                         ),
                     )) => MlsError::SessionDesync(e.to_string()),
-                    _ => MlsError::Decryption(e.to_string()),
+                    _ => MlsError::Decryption(format!("{}: {e}", decryption_detail(&e))),
                 }
             })?;
 
@@ -1143,6 +1215,39 @@ mod tests {
     use super::*;
     use crate::storage::InMemoryStorage;
     use crate::storage_adapter::MlsStorageAdapter;
+
+    /// Every name the classifier writes is one the reader accepts. A name
+    /// missing from the list reads back as no detail at all, silently.
+    #[test]
+    fn every_decryption_detail_is_on_the_list() {
+        use crate::error::DECRYPTION_DETAILS;
+        let unable = |d| {
+            ProcessMessageError::<StorageError>::ValidationError(ValidationError::UnableToDecrypt(
+                d,
+            ))
+        };
+        let errors = [
+            unable(MessageDecryptionError::AeadError),
+            unable(MessageDecryptionError::GenerationOutOfBound),
+            unable(MessageDecryptionError::MalformedContent),
+            unable(MessageDecryptionError::WrongWireFormat),
+            unable(MessageDecryptionError::SecretTreeError(
+                SecretTreeError::TooDistantInThePast,
+            )),
+            unable(MessageDecryptionError::SecretTreeError(
+                SecretTreeError::SecretReuseError,
+            )),
+            unable(MessageDecryptionError::SecretTreeError(
+                SecretTreeError::IndexOutOfBounds,
+            )),
+            ProcessMessageError::ValidationError(ValidationError::WrongGroupId),
+            ProcessMessageError::IncompatibleWireFormat,
+        ];
+        for err in &errors {
+            let name = decryption_detail(err);
+            assert!(DECRYPTION_DETAILS.contains(&name), "{name} is not listed");
+        }
+    }
 
     fn create_test_group_manager() -> GroupManager {
         let storage = Arc::new(InMemoryStorage::new());

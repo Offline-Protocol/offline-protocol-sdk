@@ -82,6 +82,19 @@ enum FreshnessVerdict {
     Refused,
 }
 
+/// How far past this device's clock a session-building frame's stamp may set
+/// the spent mark (`note_session_frame_stamp`). Covers ordinary skew between
+/// two devices; bounds how long a peer whose clock was set back is locked
+/// out of resetting.
+pub(crate) const SPENT_MARK_CLOCK_TOLERANCE_MS: i64 = 5 * 60 * 1000;
+
+/// How long after a session is built a `no_session` frame older than the
+/// frame that built it is refused, whatever the clamp of the spent mark
+/// allowed (`no_session_predates_session`). Long enough for a first-contact
+/// push to arrive behind the Welcome it crossed; short enough that a peer
+/// whose clock was set back is locked out for at most this long.
+pub(crate) const SESSION_BUILD_STAMP_WINDOW: Duration = Duration::from_secs(10 * 60);
+
 impl OfflineProtocol {
     /// Builds the canonical signing payload a control frame is authenticated
     /// over: `CTRL_SIGN_DOMAIN` followed by sender, message id, recipient and
@@ -1494,6 +1507,66 @@ impl OfflineProtocol {
         self.control_reset_watermark
             .get(peer_id)
             .is_none_or(|seen| signed_ms > *seen)
+    }
+
+    /// Moves the spent mark up to the signed stamp of the frame a session
+    /// with `peer_id` was built from, never down: the key package it was
+    /// created from, or the Welcome it was joined from.
+    ///
+    /// Invariant: a destructive directive (a `session_reset`, or a
+    /// `no_session` key package) is acted on only when it is newer than the
+    /// frame that built the current session. Older, it predates the session
+    /// it would destroy: a first-contact push carried slowly through the
+    /// mesh, or a recording. Marking only the resets acted on left such a
+    /// frame unspent and able to tear a healthy session down. The stamps are
+    /// the peer's own clock, so skew between the two devices does not enter.
+    ///
+    /// Only those frames, and not every key package or Welcome, because each
+    /// move is a secure-storage write. And never more than
+    /// [`SPENT_MARK_CLOCK_TOLERANCE_MS`] past this device's own clock: the
+    /// mark is durable, so a stamp from a peer whose clock ran fast and was
+    /// then set back would refuse that peer's every reset and `no_session`
+    /// teardown until its clock caught up, up to the two days the freshness
+    /// window admits, with neither side able to heal meanwhile.
+    ///
+    /// The tolerance, rather than our clock itself, because the two clocks
+    /// differ by ordinary skew. Clamped at our clock, a receiver running a
+    /// few seconds slow set the mark below the peer's own stamp, and an
+    /// honest `no_session` push the peer sent just before building the
+    /// session, delivered late, then tore that session down. Within the
+    /// tolerance the peer's stamp is kept as it is; past it, a peer whose
+    /// clock is set back is locked out for at most the tolerance.
+    pub(crate) fn note_session_frame_stamp(&mut self, peer_id: &str, signed_ms: i64) {
+        if !self.session_build_stamps.contains_key(peer_id)
+            && self.session_build_stamps.len() >= super::MAX_REKEY_TRACKED_PEERS
+        {
+            self.session_build_stamps.clear();
+        }
+        self.session_build_stamps
+            .insert(peer_id.to_string(), (signed_ms, Instant::now()));
+        let stamp = signed_ms.min(Utc::now().timestamp_millis() + SPENT_MARK_CLOCK_TOLERANCE_MS);
+        if self.reset_is_unspent(peer_id, stamp) {
+            self.record_reset_spent(peer_id, stamp);
+        }
+    }
+
+    /// Whether a `no_session` frame stamped `signed_ms` is older than the
+    /// frame our session with `peer_id` was built from, judged on the
+    /// unclamped stamp for [`SESSION_BUILD_STAMP_WINDOW`] after the build.
+    ///
+    /// The spent mark is clamped to five minutes past our clock, so with more
+    /// skew than that it sits below the building frame's stamp. A first-contact
+    /// key package the peer sent just before its Welcome, which carries
+    /// `no_session` because the peer held none yet, then arrived behind the
+    /// Welcome and tore down the session it had just built. Both stamps are
+    /// the peer's own clock, so this comparison holds at any skew. A peer that
+    /// really lost the session re-pushes with a newer stamp and is answered.
+    pub(crate) fn no_session_predates_session(&self, peer_id: &str, signed_ms: i64) -> bool {
+        self.session_build_stamps
+            .get(peer_id)
+            .is_some_and(|(built, at)| {
+                at.elapsed() < SESSION_BUILD_STAMP_WINDOW && signed_ms <= *built
+            })
     }
 
     /// Records a session reset as spent, in memory and durably.

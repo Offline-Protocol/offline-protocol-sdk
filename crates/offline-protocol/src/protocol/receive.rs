@@ -1621,6 +1621,12 @@ impl OfflineProtocol {
                             error_code = classification.code(),
                             "Failed to decrypt media chunk; withholding ACK so the transfer can be resent"
                         );
+                        // As on the text path: a split fails here on every
+                        // chunk, and a pair that only exchanges media would
+                        // otherwise never ask, its transfers stalling for good.
+                        if group_id.starts_with("session:") {
+                            self.request_session_corroboration(sender);
+                        }
                         let kind = DecryptionFailureKind::from_mls_error(&e);
                         self.emit_mls_decryption_failed(
                             sender,
@@ -1638,8 +1644,9 @@ impl OfflineProtocol {
                                 sender.to_string(),
                                 Self::decryption_failure_code_from_kind(kind),
                                 format!(
-                                    "encrypted media chunk failed to decrypt ({}); its file transfer is stalled until the sender resends",
-                                    classification.code()
+                                    "encrypted media chunk failed to decrypt ({}{}); its file transfer is stalled until the sender resends",
+                                    classification.code(),
+                                    e.decryption_detail().map(|d| format!(", {d}")).unwrap_or_default()
                                 ),
                             ));
                         }
@@ -1652,6 +1659,11 @@ impl OfflineProtocol {
                             error_code = classification.code(),
                             "Failed to decrypt media chunk, dropping"
                         );
+                        // As in the recoverable arm: asking destroys nothing,
+                        // and with recovery off a split is otherwise never found.
+                        if group_id.starts_with("session:") {
+                            self.request_session_corroboration(sender);
+                        }
                         let kind = DecryptionFailureKind::from_mls_error(&e);
                         self.emit_mls_decryption_failed(
                             sender,
@@ -1670,8 +1682,9 @@ impl OfflineProtocol {
                                 sender.to_string(),
                                 Self::decryption_failure_code_from_kind(kind),
                                 format!(
-                                    "encrypted media chunk failed to decrypt ({}); its file transfer cannot complete",
-                                    classification.code()
+                                    "encrypted media chunk failed to decrypt ({}{}); its file transfer cannot complete",
+                                    classification.code(),
+                                    e.decryption_detail().map(|d| format!(", {d}")).unwrap_or_default()
                                 ),
                             ));
                         }

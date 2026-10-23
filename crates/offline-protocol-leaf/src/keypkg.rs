@@ -121,6 +121,7 @@ pub(crate) fn payload(
             .unwrap_or(u64::MAX),
         timestamp_ms: 0,
         session_reset,
+        no_session: false,
         wire_versions: alloc::vec![WIRE_VERSION_V1],
         env_versions: alloc::vec![MLS_ENVELOPE_COMPACT_V1],
         rich_versions: Vec::new(),

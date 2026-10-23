@@ -1877,6 +1877,7 @@ fn feed_key_package(protocol: &mut OfflineProtocol, sender: &str, wire_versions:
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions,
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -1959,6 +1960,7 @@ fn feed_key_package_with_env(protocol: &mut OfflineProtocol, sender: &str, env_v
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions,
         rich_versions: Vec::new(),
@@ -2157,6 +2159,7 @@ pub(crate) fn feed_key_package_with_capabilities(
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions,
@@ -2278,6 +2281,7 @@ fn feed_key_package_with_caps(
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions,
         rich_versions,
@@ -2422,6 +2426,7 @@ fn key_package_message_with_nostr_pubkey(
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -2759,6 +2764,7 @@ fn feed_key_package_with_data(
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -3146,6 +3152,7 @@ fn peer_undecryptable_ack_capability_is_learned_and_survives_restart() {
             remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
             timestamp_ms: 0,
             session_reset: false,
+            no_session: false,
             wire_versions: Vec::new(),
             env_versions: Vec::new(),
             rich_versions: Vec::new(),
@@ -3943,6 +3950,7 @@ fn test_process_internal_message_key_package() {
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 12345,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -15891,6 +15899,7 @@ fn feed_session_reset_key_package(
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: true,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -20993,6 +21002,7 @@ fn test_lamport_clock_merge_on_internal_message() {
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 12345,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -21206,6 +21216,7 @@ fn test_key_package_remaining_lifetime_ms() {
         remaining_lifetime_ms: 0,
         timestamp_ms: 12345,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -21293,6 +21304,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             remaining_lifetime_ms: 60 * 60 * 1000,
             timestamp_ms: 0,
             session_reset: false,
+            no_session: false,
             wire_versions: Vec::new(),
             env_versions: Vec::new(),
             rich_versions: Vec::new(),
@@ -21383,6 +21395,7 @@ fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
         remaining_lifetime_ms: 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -21436,6 +21449,7 @@ fn test_received_key_package_lifetime_is_clamped() {
         remaining_lifetime_ms: u64::MAX, // attacker claims a maximal lifetime
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -22990,6 +23004,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             remaining_lifetime_ms: 60 * 60 * 1000,
             timestamp_ms: 0,
             session_reset: false,
+            no_session: false,
             wire_versions: Vec::new(),
             env_versions: Vec::new(),
             rich_versions: Vec::new(),
@@ -40987,6 +41002,7 @@ fn key_package_frame_body(sender: &str, session_reset: bool, ctrl_versions: Vec<
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -42318,6 +42334,19 @@ fn a_confirmation_probe_is_withdrawn_when_nothing_could_supersede_it() {
     assert!(!alice.confirmation_probe_outstanding.contains_key(&bob));
     assert!(!alice.confirmation_probe_superseded.contains_key(&bob));
 
+    // The rest needs a session again: a probe with no corroboration to carry
+    // is not sent at all.
+    {
+        let bob_manager =
+            crate::test_identity::manager_for("bob", Arc::new(crate::mls::InMemoryStorage::new()));
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        manager
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
+            .unwrap();
+        manager.create_session(&id("bob")).unwrap();
+    }
+
     // A full ACK tracker holds the probe for the retry queue instead of
     // failing its send, so its id still comes back and the next probe can
     // supersede it: exactly one probe stays queued, and it is the tracked one.
@@ -42756,6 +42785,7 @@ fn the_ordinary_handshake_starts_a_latency_without_any_session_missing() {
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -44237,5 +44267,1177 @@ fn a_full_outbox_refuses_on_a_tie() {
     assert_eq!(
         capacity_failures(&events),
         vec![refused.as_str().to_string()]
+    );
+}
+
+/// The two users of the split-session tests, lower address first. The lower
+/// side is the both-create owner (it keeps its group); the higher adopts.
+fn split_pair() -> (&'static str, &'static str) {
+    let (a, b) = ("alice", "bob");
+    if id(a).parse::<offline_protocol_core::Address>().unwrap()
+        < id(b).parse::<offline_protocol_core::Address>().unwrap()
+    {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+fn received_contents(protocol: &mut OfflineProtocol) -> Arc<Mutex<Vec<String>>> {
+    let rx: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let h = Arc::clone(&rx);
+    protocol.on_event(move |e| {
+        if let Event::MessageReceived { content, .. } = e {
+            h.lock().unwrap().push(content);
+        }
+    });
+    rx
+}
+
+/// Both sides create a group for the slot at once, and the owner's Welcome
+/// to the adopter is lost while the adopter's reaches the owner. The owner
+/// keeps its group, as the tiebreak says. Leaves both sides' first message
+/// queued and nothing in flight.
+fn both_create_losing_the_owners_welcome(
+    owner: &mut OfflineProtocol,
+    owner_h: &MockTransport,
+    adopter: &mut OfflineProtocol,
+    adopter_h: &MockTransport,
+) {
+    let (lo, hi) = split_pair();
+    let package = |p: &OfflineProtocol| {
+        let m = p.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap().key_package_data
+    };
+    let expires = Utc::now().timestamp_millis() as u64 + 60_000;
+    let (owner_kp, adopter_kp) = (package(owner), package(adopter));
+    owner.pending_key_packages.insert(
+        id(hi),
+        ReceivedKeyPackage {
+            key_package_data: adopter_kp,
+            local_expires_at_ms: expires,
+        },
+    );
+    adopter.pending_key_packages.insert(
+        id(lo),
+        ReceivedKeyPackage {
+            key_package_data: owner_kp,
+            local_expires_at_ms: expires,
+        },
+    );
+    owner
+        .send_message(&id(hi), "from-owner", None, None::<String>)
+        .unwrap();
+    adopter
+        .send_message(&id(lo), "from-adopter", None, None::<String>)
+        .unwrap();
+
+    owner_h.clear_sent_messages();
+    for m in adopter_h.sent_messages() {
+        owner_h.queue_message_from(m, id(hi));
+    }
+    adopter_h.clear_sent_messages();
+    while owner.receive_message().is_some() {}
+    // The owner's answers (an acknowledgement of the adopter's probe) are
+    // lost with its Welcome, so each test chooses what reaches whom next.
+    owner_h.clear_sent_messages();
+    assert!(
+        owner.both_create_awaiting_decrypt.contains(&id(hi)),
+        "precondition: the owner kept its own group"
+    );
+}
+
+/// The split session. Before corroboration, the owner's plaintext probe
+/// confirmed the adopter's own group, the adopter flushed under it, and every
+/// frame failed at the owner as an ordinary decrypt failure, which nothing
+/// re-keys on. Now the probe's tag does not match, the adopter does not
+/// confirm, and it heals: both first messages arrive, then a fresh one each
+/// way.
+#[test]
+fn a_both_create_race_that_loses_the_owners_welcome_heals_rather_than_splits() {
+    let (lo, hi) = split_pair();
+    let (mut owner, owner_h) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    let owner_rx = received_contents(&mut owner);
+    let adopter_rx = received_contents(&mut adopter);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+
+    both_create_losing_the_owners_welcome(&mut owner, &owner_h, &mut adopter, &adopter_h);
+
+    owner.send_session_confirmation_probe(&id(hi), "test");
+    let probe = owner_h.sent_messages();
+    owner_h.clear_sent_messages();
+    for m in probe {
+        adopter_h.queue_message_from(m, id(lo));
+    }
+    while adopter.receive_message().is_some() {}
+    assert!(
+        !adopter.confirmed_sessions.contains(&id(lo)),
+        "a probe from a peer holding another group must not confirm ours"
+    );
+
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+    owner
+        .send_message(&id(hi), "healed-owner", None, None::<String>)
+        .unwrap();
+    adopter
+        .send_message(&id(lo), "healed-adopter", None, None::<String>)
+        .unwrap();
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+
+    let adopter_got = adopter_rx.lock().unwrap().clone();
+    let owner_got = owner_rx.lock().unwrap().clone();
+    for (got, want) in [
+        (&adopter_got, "from-owner"),
+        (&adopter_got, "healed-owner"),
+        (&owner_got, "from-adopter"),
+        (&owner_got, "healed-adopter"),
+    ] {
+        assert!(got.iter().any(|c| c == want), "{want} missing from {got:?}");
+    }
+}
+
+/// A corroborated probe is group-aware proof, as a decrypt is, so it
+/// confirms a both-create owner, which before only a decrypt could. A probe
+/// with no corroboration, from an older peer, is still refused there.
+#[test]
+fn a_corroborated_probe_confirms_a_both_create_owner_and_a_bare_one_does_not() {
+    let (lo, hi) = split_pair();
+    let (mut owner, owner_h) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+
+    let adopter_kp = {
+        let m = adopter.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap().key_package_data
+    };
+    owner.pending_key_packages.insert(
+        id(hi),
+        ReceivedKeyPackage {
+            key_package_data: adopter_kp,
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+    owner
+        .send_message(&id(hi), "hello", None, None::<String>)
+        .unwrap();
+    for m in owner_h.sent_messages() {
+        adopter_h.queue_message_from(m, id(lo));
+    }
+    owner_h.clear_sent_messages();
+    while adopter.receive_message().is_some() {}
+    adopter_h.clear_sent_messages();
+    assert!(adopter.has_mls_session(&id(lo)).unwrap());
+    owner.mark_both_create_awaiting_decrypt(&id(hi));
+
+    let bare = signed_frame(&id(hi), &id(lo), internal_prefixes::SESSION_CONFIRM_PROBE);
+    let _ = owner.process_internal_message(&bare);
+    assert!(
+        !owner.confirmed_sessions.contains(&id(hi)),
+        "a bare probe must not confirm a both-create owner"
+    );
+
+    adopter.send_session_confirmation_probe(&id(lo), "test");
+    for m in adopter_h.sent_messages() {
+        owner_h.queue_message_from(m, id(hi));
+    }
+    while owner.receive_message().is_some() {}
+    assert!(
+        owner.confirmed_sessions.contains(&id(hi)),
+        "a corroborated probe must confirm the owner"
+    );
+}
+
+/// A split between two sides that have both confirmed, as an older peer's
+/// plaintext confirmation or a restored store leaves one. No confirmation
+/// probe runs on a confirmed session, so before corroboration on failure
+/// every frame failed for the life of the pair. Now the first failure asks,
+/// the tags disagree, and the greater side heals.
+#[test]
+fn a_split_between_two_confirmed_sides_heals_on_the_first_failed_frame() {
+    let (lo, hi) = split_pair();
+    let (mut owner, owner_h) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    let owner_rx = received_contents(&mut owner);
+    let adopter_rx = received_contents(&mut adopter);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+
+    both_create_losing_the_owners_welcome(&mut owner, &owner_h, &mut adopter, &adopter_h);
+    owner.clear_both_create_awaiting_decrypt(&id(hi));
+    owner
+        .confirm_session_state(&id(hi), "decrypt_success")
+        .unwrap();
+    adopter
+        .confirm_session_state(&id(lo), "decrypt_success")
+        .unwrap();
+    owner.flush_pending_messages(&id(hi)).unwrap();
+    adopter.flush_pending_messages(&id(lo)).unwrap();
+
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+    owner
+        .send_message(&id(hi), "healed-owner", None, None::<String>)
+        .unwrap();
+    adopter
+        .send_message(&id(lo), "healed-adopter", None, None::<String>)
+        .unwrap();
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+
+    let adopter_got = adopter_rx.lock().unwrap().clone();
+    let owner_got = owner_rx.lock().unwrap().clone();
+    for (got, want) in [
+        (&adopter_got, "healed-owner"),
+        (&owner_got, "healed-adopter"),
+    ] {
+        assert!(got.iter().any(|c| c == want), "{want} missing from {got:?}");
+    }
+}
+
+/// Makes `protocol`'s next key package re-push to `peer` due now.
+fn make_key_package_repush_due(protocol: &mut OfflineProtocol, peer: &str) {
+    let long_ago = offline_protocol_core::time::Instant::now()
+        .checked_sub(offline_protocol_core::time::Duration::from_secs(3600))
+        .unwrap();
+    protocol
+        .key_package_sent_to
+        .insert(peer.to_string(), (long_ago, 0));
+}
+
+/// A re-key whose reset frame is lost leaves one side with no session and
+/// the other with one it will keep for good. Before `no_session`, the side
+/// without one re-pushed a plain key package, the holder refreshed its copy
+/// and kept its session, and the pair stayed split. Now the re-push says the
+/// sender holds no session, the holder drops its own and rebuilds.
+#[test]
+fn a_lost_reset_push_heals_on_the_next_repush() {
+    let (mut alice, alice_h) = make_encrypted_protocol("alice");
+    let (mut bob, bob_h) = make_encrypted_protocol("bob");
+    let alice_rx = received_contents(&mut alice);
+    let bob_rx = received_contents(&mut bob);
+    alice.start().unwrap();
+    bob.start().unwrap();
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+    // A pair that held a session has exchanged key packages, so each signs
+    // the freshness-bound payload at the other.
+    alice.peer_ctrl_freshness.insert(id("bob"));
+    bob.peer_ctrl_freshness.insert(id("alice"));
+
+    assert!(alice.rekey_session(&id("bob")).unwrap());
+    alice_h.clear_sent_messages();
+    assert!(!alice.has_mls_session(&id("bob")).unwrap());
+    assert!(bob.has_mls_session(&id("alice")).unwrap());
+
+    alice
+        .send_message(&id("bob"), "queued-at-alice", None, None::<String>)
+        .unwrap();
+    make_key_package_repush_due(&mut alice, &id("bob"));
+    alice.rearm_key_package_for_peer(&id("bob"));
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+
+    bob.send_message(&id("alice"), "healed-bob", None, None::<String>)
+        .unwrap();
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+
+    let bob_got = bob_rx.lock().unwrap().clone();
+    let alice_got = alice_rx.lock().unwrap().clone();
+    assert!(
+        bob_got.iter().any(|c| c == "queued-at-alice"),
+        "queued-at-alice missing from {bob_got:?}"
+    );
+    assert!(
+        alice_got.iter().any(|c| c == "healed-bob"),
+        "healed-bob missing from {alice_got:?}"
+    );
+}
+
+/// The other half of the rule: a peer with no session that is still
+/// offering the package our Welcome was built on has not processed that
+/// Welcome, so it is sent again and our session is kept. Tearing down here
+/// would destroy a replacement whose Welcome is merely in flight.
+#[test]
+fn a_peer_still_offering_our_welcomes_package_gets_the_welcome_again() {
+    let (mut alice, alice_h) = make_encrypted_protocol("alice");
+    let (mut bob, bob_h) = make_encrypted_protocol("bob");
+    let alice_rx = received_contents(&mut alice);
+    alice.start().unwrap();
+    bob.start().unwrap();
+
+    // Alice pushes; Bob builds a session on her package, and his Welcome
+    // (and everything else he sends) is lost.
+    alice.send_key_package_to(&id("bob"), false).unwrap();
+    for m in alice_h.sent_messages() {
+        bob_h.queue_message_from(m, id("alice"));
+    }
+    alice_h.clear_sent_messages();
+    while bob.receive_message().is_some() {}
+    bob_h.clear_sent_messages();
+    let built_at = bob
+        .mls_manager
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .session_established_at_ms(&id("alice"))
+        .unwrap();
+    assert!(built_at.is_some(), "precondition: bob built a session");
+
+    make_key_package_repush_due(&mut alice, &id("bob"));
+    alice.rearm_key_package_for_peer(&id("bob"));
+    for m in alice_h.sent_messages() {
+        bob_h.queue_message_from(m, id("alice"));
+    }
+    alice_h.clear_sent_messages();
+    while bob.receive_message().is_some() {}
+
+    assert!(
+        bob_h
+            .sent_messages()
+            .iter()
+            .any(|m| m.content.starts_with(internal_prefixes::WELCOME)),
+        "bob must send his Welcome again"
+    );
+    let still = bob
+        .mls_manager
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .session_established_at_ms(&id("alice"))
+        .unwrap();
+    assert_eq!(
+        still, built_at,
+        "bob must keep the session the Welcome builds"
+    );
+
+    bob.send_message(&id("alice"), "after-welcome", None, None::<String>)
+        .unwrap();
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+    let alice_got = alice_rx.lock().unwrap().clone();
+    assert!(
+        alice_got.iter().any(|c| c == "after-welcome"),
+        "after-welcome missing from {alice_got:?}"
+    );
+}
+
+/// A `no_session` frame can end in the same teardown as a reset, so it is
+/// held to the same rule: one captured frame is good for one teardown, and a
+/// newer one from the same peer is still honoured.
+#[test]
+fn a_captured_no_session_frame_can_be_spent_exactly_once() {
+    let (mut alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+    let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&proof, None);
+    assert!(bob.signs_freshness_bound_control(&id("alice")));
+
+    let body = key_package_frame_body(&id("alice"), false, Vec::new());
+    let mut payload: KeyPackagePayload =
+        serde_json::from_str(body.strip_prefix(internal_prefixes::KEY_PACKAGE).unwrap()).unwrap();
+    payload.no_session = true;
+    let data = serde_json::to_string(&payload).unwrap();
+    let captured_stamp = Utc::now().timestamp_millis() - 60_000;
+
+    bob.handle_key_package_message(&id("alice"), &data, true, Some(captured_stamp));
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "a peer without a session must make us drop ours"
+    );
+
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+    bob.handle_key_package_message(&id("alice"), &data, true, Some(captured_stamp));
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "a frame already spent must not tear the rebuilt session down"
+    );
+
+    bob.handle_key_package_message(&id("alice"), &data, true, Some(captured_stamp + 1));
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "a newer one must still be honoured"
+    );
+}
+
+/// A `no_session` key package older than the Welcome that built the session
+/// predates that session: a first-contact push carried slowly, or a
+/// recording. It must not tear the session down. One newer than every frame
+/// the peer has sent still does.
+#[test]
+fn a_no_session_frame_older_than_the_session_is_refused() {
+    let (alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&proof, None);
+
+    let bob_kp = {
+        let m = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap()
+    };
+    let welcome = {
+        let m = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        m.import_key_package(&id("bob"), &bob_kp.key_package_data)
+            .unwrap();
+        m.create_session(&id("bob")).unwrap()
+    };
+    let welcome_stamp = Utc::now().timestamp_millis() - 30_000;
+    bob.handle_welcome_message(
+        &id("alice"),
+        &serde_json::to_string(&welcome).unwrap(),
+        Some(welcome_stamp),
+    );
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "precondition: bob joined"
+    );
+
+    let body = key_package_frame_body(&id("alice"), false, Vec::new());
+    let mut payload: KeyPackagePayload =
+        serde_json::from_str(body.strip_prefix(internal_prefixes::KEY_PACKAGE).unwrap()).unwrap();
+    payload.no_session = true;
+    let data = serde_json::to_string(&payload).unwrap();
+
+    bob.handle_key_package_message(&id("alice"), &data, true, Some(welcome_stamp - 1_000));
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "a no_session frame from before the session must not tear it down"
+    );
+
+    bob.handle_key_package_message(&id("alice"), &data, true, Some(welcome_stamp + 1));
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "one newer than the session is the peer saying it lost it"
+    );
+}
+
+/// A probe or acknowledgement whose tag disagrees but that answers no
+/// challenge of ours may be stale (sealed before a heal, retried from an
+/// outbox) or replayed. It must not tear a healthy session down. A probe
+/// like that makes the greater side ask for itself instead, and a healthy
+/// peer's answer agrees.
+#[test]
+fn a_split_shown_by_anything_but_an_answer_to_our_challenge_heals_nothing() {
+    let (lo, hi) = split_pair();
+    let (mut owner, owner_h) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+    establish_confirmed_session(&mut owner, &id(lo), &mut adopter, &id(hi));
+    owner_h.clear_sent_messages();
+    adopter_h.clear_sent_messages();
+    let built_at = adopter
+        .mls_manager
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .session_established_at_ms(&id(lo))
+        .unwrap();
+
+    let nonce = [9u8; 16];
+    let (epoch, _) = adopter
+        .mls_manager
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .session_corroboration(&id(lo), &nonce)
+        .unwrap()
+        .unwrap();
+    let stale = offline_protocol_sealed::SessionCorroboration {
+        epoch,
+        nonce: nonce.to_vec(),
+        tag: vec![0u8; 16],
+    }
+    .to_body()
+    .unwrap();
+
+    adopter.handle_session_confirm_ack(
+        &id(lo),
+        &format!("{}{}", internal_prefixes::SESSION_CONFIRM_ACK, stale),
+    );
+    adopter.handle_session_confirm_probe(
+        &id(lo),
+        &format!("{}{}", internal_prefixes::SESSION_CONFIRM_PROBE, stale),
+    );
+    let still = adopter
+        .mls_manager
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .session_established_at_ms(&id(lo))
+        .unwrap();
+    assert_eq!(
+        still, built_at,
+        "a stale tag must not tear the session down"
+    );
+    assert!(
+        adopter_h.sent_messages().iter().any(|m| m
+            .content
+            .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)),
+        "the greater side must ask with a challenge of its own"
+    );
+
+    // The healthy peer answers the challenge, the tags agree, nothing moves.
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 10);
+    let after = adopter
+        .mls_manager
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .session_established_at_ms(&id(lo))
+        .unwrap();
+    assert_eq!(
+        after, built_at,
+        "a healthy answer must leave the session alone"
+    );
+}
+
+/// Adopting the peer's Welcome gives up our own group, so our outbound
+/// Welcome for it must go. Kept, it named a package the peer never
+/// processed and still offers, and a `no_session` push after a lost reset
+/// was answered with that dead Welcome.
+#[test]
+fn adopting_the_peers_welcome_drops_our_own() {
+    let (lo, hi) = split_pair();
+    let (mut owner, owner_h) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    let owner_rx = received_contents(&mut owner);
+    let adopter_rx = received_contents(&mut adopter);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+
+    // Both create, and every frame arrives: the adopter adopts.
+    let package = |p: &OfflineProtocol| {
+        let m = p.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap().key_package_data
+    };
+    let expires = Utc::now().timestamp_millis() as u64 + 60_000;
+    let (owner_kp, adopter_kp) = (package(&owner), package(&adopter));
+    owner.pending_key_packages.insert(
+        id(hi),
+        ReceivedKeyPackage {
+            key_package_data: adopter_kp,
+            local_expires_at_ms: expires,
+        },
+    );
+    adopter.pending_key_packages.insert(
+        id(lo),
+        ReceivedKeyPackage {
+            key_package_data: owner_kp,
+            local_expires_at_ms: expires,
+        },
+    );
+    owner
+        .send_message(&id(hi), "first-owner", None, None::<String>)
+        .unwrap();
+    adopter
+        .send_message(&id(lo), "first-adopter", None, None::<String>)
+        .unwrap();
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+    assert!(
+        !adopter.welcome_lifecycles.contains_key(&id(lo)),
+        "the adopter's Welcome names a group it gave up"
+    );
+
+    // The owner loses its session, as to a lost reset, and pushes again.
+    owner.manual_mls_delete_session(&id(hi)).unwrap();
+    owner
+        .send_message(&id(hi), "after-loss", None, None::<String>)
+        .unwrap();
+    make_key_package_repush_due(&mut owner, &id(hi));
+    owner.rearm_key_package_for_peer(&id(hi));
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+    adopter
+        .send_message(&id(lo), "after-heal", None, None::<String>)
+        .unwrap();
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+
+    let adopter_got = adopter_rx.lock().unwrap().clone();
+    let owner_got = owner_rx.lock().unwrap().clone();
+    assert!(
+        adopter_got.iter().any(|c| c == "after-loss"),
+        "after-loss missing from {adopter_got:?}"
+    );
+    assert!(
+        owner_got.iter().any(|c| c == "after-heal"),
+        "after-heal missing from {owner_got:?}"
+    );
+}
+
+/// The owner's Welcome is only delayed, not lost, and the owner's answer to
+/// the adopter's challenge overtakes it. The adopter heals by giving up its
+/// own group, so the owner keeps its group and resends the Welcome, and the
+/// delayed one is simply joined. A reset there made the owner rebuild on the
+/// same unconsumed package, and the late Welcome then split the pair again.
+#[test]
+fn a_delayed_owner_welcome_is_joined_and_the_owner_keeps_its_group() {
+    let (lo, hi) = split_pair();
+    let (mut owner, owner_h) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    let owner_rx = received_contents(&mut owner);
+    let adopter_rx = received_contents(&mut adopter);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+
+    let package = |p: &OfflineProtocol| {
+        let m = p.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap().key_package_data
+    };
+    let expires = Utc::now().timestamp_millis() as u64 + 60_000;
+    let (owner_kp, adopter_kp) = (package(&owner), package(&adopter));
+    owner.pending_key_packages.insert(
+        id(hi),
+        ReceivedKeyPackage {
+            key_package_data: adopter_kp,
+            local_expires_at_ms: expires,
+        },
+    );
+    adopter.pending_key_packages.insert(
+        id(lo),
+        ReceivedKeyPackage {
+            key_package_data: owner_kp,
+            local_expires_at_ms: expires,
+        },
+    );
+    owner
+        .send_message(&id(hi), "from-owner", None, None::<String>)
+        .unwrap();
+    adopter
+        .send_message(&id(lo), "from-adopter", None, None::<String>)
+        .unwrap();
+    // Everything the owner sent so far, its Welcome among it, is held back.
+    let delayed = owner_h.sent_messages();
+    owner_h.clear_sent_messages();
+    let owners_group = owner
+        .mls_manager
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .session_established_at_ms(&id(hi))
+        .unwrap();
+
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+    for m in delayed {
+        adopter_h.queue_message_from(m, id(lo));
+    }
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+    owner
+        .send_message(&id(hi), "after-owner", None, None::<String>)
+        .unwrap();
+    adopter
+        .send_message(&id(lo), "after-adopter", None, None::<String>)
+        .unwrap();
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+
+    let still = owner
+        .mls_manager
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .session_established_at_ms(&id(hi))
+        .unwrap();
+    assert_eq!(still, owners_group, "the owner must keep its group");
+    let adopter_got = adopter_rx.lock().unwrap().clone();
+    let owner_got = owner_rx.lock().unwrap().clone();
+    for (got, want) in [
+        (&adopter_got, "from-owner"),
+        (&adopter_got, "after-owner"),
+        (&owner_got, "from-adopter"),
+        (&owner_got, "after-adopter"),
+    ] {
+        assert!(got.iter().any(|c| c == want), "{want} missing from {got:?}");
+    }
+}
+
+/// An unconfirmed session is probed every few seconds, and an answer over a
+/// slow path takes longer than that. Every probe carries the same challenge
+/// until it is answered, so a slow answer is still live; the first answer
+/// retires it.
+#[test]
+fn a_challenge_outlives_the_probes_that_repeat_it() {
+    let (mut alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+
+    let nonce_of = |body: String| {
+        offline_protocol_sealed::SessionCorroboration::parse(&body)
+            .unwrap()
+            .nonce
+    };
+    let first = nonce_of(alice.session_challenge_body(&id("bob")).unwrap());
+    for _ in 0..10 {
+        assert_eq!(
+            nonce_of(alice.session_challenge_body(&id("bob")).unwrap()),
+            first
+        );
+    }
+    assert!(alice.answers_live_challenge(&id("bob"), &first));
+    assert!(
+        !alice.answers_live_challenge(&id("bob"), &first),
+        "the first answer retires the challenge"
+    );
+    assert_ne!(
+        nonce_of(alice.session_challenge_body(&id("bob")).unwrap()),
+        first
+    );
+}
+
+/// Only the frames that built the session move the spent mark. An ordinary
+/// key package stamped by a peer whose clock ran fast must not lock that
+/// peer's later resets out once its clock is set back.
+#[test]
+fn an_ordinary_key_package_does_not_move_the_spent_mark() {
+    let (mut alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+    let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&proof, None);
+
+    let now = Utc::now().timestamp_millis();
+    let refresh = key_package_frame_body(&id("alice"), false, Vec::new());
+    let refresh = refresh
+        .strip_prefix(internal_prefixes::KEY_PACKAGE)
+        .unwrap();
+    bob.handle_key_package_message(&id("alice"), refresh, true, Some(now + 86_400_000));
+    assert!(bob_has_session(&bob, &id("alice")));
+
+    let reset = key_package_frame_body(&id("alice"), true, Vec::new());
+    let reset = reset.strip_prefix(internal_prefixes::KEY_PACKAGE).unwrap();
+    bob.handle_key_package_message(&id("alice"), reset, true, Some(now));
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "a reset after the peer's clock was set back must still be honoured"
+    );
+}
+
+/// The mark never moves past this device's clock. A peer whose clock ran an
+/// hour fast when it built the session, and was then corrected, must still
+/// be able to reset it: before the clamp its every reset was refused for
+/// that hour, and a peer that had already dropped its session could not
+/// heal.
+#[test]
+fn a_peer_clock_set_back_after_building_the_session_can_still_reset_it() {
+    let (alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&proof, None);
+
+    let bob_kp = {
+        let m = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap()
+    };
+    let welcome = {
+        let m = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        m.import_key_package(&id("bob"), &bob_kp.key_package_data)
+            .unwrap();
+        m.create_session(&id("bob")).unwrap()
+    };
+    let now = Utc::now().timestamp_millis();
+    bob.handle_welcome_message(
+        &id("alice"),
+        &serde_json::to_string(&welcome).unwrap(),
+        Some(now + 3_600_000),
+    );
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "precondition: bob joined"
+    );
+
+    let reset = key_package_frame_body(&id("alice"), true, Vec::new());
+    let reset = reset.strip_prefix(internal_prefixes::KEY_PACKAGE).unwrap();
+    let past_tolerance = now + crate::protocol::security::SPENT_MARK_CLOCK_TOLERANCE_MS + 1_000;
+    bob.handle_key_package_message(&id("alice"), reset, true, Some(past_tolerance));
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "a reset from the corrected clock must be honoured past the tolerance, not an hour later"
+    );
+}
+
+/// A `no_session` package this side cannot compare with its retained
+/// Welcome (here, bytes that are not a key package) proves nothing, so the
+/// session is kept: a teardown there could leave neither side a session.
+#[test]
+fn a_no_session_package_we_cannot_compare_keeps_our_session() {
+    let (alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&proof, None);
+
+    // Bob builds the session on alice's real package and keeps his Welcome.
+    let alice_kp = {
+        let m = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap()
+    };
+    let mut payload: KeyPackagePayload = serde_json::from_str(
+        key_package_frame_body(&id("alice"), false, Vec::new())
+            .strip_prefix(internal_prefixes::KEY_PACKAGE)
+            .unwrap(),
+    )
+    .unwrap();
+    payload.key_package_data = alice_kp.key_package_data.clone();
+    let now = Utc::now().timestamp_millis();
+    bob.handle_key_package_message(
+        &id("alice"),
+        &serde_json::to_string(&payload).unwrap(),
+        true,
+        Some(now - 10_000),
+    );
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "precondition: bob built a session"
+    );
+    assert!(bob.welcome_lifecycles.contains_key(&id("alice")));
+
+    payload.key_package_data = vec![1, 2, 3, 4];
+    payload.no_session = true;
+    bob.handle_key_package_message(
+        &id("alice"),
+        &serde_json::to_string(&payload).unwrap(),
+        true,
+        Some(now),
+    );
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "a package that cannot be compared must not tear the session down"
+    );
+}
+
+/// A successful decrypt shows the groups agree now, so the challenge out is
+/// retired: an answer the peer sealed under a group it has since left must
+/// not find it live.
+#[test]
+fn a_successful_decrypt_retires_the_challenge() {
+    let (mut alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, bob_h) = make_encrypted_protocol("bob");
+    alice.start().unwrap();
+    bob.start().unwrap();
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+
+    let challenge = offline_protocol_sealed::SessionCorroboration::parse(
+        &alice.session_challenge_body(&id("bob")).unwrap(),
+    )
+    .unwrap()
+    .nonce;
+    bob.send_message(&id("alice"), "hello", None, None::<String>)
+        .unwrap();
+    let sealed = bob_h
+        .sent_messages()
+        .into_iter()
+        .rev()
+        .find(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .expect("bob sealed a message");
+    let _ = alice.process_internal_message(&sealed);
+    assert!(
+        !alice.answers_live_challenge(&id("bob"), &challenge),
+        "a decrypt must retire the challenge"
+    );
+}
+
+/// Ordinary skew must not reopen the stale-flag hole. The peer's clock runs
+/// two minutes ahead of ours; it pushed `no_session` a minute before it built
+/// the session, and that push arrives late. Its stamp is older than the
+/// Welcome's, so it is refused, which it was not when the mark was clamped
+/// at our own clock.
+#[test]
+fn a_late_no_session_push_is_refused_under_ordinary_clock_skew() {
+    let (alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&proof, None);
+
+    let bob_kp = {
+        let m = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap()
+    };
+    let welcome = {
+        let m = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        m.import_key_package(&id("bob"), &bob_kp.key_package_data)
+            .unwrap();
+        m.create_session(&id("bob")).unwrap()
+    };
+    let now = Utc::now().timestamp_millis();
+    let alices_now = now + 120_000;
+    bob.handle_welcome_message(
+        &id("alice"),
+        &serde_json::to_string(&welcome).unwrap(),
+        Some(alices_now),
+    );
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "precondition: bob joined"
+    );
+
+    let mut payload: KeyPackagePayload = serde_json::from_str(
+        key_package_frame_body(&id("alice"), false, Vec::new())
+            .strip_prefix(internal_prefixes::KEY_PACKAGE)
+            .unwrap(),
+    )
+    .unwrap();
+    payload.no_session = true;
+    bob.handle_key_package_message(
+        &id("alice"),
+        &serde_json::to_string(&payload).unwrap(),
+        true,
+        Some(alices_now - 60_000),
+    );
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "a push older than the Welcome must be refused under ordinary skew"
+    );
+}
+
+/// A media chunk that fails an ordinary decrypt asks for corroboration as a
+/// text frame does, so a pair exchanging only media still finds a split.
+#[test]
+fn a_failed_media_chunk_asks_the_peer_to_corroborate() {
+    use crate::media_envelope::{decode_media_envelope, encode_media_envelope};
+
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    alice
+        .send_media(&id("bob"), vec![3u8; 512], "s.bin", ContentType::File, None)
+        .unwrap();
+    let chunk_wire = alice_handle
+        .sent_messages()
+        .into_iter()
+        .find(|m| m.content_type == ContentType::FileChunk)
+        .expect("alice should have sent a media chunk");
+    let mut corrupt = chunk_wire.clone();
+    let mut envelope = decode_media_envelope(chunk_wire.binary_content.as_ref().unwrap()).unwrap();
+    envelope.ciphertext = vec![0u8; 24];
+    corrupt.binary_content = Some(encode_media_envelope(
+        &envelope,
+        crate::media_envelope::MEDIA_ENVELOPE_VERSION_MLS_V1,
+    ));
+
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(corrupt);
+    while bob.receive_message().is_some() {}
+    assert!(
+        bob_handle.sent_messages().iter().any(|m| m
+            .content
+            .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)),
+        "a failed chunk must send a corroboration probe"
+    );
+}
+
+/// A decrypt in a multi-party group the pair shares says nothing about their
+/// 1:1 session. It must neither retire the 1:1 challenge, which held a heal
+/// off for as long as the pair kept talking in the group, nor confirm a 1:1
+/// session that may be split.
+#[test]
+fn a_group_decrypt_neither_retires_the_challenge_nor_confirms_the_session() {
+    let (lo, hi) = split_pair();
+    let (mut owner, owner_h) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+    both_create_losing_the_owners_welcome(&mut owner, &owner_h, &mut adopter, &adopter_h);
+
+    let challenge = offline_protocol_sealed::SessionCorroboration::parse(
+        &owner.session_challenge_body(&id(hi)).unwrap(),
+    )
+    .unwrap()
+    .nonce;
+    owner.confirm_session_from_successful_decrypt(&id(hi), "group:shared");
+    assert!(
+        !owner.confirmed_sessions.contains(&id(hi)),
+        "a group decrypt must not confirm the 1:1 session"
+    );
+    assert!(
+        owner.answers_live_challenge(&id(hi), &challenge),
+        "a group decrypt must not retire the 1:1 challenge"
+    );
+}
+
+/// A side that cannot compute its tag sends nothing rather than an empty
+/// body: the peer reads an empty body as an older device and confirms on the
+/// plaintext rules, which is how a split used to confirm. An older peer's
+/// empty probe still gets the empty answer it can read.
+#[test]
+fn an_untaggable_corroboration_is_withheld_not_sent_empty() {
+    let (mut alice, alice_h) = make_encrypted_protocol("alice");
+    alice.start().unwrap();
+    // No session with bob, so no tag can be computed for him.
+    assert_eq!(alice.session_challenge_body(&id("bob")), None);
+    let probe = offline_protocol_sealed::SessionCorroboration {
+        epoch: 1,
+        nonce: vec![5u8; 16],
+        tag: vec![6u8; 16],
+    };
+    assert_eq!(alice.session_answer_body(&id("bob"), Some(&probe)), None);
+    assert_eq!(
+        alice.session_answer_body(&id("bob"), None),
+        Some(String::new())
+    );
+
+    alice_h.clear_sent_messages();
+    alice.send_session_confirmation_probe(&id("bob"), "test");
+    assert!(
+        !alice_h.sent_messages().iter().any(|m| m
+            .content
+            .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)),
+        "a probe with no challenge to carry must not be sent"
+    );
+}
+
+/// With crypto recovery switched off a failed decrypt is dropped and
+/// acknowledged, but it still asks: asking destroys nothing, and a split
+/// between two confirmed sides is otherwise never found.
+#[test]
+fn a_split_heals_with_crypto_recovery_switched_off() {
+    let (lo, hi) = split_pair();
+    let (mut owner, owner_h) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    owner.config.encryption.crypto_recovery_enabled = false;
+    adopter.config.encryption.crypto_recovery_enabled = false;
+    let owner_rx = received_contents(&mut owner);
+    let adopter_rx = received_contents(&mut adopter);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+
+    both_create_losing_the_owners_welcome(&mut owner, &owner_h, &mut adopter, &adopter_h);
+    owner.clear_both_create_awaiting_decrypt(&id(hi));
+    owner
+        .confirm_session_state(&id(hi), "decrypt_success")
+        .unwrap();
+    adopter
+        .confirm_session_state(&id(lo), "decrypt_success")
+        .unwrap();
+    owner.flush_pending_messages(&id(hi)).unwrap();
+    adopter.flush_pending_messages(&id(lo)).unwrap();
+
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+    owner
+        .send_message(&id(hi), "healed-owner", None, None::<String>)
+        .unwrap();
+    adopter
+        .send_message(&id(lo), "healed-adopter", None, None::<String>)
+        .unwrap();
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+
+    let adopter_got = adopter_rx.lock().unwrap().clone();
+    let owner_got = owner_rx.lock().unwrap().clone();
+    assert!(
+        adopter_got.iter().any(|c| c == "healed-owner"),
+        "healed-owner missing from {adopter_got:?}"
+    );
+    assert!(
+        owner_got.iter().any(|c| c == "healed-adopter"),
+        "healed-adopter missing from {owner_got:?}"
+    );
+}
+
+/// More skew than the spent mark's five-minute clamp: the peer's clock runs
+/// twenty minutes ahead. Its first-contact key package, sent just before the
+/// Welcome and so carrying `no_session`, arrives behind the Welcome. It is
+/// older than the frame that built the session on the peer's own clock, so it
+/// is refused; the peer's next genuine push is still answered.
+#[test]
+fn a_crossing_first_contact_push_is_refused_at_any_skew() {
+    let (alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&proof, None);
+
+    let bob_kp = {
+        let m = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap()
+    };
+    let welcome = {
+        let m = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        m.import_key_package(&id("bob"), &bob_kp.key_package_data)
+            .unwrap();
+        m.create_session(&id("bob")).unwrap()
+    };
+    let alices_now = Utc::now().timestamp_millis() + 20 * 60 * 1000;
+    bob.handle_welcome_message(
+        &id("alice"),
+        &serde_json::to_string(&welcome).unwrap(),
+        Some(alices_now),
+    );
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "precondition: bob joined"
+    );
+
+    let mut payload: KeyPackagePayload = serde_json::from_str(
+        key_package_frame_body(&id("alice"), false, Vec::new())
+            .strip_prefix(internal_prefixes::KEY_PACKAGE)
+            .unwrap(),
+    )
+    .unwrap();
+    payload.no_session = true;
+    let data = serde_json::to_string(&payload).unwrap();
+    bob.handle_key_package_message(&id("alice"), &data, true, Some(alices_now - 1_000));
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "a push that crossed the Welcome must not tear the session down"
+    );
+    bob.handle_key_package_message(&id("alice"), &data, true, Some(alices_now + 1_000));
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "a later push from a peer that really lost the session is answered"
+    );
+}
+
+/// An answered challenge whose heal the re-key floor holds back asks again,
+/// rather than leaving a quiet confirmed pair split until a frame fails.
+#[test]
+fn a_heal_held_by_the_rekey_floor_asks_again() {
+    let (lo, hi) = split_pair();
+    let (mut owner, _oh) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+    establish_confirmed_session(&mut owner, &id(lo), &mut adopter, &id(hi));
+    assert!(adopter.gives_way_to(&id(lo)));
+    let probes = |h: &MockTransport| {
+        h.sent_messages()
+            .iter()
+            .filter(|m| {
+                m.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
+            })
+            .count()
+    };
+
+    // The ask that draws the answer sets its own limit, as in a real run.
+    adopter.request_session_corroboration(&id(lo));
+    assert!(adopter.claim_rekey_slot(&id(lo)));
+    adopter_h.clear_sent_messages();
+    adopter.heal_split_session(&id(lo), true);
+    assert!(
+        adopter.has_mls_session(&id(lo)).unwrap(),
+        "the floor holds the heal back"
+    );
+    assert_eq!(
+        probes(&adopter_h),
+        0,
+        "an answer now would meet the same floor"
+    );
+    assert!(
+        adopter.corroboration_reask_at.contains_key(&id(lo)),
+        "the held heal schedules its re-ask"
+    );
+
+    // The floor opens: the next tick asks again, past the ask's own limit.
+    let opened = Utc::now() - ChronoDuration::seconds(1);
+    adopter.rekey_due_at.insert(id(lo), opened);
+    adopter.corroboration_reask_at.insert(id(lo), opened);
+    adopter.last_reconciliation_at = None;
+    adopter.run_throttled_reconciliation("test");
+    assert_eq!(
+        probes(&adopter_h),
+        1,
+        "a held heal must ask again once the floor opens"
     );
 }

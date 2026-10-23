@@ -314,7 +314,12 @@ than a false delivery.
 
 **What would close it:** a signed epoch-corroboration exchange before teardown.
 A liveness-only probe does **not** work, because a healthy peer answers and the
-teardown happens anyway.
+teardown happens anyway. The exchange now exists: a confirmation probe and its
+acknowledgement carry an MLS exporter tag under the sender's identity signature
+([ADR 0033](../adr/0033-a-session-is-confirmed-only-by-proof-of-the-same-group.md)).
+It heals the split sessions this trigger cannot see. The epoch-desync re-key
+does not yet wait on it, because that would slow the heal of a genuine fork by
+a probe round trip; gating it is the remaining step.
 
 ### R3. Address collision margin
 

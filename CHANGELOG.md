@@ -95,6 +95,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 - **`account_storage_namespace` no longer needs the `file-store` feature.**
   The browser's store derives its folder with it, and a browser build has no
   POSIX files. It is still re-exported from `offline_protocol::file_store`.
+- **A decrypt failure names its cause.** The `reason` of
+  `message_decryption_failed`, for a message or a media chunk, now carries
+  the OpenMLS failure as a fixed name
+  beside the kind, for example `(InvalidCiphertext, aead)` or
+  `(InvalidCiphertext, too_distant_in_the_past)`. A pair holding two
+  different sessions for one slot fails as `aead` on every frame, where a
+  frame too far behind a healthy session does not, and the two were
+  indistinguishable before. Only names from a closed list are written, so
+  nothing the error renders reaches telemetry. `MlsError::decryption_detail`
+  reads it.
 - **Telemetry counts only acknowledged sends as sent.** An ephemeral message
   is never delivered or failed, so counting it would lower the delivery ratio
   by every game update.
@@ -108,6 +118,42 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A pair no longer splits into two sessions that never decrypt each
+  other.** When both sides created a session at once and the lesser
+  address's Welcome was lost, the greater side kept a group the other never
+  joined, and the other side's plaintext confirmation probe confirmed it.
+  Every message after that failed as `INVALID_CIPHERTEXT`, and nothing healed
+  it, because the two groups sit at the same epoch and the re-key fires only
+  on an epoch mismatch. A probe and its acknowledgement now carry an MLS
+  exporter tag that only a member of the same group computes. A match
+  confirms, including the session owner, which before only a decrypted
+  message could. A mismatch is a split, and the greater side heals it by
+  giving up its own group, so the other side resends its Welcome and keeps
+  its group. It does so only when the mismatch answers a challenge it issued
+  under its current session, so a late or replayed probe can never tear a
+  healthy session down. An older peer sends no tag and keeps the old
+  rules.
+  A split between two sides that had both confirmed is found too: an ordinary
+  decrypt failure on a 1:1 session now sends a probe, at most once per peer
+  every 30 seconds, and the tags decide. The failure itself still tears
+  nothing down. A message decrypted in a multi-party group the pair shares
+  no longer confirms their 1:1 session, which let a split confirm. See
+  [ADR 0033](docs/adr/0033-a-session-is-confirmed-only-by-proof-of-the-same-group.md).
+- **A lost re-key no longer leaves one side without a session for good.**
+  When the reset frame of a re-key or an unblock never arrived, the side that
+  sent it held no session, the other kept its own, and the first side's
+  repeated key packages only refreshed the other's copy. Messages then waited
+  on both sides until they expired. A key package sent while the sender
+  holds no session now says so (`no_session`). It is omitted when false, so
+  a package that does not set it is byte for byte what it was, and an older
+  receiver ignores it where it is set, which is every push from a side
+  holding no session, first contact included. The holder sends its Welcome
+  again when that Welcome was built on the very package offered, since the
+  sender never processed it, and otherwise drops its session and rebuilds,
+  under the same freshness and spent-reset rules as a reset. A flag older
+  than the frame that built the session is refused, and the same rule now
+  refuses a late `session_reset`. A Welcome given up in
+  the both-create tiebreak is discarded, so it is never sent again.
 - **A durable browser node starts in Firefox.** `OfflineNode.start` awaited
   `navigator.storage.persist()`, which Firefox answers by asking the user, so
   the start waited for the prompt (and never finished in a headless

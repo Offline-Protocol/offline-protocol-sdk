@@ -319,6 +319,7 @@ fn key_package_body(sender: &str, svc_versions: Vec<u8>) -> String {
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),

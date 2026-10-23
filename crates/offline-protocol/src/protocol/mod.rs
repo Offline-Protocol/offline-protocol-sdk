@@ -835,6 +835,33 @@ pub struct OfflineProtocol {
     /// action, and a fresh desync after restart simply re-arms it.
     rekey_due_at: HashMap<String, DateTime<Utc>>,
 
+    /// When each peer may next be asked to corroborate a session that is
+    /// failing ordinary decrypts (`request_session_corroboration`). Keyed by
+    /// the wire-claimed sender, so bounded like `rekey_due_at`. In memory
+    /// only: the next failure re-arms it.
+    corroboration_due_at: HashMap<String, DateTime<Utc>>,
+
+    /// The corroboration challenge this side has out to each peer, with the
+    /// session it was issued under (`session_challenge_body`). Only an
+    /// acknowledgement answering it under the current session may heal a
+    /// split. Bounded like `rekey_due_at`. In memory only: an answer arriving
+    /// after a restart is not acted on, and the next challenge asks again.
+    corroboration_challenges: HashMap<String, CorroborationChallenge>,
+
+    /// The signed stamp, unclamped, of the frame each peer's session was built
+    /// from, and when it was noted (`note_session_frame_stamp`). Refuses a
+    /// `no_session` teardown older than that frame for
+    /// `SESSION_BUILD_STAMP_WINDOW` after it, whatever the skew between the
+    /// two clocks. In memory only, and bounded like `rekey_due_at`.
+    session_build_stamps: HashMap<String, (i64, Instant)>,
+
+    /// When to ask each peer again for a corroboration whose heal the re-key
+    /// floor held back: the moment the floor opens. Sent from the
+    /// reconciliation tick (`send_due_corroboration_reasks`), because the ask
+    /// that drew the answer has just set its own limit and an inline ask would
+    /// do nothing. Bounded like `rekey_due_at`. In memory only.
+    corroboration_reask_at: HashMap<String, DateTime<Utc>>,
+
     /// Outbound welcome lifecycle records keyed by peer id.
     welcome_lifecycles: HashMap<String, WelcomeLifecycleRecord>,
 
@@ -1293,6 +1320,10 @@ impl OfflineProtocol {
             retry_drain_tokens: 0.0,
             retry_drain_last: None,
             rekey_due_at: HashMap::new(),
+            corroboration_due_at: HashMap::new(),
+            corroboration_challenges: HashMap::new(),
+            session_build_stamps: HashMap::new(),
+            corroboration_reask_at: HashMap::new(),
             welcome_lifecycles: HashMap::new(),
             pending_connection_requests: HashMap::new(),
             welcome_presence_rescue: HashMap::new(),
@@ -3563,7 +3594,8 @@ impl OfflineProtocol {
 
         // Handle welcome messages (session invitation)
         if let Some(data) = content.strip_prefix(internal_prefixes::WELCOME) {
-            self.handle_welcome_message(sender, data);
+            let freshness = freshness_bound.then(|| message.timestamp.as_millis());
+            self.handle_welcome_message(sender, data, freshness);
             return Some(InternalMessageResult::Consumed);
         }
 

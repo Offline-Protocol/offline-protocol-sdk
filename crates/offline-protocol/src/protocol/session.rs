@@ -19,11 +19,32 @@ use chrono::{Duration as ChronoDuration, Utc};
 use offline_protocol_core::time::{Duration as StdDuration, Instant};
 use offline_protocol_core::{Message, MessageId, MessagePriority};
 use offline_protocol_mls::{MlsManager, WelcomeMessage};
+use offline_protocol_sealed::SessionCorroboration;
 use offline_protocol_transport::TransportType;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
+
+/// The confirmation source for a probe or acknowledgement whose
+/// corroboration matched: group-aware proof, like a successful decrypt.
+pub(super) const SESSION_CORROBORATED: &str = "session_corroborated";
+
+/// What a confirmation probe or acknowledgement says about the session the
+/// two sides hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Corroboration {
+    /// No corroboration in the frame: an older peer, or a leaf. The plaintext
+    /// rules apply as they always did.
+    Absent,
+    /// The same group at the same epoch.
+    Agrees,
+    /// The same epoch and a different group: a split session.
+    Split,
+    /// A different epoch, which the desync path owns, or no session or MLS
+    /// on this side to compare against. Evidence of nothing.
+    Inconclusive,
+}
 
 impl OfflineProtocol {
     // ========================================================================
@@ -551,6 +572,23 @@ impl OfflineProtocol {
     }
 
     pub(super) fn send_session_confirmation_probe(&mut self, peer_id: &str, source_event: &str) {
+        let Some(challenge) = self.session_challenge_body(peer_id) else {
+            debug!(
+                session_or_group_id = %peer_id,
+                source_event = %source_event,
+                "No corroboration to probe with; not probing"
+            );
+            // Next interval rather than the next scan: a tag that keeps
+            // failing would otherwise cost a group load and an export on
+            // every reconciliation pass.
+            let next = Utc::now() + ChronoDuration::seconds(CONFIRMATION_PROBE_INTERVAL_SECS);
+            let due_at = self
+                .confirmation_probe_due_at
+                .entry(peer_id.to_string())
+                .or_insert(next);
+            *due_at = (*due_at).max(next);
+            return;
+        };
         // Superseded, not failed: the new probe asks the same question, so
         // the old one's retry ladder would only stack onto it. Here rather
         // than in the scan because the Welcome fast path sends one too, and
@@ -581,11 +619,8 @@ impl OfflineProtocol {
             .entry(peer_id.to_string())
             .or_insert(next);
         *due_at = (*due_at).max(next);
-        match self.send_internal_message(
-            peer_id,
-            internal_prefixes::SESSION_CONFIRM_PROBE.to_string(),
-            MessagePriority::High,
-        ) {
+        let probe = format!("{}{}", internal_prefixes::SESSION_CONFIRM_PROBE, challenge);
+        match self.send_internal_message(peer_id, probe, MessagePriority::High) {
             Ok(message_id) => {
                 self.confirmation_probe_outstanding
                     .insert(peer_id.to_string(), message_id);
@@ -636,7 +671,8 @@ impl OfflineProtocol {
         // Fast path: nothing pending → skip entirely (no storage I/O)
         let has_pending_work = !self.pending_encrypted_messages.is_empty()
             || !self.confirmation_probe_due_at.is_empty()
-            || !self.confirmation_retry_due_at.is_empty();
+            || !self.confirmation_retry_due_at.is_empty()
+            || !self.corroboration_reask_at.is_empty();
 
         if !has_pending_work {
             return;
@@ -654,6 +690,7 @@ impl OfflineProtocol {
         self.last_reconciliation_at = Some(now);
         self.retry_pending_session_confirmations();
         self.kick_pending_session_reconciliation(source_event);
+        self.send_due_corroboration_reasks();
 
         // A message queued for a session is the standing reason to want one,
         // so a lost key package is re-armed here too, not only on a discovery
@@ -927,12 +964,13 @@ impl OfflineProtocol {
 
     /// Gives back a re-key slot claimed for work that did not happen.
     ///
-    /// Only the application-driven entry may call this, and only when the
-    /// advertisement never left: no teardown happened, so nothing was spent
-    /// and a caller back in range a second later should not be made to wait
-    /// out a window that bounds teardowns. The desync path must **not**, since
-    /// it discards the session whether or not the reset was sent, and that is
-    /// exactly the churn the floor exists to bound.
+    /// Only the application-driven entry and the split heal may call this,
+    /// and only when the advertisement never left: no teardown happened, so
+    /// nothing was spent and a caller back in range a second later should not
+    /// be made to wait out a window that bounds teardowns. Both drop nothing
+    /// unless the push left. The desync path must **not**, since it discards
+    /// the session whether or not the reset was sent, and that is exactly the
+    /// churn the floor exists to bound.
     pub(super) fn release_rekey_slot(&mut self, peer_id: &str) {
         self.rekey_due_at.remove(peer_id);
     }
@@ -1029,7 +1067,9 @@ impl OfflineProtocol {
         // proof of that; a plaintext probe/ack proves only that the peer holds
         // some session (possibly its own, pre-adoption group), so it must not
         // confirm us or we would stop retransmitting and strand the peer.
-        if self.both_create_awaiting_decrypt.contains(peer_id) && source_event != "decrypt_success"
+        if self.both_create_awaiting_decrypt.contains(peer_id)
+            && source_event != "decrypt_success"
+            && source_event != SESSION_CORROBORATED
         {
             return false;
         }
@@ -1047,7 +1087,11 @@ impl OfflineProtocol {
         // `SessionNotReady` — it can receive but never reply. The both-create gate
         // above is preserved, so a both-create owner is still restricted to *only*
         // decrypt_success (a plaintext probe/ack can never confirm it).
-        if source_event == "decrypt_success" {
+        //
+        // A corroborated probe or acknowledgement is the same proof without a
+        // message to carry it: its tag is computable only by a member of this
+        // very group at this epoch (`SessionCorroboration`).
+        if source_event == "decrypt_success" || source_event == SESSION_CORROBORATED {
             return true;
         }
 
@@ -1072,6 +1116,273 @@ impl OfflineProtocol {
                 "confirmation_ack_received" | "confirmation_probe_received" | "confirmation_retry"
             ),
         }
+    }
+
+    /// Whether this device gives way to `remote_id` when the two hold
+    /// competing groups for their slot: the greater address adopts.
+    ///
+    /// Addresses compare as addresses, hash bytes, the order
+    /// `GroupId::for_session` canonicalizes slots with, because the bech32
+    /// charset is not ASCII-monotonic and comparing the rendered strings would
+    /// give a different answer than every other address comparison. Any total
+    /// order converges as long as both peers use the same one; ids that are
+    /// not both addresses keep string order.
+    pub(super) fn gives_way_to(&self, remote_id: &str) -> bool {
+        match (
+            self.local_id.parse::<offline_protocol_core::Address>(),
+            remote_id.parse::<offline_protocol_core::Address>(),
+        ) {
+            (Ok(local), Ok(remote)) => local > remote,
+            _ => self.local_id.as_str() > remote_id,
+        }
+    }
+
+    /// This side's corroboration of its session with `peer_id` over `nonce`,
+    /// as a frame body, or `None` without a session.
+    fn corroboration_body(&self, peer_id: &str, nonce: &[u8]) -> Option<String> {
+        let mls = self.mls_manager.as_ref()?;
+        let manager = mls.read().ok()?;
+        let (epoch, tag) = manager.session_corroboration(peer_id, nonce).ok()??;
+        SessionCorroboration {
+            epoch,
+            nonce: nonce.to_vec(),
+            tag,
+        }
+        .to_body()
+    }
+
+    /// When this side's session with `peer_id` was established, which names
+    /// that session: a new one is stamped on every create and join.
+    fn session_incarnation(&self, peer_id: &str) -> Option<u64> {
+        self.mls_manager
+            .as_ref()
+            .and_then(|mls| mls.read().ok())
+            .and_then(|manager| manager.session_established_at_ms(peer_id).ok())
+            .flatten()
+    }
+
+    /// The body of a confirmation probe to `peer_id`: a challenge. `None`
+    /// when this side cannot compute one (no session, a store read or export
+    /// that failed), and the probe is then not sent. Never an empty body: the
+    /// peer reads that as an older device and confirms on the plaintext
+    /// rules, which is how a split used to confirm.
+    ///
+    /// One challenge per peer and session, carried by every probe until it
+    /// is answered: an unconfirmed session is probed every few seconds, and a
+    /// fresh nonce per probe would retire each challenge before an answer
+    /// over a slow path (the mesh, a relay) could come back, so a split
+    /// there would never heal.
+    pub(super) fn session_challenge_body(&mut self, peer_id: &str) -> Option<String> {
+        let incarnation = self.session_incarnation(peer_id);
+        let nonce = match self.corroboration_challenges.get(peer_id) {
+            Some((nonce, issued_under)) if *issued_under == incarnation => *nonce,
+            _ => *uuid::Uuid::new_v4().as_bytes(),
+        };
+        let body = self.corroboration_body(peer_id, &nonce)?;
+        if !self.corroboration_challenges.contains_key(peer_id)
+            && self.corroboration_challenges.len() >= MAX_REKEY_TRACKED_PEERS
+        {
+            self.corroboration_challenges.clear();
+        }
+        self.corroboration_challenges
+            .insert(peer_id.to_string(), (nonce, incarnation));
+        Some(body)
+    }
+
+    /// The body of an acknowledgement answering `probe`: this side's tag over
+    /// the prober's own nonce, so the prober can tell an answer to its
+    /// challenge from any other frame. Empty for a probe with no
+    /// corroboration, from an older peer that reads no body. `None` when the
+    /// tag cannot be computed, and the acknowledgement is then not sent: an
+    /// empty body would be read as an older device and confirmed on the
+    /// plaintext rules.
+    pub(super) fn session_answer_body(
+        &self,
+        peer_id: &str,
+        probe: Option<&SessionCorroboration>,
+    ) -> Option<String> {
+        match probe {
+            None => Some(String::new()),
+            Some(probe) => self.corroboration_body(peer_id, &probe.nonce),
+        }
+    }
+
+    /// Whether `nonce` is the challenge this side has out to `peer_id`, issued
+    /// under the session it holds now. Spent by the asking: the first answer
+    /// retires it, and the next probe carries a new one.
+    pub(super) fn answers_live_challenge(&mut self, peer_id: &str, nonce: &[u8]) -> bool {
+        let incarnation = self.session_incarnation(peer_id);
+        match self.corroboration_challenges.get(peer_id) {
+            Some((issued, issued_under)) if issued.as_slice() == nonce => {
+                let live = *issued_under == incarnation;
+                self.corroboration_challenges.remove(peer_id);
+                live
+            }
+            _ => false,
+        }
+    }
+
+    /// What a probe or acknowledgement's corroboration from `peer_id` says
+    /// about the session the two sides hold.
+    pub(super) fn corroborate_session(
+        &self,
+        peer_id: &str,
+        theirs: Option<&SessionCorroboration>,
+    ) -> Corroboration {
+        let Some(theirs) = theirs else {
+            return Corroboration::Absent;
+        };
+        let ours = self
+            .mls_manager
+            .as_ref()
+            .and_then(|mls| mls.read().ok())
+            .and_then(|manager| manager.session_corroboration(peer_id, &theirs.nonce).ok())
+            .flatten();
+        match ours {
+            Some((epoch, tag)) if epoch == theirs.epoch && tag == theirs.tag => {
+                Corroboration::Agrees
+            }
+            Some((epoch, _)) if epoch == theirs.epoch => Corroboration::Split,
+            _ => Corroboration::Inconclusive,
+        }
+    }
+
+    /// Asks `peer_id` to corroborate a session that just failed an ordinary
+    /// decrypt, or that a probe showed split, at most once per re-key
+    /// interval.
+    ///
+    /// Invariant: a split between two sides that have both confirmed is
+    /// found by the first frame that fails between them. Confirmation probes
+    /// stop once a session confirms, so without this a split that formed
+    /// another way (an older peer's plaintext confirmation, a restored
+    /// store) would fail every frame for the life of the pair.
+    ///
+    /// A failure only asks; it never tears anything down, which is what ADR
+    /// 0006 requires of a class anyone corrupting a frame can reach. A
+    /// healthy session answers with a matching tag and nothing happens.
+    ///
+    /// Sent apart from the confirmation probes, because a confirmed session
+    /// has none: one tracked as a confirmation probe was withdrawn from the
+    /// outbox by the next reconciliation scan, so a first send that did not
+    /// leave was never retried. A confirmation probe whose own send fails
+    /// still clears every probe queued for the peer, this one included; only
+    /// an unconfirmed session reaches that, and its next probe carries the
+    /// same challenge.
+    pub(super) fn request_session_corroboration(&mut self, peer_id: &str) {
+        let now = Utc::now();
+        if self
+            .corroboration_due_at
+            .get(peer_id)
+            .is_some_and(|due_at| *due_at > now)
+        {
+            return;
+        }
+        // Built first, so a tag that could not be computed this time does not
+        // spend the window: the next failure asks again.
+        let Some(challenge) = self.session_challenge_body(peer_id) else {
+            return;
+        };
+        if !self.corroboration_due_at.contains_key(peer_id)
+            && self.corroboration_due_at.len() >= MAX_REKEY_TRACKED_PEERS
+        {
+            self.corroboration_due_at.clear();
+        }
+        self.corroboration_due_at.insert(
+            peer_id.to_string(),
+            now + ChronoDuration::seconds(REKEY_INTERVAL_SECS),
+        );
+        let probe = format!("{}{}", internal_prefixes::SESSION_CONFIRM_PROBE, challenge);
+        if let Err(err) = self.send_internal_message(peer_id, probe, MessagePriority::High) {
+            debug!(peer_id = %peer_id, error = %err, "Corroboration probe deferred");
+        }
+    }
+
+    /// Asks again each peer whose split heal the re-key floor held back, once
+    /// the floor has opened. The ask's own limit is lifted first: it was set
+    /// by the ask that drew the held answer, and would otherwise swallow this
+    /// one.
+    pub(super) fn send_due_corroboration_reasks(&mut self) {
+        let now = Utc::now();
+        let due: Vec<String> = self
+            .corroboration_reask_at
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(peer, _)| peer.clone())
+            .collect();
+        for peer_id in due {
+            self.corroboration_reask_at.remove(&peer_id);
+            self.corroboration_due_at.remove(&peer_id);
+            self.request_session_corroboration(&peer_id);
+        }
+    }
+
+    /// Acts on a corroboration from `peer_id` that shows a split.
+    ///
+    /// Invariant: a split is ended by exactly one side, the one that
+    /// [`gives_way_to`](Self::gives_way_to) the other, and only on an
+    /// acknowledgement answering a challenge it issued under the session it
+    /// holds now (`answered_our_challenge`). Anything else, a probe, or an
+    /// acknowledgement of an older challenge, may be a frame sealed before a
+    /// heal and delivered late, an outbox retry carrying an earlier group's
+    /// tag, or a replay: acting on those tore down healthy sessions. Such a
+    /// frame only makes the greater side ask for itself, so a real split is
+    /// still healed one round trip later.
+    ///
+    /// The heal gives up this side's group: a key package saying this side
+    /// holds no session goes out first, then the local group is dropped. The
+    /// peer answers as for any `no_session` package. When its own Welcome
+    /// names the package, which it does after a both-create race because
+    /// that package was never consumed, it sends that Welcome again and
+    /// keeps its group, and this side joins it. A Welcome merely delayed
+    /// rather than lost is then joined too, where a reset would have made the
+    /// peer rebuild on the same package and left the delayed Welcome to split
+    /// the pair again. Otherwise the peer rebuilds from the package. It
+    /// shares the re-key floor, and a push that could not be sent drops
+    /// nothing and gives the slot back: the peer was told nothing, and the
+    /// next challenge asks again.
+    pub(super) fn heal_split_session(&mut self, peer_id: &str, answered_our_challenge: bool) {
+        let gives_way = self.gives_way_to(peer_id);
+        if !(gives_way && answered_our_challenge) {
+            if gives_way {
+                self.request_session_corroboration(peer_id);
+            }
+            return;
+        }
+        if !self.claim_rekey_slot(peer_id) {
+            // The answer spent the challenge, and a quiet confirmed pair has no
+            // failing frame to ask again. Asking now would do nothing (the ask
+            // that drew this answer has just set its own limit) and an answer
+            // would meet the same floor, so ask once it opens.
+            let opens = self
+                .rekey_due_at
+                .get(peer_id)
+                .copied()
+                .unwrap_or_else(|| Utc::now() + ChronoDuration::seconds(REKEY_INTERVAL_SECS));
+            if !self.corroboration_reask_at.contains_key(peer_id)
+                && self.corroboration_reask_at.len() >= MAX_REKEY_TRACKED_PEERS
+            {
+                self.corroboration_reask_at.clear();
+            }
+            self.corroboration_reask_at
+                .insert(peer_id.to_string(), opens);
+            return;
+        }
+        if let Err(err) = self.push_key_package(peer_id, false, true) {
+            debug!(peer_id = %peer_id, error = %err, "Split heal deferred");
+            self.release_rekey_slot(peer_id);
+            return;
+        }
+        // Here and not on every mismatching frame: an unconfirmed split side
+        // is probed every few seconds, and the event reaches the application
+        // and telemetry. Once per heal that went out, bounded by the re-key
+        // floor.
+        self.emit_event(Event::convergence_diag(
+            "session_split_detected".to_string(),
+            peer_id.to_string(),
+            "heals=true".to_string(),
+        ));
+        info!(peer_id = %peer_id, "Gave up our group of a split session to join the peer's");
+        self.discard_local_session(peer_id);
     }
 
     pub(super) fn abort_pending_session_for_peer(
@@ -1387,11 +1698,34 @@ impl OfflineProtocol {
         if self.confirmed_sessions.contains(peer_id) {
             return;
         }
+        self.resend_welcome(peer_id, source_event, false);
+    }
+
+    /// Sends the retained Welcome to `peer_id` again, unless it is in flight
+    /// or delivered. When `peer_never_got_it`, one in flight or delivered is
+    /// sent again too: the peer has said it holds no session, so neither
+    /// attempt reached it.
+    pub(super) fn resend_welcome(
+        &mut self,
+        peer_id: &str,
+        source_event: &str,
+        peer_never_got_it: bool,
+    ) {
         let Some(record) = self.welcome_lifecycles.get(peer_id).cloned() else {
             return;
         };
         match record.state {
-            WelcomeDeliveryState::Sent | WelcomeDeliveryState::SendAttempted => {}
+            WelcomeDeliveryState::SendAttempted | WelcomeDeliveryState::Sent
+                if !peer_never_got_it => {}
+            WelcomeDeliveryState::SendAttempted => {
+                // Settled as lost, the one legal way back to a send.
+                if self
+                    .transition_welcome_state(peer_id, WelcomeDeliveryState::Failed, source_event)
+                    .is_ok()
+                {
+                    self.resend_welcome(peer_id, source_event, false);
+                }
+            }
             WelcomeDeliveryState::Created | WelcomeDeliveryState::Failed => {
                 if let Some(entry) = self.welcome_lifecycles.get_mut(peer_id) {
                     entry.attempt = 0;
@@ -1413,10 +1747,10 @@ impl OfflineProtocol {
                     );
                 }
             }
-            WelcomeDeliveryState::Expired => {
-                // Expired is terminal in the lifecycle state machine, so rebuild
-                // from the retained Welcome message (upsert permits overwrite
-                // from Expired) before re-sending.
+            WelcomeDeliveryState::Sent | WelcomeDeliveryState::Expired => {
+                // Expired is terminal in the lifecycle state machine, and Sent
+                // is settled, so rebuild from the retained Welcome message
+                // (upsert permits overwrite from either) before re-sending.
                 let welcome_message = record.welcome_message.clone();
                 let group_id = record.group_id.clone();
                 if let Err(err) =
@@ -2359,9 +2693,10 @@ impl OfflineProtocol {
 
     pub(super) fn session_ready_context_for_source(source_event: &str) -> MlsOperationContext {
         match source_event {
-            "confirmation_ack_received" | "confirmation_probe_received" | "decrypt_success" => {
-                MlsOperationContext::Receive
-            }
+            "confirmation_ack_received"
+            | "confirmation_probe_received"
+            | "decrypt_success"
+            | SESSION_CORROBORATED => MlsOperationContext::Receive,
             "welcome_received" => MlsOperationContext::Welcome,
             _ => MlsOperationContext::Send,
         }

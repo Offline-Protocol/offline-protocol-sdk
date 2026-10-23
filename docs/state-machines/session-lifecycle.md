@@ -32,11 +32,15 @@ stateDiagram-v2
     Establishing --> Owner: we created the group
     Establishing --> Joined: we processed a Welcome
 
-    Owner --> Confirmed: successful decrypt
+    Owner --> Confirmed: successful decrypt, or a corroborated probe/ack
     Joined --> Confirmed: Welcome processed, probe/ack, or decrypt
+
+    Owner --> None: split answered, greater side gives up its group
+    Joined --> None: split answered, greater side gives up its group
 
     Confirmed --> Desynced: WrongEpoch / NoPastEpochData
     Desynced --> None: session_reset, tear down + advertise
+    Confirmed --> None: peer holds no session and cannot join ours
     None --> Joined: peer's Welcome rebuilds us back in
 
     Confirmed --> [*]
@@ -86,14 +90,14 @@ discovery makes it. The one exception is a peer only the mesh reaches, which
 discovery never names: the tick makes its first push (see
 [A peer only the mesh reaches is pushed to from the tick](#a-peer-only-the-mesh-reaches-is-pushed-to-from-the-tick)).
 
-**A lost reset push is not healed by this rule.** The repeat push always
-carries `session_reset = false`, so a receiver only refreshes its stored copy
-of our package. When the lost push was a reset (a re-key or an unblock), we
-have already dropped our session and the peer still holds its own; the
-repeat push cannot make it let go, and the pair stays split until the peer
-re-enters the desync path. Repeating the reset flag would tear down a
-replacement session whose Welcome is in flight, so it belongs with the
-split-session work rather than here.
+**A lost reset push is healed by the repeat, which says we hold no
+session.** The repeat never carries `session_reset`: when the lost push was a
+reset, a repeat of the flag that overtook the replacement session's Welcome
+would tear the replacement down too. It carries `no_session` instead, and the
+peer, holding a session we cannot read, tells the two cases apart by the
+package: if the Welcome it built names this package, the Welcome never
+arrived and is sent again; otherwise it drops its session and builds a new
+one from the package. See [A peer that holds no session](#a-peer-that-holds-no-session).
 
 ### A peer only the mesh reaches is pushed to from the tick
 
@@ -178,7 +182,9 @@ well receive the peer's Welcome, but the tiebreaker keeps the local session and
 the Welcome is not processed into one, so any mechanism that keys off Welcome
 adoption silently skips the owner. This is why:
 
-- session confirmation also triggers on **any successful decrypt**, and
+- session confirmation also triggers on **any successful decrypt** in the 1:1
+  group (a decrypt in a multi-party group the pair shares says nothing about
+  their 1:1 session, and confirming on one let a split confirm), and
 - the pending-decryption drain hangs off that confirmation, so a decrypt reaches
   it too.
 
@@ -405,6 +411,131 @@ honest failure rather than a false delivery.
 **What would close it:** a signed epoch-corroboration exchange before teardown. A
 liveness-only probe does not work, because a healthy peer answers and the
 teardown happens anyway.
+
+## Split sessions
+
+**A confirmation stands only on proof that both sides hold the same group.**
+Two sides can hold two different groups for one slot, and nothing above sees
+it: a 1:1 session never commits after it is created, so the two groups sit at
+the same epoch, frames between them pass MLS framing validation, and each
+fails as an ordinary decryption failure. ADR 0006 keeps the re-key off that
+class, rightly, because a corrupted frame reaches it.
+
+The common way in is a both-create race that loses the owner's Welcome. The
+owner keeps its group, as the tiebreak says. The adopter never received the
+Welcome it was meant to adopt, so it still holds its own, and before this rule
+the owner's plaintext probe confirmed it. The adopter then flushed its queue
+under a group the owner never joined.
+
+So a probe and its acknowledgement carry a corroboration: the sender's epoch
+and an MLS exporter tag over a nonce (a probe's challenge, or the nonce of the
+probe an acknowledgement answers), which only a member of the same group at
+the same epoch computes (see
+[the spec](../spec/control-messages.md#session-corroboration)).
+
+| What the frame shows | What the receiver does |
+|----------------------|------------------------|
+| Same epoch, same tag | Confirms, as group-aware proof. The both-create owner included |
+| Same epoch, different tag, on an acknowledgement answering our live challenge | Does not confirm. The split: the side whose address is greater gives up its group |
+| Same epoch, different tag, on anything else | Does not confirm, tears nothing down. The greater side issues a challenge of its own |
+| Different epoch, or nothing this side can compare | Does not confirm, and does nothing. The epoch-desync path owns an epoch mismatch |
+| Empty body | An older peer or a leaf: the plaintext rules above |
+
+**Only the greater side heals**, the side that adopts in the tiebreak. If both
+did, both would tear down at once, each would rebuild from the other's
+package, and the pair would race again.
+
+**And only on an answer to its own live challenge.** A probe's nonce is a
+challenge, remembered with the session it was issued under and repeated by
+every probe until it is answered (probes run every few seconds, and an answer
+over the mesh can take longer), and an acknowledgement answers with the
+responder's tag over that same nonce. Any
+other mismatching frame may be stale: a probe sealed under a group that has
+since been healed and delivered late, an outbox retry carrying an earlier
+group's tag, or a recording. Acting on those tore healthy sessions down, so
+they only make the greater side issue a challenge of its own. Whichever side
+probes first, the greater side learns within one round trip, and a challenge
+is spent by its first answer.
+
+**The heal gives up the greater side's group, not the pair's.** It sends a key
+package saying it holds no session, then drops its group, and the peer answers
+as for any `no_session` package (below). After a both-create race the peer's
+Welcome names that very package, because it was never consumed, so the peer
+resends it and keeps its group, and the greater side joins. A Welcome that was
+only delayed is joined the same way. A reset there made the peer rebuild on
+the same package, and the delayed Welcome then split the pair again. The heal
+shares the re-key floor; a push that could not be sent drops nothing and gives
+the floor back, because the peer was told nothing and the next challenge asks
+again. An answer that meets the floor held (a heal or re-key within the last
+30 seconds) has spent its challenge, so the greater side asks again once the
+floor opens, from the reconciliation tick; asking at once would do nothing,
+since the ask that drew the answer has just set its own limit.
+
+### A peer that holds no session
+
+**A pair where one side holds a session and the other none is rebuilt, never
+left.** The side without one cannot read anything the other seals, and the
+other never re-enters the desync path, because the first sends nothing sealed.
+A lost reset is the usual way in, and a store that lost the session another.
+
+Every key package sent while this side holds no session with the peer carries
+`no_session`. A peer holding a session answers it under the same freshness and
+spent-reset rules as a reset, since it can end in the same teardown:
+
+| The peer's retained Welcome | What the peer does |
+|-----------------------------|--------------------|
+| Names this key package | Sends it again and keeps its session. The package is consumed by the Welcome built on it, so a sender still offering it never processed it. A send in flight is settled as lost first, the one legal way back to a send |
+| Names another package, or there is none | Drops its session as for a reset, and builds a new one from the package |
+
+The comparison is what makes the flag safe where repeating the reset flag is
+not: a replacement whose Welcome is in flight is recognised and kept. Two
+rules keep the comparison honest:
+
+- **A flag older than the session is refused.** The spent mark moves up to the
+  signed stamp of the frame the session was built from (the key package it was
+  created from, or the Welcome it was joined from), so a `no_session` (or
+  reset) frame older than that is refused: a first-contact push delivered late,
+  or a recording. Only those frames, and never more than five minutes past this
+  device's own clock, since the mark is durable and a peer clock that ran fast
+  and was set back would otherwise lock that peer's resets out. Five minutes
+  rather than none, so ordinary skew between the two clocks does not put the
+  mark below the session's own stamp. The teardown also needs the frame's stamp
+  to be signed at all; resending a Welcome needs neither. A teardown that is
+  acted on records the frame's own stamp, unclamped, as a reset always has, so
+  a peer whose clock ran fast when it lost its session is refused until its
+  clock catches up.
+- **A push that crossed the Welcome is refused at any skew.** Every push from
+  a side holding no session carries the flag, first contact included, so the
+  peer's first-contact key package can arrive just behind the Welcome it sent
+  after it. For ten minutes after the session is built, a `no_session` frame
+  not newer than the unclamped stamp of the frame that built it is refused.
+  Both are the peer's own clock, so the five-minute clamp on the spent mark
+  does not decide this case.
+- **An adopted Welcome retires our own.** Adopting the peer's Welcome in the
+  both-create tiebreak gives up our group, and our outbound Welcome for it is
+  dropped. It names a package the peer never processed and still offers, so
+  kept, it would answer a `no_session` with a Welcome for a group nobody
+  holds.
+
+The flag states the sender's view when the frame left. One that arrives after
+its sender gained a session, because a frame crossed it in flight or the
+carrier reordered them, costs one extra rebuild, bounded like any reset by the
+spent-reset mark.
+
+### A failed frame asks
+
+**A split between two sides that have both confirmed is found by the first
+frame that fails between them.** Confirmation probes stop once a session
+confirms, so a split that formed some other way, through an older peer's
+plaintext confirmation or a restored store, would otherwise fail every frame
+for the life of the pair.
+
+So an ordinary decrypt failure on a 1:1 session, of a message or of a media
+chunk, sends a confirmation probe, at most once per peer per re-key interval.
+It only asks. A healthy session answers with a matching tag and nothing
+happens; a split answers with a different one and is healed as above. Nothing
+is torn down on the failure itself, which is what ADR 0006 requires of a class
+that anyone corrupting a frame can reach.
 
 ## Session reset semantics
 

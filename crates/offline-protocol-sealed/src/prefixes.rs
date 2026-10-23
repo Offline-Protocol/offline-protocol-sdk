@@ -44,10 +44,13 @@ pub const WELCOME: &str = "__MLS_WELCOME__";
 /// state on the outside what the AEAD already proves on the inside.
 pub const ENCRYPTED: &str = "__MLS_ENC__";
 
-/// Asks a peer to confirm it holds a working session. Empty body, signed.
+/// Asks a peer to confirm it holds a working session. Signed. The body is a
+/// [`SessionCorroboration`], or empty from an older peer.
+///
+/// [`SessionCorroboration`]: crate::SessionCorroboration
 pub const SESSION_CONFIRM_PROBE: &str = "__MLS_CONFIRM_PROBE__";
 
-/// Answers [`SESSION_CONFIRM_PROBE`]. Empty body, signed.
+/// Answers [`SESSION_CONFIRM_PROBE`]. Signed, with the same body.
 pub const SESSION_CONFIRM_ACK: &str = "__MLS_CONFIRM_ACK__";
 
 /// A confirmation that travels **inside** an [`ENCRYPTED`] envelope and

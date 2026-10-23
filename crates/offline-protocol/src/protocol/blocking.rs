@@ -1493,6 +1493,7 @@ mod tests {
             remaining_lifetime_ms: alice_fresh_key_pkg.remaining_lifetime_ms(),
             timestamp_ms: 0,
             session_reset: true,
+            no_session: false,
             wire_versions: Vec::new(),
             env_versions: Vec::new(),
             rich_versions: Vec::new(),

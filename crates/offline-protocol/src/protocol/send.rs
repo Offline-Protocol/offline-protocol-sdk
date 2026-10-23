@@ -6731,6 +6731,7 @@ impl OfflineProtocol {
             remaining_lifetime_ms: key_pkg.remaining_lifetime_ms(),
             timestamp_ms: Utc::now().timestamp_millis() as u64,
             session_reset,
+            no_session: false,
             wire_versions: if self.config.transport.binary_wire_enabled {
                 vec![offline_protocol_core::WIRE_VERSION_V1]
             } else {
@@ -6798,6 +6799,21 @@ impl OfflineProtocol {
     /// package and the Welcome were the two frames that never left the
     /// device by any other route, and every frame after them is sealed.
     pub(crate) fn send_key_package_to(&mut self, peer_id: &str, session_reset: bool) -> Result<()> {
+        // Only a definite "no": a failed lookup must not make the peer drop a
+        // session we may well hold.
+        let no_session = matches!(self.has_mls_session(peer_id), Ok(false));
+        self.push_key_package(peer_id, session_reset, no_session)
+    }
+
+    /// [`Self::send_key_package_to`] with the `no_session` flag stated rather
+    /// than read from the session store: a side about to give up its session
+    /// says so before it does.
+    pub(crate) fn push_key_package(
+        &mut self,
+        peer_id: &str,
+        session_reset: bool,
+        no_session: bool,
+    ) -> Result<()> {
         let mls = self.mls_manager.as_ref().ok_or(Error::MlsNotInitialized)?;
 
         let push = {
@@ -6812,7 +6828,8 @@ impl OfflineProtocol {
         }
 
         let key_pkg = push.bundle;
-        let payload = self.build_key_package_payload(&key_pkg, session_reset);
+        let mut payload = self.build_key_package_payload(&key_pkg, session_reset);
+        payload.no_session = no_session;
 
         let serialized =
             serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;
