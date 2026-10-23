@@ -197,10 +197,13 @@ class LeAdvertiser(
                 .build()
 
             val advertiseData = host.buildAdvertiseData()
-            // Include scan response with service UUID for iOS compatibility.
-            // iOS's CoreBluetooth actively queries for scan responses and has
-            // known issues recognizing 128-bit service UUIDs from Android's
-            // main advertisement packet format.
+            // Include a scan response for iOS compatibility: the service UUID,
+            // which iOS's CoreBluetooth reads from actively requested scan
+            // responses more reliably than from Android's main packet, or,
+            // when the app opts in to `advertiseNodeHash`, the node hash as
+            // service data under that UUID in its place. Whether iOS still
+            // finds the phone in the background with the latter is unverified
+            // on a device; see PeerRssiFeedPolicy.scanResponse.
             val scanResponse = host.buildScanResponse()
 
             val cb = object : AdvertiseCallback() {
