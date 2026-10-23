@@ -405,6 +405,29 @@ never presented a v2 signature. A driven rekey *is* a reset, so a peer whose
 resets are ignored is a peer that can no longer heal a session; holding a peer
 to a payload it has never shown it can produce breaks exactly that.
 
+#### A peer that holds no session
+
+**A pair where one side holds a session and the other none is rebuilt, never
+left.** The side without one cannot read anything the other seals, and the
+other never re-enters the desync path, because the first sends nothing
+sealed. A lost reset leaves a pair exactly so, and a sender cannot repeat the
+reset flag to recover: a repeat that overtook the replacement session's
+Welcome would tear that down too.
+
+So a key package sent while the sender holds no session with the receiver
+SHOULD set `no_session`, and MUST NOT set it otherwise, including when it
+cannot tell. A receiver holding a session that gets one, signed, and admitted
+under the two rules above exactly as a `session_reset` would be:
+
+- **MUST**, when the Welcome it built for the session names this very key
+  package, send that Welcome again and keep its session. The package is
+  consumed by the Welcome built on it, so a peer still offering it has not
+  processed the Welcome, and still can.
+- **MUST** otherwise drop its session as for a reset, recording the stamp
+  first, and build a new one from the package.
+
+A leaf never sets it.
+
 ### Exemption class 1: the data plane
 
 Two prefixes are exempt because they are authenticated later, by MLS, rather

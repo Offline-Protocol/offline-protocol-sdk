@@ -477,39 +477,16 @@ impl OfflineProtocol {
                     // leaves this frame able to destroy the replacement too.
                     self.record_reset_spent(sender, stamp);
                 }
-                if let Some(mls) = self.mls_manager.clone() {
-                    if let Ok(manager) = mls.read() {
-                        if manager.has_session(sender).unwrap_or(false) {
-                            drop(manager); // release lock before mutating
-                            info!(sender = %sender, "Session reset requested — deleting stale local session");
-                            if let Err(e) = self.manual_mls_delete_session(sender) {
-                                debug!(sender = %sender, error = %e, "No MLS session to clean up for session reset");
-                            }
-                            // The outbound pending queue is deliberately KEPT.
-                            // `PendingMessage` holds original plaintext and is
-                            // sealed at flush time by `prepare_outbound_content`
-                            // against whatever session is current then — so
-                            // these entries are not bound to the epoch we just
-                            // discarded, and the reset is precisely what
-                            // produces the session they will seal against.
-                            // Dropping them here destroyed messages the app had
-                            // been handed ids for, and a re-key is remotely
-                            // triggerable (see `schedule_session_rekey`), which
-                            // made that reachable by an injected frame.
-                            //
-                            // Drain the inbound pending decryption queue though:
-                            // unlike the outbound side those really are
-                            // ciphertexts sealed to the session just deleted, so
-                            // they can never decrypt. Their persisted records go
-                            // too: left on disk, the next launch restores them and
-                            // drains them into the replacement session as
-                            // spurious decrypt failures.
-                            self.discard_pending_decryption_for_peer(sender);
-                            // Allow fresh key exchange
-                            self.key_package_sent_to.remove(sender);
-                        }
-                    }
+                if self.has_mls_session(sender).unwrap_or(false) {
+                    info!(sender = %sender, "Session reset requested — deleting stale local session");
+                    self.drop_session_for_reset(sender);
                 }
+            }
+
+            // The sender holds no session with us. Answered under the same
+            // two rules as a reset, since it can end in the same teardown.
+            if payload.no_session && signed && reset_admissible && reset_unspent {
+                self.answer_peer_without_session(sender, &payload.key_package_data, freshness);
             }
 
             let now_ms = Utc::now().timestamp_millis() as u64;
@@ -639,6 +616,84 @@ impl OfflineProtocol {
                 }
             }
         }
+    }
+
+    /// Drops this side's session with `sender` for a peer that has let go of
+    /// its own, keeping what the rebuilt session will need.
+    fn drop_session_for_reset(&mut self, sender: &str) {
+        if let Err(e) = self.manual_mls_delete_session(sender) {
+            debug!(sender = %sender, error = %e, "No MLS session to clean up for session reset");
+        }
+        // The outbound pending queue is deliberately KEPT. `PendingMessage`
+        // holds original plaintext and is sealed at flush time by
+        // `prepare_outbound_content` against whatever session is current then,
+        // so these entries are not bound to the epoch we just discarded, and
+        // the reset is precisely what produces the session they will seal
+        // against. Dropping them here destroyed messages the app had been
+        // handed ids for, and a re-key is remotely triggerable (see
+        // `schedule_session_rekey`), which made that reachable by an injected
+        // frame.
+        //
+        // Drain the inbound pending decryption queue though: unlike the
+        // outbound side those really are ciphertexts sealed to the session just
+        // deleted, so they can never decrypt. Their persisted records go too:
+        // left on disk, the next launch restores them and drains them into the
+        // replacement session as spurious decrypt failures.
+        self.discard_pending_decryption_for_peer(sender);
+        // Allow fresh key exchange
+        self.key_package_sent_to.remove(sender);
+    }
+
+    /// Answers a key package from a peer that holds no session with us.
+    ///
+    /// Invariant: a pair where one side holds a session and the other none
+    /// is rebuilt, never left. The side without one cannot read anything
+    /// this side seals, and this side never re-enters the desync path,
+    /// because the other side sends nothing sealed.
+    ///
+    /// When our retained Welcome was built on the package the peer is
+    /// offering, the peer has not processed it and still can, so it is sent
+    /// again: tearing down here would destroy a replacement whose Welcome
+    /// is merely in flight. Otherwise our session is one the peer will never
+    /// hold, and it is dropped as for a reset; the caller then builds a new
+    /// one from the package. A freshness stamp is spent only by the teardown.
+    fn answer_peer_without_session(
+        &mut self,
+        peer_id: &str,
+        key_package_data: &[u8],
+        freshness: Option<i64>,
+    ) {
+        if !self.has_mls_session(peer_id).unwrap_or(false) {
+            return;
+        }
+        let retained = self.welcome_lifecycles.get(peer_id).and_then(|record| {
+            record
+                .welcome_message
+                .content
+                .strip_prefix(internal_prefixes::WELCOME)
+                .and_then(|body| serde_json::from_str::<WelcomeMessage>(body).ok())
+        });
+        let still_joinable = retained.is_some_and(|welcome| {
+            self.mls_manager
+                .as_ref()
+                .and_then(|mls| mls.read().ok())
+                .and_then(|manager| {
+                    manager
+                        .welcome_targets_key_package(&welcome, key_package_data)
+                        .ok()
+                })
+                .unwrap_or(false)
+        });
+        if still_joinable {
+            info!(sender = %peer_id, "Peer holds no session and can still join ours, re-sending the Welcome");
+            self.resend_welcome(peer_id, "peer_holds_no_session", true);
+            return;
+        }
+        if let Some(stamp) = freshness {
+            self.record_reset_spent(peer_id, stamp);
+        }
+        info!(sender = %peer_id, "Peer holds no session we can reach, deleting ours to rebuild");
+        self.drop_session_for_reset(peer_id);
     }
 
     /// Handles a session confirmation probe message.

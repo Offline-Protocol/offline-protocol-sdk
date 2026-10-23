@@ -987,6 +987,34 @@ impl MlsManager {
         self.session_manager.corroboration(other_user_id, nonce)
     }
 
+    /// Whether `welcome` was built for the peer holding `key_package_data`,
+    /// which is whether that peer can still join it.
+    ///
+    /// A peer that says it holds no session while this side holds one is
+    /// either still waiting on this side's Welcome, or lost the session the
+    /// Welcome built. The package it sends tells the two apart: a package is
+    /// consumed by the Welcome built on it, so a peer still offering the one
+    /// a retained Welcome names has not processed it.
+    pub fn welcome_targets_key_package(
+        &self,
+        welcome: &WelcomeMessage,
+        key_package_data: &[u8],
+    ) -> Result<bool> {
+        let reference = self
+            .validate_peer_key_package(key_package_data)?
+            .hash_ref(self.provider.crypto())
+            .map_err(|e| MlsError::InvalidKeyPackage(e.to_string()))?;
+        let message = MlsMessageIn::tls_deserialize_exact(&welcome.welcome_data)
+            .map_err(|e| MlsError::Deserialization(e.to_string()))?;
+        let MlsMessageBodyIn::Welcome(welcome) = message.extract() else {
+            return Ok(false);
+        };
+        Ok(welcome
+            .secrets()
+            .iter()
+            .any(|secrets| secrets.new_member() == reference))
+    }
+
     /// Creates a new 1:1 session with another user.
     pub fn create_session(&self, other_user_id: &str) -> Result<WelcomeMessage> {
         let their_key_package = self.get_contact_key_package(other_user_id)?;
@@ -4201,6 +4229,25 @@ mod tests {
             "a split session must fail as Decryption, got {err:?}"
         );
         assert_eq!(err.decryption_detail(), Some("aead"));
+    }
+
+    /// A Welcome names the package it was built on, and no other.
+    #[test]
+    fn test_a_welcome_targets_only_the_package_it_was_built_on() {
+        let alice = create_test_manager("alice");
+        let bob = create_test_manager("bob");
+        let bob_kp = bob.generate_key_package().unwrap();
+        let other_kp = bob.generate_key_package().unwrap();
+        alice
+            .import_key_package(&addr("bob"), &bob_kp.key_package_data)
+            .unwrap();
+        let welcome = alice.create_session(&addr("bob")).unwrap();
+        assert!(alice
+            .welcome_targets_key_package(&welcome, &bob_kp.key_package_data)
+            .unwrap());
+        assert!(!alice
+            .welcome_targets_key_package(&welcome, &other_kp.key_package_data)
+            .unwrap());
     }
 
     /// Both members of one session compute the same tag for a nonce, and a

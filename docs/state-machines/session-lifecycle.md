@@ -40,6 +40,7 @@ stateDiagram-v2
 
     Confirmed --> Desynced: WrongEpoch / NoPastEpochData
     Desynced --> None: session_reset, tear down + advertise
+    Confirmed --> None: peer holds no session and cannot join ours
     None --> Joined: peer's Welcome rebuilds us back in
 
     Confirmed --> [*]
@@ -89,14 +90,14 @@ discovery makes it. The one exception is a peer only the mesh reaches, which
 discovery never names: the tick makes its first push (see
 [A peer only the mesh reaches is pushed to from the tick](#a-peer-only-the-mesh-reaches-is-pushed-to-from-the-tick)).
 
-**A lost reset push is not healed by this rule.** The repeat push always
-carries `session_reset = false`, so a receiver only refreshes its stored copy
-of our package. When the lost push was a reset (a re-key or an unblock), we
-have already dropped our session and the peer still holds its own; the
-repeat push cannot make it let go, and the pair stays split until the peer
-re-enters the desync path. Repeating the reset flag would tear down a
-replacement session whose Welcome is in flight, so it belongs with the
-split-session work rather than here.
+**A lost reset push is healed by the repeat, which says we hold no
+session.** The repeat never carries `session_reset`: when the lost push was a
+reset, a repeat of the flag that overtook the replacement session's Welcome
+would tear the replacement down too. It carries `no_session` instead, and the
+peer, holding a session we cannot read, tells the two cases apart by the
+package: if the Welcome it built names this package, the Welcome never
+arrived and is sent again; otherwise it drops its session and builds a new
+one from the package. See [A peer that holds no session](#a-peer-that-holds-no-session).
 
 ### A peer only the mesh reaches is pushed to from the tick
 
@@ -446,6 +447,30 @@ key package first, then the local group dropped. It shares the re-key floor,
 so a replayed probe from an earlier group buys at most one teardown per
 window. A reset that could not be sent drops nothing and gives the floor back,
 because the peer was told nothing and the next probe asks again.
+
+### A peer that holds no session
+
+**A pair where one side holds a session and the other none is rebuilt, never
+left.** The side without one cannot read anything the other seals, and the
+other never re-enters the desync path, because the first sends nothing sealed.
+A lost reset is the usual way in, and a store that lost the session another.
+
+Every key package sent while this side holds no session with the peer carries
+`no_session`. A peer holding a session answers it under the same freshness and
+spent-reset rules as a reset, since it can end in the same teardown:
+
+| The peer's retained Welcome | What the peer does |
+|-----------------------------|--------------------|
+| Names this key package | Sends it again and keeps its session. The package is consumed by the Welcome built on it, so a sender still offering it never processed it. A send in flight is settled as lost first, the one legal way back to a send |
+| Names another package, or there is none | Drops its session as for a reset, and builds a new one from the package |
+
+The comparison is what makes the flag safe where repeating the reset flag is
+not: a replacement whose Welcome is in flight is recognised and kept.
+
+The flag states the sender's view when the frame left. One that arrives after
+its sender gained a session, because a frame crossed it in flight or the
+carrier reordered them, costs one extra rebuild, bounded like any reset by the
+spent-reset mark.
 
 ### A failed frame asks
 

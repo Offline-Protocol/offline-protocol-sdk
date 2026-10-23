@@ -38,6 +38,14 @@ failure on a 1:1 session sends one too, at most once per peer per re-key
 interval. That finds a split between two sides that both confirmed. The
 failure only asks; the tag in the answer decides.
 
+The other split is one side holding a session and the other none, which a
+lost reset leaves. A key package sent while the sender holds no session
+carries `no_session`. The holder resends its Welcome when that Welcome names
+the package, since the sender never processed it, and otherwise drops its
+session and rebuilds. Repeating the reset flag instead would tear down a
+replacement whose Welcome is in flight; the package comparison is what tells
+that case apart.
+
 ## Consequences
 
 **Good.** The split cannot form through confirmation, and one that exists is
@@ -59,6 +67,10 @@ one teardown per window, as for a replayed reset.
 
 Confirming on a probe whose tag cannot be compared, on the reasoning that
 the peer clearly holds a session. It does, and possibly a different one.
+
+Repeating `session_reset` on a re-push instead of `no_session`, on the
+reasoning that a reset already means "drop yours". It does, unconditionally,
+including the replacement session a Welcome is still carrying.
 
 Letting both sides heal a mismatch. Both would tear down at once, each would
 rebuild from the other's package, and the pair would race again.

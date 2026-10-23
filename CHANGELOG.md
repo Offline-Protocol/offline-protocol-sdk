@@ -77,6 +77,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   every 30 seconds, and the tags decide. The failure itself still tears
   nothing down. See
   [ADR 0033](docs/adr/0033-a-session-is-confirmed-only-by-proof-of-the-same-group.md).
+- **A lost re-key no longer leaves one side without a session for good.**
+  When the reset frame of a re-key or an unblock never arrived, the side that
+  sent it held no session, the other kept its own, and the first side's
+  repeated key packages only refreshed the other's copy. Messages then waited
+  on both sides until they expired. A key package sent while the sender
+  holds no session now says so (`no_session`, omitted when false, so older
+  receivers see the payload they always did). The holder sends its Welcome
+  again when that Welcome was built on the very package offered, since the
+  sender never processed it, and otherwise drops its session and rebuilds,
+  under the same freshness and spent-reset rules as a reset.
 
 ## [0.30.0] — 2026-10-21
 

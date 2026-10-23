@@ -1876,6 +1876,7 @@ fn feed_key_package(protocol: &mut OfflineProtocol, sender: &str, wire_versions:
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions,
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -1958,6 +1959,7 @@ fn feed_key_package_with_env(protocol: &mut OfflineProtocol, sender: &str, env_v
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions,
         rich_versions: Vec::new(),
@@ -2156,6 +2158,7 @@ pub(crate) fn feed_key_package_with_capabilities(
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions,
@@ -2277,6 +2280,7 @@ fn feed_key_package_with_caps(
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions,
         rich_versions,
@@ -2421,6 +2425,7 @@ fn key_package_message_with_nostr_pubkey(
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -2758,6 +2763,7 @@ fn feed_key_package_with_data(
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -3145,6 +3151,7 @@ fn peer_undecryptable_ack_capability_is_learned_and_survives_restart() {
             remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
             timestamp_ms: 0,
             session_reset: false,
+            no_session: false,
             wire_versions: Vec::new(),
             env_versions: Vec::new(),
             rich_versions: Vec::new(),
@@ -3942,6 +3949,7 @@ fn test_process_internal_message_key_package() {
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 12345,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -15890,6 +15898,7 @@ fn feed_session_reset_key_package(
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: true,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -20992,6 +21001,7 @@ fn test_lamport_clock_merge_on_internal_message() {
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 12345,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -21205,6 +21215,7 @@ fn test_key_package_remaining_lifetime_ms() {
         remaining_lifetime_ms: 0,
         timestamp_ms: 12345,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -21292,6 +21303,7 @@ fn test_peer_key_package_persisted_and_restored_after_restart() {
             remaining_lifetime_ms: 60 * 60 * 1000,
             timestamp_ms: 0,
             session_reset: false,
+            no_session: false,
             wire_versions: Vec::new(),
             env_versions: Vec::new(),
             rich_versions: Vec::new(),
@@ -21382,6 +21394,7 @@ fn test_pending_key_packages_capped_evicts_soonest_to_expire() {
         remaining_lifetime_ms: 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -21435,6 +21448,7 @@ fn test_received_key_package_lifetime_is_clamped() {
         remaining_lifetime_ms: u64::MAX, // attacker claims a maximal lifetime
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -22989,6 +23003,7 @@ fn test_establish_secure_session_loads_from_storage_after_restart() {
             remaining_lifetime_ms: 60 * 60 * 1000,
             timestamp_ms: 0,
             session_reset: false,
+            no_session: false,
             wire_versions: Vec::new(),
             env_versions: Vec::new(),
             rich_versions: Vec::new(),
@@ -40986,6 +41001,7 @@ fn key_package_frame_body(sender: &str, session_reset: bool, ctrl_versions: Vec<
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -42755,6 +42771,7 @@ fn the_ordinary_handshake_starts_a_latency_without_any_session_missing() {
         remaining_lifetime_ms: 30 * 24 * 60 * 60 * 1000,
         timestamp_ms: 0,
         session_reset: false,
+        no_session: false,
         wire_versions: Vec::new(),
         env_versions: Vec::new(),
         rich_versions: Vec::new(),
@@ -44462,4 +44479,165 @@ fn a_split_between_two_confirmed_sides_heals_on_the_first_failed_frame() {
     ] {
         assert!(got.iter().any(|c| c == want), "{want} missing from {got:?}");
     }
+}
+
+/// Makes `protocol`'s next key package re-push to `peer` due now.
+fn make_key_package_repush_due(protocol: &mut OfflineProtocol, peer: &str) {
+    let long_ago = offline_protocol_core::time::Instant::now()
+        .checked_sub(offline_protocol_core::time::Duration::from_secs(3600))
+        .unwrap();
+    protocol
+        .key_package_sent_to
+        .insert(peer.to_string(), (long_ago, 0));
+}
+
+/// A re-key whose reset frame is lost leaves one side with no session and
+/// the other with one it will keep for good. Before `no_session`, the side
+/// without one re-pushed a plain key package, the holder refreshed its copy
+/// and kept its session, and the pair stayed split. Now the re-push says the
+/// sender holds no session, the holder drops its own and rebuilds.
+#[test]
+fn a_lost_reset_push_heals_on_the_next_repush() {
+    let (mut alice, alice_h) = make_encrypted_protocol("alice");
+    let (mut bob, bob_h) = make_encrypted_protocol("bob");
+    let alice_rx = received_contents(&mut alice);
+    let bob_rx = received_contents(&mut bob);
+    alice.start().unwrap();
+    bob.start().unwrap();
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+
+    assert!(alice.rekey_session(&id("bob")).unwrap());
+    alice_h.clear_sent_messages();
+    assert!(!alice.has_mls_session(&id("bob")).unwrap());
+    assert!(bob.has_mls_session(&id("alice")).unwrap());
+
+    alice
+        .send_message(&id("bob"), "queued-at-alice", None, None::<String>)
+        .unwrap();
+    make_key_package_repush_due(&mut alice, &id("bob"));
+    alice.rearm_key_package_for_peer(&id("bob"));
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+
+    bob.send_message(&id("alice"), "healed-bob", None, None::<String>)
+        .unwrap();
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+
+    let bob_got = bob_rx.lock().unwrap().clone();
+    let alice_got = alice_rx.lock().unwrap().clone();
+    assert!(
+        bob_got.iter().any(|c| c == "queued-at-alice"),
+        "queued-at-alice missing from {bob_got:?}"
+    );
+    assert!(
+        alice_got.iter().any(|c| c == "healed-bob"),
+        "healed-bob missing from {alice_got:?}"
+    );
+}
+
+/// The other half of the rule: a peer with no session that is still
+/// offering the package our Welcome was built on has not processed that
+/// Welcome, so it is sent again and our session is kept. Tearing down here
+/// would destroy a replacement whose Welcome is merely in flight.
+#[test]
+fn a_peer_still_offering_our_welcomes_package_gets_the_welcome_again() {
+    let (mut alice, alice_h) = make_encrypted_protocol("alice");
+    let (mut bob, bob_h) = make_encrypted_protocol("bob");
+    let alice_rx = received_contents(&mut alice);
+    alice.start().unwrap();
+    bob.start().unwrap();
+
+    // Alice pushes; Bob builds a session on her package, and his Welcome
+    // (and everything else he sends) is lost.
+    alice.send_key_package_to(&id("bob"), false).unwrap();
+    for m in alice_h.sent_messages() {
+        bob_h.queue_message_from(m, id("alice"));
+    }
+    alice_h.clear_sent_messages();
+    while bob.receive_message().is_some() {}
+    bob_h.clear_sent_messages();
+    let built_at = bob
+        .mls_manager
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .session_established_at_ms(&id("alice"))
+        .unwrap();
+    assert!(built_at.is_some(), "precondition: bob built a session");
+
+    make_key_package_repush_due(&mut alice, &id("bob"));
+    alice.rearm_key_package_for_peer(&id("bob"));
+    for m in alice_h.sent_messages() {
+        bob_h.queue_message_from(m, id("alice"));
+    }
+    alice_h.clear_sent_messages();
+    while bob.receive_message().is_some() {}
+
+    assert!(
+        bob_h
+            .sent_messages()
+            .iter()
+            .any(|m| m.content.starts_with(internal_prefixes::WELCOME)),
+        "bob must send his Welcome again"
+    );
+    let still = bob
+        .mls_manager
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .session_established_at_ms(&id("alice"))
+        .unwrap();
+    assert_eq!(
+        still, built_at,
+        "bob must keep the session the Welcome builds"
+    );
+
+    bob.send_message(&id("alice"), "after-welcome", None, None::<String>)
+        .unwrap();
+    pump_between(&mut alice, &alice_h, &mut bob, &bob_h, 40);
+    let alice_got = alice_rx.lock().unwrap().clone();
+    assert!(
+        alice_got.iter().any(|c| c == "after-welcome"),
+        "after-welcome missing from {alice_got:?}"
+    );
+}
+
+/// A `no_session` frame can end in the same teardown as a reset, so it is
+/// held to the same rule: one captured frame is good for one teardown, and a
+/// newer one from the same peer is still honoured.
+#[test]
+fn a_captured_no_session_frame_can_be_spent_exactly_once() {
+    let (mut alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+    let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&proof, None);
+    assert!(bob.signs_freshness_bound_control(&id("alice")));
+
+    let body = key_package_frame_body(&id("alice"), false, Vec::new());
+    let mut payload: KeyPackagePayload =
+        serde_json::from_str(body.strip_prefix(internal_prefixes::KEY_PACKAGE).unwrap()).unwrap();
+    payload.no_session = true;
+    let data = serde_json::to_string(&payload).unwrap();
+    let captured_stamp = Utc::now().timestamp_millis() - 60_000;
+
+    bob.handle_key_package_message(&id("alice"), &data, true, Some(captured_stamp));
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "a peer without a session must make us drop ours"
+    );
+
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+    bob.handle_key_package_message(&id("alice"), &data, true, Some(captured_stamp));
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "a frame already spent must not tear the rebuilt session down"
+    );
+
+    bob.handle_key_package_message(&id("alice"), &data, true, Some(captured_stamp + 1));
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "a newer one must still be honoured"
+    );
 }

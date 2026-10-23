@@ -1547,11 +1547,34 @@ impl OfflineProtocol {
         if self.confirmed_sessions.contains(peer_id) {
             return;
         }
+        self.resend_welcome(peer_id, source_event, false);
+    }
+
+    /// Sends the retained Welcome to `peer_id` again, unless it is in flight
+    /// or delivered. When `peer_never_got_it`, one in flight or delivered is
+    /// sent again too: the peer has said it holds no session, so neither
+    /// attempt reached it.
+    pub(super) fn resend_welcome(
+        &mut self,
+        peer_id: &str,
+        source_event: &str,
+        peer_never_got_it: bool,
+    ) {
         let Some(record) = self.welcome_lifecycles.get(peer_id).cloned() else {
             return;
         };
         match record.state {
-            WelcomeDeliveryState::Sent | WelcomeDeliveryState::SendAttempted => {}
+            WelcomeDeliveryState::SendAttempted | WelcomeDeliveryState::Sent
+                if !peer_never_got_it => {}
+            WelcomeDeliveryState::SendAttempted => {
+                // Settled as lost, the one legal way back to a send.
+                if self
+                    .transition_welcome_state(peer_id, WelcomeDeliveryState::Failed, source_event)
+                    .is_ok()
+                {
+                    self.resend_welcome(peer_id, source_event, false);
+                }
+            }
             WelcomeDeliveryState::Created | WelcomeDeliveryState::Failed => {
                 if let Some(entry) = self.welcome_lifecycles.get_mut(peer_id) {
                     entry.attempt = 0;
@@ -1573,10 +1596,10 @@ impl OfflineProtocol {
                     );
                 }
             }
-            WelcomeDeliveryState::Expired => {
-                // Expired is terminal in the lifecycle state machine, so rebuild
-                // from the retained Welcome message (upsert permits overwrite
-                // from Expired) before re-sending.
+            WelcomeDeliveryState::Sent | WelcomeDeliveryState::Expired => {
+                // Expired is terminal in the lifecycle state machine, and Sent
+                // is settled, so rebuild from the retained Welcome message
+                // (upsert permits overwrite from either) before re-sending.
                 let welcome_message = record.welcome_message.clone();
                 let group_id = record.group_id.clone();
                 if let Err(err) =

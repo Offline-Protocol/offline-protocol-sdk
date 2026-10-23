@@ -6726,6 +6726,7 @@ impl OfflineProtocol {
             remaining_lifetime_ms: key_pkg.remaining_lifetime_ms(),
             timestamp_ms: Utc::now().timestamp_millis() as u64,
             session_reset,
+            no_session: false,
             wire_versions: if self.config.transport.binary_wire_enabled {
                 vec![offline_protocol_core::WIRE_VERSION_V1]
             } else {
@@ -6807,7 +6808,10 @@ impl OfflineProtocol {
         }
 
         let key_pkg = push.bundle;
-        let payload = self.build_key_package_payload(&key_pkg, session_reset);
+        let mut payload = self.build_key_package_payload(&key_pkg, session_reset);
+        // Only a definite "no": a failed lookup must not make the peer drop a
+        // session we may well hold.
+        payload.no_session = matches!(self.has_mls_session(peer_id), Ok(false));
 
         let serialized =
             serde_json::to_string(&payload).map_err(|e| Error::Serialization(e.to_string()))?;

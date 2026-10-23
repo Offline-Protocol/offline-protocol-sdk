@@ -17,7 +17,9 @@ Peers advertise what they can parse in the key package payload, the body of a
 | `nostr_pubkey` | End to end | Which key metadata is sealed to on the Nostr path | Seal to the publicly computable key |
 
 The key package payload also carries `user_id`, the MLS key package itself, a
-**relative** remaining lifetime in milliseconds, and a `session_reset` flag.
+**relative** remaining lifetime in milliseconds, a `session_reset` flag, and a
+`no_session` flag, omitted when false, saying the sender holds no session with
+the receiver (see [Control messages](control-messages.md#a-peer-that-holds-no-session)).
 
 The lifetime is relative rather than absolute so the receiver applies it to
 their own clock and clock skew does not expire a valid package.
