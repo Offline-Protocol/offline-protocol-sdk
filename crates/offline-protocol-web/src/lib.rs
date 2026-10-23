@@ -5,8 +5,9 @@
 //! owns the carriers and moves bytes; [`node`] owns what the protocol says
 //! about them. [`bindings`] is the JavaScript surface.
 //!
-//! Experimental: storage is in memory ([`memory_store`]), so an identity lasts
-//! as long as the worker.
+//! Storage is durable: [`log_store`] keeps each category in a sealed append
+//! log over origin-private files ([`opfs`]), so an identity outlives the
+//! worker. [`memory_store`] remains for a node that should not.
 //!
 //! The crate also builds on every host, so the workspace's lint, docs and test
 //! runs cover it: everything below the bindings is plain Rust, and the tests
@@ -16,8 +17,10 @@
 #![warn(missing_docs)]
 
 pub mod bindings;
+pub mod log_store;
 pub mod memory_store;
 pub mod node;
+pub mod opfs;
 
 #[cfg(test)]
 mod tests;

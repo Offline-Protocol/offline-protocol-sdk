@@ -74,7 +74,9 @@ function note(text) {
   $("messages").prepend(item);
 }
 
-const node = await OfflineNode.start({ appId: "web-two-tabs-demo" });
+// In memory: every tab is its own device, so any number can be open at once.
+// A durable node is one per account per origin (see examples/web-lobby).
+const node = await OfflineNode.start({ appId: "web-two-tabs-demo", storage: "memory" });
 $("me").textContent = node.address;
 
 node.addEventListener("neighbor_discovered", ({ detail }) => {

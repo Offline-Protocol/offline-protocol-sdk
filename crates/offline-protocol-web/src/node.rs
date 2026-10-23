@@ -35,8 +35,8 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use offline_protocol::mls::InMemoryStorage;
-use offline_protocol::{Event, GroupInfo, OfflineProtocol, ProtocolConfig};
+use offline_protocol::mls::{InMemoryStorage, MlsStorage};
+use offline_protocol::{Event, GroupInfo, OfflineProtocol, ProtocolConfig, ProtocolStateStorage};
 use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_transport::{
     frame, PeerStreamReader, StreamEvent, Transport, TransportStatus, TransportType,
@@ -147,16 +147,29 @@ impl Node {
     }
 
     /// Mints this device's identity over in-memory stores and returns its
-    /// address. Must run before [`Self::start`]: the address replaces the
-    /// placeholder the transport was built on.
+    /// address: a new device every time the worker starts.
     pub fn initialize(&mut self) -> NodeResult<String> {
+        self.initialize_with(
+            Arc::new(InMemoryStorage::new()),
+            Arc::new(MemoryProtocolStateStorage::new()),
+        )
+    }
+
+    /// Loads this device's identity from `mls`, minting it on the first run,
+    /// and returns its address. Must run before [`Self::start`]: the address
+    /// replaces the placeholder the transport was built on.
+    ///
+    /// The two stores must be separate instances; one backend behind both
+    /// handles lets one category collide with the other's.
+    pub fn initialize_with(
+        &mut self,
+        mls: Arc<dyn MlsStorage>,
+        state: Arc<dyn ProtocolStateStorage>,
+    ) -> NodeResult<String> {
         if let Some(address) = self.protocol.local_address() {
             return Ok(address.to_string());
         }
-        self.protocol.initialize_mls(
-            Arc::new(InMemoryStorage::new()),
-            Arc::new(MemoryProtocolStateStorage::new()),
-        )?;
+        self.protocol.initialize_mls(mls, state)?;
         let address = self
             .protocol
             .local_address()

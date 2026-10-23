@@ -4,9 +4,23 @@
 //! JavaScript, so the worker that owns the engine decides when events and
 //! outbound frames are read (see the invariants in [`crate::node`]).
 
+use std::sync::Arc;
+
 use wasm_bindgen::prelude::*;
 
+use crate::log_store::{Category, LogStats, LogStore, STORE_KEY_BYTES};
 use crate::node::{LinkId, Node, NodeError};
+use crate::opfs::{OpfsFile, SyncAccessHandle};
+
+/// The folder an account's files live in, under the origin's OPFS root: the
+/// namespace every binding derives for one application id and profile, so
+/// two profiles never share a log.
+#[wasm_bindgen(js_name = storageNamespace)]
+pub fn storage_namespace(app_id: &str, profile: &str) -> String {
+    offline_protocol::account_storage_namespace(app_id, profile)
+}
+
+type DurableStores = (Arc<LogStore<OpfsFile>>, Arc<LogStore<OpfsFile>>);
 
 fn js(error: NodeError) -> JsError {
     JsError::new(&error.0)
@@ -38,6 +52,7 @@ impl OutboundFrame {
 #[wasm_bindgen]
 pub struct WebEngine {
     node: Node,
+    durable: Option<DurableStores>,
 }
 
 #[wasm_bindgen]
@@ -48,12 +63,66 @@ impl WebEngine {
     pub fn new(app_id: &str, profile: &str) -> Result<WebEngine, JsError> {
         Ok(Self {
             node: Node::new(app_id, profile).map_err(js)?,
+            durable: None,
         })
     }
 
-    /// Mints this device's identity and returns its `off1…` address.
+    /// Mints a new identity held in memory and returns its `off1…` address.
+    /// The identity ends with the worker.
     pub fn initialize(&mut self) -> Result<String, JsError> {
         self.node.initialize().map_err(js)
+    }
+
+    /// Opens the account's sealed logs, loads its identity (minting it on the
+    /// first run), and returns its `off1…` address.
+    ///
+    /// `store_key` is the 32-byte key the worker unwrapped; the four handles
+    /// are the MLS log's two files and the protocol-state log's two. Refuses,
+    /// and changes nothing, when a log holds records this key does not open.
+    #[wasm_bindgen(js_name = initializeDurable)]
+    pub fn initialize_durable(
+        &mut self,
+        store_key: &[u8],
+        mls_first: SyncAccessHandle,
+        mls_second: SyncAccessHandle,
+        state_first: SyncAccessHandle,
+        state_second: SyncAccessHandle,
+    ) -> Result<String, JsError> {
+        let key: &[u8; STORE_KEY_BYTES] = store_key
+            .try_into()
+            .map_err(|_| JsError::new("the store key must be 32 bytes"))?;
+        let open = |category, first, second| {
+            LogStore::open(key, category, OpfsFile::new(first), OpfsFile::new(second))
+                .map(Arc::new)
+                .map_err(|e| JsError::new(&e.to_string()))
+        };
+        let mls = open(Category::Mls, mls_first, mls_second)?;
+        let state = open(Category::ProtocolState, state_first, state_second)?;
+        let address = self
+            .node
+            .initialize_with(mls.clone(), state.clone())
+            .map_err(js)?;
+        self.durable = Some((mls, state));
+        Ok(address)
+    }
+
+    /// What the durable logs have cost since they opened, as JSON
+    /// (`{"mls": {...}, "protocol_state": {...}}`), or `undefined` for an
+    /// engine held in memory.
+    #[wasm_bindgen(js_name = storeStats)]
+    pub fn store_stats(&self) -> Option<String> {
+        let (mls, state) = self.durable.as_ref()?;
+        let render = |stats: LogStats| {
+            format!(
+                r#"{{"flushes":{},"log_bytes":{},"live_bytes":{},"compactions":{}}}"#,
+                stats.flushes, stats.log_bytes, stats.live_bytes, stats.compactions
+            )
+        };
+        Some(format!(
+            r#"{{"mls":{},"protocol_state":{}}}"#,
+            render(mls.stats()),
+            render(state.stats())
+        ))
     }
 
     /// Starts the engine.

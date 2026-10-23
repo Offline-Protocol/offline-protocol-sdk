@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Runs the browser test page in headless Chrome against a fresh build.
+# Runs every browser test page in headless Chrome. Builds the module first
+# only when bindings/web/pkg is missing: after a Rust change, run
+# scripts/build.sh (CI always does, in the step before this one).
 #
 # CHROME names the browser binary; the default is the macOS install path, and
 # CI sets it to the runner's Chrome. A static server on PORT serves this
@@ -17,8 +19,12 @@ profile="$(mktemp -d)"
 python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1 &
 server=$!
 # CHROME_FLAGS carries what a CI sandbox needs (--no-sandbox on Linux runners).
+# WebRtcHideLocalIpsWithMdns is off so the WebRTC page's candidates are
+# addresses rather than .local names, which a runner may have no mDNS
+# responder to resolve. A real deployment keeps Chrome's default.
 # shellcheck disable=SC2086
 "$CHROME" ${CHROME_FLAGS:-} --headless=new --disable-gpu --no-first-run --no-default-browser-check \
+  --disable-features=WebRtcHideLocalIpsWithMdns \
   --user-data-dir="$profile" --remote-debugging-port="$DEVTOOLS_PORT" about:blank \
   >/dev/null 2>&1 &
 chrome=$!

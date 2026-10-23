@@ -1,7 +1,9 @@
 //! Two engines on one host, joined by the links a page would carry.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::log_store::{Category, LogStore, MemoryFile, STORE_KEY_BYTES};
 use crate::node::{LinkId, Node, MAX_LINKS};
 
 struct Peer {
@@ -323,4 +325,111 @@ fn the_browser_tests_run_in_ci() {
             needle.trim()
         );
     }
+}
+
+/// The files of one node's two logs, kept across a restart.
+struct Disk {
+    mls: (MemoryFile, MemoryFile),
+    state: (MemoryFile, MemoryFile),
+}
+
+impl Disk {
+    fn new() -> Self {
+        Self {
+            mls: Default::default(),
+            state: Default::default(),
+        }
+    }
+
+    fn boot(&self, profile: &str) -> Peer {
+        let key = [42u8; STORE_KEY_BYTES];
+        let mls = LogStore::open(&key, Category::Mls, self.mls.0.clone(), self.mls.1.clone())
+            .expect("mls log");
+        let state = LogStore::open(
+            &key,
+            Category::ProtocolState,
+            self.state.0.clone(),
+            self.state.1.clone(),
+        )
+        .expect("state log");
+        let mut node = Node::new("web-test", profile).expect("node");
+        let address = node
+            .initialize_with(Arc::new(mls), Arc::new(state))
+            .expect("initialize");
+        node.start().expect("start");
+        let link = node.open_link().expect("link");
+        Peer {
+            node,
+            link,
+            events: Vec::new(),
+            address,
+        }
+    }
+}
+
+#[test]
+fn a_node_killed_and_restarted_over_its_logs_is_the_same_member() {
+    let mut a = peer("host");
+    let disk = Disk::new();
+    let mut b = disk.boot("player");
+    let b_addr = b.address.clone();
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        saw(a, "secure_session_established", "peer_id", &b_addr)
+    }));
+    let info: serde_json::Value =
+        serde_json::from_str(&a.node.create_group("lobby").expect("group")).expect("json");
+    let group = info["group_id"].as_str().expect("group id").to_string();
+    let mut invited = false;
+    for _ in 0..40 {
+        if a.node.invite_to_group(&group, &b_addr).is_ok() {
+            invited = true;
+            break;
+        }
+        run_until(&mut a, &mut b, |_, _| true);
+    }
+    assert!(invited, "the invite never found the member's key package");
+    assert!(run_until(&mut a, &mut b, |_, b| saw(
+        b,
+        "group_member_added",
+        "group_id",
+        &group
+    )));
+    a.node.send_group_message(&group, "before").expect("send");
+    assert!(run_until(&mut a, &mut b, |_, b| {
+        b.events
+            .iter()
+            .any(|e| e["type"] == "group_message_received" && e["content"] == "before")
+    }));
+
+    // A crash: b is dropped without stop, and a's carrier to it closes.
+    drop(b);
+    a.node.close_link(a.link);
+    a.link = a.node.open_link().expect("link");
+    a.events.clear();
+
+    let mut b = disk.boot("player");
+    assert_eq!(
+        b.address, b_addr,
+        "a restart must load the identity, not mint one"
+    );
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        saw(a, "neighbor_discovered", "peer_id", &b_addr)
+    }));
+    a.node.send_group_message(&group, "after").expect("send");
+    assert!(
+        run_until(&mut a, &mut b, |_, b| {
+            b.events
+                .iter()
+                .any(|e| e["type"] == "group_message_received" && e["content"] == "after")
+        }),
+        "the restarted member could not read the group: {:?}",
+        b.events
+    );
+    assert!(
+        !b.events
+            .iter()
+            .any(|e| e["type"] == "message_decryption_failed"),
+        "{:?}",
+        b.events
+    );
 }

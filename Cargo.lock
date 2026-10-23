@@ -2587,17 +2587,23 @@ dependencies = [
 name = "offline-protocol-web"
 version = "0.30.0"
 dependencies = [
+ "chacha20poly1305",
  "getrandom 0.2.16",
  "getrandom 0.3.4",
+ "hkdf",
+ "js-sys",
  "offline-protocol",
  "offline-protocol-core",
  "offline-protocol-mls",
  "offline-protocol-transport",
  "openmls",
+ "rand_core 0.6.4",
  "serde_json",
+ "sha2 0.10.9",
  "tracing",
  "uuid",
  "wasm-bindgen",
+ "zeroize",
 ]
 
 [[package]]

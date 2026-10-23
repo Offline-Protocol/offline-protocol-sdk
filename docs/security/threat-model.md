@@ -1164,6 +1164,56 @@ It goes only to a sender whose key package advertised `ack_versions` entry 1,
 and the sender reacts with one resend of a message it already holds, never a
 delivery.
 
+### R26. A browser node's store key is reachable from its origin
+
+A browser node keeps its identity keys, group state and delivery state in
+origin-private files, sealed under a store key that is itself sealed by a
+non-extractable WebCrypto key in the origin's IndexedDB
+([web bridge W8](../bridges/web.md#w8-storage-is-a-sealed-log-one-node-per-account)).
+Any script that runs on the origin can ask the browser to unseal that key, or
+simply drive the node's worker: a cross-site scripting flaw, a compromised
+dependency the page loads, or an extension granted access to the site.
+
+**Why it stands:** a page has no keystore it can reach without the origin. The
+engine's storage traits are synchronous and the WebCrypto calls are not, so
+the key must be in the worker's memory while the engine runs, and an
+authenticator prompt per launch would turn a game lobby into a login.
+
+**What bounds it:** the sealing keeps the records from anything that reads the
+files alone: a copied browser profile, a backup, another origin. The key never
+leaves the browser in the clear, and the sealed copy beside the logs does not
+open without the wrapping key, which the browser will not export. An origin
+that runs third-party script it does not control should not host a node whose
+identity matters. Clearing the site's data destroys the identity, and so can
+eviction under storage pressure, which the binding asks the browser not to do
+(`navigator.storage.persist()`) but cannot forbid. A node that finds its logs
+without its key, or its key without its wrapping key, refuses to start and
+changes nothing rather than minting a new identity over the old one.
+
+### R27. A WebRTC connection code is unauthenticated and names local addresses
+
+The two codes that set up a WebRTC link carry each side's session description,
+which lists its local network addresses as candidates. Whoever sees a code
+learns those addresses, and whoever can replace one in transit (a shared
+screen, a chat the codes cross) can put themselves on the other end of the
+connection.
+
+**Why it stands:** the codes exist so that two devices can connect with no
+server and no network beyond the one they share, and there is nothing to
+authenticate them against until a connection exists.
+
+**What bounds it:** a connection only carries bytes, and the engine's identity
+preamble decides who is on the other end
+([web bridge W3](../bridges/web.md#w3-the-page-moves-bytes-the-engine-decides-what-they-mean)).
+An attacker who swaps a code gets a link announced under the attacker's own
+address, never the intended peer's, and MLS keeps every session and group
+message from them. An application that admits members to a group should show
+the joining address to the people involved, as the lobby example does: it
+lists every address it admits, and a player sees the host's. No ICE
+server is configured, so the codes never reach a third party unless people
+send them through one, and a connection is made on the local network or not
+at all.
+
 ## Network egress
 
 Until 0.26 the Rust crates opened no socket: every byte that left a device
