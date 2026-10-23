@@ -578,61 +578,29 @@ fn key_types_are_isolated(storage: &dyn MlsStorage) -> Result<(), String> {
 ///
 /// Every value is one writer's fill byte repeated, so a torn read is any
 /// value that is not exactly one writer's; nothing has to be timed.
+///
+/// A target with no threads (a browser worker, WASI preview 1) cannot start
+/// a second writer, and there nothing can overwrite a key while another
+/// write to it is in progress. There the same writers take turns on one
+/// thread, a round each, so the shared key is still overwritten by every
+/// writer between reads. Without that the check would fail on such a target
+/// for a reason that has nothing to do with the adapter, and an adapter that
+/// runs there could never be green.
 fn concurrent_writes(storage: &dyn MlsStorage) -> Result<(), String> {
-    const SHARED_KEY: &str = "concurrent_shared";
     let shared_values: Vec<Vec<u8>> = (0..CONCURRENT_WRITERS)
         .map(|writer| vec![writer as u8 + 1; CONCURRENT_VALUE_BYTES])
         .collect();
 
-    let own_value = |writer: usize, round: usize| -> Vec<u8> {
-        let mut value = vec![writer as u8 + 1; CONCURRENT_VALUE_BYTES];
-        value[0] = round as u8;
-        value
-    };
-
+    #[cfg(not(all(target_family = "wasm", not(target_feature = "atomics"))))]
     let outcomes: Vec<Result<(), String>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..CONCURRENT_WRITERS)
             .map(|writer| {
                 let shared_values = &shared_values;
-                let own_value = &own_value;
                 std::thread::Builder::new().spawn_scoped(scope, move || -> Result<(), String> {
-                    let own_key = format!("concurrent_writer_{writer}");
                     for round in 0..WRITES_PER_WRITER {
-                        storage
-                            .store(CONFORMANCE_KEY_TYPE, &own_key, &own_value(writer, round))
-                            .map_err(|err| format!("writer {writer}: store failed: {err}"))?;
-                        storage
-                            .store(CONFORMANCE_KEY_TYPE, SHARED_KEY, &shared_values[writer])
-                            .map_err(|err| format!("writer {writer}: store failed: {err}"))?;
-                        match storage.load(CONFORMANCE_KEY_TYPE, SHARED_KEY) {
-                            Ok(Some(seen)) if shared_values.contains(&seen) => {}
-                            Ok(Some(seen)) => {
-                                return Err(format!(
-                                    "writer {writer} read a torn value ({} bytes) from a key \
-                                     under concurrent overwrite",
-                                    seen.len()
-                                ))
-                            }
-                            Ok(None) => {
-                                return Err(format!(
-                                    "writer {writer} found a key it had just written missing \
-                                     under concurrent overwrite"
-                                ))
-                            }
-                            Err(err) => {
-                                return Err(format!(
-                                    "writer {writer}: load under concurrent writes failed: {err}"
-                                ))
-                            }
-                        }
+                        write_round(storage, shared_values, writer, round)?;
                     }
-                    expect_load(
-                        storage,
-                        CONFORMANCE_KEY_TYPE,
-                        &own_key,
-                        &own_value(writer, WRITES_PER_WRITER - 1),
-                    )
-                    .map_err(|detail| format!("writer {writer}'s own key: {detail}"))
+                    check_own_key(storage, writer)
                 })
             })
             .collect();
@@ -646,11 +614,25 @@ fn concurrent_writes(storage: &dyn MlsStorage) -> Result<(), String> {
             })
             .collect()
     });
+    #[cfg(all(target_family = "wasm", not(target_feature = "atomics")))]
+    let outcomes: Vec<Result<(), String>> = {
+        let mut outcomes = Vec::with_capacity(CONCURRENT_WRITERS + 1);
+        outcomes.push((|| {
+            for round in 0..WRITES_PER_WRITER {
+                for writer in 0..CONCURRENT_WRITERS {
+                    write_round(storage, &shared_values, writer, round)?;
+                }
+            }
+            Ok(())
+        })());
+        outcomes.extend((0..CONCURRENT_WRITERS).map(|writer| check_own_key(storage, writer)));
+        outcomes
+    };
     for outcome in outcomes {
         outcome?;
     }
 
-    match storage.load(CONFORMANCE_KEY_TYPE, SHARED_KEY) {
+    match storage.load(CONFORMANCE_KEY_TYPE, CONCURRENT_SHARED_KEY) {
         Ok(Some(seen)) if shared_values.contains(&seen) => Ok(()),
         Ok(Some(seen)) => Err(format!(
             "after all writers finished the shared key held a torn value ({} bytes)",
@@ -659,6 +641,64 @@ fn concurrent_writes(storage: &dyn MlsStorage) -> Result<(), String> {
         Ok(None) => Err("after all writers finished the shared key was missing".to_string()),
         Err(err) => Err(format!("load after concurrent writes failed: {err}")),
     }
+}
+
+/// The key every writer of the concurrency check overwrites.
+const CONCURRENT_SHARED_KEY: &str = "concurrent_shared";
+
+/// The value `writer` stores under its own key in `round`.
+fn concurrent_own_value(writer: usize, round: usize) -> Vec<u8> {
+    let mut value = vec![writer as u8 + 1; CONCURRENT_VALUE_BYTES];
+    value[0] = round as u8;
+    value
+}
+
+/// One round of one writer: its own key, the shared key, and a read of the
+/// shared key that must be exactly one writer's value.
+fn write_round(
+    storage: &dyn MlsStorage,
+    shared_values: &[Vec<u8>],
+    writer: usize,
+    round: usize,
+) -> Result<(), String> {
+    storage
+        .store(
+            CONFORMANCE_KEY_TYPE,
+            &format!("concurrent_writer_{writer}"),
+            &concurrent_own_value(writer, round),
+        )
+        .map_err(|err| format!("writer {writer}: store failed: {err}"))?;
+    storage
+        .store(
+            CONFORMANCE_KEY_TYPE,
+            CONCURRENT_SHARED_KEY,
+            &shared_values[writer],
+        )
+        .map_err(|err| format!("writer {writer}: store failed: {err}"))?;
+    match storage.load(CONFORMANCE_KEY_TYPE, CONCURRENT_SHARED_KEY) {
+        Ok(Some(seen)) if shared_values.contains(&seen) => Ok(()),
+        Ok(Some(seen)) => Err(format!(
+            "writer {writer} read a torn value ({} bytes) from a key under concurrent overwrite",
+            seen.len()
+        )),
+        Ok(None) => Err(format!(
+            "writer {writer} found a key it had just written missing under concurrent overwrite"
+        )),
+        Err(err) => Err(format!(
+            "writer {writer}: load under concurrent writes failed: {err}"
+        )),
+    }
+}
+
+/// A writer's own key holds its last round's value.
+fn check_own_key(storage: &dyn MlsStorage, writer: usize) -> Result<(), String> {
+    expect_load(
+        storage,
+        CONFORMANCE_KEY_TYPE,
+        &format!("concurrent_writer_{writer}"),
+        &concurrent_own_value(writer, WRITES_PER_WRITER - 1),
+    )
+    .map_err(|detail| format!("writer {writer}'s own key: {detail}"))
 }
 
 /// Remove every record the suite writes, in both key types.

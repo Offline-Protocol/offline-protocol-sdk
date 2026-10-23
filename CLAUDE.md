@@ -152,7 +152,11 @@ cd bindings/java && gradle build        # -PnativeLibrary=... for another build
 cargo install wasm-bindgen-cli --version 0.2.105 --locked
 cargo test -p offline-protocol-web            # two engines over links, on the host
 bash bindings/web/scripts/build.sh            # module + glue in bindings/web/pkg
-bash bindings/web/scripts/test-browser.sh     # headless Chrome (CHROME= to override)
+(cd bindings/web && npm ci && npx playwright install chromium firefox webkit)  # once
+bash bindings/web/scripts/test-browser.sh     # every page in three engines (BROWSERS= to narrow)
+# The storage conformance suites over real OPFS, in a worker of each browser;
+# each driver must match its browser's version.
+CHROMEDRIVER=... GECKODRIVER=... bash bindings/web/scripts/test-conformance.sh
 ```
 
 ### Native packages

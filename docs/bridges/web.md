@@ -332,10 +332,19 @@ sent never sees it.
 cargo install wasm-bindgen-cli --version 0.2.105 --locked   # once
 cargo test -p offline-protocol-web                          # two engines on the host
 bash bindings/web/scripts/build.sh                          # module + glue in bindings/web/pkg
-bash bindings/web/scripts/test-browser.sh                   # headless Chrome
+(cd bindings/web && npm ci && npx playwright install chromium firefox webkit)   # once
+bash bindings/web/scripts/test-browser.sh                   # every page, three engines
+CHROMEDRIVER=... GECKODRIVER=... \
+  bash bindings/web/scripts/test-conformance.sh             # storage suites on OPFS
 ```
 
-`scripts/test-browser.sh` runs every page in `bindings/web/test`:
+`scripts/test-browser.sh` runs every page in `bindings/web/test` in
+Chromium, Firefox and WebKit, headless, through Playwright (`BROWSERS`
+narrows the list). The engines are Playwright's builds, pinned by its version
+in `package-lock.json`; WebKit is Safari's engine, not Safari. A page that
+passes in one engine and not another is a real difference: the first run in
+Firefox found that awaiting `navigator.storage.persist()` hangs every durable
+start there, because Firefox answers it by asking the user.
 
 - `two-nodes.html`: two nodes in two workers of one page, which reach each
   other over the origin's `BroadcastChannel` exactly as two tabs do. An MLS
@@ -355,8 +364,10 @@ bash bindings/web/scripts/test-browser.sh                   # headless Chrome
   message that crosses in chunks, a group at 10 Hz sent acknowledged and
   then ephemeral, each with its delivery latency and the sender's store
   flushes (the ephemeral phase must cost fewer), and a loss when the
-  connection closes (W9, W10). Chrome runs with `WebRtcHideLocalIpsWithMdns`
-  off, so the candidates are addresses a runner can reach.
+  connection closes (W9, W10). Chromium runs with `WebRtcHideLocalIpsWithMdns`
+  off and Firefox with `media.peerconnection.ice.obfuscate_host_addresses`
+  off, so the candidates are addresses a runner can reach. WebKit has no such
+  switch and gathers `.local` names.
 - `nostr-signal.html`: two nodes that share only a room code meet through
   a Nostr relay, link over WebRTC and send an ephemeral direct message. A
   join to a room nobody hosts gives up at its deadline, and a call to a
@@ -365,7 +376,21 @@ bash bindings/web/scripts/test-browser.sh                   # headless Chrome
   stores and verifies nothing, so the page's own checks are what refuse a
   forged event.
 
-CI's `web-binding` job runs them all.
+`scripts/test-conformance.sh` runs
+`crates/offline-protocol-web/tests/browser_conformance.rs` in a dedicated
+worker of Chrome and Firefox, through wasm-bindgen's test runner and each
+browser's WebDriver (`CHROMEDRIVER`, `GECKODRIVER`). It is the storage
+adapter verification every other binding's store passes (C11), against the
+log store over real OPFS files: both conformance suites, then a reopen after
+enough writes to compact several times. The suites alone run against one open
+store and cannot see a write that never reached the file; the reopen can,
+and a store that wrote every record at offset zero fails it. A worker has
+one thread, so the MLS suite's concurrent-writers check runs its writers in
+turns there.
+
+CI's `web-binding` job runs both. [The two-device checklist](web-devices.md)
+covers what one machine cannot: a phone's browser, a local network, and a
+tab the phone suspends.
 
 [`examples/web-two-tabs`](../../examples/web-two-tabs) is the first page to
 open in two tabs, and [`examples/web-lobby`](../../examples/web-lobby) a
@@ -387,6 +412,8 @@ two-player game between devices over WebRTC with durable nodes.
 - **A published package.** `bindings/web` is private on npm and the
   `offline-protocol-web` crate has not been released; build both from
   source.
-- **Coverage beyond Chrome on one machine.** No page runs in Safari or
-  Firefox, and no run has crossed two physical devices. The storage
-  conformance suites run on the host only (W8).
+- **Coverage beyond one machine.** CI runs every page in Chromium, Firefox
+  and WebKit, but on one host over loopback, and WebKit there is
+  Playwright's build rather than Safari. Two physical devices are a manual
+  checklist ([web-devices.md](web-devices.md)), not a gate. The storage
+  conformance suites run in Chrome and Firefox, not in WebKit.

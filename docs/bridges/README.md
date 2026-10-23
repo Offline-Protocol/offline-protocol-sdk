@@ -359,7 +359,7 @@ and they are fast enough that there is no excuse:
 | Kotlin | Gradle unit tests, Robolectric where a platform type is needed | tens of seconds |
 | Python | pytest against the built desktop library | seconds |
 | TypeScript | `tsc` plus the JS harness | seconds |
-| Web | `bindings/web/scripts/test-browser.sh` in headless Chrome | seconds |
+| Web | `bindings/web/scripts/test-browser.sh` in Chromium, Firefox and WebKit, `test-conformance.sh` in Chrome and Firefox | minutes |
 
 **After a rename, grep for the old identifier across every binding.** The
 compiler will not find it in the three languages that do not share a type system
