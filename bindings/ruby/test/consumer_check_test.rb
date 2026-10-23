@@ -4,10 +4,11 @@ require_relative "test_helper"
 
 # The Ruby program that proves the generated binding, the library and the
 # interface definition agree: the counterpart of bindings/c/consumer-check and
-# of the Java ConsumerCheckTest. It loads the real library, whose FFI checksums
-# the generated code verifies before the first call, so a binding generated from
-# a different definition than the library fails every test here, and so does a
-# config that names the wrong library.
+# of the Java ConsumerCheckTest. The generated code compares none of the
+# library's FFI checksums (docs/bridges/ruby.md, R1): it refuses only a library
+# that lacks a function it names. So these tests, run against the real library,
+# are what catch a binding generated from a different definition, and a config
+# that names the wrong library fails every one of them at the require.
 class ConsumerCheckTest < Minitest::Test
   STORE_KEY = (0..31).to_a.pack("C*").freeze
 
@@ -165,6 +166,18 @@ class ConsumerCheckTest < Minitest::Test
       e.stop
       e.close_file_stores
     end
+  end
+
+  # The generated code declares the functions that report the library's FFI
+  # checksums and contract version, and compares none of them (R1). The
+  # contract tells gem users that nothing refuses a library from another
+  # release; when this fails, the generator started checking: relax R1.
+  def test_the_generated_code_compares_no_checksum
+    source = File.read(File.expand_path("../lib/offline_protocol.rb", __dir__))
+    declared = source.scan(/attach_function :\w+_(?:checksum_\w+|uniffi_contract_version)\b/).size
+    mentioned = source.scan(/\w+_(?:checksum_\w+|uniffi_contract_version)\b/).size
+    assert_operator declared, :>, 0, "the reporting functions are no longer declared"
+    assert_equal declared, mentioned, "the generated code now reads a checksum: update R1"
   end
 
   def test_a_provider_that_raises_is_reported_as_a_storage_failure

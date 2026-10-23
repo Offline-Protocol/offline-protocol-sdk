@@ -625,9 +625,10 @@ jobs:
   # The Ruby binding (docs/bridges/ruby.md). Its source is generated from the
   # UDL and its drift is gated with the other bindings (python-bindings). This
   # is the other side: the generated Ruby, run against the library built from
-  # the same definition. The generated code verifies the library's FFI
-  # checksums before the first call, so the tests fail if the two were produced
-  # from different definitions, or if the config names the wrong library.
+  # the same definition. The Ruby generator compares no FFI checksums at load
+  # (docs/bridges/ruby.md, R1), so this run is what proves the two agree: it
+  # fails if they were produced from different definitions, or if the config
+  # names the wrong library.
   ruby-binding:
     name: Ruby Binding (${{ matrix.os }}, Ruby ${{ matrix.ruby }})
     runs-on: ${{ matrix.os }}

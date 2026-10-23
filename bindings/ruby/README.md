@@ -106,9 +106,10 @@ bundle exec rake test
 `rake test` puts `../../target/debug` on the loader's search path (set
 `OFFLINE_PROTOCOL_LIBRARY_DIR` for another build) and runs
 [`test/consumer_check_test.rb`](test/consumer_check_test.rb) against the real
-library. The generated code verifies the library's FFI checksums before the
-first call, so the tests fail if the binding and the library came from
-different definitions.
+library. The generated code does not compare the library's FFI checksums, so
+these tests are what show that the binding and the library came from the same
+definition. Outside this repository nothing checks it: take the library from
+the same release as the gem (R1).
 
 `bundle exec rake build` writes the gem to `pkg/`, at the version in
 `OFFLINE_PROTOCOL_VERSION` (default `0.0.0`). Use the task, not `gem build`: it

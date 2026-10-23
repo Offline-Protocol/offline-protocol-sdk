@@ -46,9 +46,25 @@ misspelt key would produce a binding that fails with a `LoadError` for every
 consumer and passes every generation check. The guard pins that the config is
 passed, and the consumer check is what proves it took effect.
 
-The generated code checks the library's FFI contract version and every
-function's checksum when it loads, so a Ruby generated from a different
-definition than the library fails at the first call, not at build time.
+### The generated code verifies no checksums
+
+Unlike the Swift, Kotlin, Python and Java bindings, the Ruby generator's
+output does not compare the library's FFI contract version or any function's
+checksum. It declares the functions that report them and never calls them. What it does
+check is narrower: it attaches every function when the file is required, so a
+library that lacks one (an older build, before a method was added) fails the
+`require` with `FFI::NotFoundError`. A library that has every function but
+whose signatures or records changed loads, and then reads and writes the wrong
+layout.
+
+So the property the other bindings get at load, Ruby gets only from the
+outside. In this repository the drift gate keeps the committed file in step
+with the definition, and the consumer check runs it against the library built
+from that definition. A host using the gem has neither: it must take the
+library from the same release as the gem, exactly, and nothing refuses a
+mismatch. The consumer check pins that the generated code compares no
+checksum, so a UniFFI bump that starts doing so fails that test and this
+section can be relaxed.
 
 ## R2. The generated records keep the definition's defaults
 
