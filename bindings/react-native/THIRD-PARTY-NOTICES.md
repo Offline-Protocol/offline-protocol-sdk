@@ -2951,7 +2951,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [zeroize 1.9.0](https://github.com/RustCrypto/utils)
+- [zeroize 1.9.1](https://github.com/RustCrypto/utils)
 
 ```
 Copyright (c) 2018-2026 The RustCrypto Project Developers
