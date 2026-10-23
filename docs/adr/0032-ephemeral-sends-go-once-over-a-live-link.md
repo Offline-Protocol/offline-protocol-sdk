@@ -65,8 +65,9 @@ that member's reachability edge sends the rung first. Once it is
 acknowledged (or has expired or failed), the member takes ephemeral frames
 again. A member that held a live link when the rung was sent is never
 held: the rung went down that link ahead of any later frame. (When the link
-refused it, that is not true; see Consequences.) As with replication, the count is not persisted, so the first
-ephemeral send to a group in a process is reliable.
+refused it, that is not true; see Consequences.) As with replication, the
+count is not persisted, so the first ephemeral send to a group in a process
+is reliable.
 
 Measured on the host over the browser node's sealed log store, one member:
 
@@ -105,14 +106,29 @@ restart never reuses a generation.
   them arrive before the rung is retried, it can never be decrypted, is never
   acknowledged, and is retried until `MessageFailed`, for an id the
   application got back from `sendGroupMessage`. The member's ratchet is
-  still safe, because the rung is the only thing that gap needed. It is
-  narrow: a carrier that refuses on a live link is usually closing it, and
-  the member is then unlinked and held. Holding linked members too would
-  cost every game one round trip of `PeerNotReachable` at each rung (about
-  every 25 seconds at 10 Hz), which a two-player game sees as its only peer
-  dropping out. The fix, if it shows, is to hold a member only when its
-  carrier refused the rung, which needs the send path to report that per
-  member.
+  still safe, because the rung is the only thing that gap needed. A carrier
+  that refuses on a live link is usually closing it, but that does not hold
+  the member either: the hold records only members that were unlinked
+  before the rung was sent, so this member is skipped, and when its link
+  comes back nothing keeps the next ephemeral frames behind the rung the
+  flush is resending. It is narrow because rungs are rare: the count resets
+  on every send that reaches every member, so a rung goes out only after
+  256 sends in a row that missed somebody (at 10 Hz, about every 25 seconds
+  while one member stays out of reach), plus the first send in a process.
+  Holding linked members at each rung would cost a game one round trip of
+  `PeerNotReachable` whenever a member keeps missing frames, which a
+  two-player game sees as its only peer dropping out. The fix, if it shows,
+  is to hold a member only when its carrier refused the rung, which needs
+  the send path to report that per member.
+- A rung that can never be decrypted is retried until it fails. A held
+  member's rung waits in the outbox, and the hold ends only when the rung
+  leaves it. If the member received more than 32 newer frames first (the
+  refused-rung case above), the frame is too far in the past to decrypt, the
+  receiver answers nothing, the sender retries it to the end of the retry
+  ladder, and the application sees `MessageFailed` for it while that member
+  gets no ephemeral frames. Acknowledging a group frame that fails as too
+  far in the past, where the session itself is healthy, would end the futile
+  retry; that is not built.
 - Only the browser binding exposes it. The FFI record does not have the field
   yet, so the UDL, the generated bindings and the C dispatcher are unchanged.
   Adding it is an append to `SendMessageOptions` in the UDL and every binding

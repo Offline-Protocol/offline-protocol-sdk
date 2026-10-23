@@ -380,6 +380,13 @@ two-player game between devices over WebRTC with durable nodes.
 - **Ephemeral sends on the native bindings.** The engine has them and the
   browser exposes them; the UDL record does not yet carry the field
   ([ADR 0032](../adr/0032-ephemeral-sends-go-once-over-a-live-link.md)).
+- **An end to a rung that can never be decrypted.** A group member's
+  reliable rung that arrives behind more than 32 newer ephemeral frames is
+  retried until it fails, and holds that member out of ephemeral frames
+  meanwhile ([ADR 0032](../adr/0032-ephemeral-sends-go-once-over-a-live-link.md)).
+- **A published package.** `bindings/web` is private on npm and the
+  `offline-protocol-web` crate has not been released; build both from
+  source.
 - **Coverage beyond Chrome on one machine.** No page runs in Safari or
   Firefox, and no run has crossed two physical devices. The storage
   conformance suites run on the host only (W8).

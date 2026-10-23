@@ -99,7 +99,8 @@ export class OfflineNode extends EventTarget {
 
   /// NostrSignaller's half in the worker (W11): the relay REQ text for a
   /// room, a sealed and signed EVENT text, and the signal a relay message
-  /// carries (`{ role, session, code }`, or null for anything else).
+  /// carries (`{ role, session, code, freshUntilMs }`, where `freshUntilMs` is
+  /// when the offer stops being fresh, or null for anything else).
   signalSubscription(room, subscriptionId) {
     return this.#call("signalSubscription", { room, subscriptionId });
   }
