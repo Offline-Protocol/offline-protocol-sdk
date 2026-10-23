@@ -273,6 +273,11 @@ These fail silently if broken. Each is documented in full where it is linked.
   fallback ([C binding](docs/bridges/c.md)).
 - **Regenerate all bindings together** after a UDL change
   ([C1](docs/bridges/README.md#c1-regenerate-every-binding-together)).
+- **A UDL change also regenerates the Python local API table**
+  (`python bindings/python/scripts/generate_local_api_table.py`, `--check`
+  to verify) and classifies each new method in `local_api/dispatch.py` and
+  the [local API chapter](docs/spec/local-api.md). It is not part of
+  `generate-bindings.sh`, so only the Python jobs in CI notice it is stale.
 - **The FFI error enum is append-only**; discriminants are positional
   ([C2](docs/bridges/README.md#c2-the-error-enum-is-append-only)).
 - **Hand-mirrored constants** (relay-answer prefixes, one-shot event tags, the

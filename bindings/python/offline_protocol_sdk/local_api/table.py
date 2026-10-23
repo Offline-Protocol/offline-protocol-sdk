@@ -9,7 +9,7 @@ and a classification in ``dispatch.py``.
 
 from __future__ import annotations
 
-UDL_SHA256 = "fc8e921a4967cfb10f8b3a91682099e19786f297d1a2be2d12e7f77a86c506ac"
+UDL_SHA256 = "78ab75bbcb8be43e8685cf83a22c0bfbce9c88b512b9250c86634354a58f7463"
 
 TABLE = {'callbacks': ('MlsStorageProvider',
                'ProtocolStateStorageProvider',
@@ -191,9 +191,14 @@ TABLE = {'callbacks': ('MlsStorageProvider',
                                                            'void'),
                                  'ble_get_next_fragment': ((), 'BleFragment?'),
                                  'ble_get_peer_count': ((), 'u32'),
+                                 'ble_node_hash': ((), 'sequence<u8>?'),
                                  'ble_peer_discovered': ((('peer_id', 'string'), ('rssi', 'i16')),
                                                          'void'),
                                  'ble_peer_lost': ((('peer_id', 'string'),), 'void'),
+                                 'ble_peer_rssi': ((('peer_id', 'string?'),
+                                                    ('node_hash', 'sequence<u8>?'),
+                                                    ('rssi', 'i16')),
+                                                   'void'),
                                  'ble_recipient_not_among_peers_count': ((), 'u64'),
                                  'ble_return_fragment': ((), 'void'),
                                  'ble_set_peer_mtu': ((('peer_id', 'string'),
@@ -482,6 +487,7 @@ TABLE = {'callbacks': ('MlsStorageProvider',
                                  'set_nostr_transport_callback': ((('callback',
                                                                     'NostrTransportCallback'),),
                                                                   'void'),
+                                 'set_peer_rssi_events': ((('enabled', 'boolean'),), 'void'),
                                  'set_relay_priority': ((('priority', 'RelayPriority'),), 'void'),
                                  'set_reticulum_transport_callback': ((('callback',
                                                                         'ReticulumTransportCallback'),),
