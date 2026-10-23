@@ -121,8 +121,9 @@ be thread-safe.
 
 ## R6. Requirements the platform imposes
 
-The consumer check is verified on Ruby 4.0 only. The binding needs the `ffi`
-gem (`~> 1.17`) and nothing else.
+CI runs the consumer check on Ruby 4.0 on Linux, macOS and Windows, and on
+Ruby 3.3 on Linux, which is the gemspec's `required_ruby_version`. The binding
+needs the `ffi` gem (`~> 1.17`) and nothing else.
 
 The native library is not bundled. The loader finds it on the library search
 path: `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on macOS, `PATH` on

@@ -1,1 +1,7 @@
 .bundle/
+pkg/
+# Staged from the repository root by `rake build`.
+/LICENSE
+/LICENSE-COMMERCIAL.md
+/THIRD-PARTY-NOTICES.md
+/EXPORT.md

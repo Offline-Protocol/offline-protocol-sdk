@@ -22,7 +22,7 @@ callback or a storage provider.
 
 | What | Where it comes from |
 |---|---|
-| Ruby (verified on 4.0) and the `ffi` gem, `~> 1.17` | Yours; `bundle install` in this directory installs the gem |
+| Ruby 3.3 or later and the `ffi` gem, `~> 1.17` | Yours; `bundle install` in this directory installs the gem |
 | This binding's source | [`lib/offline_protocol.rb`](lib/offline_protocol.rb), on your load path |
 | `liboffline_protocol_uniffi.so` / `.dylib`, `offline_protocol_uniffi.dll` | The release's desktop archives, or `cargo build --release -p offline-protocol-uniffi` |
 
@@ -104,6 +104,11 @@ bundle exec rake test
 library. The generated code verifies the library's FFI checksums before the
 first call, so the tests fail if the binding and the library came from
 different definitions.
+
+`bundle exec rake build` writes the gem to `pkg/`, at the version in
+`OFFLINE_PROTOCOL_VERSION` (default `0.0.0`). Use the task, not `gem build`: it
+stages the license notices from the repository root, which the gemspec names
+and `gem build` cannot reach.
 
 ## Regenerating
 

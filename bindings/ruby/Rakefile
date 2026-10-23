@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "fileutils"
+require "rubygems/package"
 require "rake/testtask"
 
 # The generated code loads the library by name, so the directory holding it has
@@ -27,6 +29,31 @@ Rake::TestTask.new(:test) do |t|
   t.libs << "lib" << "test"
   t.pattern = "test/**/*_test.rb"
   t.warning = false
+end
+
+# The gem: the legal files from the repository root are staged beside the
+# gemspec, which names them, and removed again. `gem build` cannot reach outside
+# this directory, and a committed copy would drift from the original.
+desc "Build pkg/offline_protocol-<version>.gem (OFFLINE_PROTOCOL_VERSION sets the version)"
+task :build do
+  spec = Gem::Specification.load(File.expand_path("offline_protocol.gemspec", __dir__))
+  root = File.expand_path("../..", __dir__)
+  legal = spec.files - %w[lib/offline_protocol.rb README.md]
+  staged = legal.map do |name|
+    source = File.join(root, name)
+    raise "the gemspec names #{name}, which is not at #{root}" unless File.file?(source)
+
+    FileUtils.cp(source, __dir__)
+    File.join(__dir__, name)
+  end
+  begin
+    FileUtils.mkdir_p(File.join(__dir__, "pkg"))
+    gem = Dir.chdir(__dir__) { Gem::Package.build(spec) }
+    FileUtils.mv(File.join(__dir__, gem), File.join(__dir__, "pkg", gem))
+    puts "pkg/#{gem}"
+  ensure
+    FileUtils.rm_f(staged)
+  end
 end
 
 task default: :test
