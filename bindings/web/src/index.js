@@ -53,8 +53,11 @@ export class OfflineNode extends EventTarget {
     if (!appId) throw new Error("appId is required");
     if (storage === "durable") {
       // Best effort: without it the browser may evict the origin's files
-      // under storage pressure, identity included.
-      await navigator.storage?.persist?.().catch(() => false);
+      // under storage pressure, identity included. Never awaited: Firefox
+      // answers by asking the user, and the promise stays pending until they
+      // do, so a node that waited for it would not start while the prompt
+      // is ignored (or ever, in a headless browser).
+      navigator.storage?.persist?.().catch(() => false);
     }
     const url = workerUrl ?? new URL("./worker.js", import.meta.url);
     const instance = crypto.randomUUID();

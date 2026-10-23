@@ -72,8 +72,20 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 - **Telemetry counts only acknowledged sends as sent.** An ephemeral message
   is never delivered or failed, so counting it would lower the delivery ratio
   by every game update.
+- **The browser tests run in Chromium, Firefox and WebKit.** Playwright drives
+  every page in `bindings/web/test` in all three, and both storage
+  conformance suites now run against the log store over real OPFS files in a
+  worker of Chrome and Firefox, with a reopen through compaction. On a target
+  with no threads, the MLS suite's concurrent-writers check runs its writers
+  in turns instead of failing to start them. A two-device checklist for the
+  lobby is in [docs/bridges/web-devices.md](docs/bridges/web-devices.md).
 
 ### Fixed
+
+- **A durable browser node starts in Firefox.** `OfflineNode.start` awaited
+  `navigator.storage.persist()`, which Firefox answers by asking the user, so
+  the start waited for the prompt (and never finished in a headless
+  browser). The request is now made without waiting for its answer.
 
 - **A browser log store whose compaction fails no longer retries it on every
   write.** The next attempt waits for another mebibyte of log.

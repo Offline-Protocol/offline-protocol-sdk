@@ -326,6 +326,8 @@ fn the_browser_tests_run_in_ci() {
         "targets: wasm32-unknown-unknown",
         "bash bindings/web/scripts/build.sh",
         "bash bindings/web/scripts/test-browser.sh",
+        "npx playwright install --with-deps chromium firefox webkit",
+        "bash bindings/web/scripts/test-conformance.sh",
     ] {
         assert!(
             ci.contains(needle),
