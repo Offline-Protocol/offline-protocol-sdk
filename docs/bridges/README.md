@@ -129,7 +129,7 @@ in the uniffi crate pins the mobile call sites, which no CI job executes.
 ## C5. Hand-mirrored constants must be pinned in every language
 
 Some constants exist in several places no single compiler sees together.
-Sixteen sets do today, and they are pinned by **two different** mechanisms, so
+Seventeen sets do today, and they are pinned by **two different** mechanisms, so
 knowing which one you are touching matters.
 
 **The relay-answer prefix exemption list** is the canonical example: the core,
@@ -321,6 +321,15 @@ readings and halves the event rate, with no error on either side.
 `peer_rssi_feed_interval_stays_above_the_core_cap` reads both bridge sources
 and compares them with the Rust constant itself.
 
+**The `peer_rssi` prefix** is the seventeenth: both bridges'
+`EventReplayRing` match the start of an event's JSON, `{"type":"peer_rssi",`,
+to keep signal readings out of the numbered #514 replay ring, where four a
+second per peer would push out the `message_received` and
+`message_delivered` events it exists to recover. A change to how the engine
+serialises the event would make the match fail silently and number every
+reading again, so `peer_rssi_is_left_out_of_the_replay_ring` serialises the
+event and reads both bridge sources.
+
 ## C6. Config parsers must not default to literals
 
 A bridge parsing a config object must distinguish "the caller did not supply this
@@ -420,7 +429,9 @@ React Native then loses: a bridgeless emit reports failure by rejecting a task
 rather than throwing, so the module sees a success. Such a loss is
 **recovered** by a fourth shape, a numbered replay. Both native modules number
 every event they hand over on the main event name (`seq`) and keep the last
-256 of them (`EventReplayRing`), and the number, the hand-over and the record
+256 of them (`EventReplayRing`), except `peer_rssi`, which the next reading
+replaces and which would otherwise crowd the ring (C5, the seventeenth set);
+it goes over unnumbered. The number, the hand-over and the record
 happen under one lock, so the ring holds a contiguous run with each event
 under its own number. When the TypeScript layer sees a number skipped it
 pauses dispatch, pulls the missing range with `replayEvents`, and dispatches

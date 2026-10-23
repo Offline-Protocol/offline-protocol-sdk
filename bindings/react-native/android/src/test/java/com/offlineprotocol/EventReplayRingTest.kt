@@ -1,6 +1,7 @@
 package com.offlineprotocol
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
@@ -94,5 +95,15 @@ class EventReplayRingTest {
         val all = ring.replay(0, 3_999)
         assertEquals(4_000, all.size)
         all.forEach { assertEquals(ev(it.seq), it.eventJson) }
+    }
+
+    @Test
+    fun aSignalReadingIsNeitherNumberedNorKept() {
+        // One numbered per quarter second per peer would push the messages
+        // this ring exists for out of it within seconds.
+        assertFalse(EventReplayRing.isReplayed("""{"type":"peer_rssi","peer_id":"p","transport":"BLE","rssi":-50}"""))
+        assertTrue(EventReplayRing.isReplayed("""{"type":"message_received","message_id":"m"}"""))
+        assertTrue(EventReplayRing.isReplayed("""{"type":"neighbor_discovered","peer_id":"p","transport":"BLE","rssi":-50}"""))
+        assertTrue("an event with no JSON keeps today's numbering", EventReplayRing.isReplayed(null))
     }
 }

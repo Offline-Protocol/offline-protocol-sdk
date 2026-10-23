@@ -22640,6 +22640,66 @@ mod tests {
         );
     }
 
+    /// Both React Native bridges leave `peer_rssi` out of the numbered #514
+    /// replay ring, by matching the start of its JSON.
+    ///
+    /// Numbered, a reading per quarter second per peer would push the
+    /// `message_received` and `message_delivered` events the ring exists for
+    /// out of it within seconds. The bridges cannot parse every event to find
+    /// its type, so each holds the prefix the engine writes. If the engine's
+    /// serialisation moved the tag or renamed the event, the match would fail
+    /// silently and every reading would be numbered again: this reads the
+    /// engine's own output and both bridge sources.
+    #[test]
+    fn peer_rssi_is_left_out_of_the_replay_ring() {
+        let json = crate::CoreEvent::PeerRssi {
+            peer_id: "p".to_string(),
+            transport: "BLE".to_string(),
+            rssi: -50,
+        }
+        .to_json()
+        .unwrap();
+        let prefix = r#"{"type":"peer_rssi","#;
+        assert!(json.starts_with(prefix), "the engine now writes {json}");
+
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rn_dir = manifest.join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            std::fs::read_to_string(rn_dir.join(rel))
+                .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
+        };
+        let escaped = prefix.replace('"', "\\\"");
+        for (file, declaration, use_site) in [
+            (
+                "android/src/main/java/com/offlineprotocol/EventReplayRing.kt",
+                format!("PEER_RSSI_PREFIX = \"{escaped}\""),
+                (
+                    "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
+                    "EventReplayRing.isReplayed(",
+                ),
+            ),
+            (
+                "ios/EventReplayRing.swift",
+                format!("peerRssiPrefix = \"{escaped}\""),
+                (
+                    "ios/OfflineProtocolModule.swift",
+                    "EventReplayRing.isReplayed(",
+                ),
+            ),
+        ] {
+            assert!(
+                read(file).contains(&declaration),
+                "{file} must declare `{declaration}`"
+            );
+            assert!(
+                read(use_site.0).contains(use_site.1),
+                "{} must decide numbering through `{}`",
+                use_site.0,
+                use_site.1
+            );
+        }
+    }
+
     /// Every `DataValue` kind reaches the three places that enumerate them
     /// by hand.
     ///

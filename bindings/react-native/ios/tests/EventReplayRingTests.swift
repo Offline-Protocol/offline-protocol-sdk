@@ -35,4 +35,13 @@ final class EventReplayRingTests: XCTestCase {
         XCTAssertTrue(ring.replay(fromSeq: 3, toSeq: 2).isEmpty)
         XCTAssertTrue(ring.replay(fromSeq: 10, toSeq: 12).isEmpty)
     }
+
+    func testASignalReadingIsNeitherNumberedNorKept() {
+        // One numbered per quarter second per peer would push the messages
+        // this ring exists for out of it within seconds.
+        XCTAssertFalse(EventReplayRing.isReplayed(#"{"type":"peer_rssi","peer_id":"p","transport":"BLE","rssi":-50}"#))
+        XCTAssertTrue(EventReplayRing.isReplayed(#"{"type":"message_received","message_id":"m"}"#))
+        XCTAssertTrue(EventReplayRing.isReplayed(#"{"type":"neighbor_discovered","peer_id":"p","transport":"BLE","rssi":-50}"#))
+        XCTAssertTrue(EventReplayRing.isReplayed(nil), "an event with no JSON keeps today's numbering")
+    }
 }

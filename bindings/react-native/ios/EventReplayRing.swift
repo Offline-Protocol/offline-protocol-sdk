@@ -23,6 +23,21 @@ final class EventReplayRing {
 
     static let defaultCapacity = 256
 
+    /// How a `peer_rssi` event's JSON begins: the engine writes the `type`
+    /// tag first. Pinned against the engine's own output by
+    /// `peer_rssi_is_left_out_of_the_replay_ring` in the Rust suite.
+    static let peerRssiPrefix = "{\"type\":\"peer_rssi\","
+
+    /// Whether an event is numbered and kept here. Not `peer_rssi`: it
+    /// arrives up to four times a second per peer and the next one replaces
+    /// it, so a lost one needs no replay, and numbered it would push out of
+    /// this ring the `message_received` and `message_delivered` events that
+    /// do, within seconds in a crowd.
+    static func isReplayed(_ eventJson: String?) -> Bool {
+        guard let eventJson else { return true }
+        return !eventJson.hasPrefix(peerRssiPrefix)
+    }
+
     private let lock = NSLock()
     private var entries: [Entry] = []
     private let capacity: Int
