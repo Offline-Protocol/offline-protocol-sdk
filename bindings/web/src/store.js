@@ -3,7 +3,9 @@
 // Invariants (docs/bridges/web.md, W8):
 // - One node per account per origin. A Web Lock named for the account is
 //   held for the worker's life, and a second node is refused before it opens
-//   a file. Two engines over one log would each advance ratchet state the
+//   a file. The request waits up to LOCK_WAIT_MS rather than failing at
+//   once: a worker the page terminated releases its lock and its file
+//   handles a moment later, and a restart must not lose that race. Two engines over one log would each advance ratchet state the
 //   other never sees, and the groups would diverge without an error. (An OPFS
 //   sync handle also refuses a second opener, but only for the file it
 //   guards, and only once the second node has started opening.)
@@ -16,9 +18,11 @@
 //   A script on this origin can still ask the browser to unseal it: this is
 //   protection for the files at rest, not a keystore.
 // - A missing key never mints a new one over existing logs. If the sealed
-//   key or its wrapping key is gone while a log is not, the node refuses to
-//   start and changes nothing: a new key would make the old logs unreadable,
-//   and they hold the identity.
+//   key or its wrapping key is gone, or does not unseal, while a log is not
+//   empty, the node refuses to start and changes nothing: a new key would
+//   make the old logs unreadable, and they hold the identity. While every
+//   log is empty there is nothing to lose (a crash while the key was first
+//   written leaves exactly that), and a new key is minted.
 
 const ROOT = "offline-protocol";
 const LOG_FILES = ["mls.0", "mls.1", "state.0", "state.1"];
@@ -27,21 +31,39 @@ const KEY_DB = "offline-protocol-keys";
 const KEY_STORE = "wrapping-keys";
 const STORE_KEY_BYTES = 32;
 const IV_BYTES = 12;
+const LOCK_WAIT_MS = 2000;
+const RETRY_MS = 50;
 
 /// Holds the account's lock; resolves to a release function, or null when
-/// another context holds it.
+/// another context still holds it after LOCK_WAIT_MS.
 function holdLock(name) {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), LOCK_WAIT_MS);
   return new Promise((resolve, reject) => {
     navigator.locks
-      .request(name, { ifAvailable: true }, (lock) => {
-        if (!lock) {
-          resolve(null);
-          return undefined;
-        }
+      .request(name, { signal: abort.signal }, () => {
+        clearTimeout(timer);
         return new Promise((release) => resolve(release));
       })
-      .catch(reject);
+      .catch((error) => {
+        clearTimeout(timer);
+        if (error?.name === "AbortError") resolve(null);
+        else reject(error);
+      });
   });
+}
+
+/// Opens a sync access handle, retrying while a terminated worker's handle
+/// on the same file is still being released.
+async function openHandle(file, deadline) {
+  for (;;) {
+    try {
+      return await file.createSyncAccessHandle();
+    } catch (error) {
+      if (error?.name !== "NoModificationAllowedError" || Date.now() >= deadline) throw error;
+      await new Promise((r) => setTimeout(r, RETRY_MS));
+    }
+  }
 }
 
 function keyDatabase() {
@@ -91,27 +113,43 @@ async function logsHoldData(handles) {
   return handles.some((handle) => handle.getSize() > 0);
 }
 
+async function unseal(sealed, wrapping, aad) {
+  if (!wrapping) {
+    throw new Error(
+      "this account's store key cannot be unsealed: its wrapping key is gone " +
+        "(site data was partly cleared). The logs were left untouched.",
+    );
+  }
+  try {
+    const plain = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: sealed.subarray(0, IV_BYTES), additionalData: aad },
+      wrapping,
+      sealed.subarray(IV_BYTES),
+    );
+    return new Uint8Array(plain);
+  } catch {
+    throw new Error(
+      "this account's store key does not unseal (its file is damaged, or its " +
+        "wrapping key was replaced). The logs were left untouched.",
+    );
+  }
+}
+
 async function storeKey(directory, namespace, handles) {
   const db = await keyDatabase();
   try {
     let wrapping = await transact(db, "readonly", (store) => store.get(namespace));
     const sealed = await readSealedKey(directory);
     const aad = new TextEncoder().encode(`${ROOT}/${namespace}/store-key`);
+    const holdsData = await logsHoldData(handles);
     if (sealed) {
-      if (!wrapping) {
-        throw new Error(
-          "this account's store key cannot be unsealed: its wrapping key is gone " +
-            "(site data was partly cleared). The logs were left untouched.",
-        );
+      try {
+        return await unseal(sealed, wrapping, aad);
+      } catch (error) {
+        // Empty logs hold no identity to strand: start the account afresh.
+        if (holdsData) throw error;
       }
-      const plain = await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: sealed.subarray(0, IV_BYTES), additionalData: aad },
-        wrapping,
-        sealed.subarray(IV_BYTES),
-      );
-      return new Uint8Array(plain);
-    }
-    if (await logsHoldData(handles)) {
+    } else if (holdsData) {
       throw new Error(
         "this account has logs but no sealed store key (site data was partly " +
           "cleared). The logs were left untouched.",
@@ -149,6 +187,7 @@ export async function openDurableStore(namespace) {
   if (!release) {
     throw new Error("another node already runs this account in this browser");
   }
+  const deadline = Date.now() + LOCK_WAIT_MS;
   const handles = [];
   const close = () => {
     for (const handle of handles) {
@@ -168,7 +207,7 @@ export async function openDurableStore(namespace) {
     ).getDirectoryHandle(namespace, { create: true });
     for (const name of LOG_FILES) {
       const file = await directory.getFileHandle(name, { create: true });
-      handles.push(await file.createSyncAccessHandle());
+      handles.push(await openHandle(file, deadline));
     }
     const key = await storeKey(directory, namespace, handles);
     return { key, handles: [...handles], close };

@@ -84,6 +84,9 @@ class Connection {
   #link = null;
   #inbound = []; // bytes that arrived before the link id
   #outbound = Promise.resolve();
+  // Sends waiting for the channel to drain; close() releases them, as a
+  // closed channel never fires bufferedamountlow.
+  #draining = new Set();
   #closed = false;
   #onClose;
 
@@ -161,7 +164,12 @@ class Connection {
       for (let at = 0; at < bytes.length && !this.#closed; at += CHUNK_BYTES) {
         if (this.#channel.bufferedAmount > HIGH_WATER_BYTES) {
           await new Promise((resolve) => {
-            this.#channel.addEventListener("bufferedamountlow", resolve, { once: true });
+            const done = () => {
+              this.#draining.delete(done);
+              resolve();
+            };
+            this.#draining.add(done);
+            this.#channel.addEventListener("bufferedamountlow", done, { once: true });
           });
         }
         if (this.#channel.readyState !== "open") return;
@@ -175,6 +183,7 @@ class Connection {
   close({ engine = false } = {}) {
     if (this.#closed) return;
     this.#closed = true;
+    for (const done of [...this.#draining]) done();
     if (this.#link !== null && !engine) this.#node.closeLink(this.#link);
     this.#channel.close();
     this.#pc.close();

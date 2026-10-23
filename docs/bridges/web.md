@@ -166,8 +166,11 @@ state, and a reused ratchet generation is a reused AEAD nonce.
 **The store key is sealed too.** The worker seals it under a non-extractable
 AES-GCM key kept in IndexedDB and stores the sealed copy beside the logs. A
 node that finds logs without a sealed key, or a sealed key without its
-wrapping key (site data partly cleared), refuses to start and changes
-nothing: a new key over old logs would strand the identity they hold. This
+wrapping key or that does not unseal (site data partly cleared), refuses to
+start and changes nothing: a new key over old logs would strand the identity
+they hold. While every log is still empty there is nothing to strand, and a
+new key is minted, which is what a crash while the first key was written
+needs. This
 protects the files at rest; it is not a keystore, and a script on the origin
 can drive the node or unseal the key
 ([R26](../security/threat-model.md#r26-a-browser-nodes-store-key-is-reachable-from-its-origin)).
@@ -175,7 +178,10 @@ can drive the node or unseal the key
 **One node per account per origin.** The worker holds a Web Lock named for
 the account (`account_storage_namespace` of the application id and profile,
 the derivation every binding uses) for its whole life, and a second node for that
-account is refused before it opens a file. Two engines over one log would
+account is refused before it opens a file. The request waits up to two
+seconds before refusing, because a worker the page terminated releases its
+lock and its file handles shortly after, and a restart must not lose that
+race. Two engines over one log would
 each advance ratchet state the other never sees, and the groups would diverge
 without an error. A page that wants several nodes in one browser gives each
 its own profile, or asks for `storage: "memory"`, a new device every start.
@@ -256,7 +262,9 @@ bash bindings/web/scripts/test-browser.sh                   # headless Chrome
 - `restart.html`: a durable node in a group is terminated mid-session and
   started again. It must come back with the same address, read the group's
   next message with no decryption failure, and a second node for the running
-  account must be refused (W5, W8). Restarting it in memory instead makes
+  account must be refused (W5, W8). With its wrapping key taken out of
+  IndexedDB the node must refuse to start and leave its files as they were,
+  and with the key put back it must start as the same device. Restarting it in memory instead makes
   the page fail, which is how the page was checked.
 - `webrtc.html`: two nodes with no tab carrier, linked only by a data channel
   set up from two codes. A session, an encrypted direct message, a 100 KiB

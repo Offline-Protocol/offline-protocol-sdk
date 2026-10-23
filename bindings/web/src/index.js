@@ -13,6 +13,11 @@ export class OfflineNode extends EventTarget {
   // link -> { send(bytes), close() }: the page's carriers.
   #links = new Map();
   #onPageHide = () => this.#worker.postMessage({ id: 0, op: "stop" });
+  // A page restored from the back-forward cache had its node stopped on
+  // pagehide; say so once rather than leave a node that answers nothing.
+  #onPageShow = (event) => {
+    if (event.persisted) this.#fail("the page was restored after its node stopped");
+  };
 
   constructor(worker, { appId, instance, tabs }) {
     super();
@@ -53,8 +58,16 @@ export class OfflineNode extends EventTarget {
     const url = workerUrl ?? new URL("./worker.js", import.meta.url);
     const instance = crypto.randomUUID();
     const node = new OfflineNode(new Worker(url, { type: "module" }), { appId, instance, tabs });
-    node.address = await node.#call("start", { appId, profile, storage, tabs, instance });
+    try {
+      node.address = await node.#call("start", { appId, profile, storage, tabs, instance });
+    } catch (error) {
+      // The worker kept nothing (no engine, lock or handle), but it is still
+      // a running worker with a module in it.
+      node.#worker.terminate();
+      throw error;
+    }
     addEventListener("pagehide", node.#onPageHide);
+    addEventListener("pageshow", node.#onPageShow);
     return node;
   }
 
@@ -106,6 +119,7 @@ export class OfflineNode extends EventTarget {
 
   async stop() {
     removeEventListener("pagehide", this.#onPageHide);
+    removeEventListener("pageshow", this.#onPageShow);
     await this.#call("stop");
     this.#worker.terminate();
     this.#closeAllCarriers();
@@ -128,6 +142,7 @@ export class OfflineNode extends EventTarget {
     if (this.#failed) return;
     this.#failed = new Error(reason);
     removeEventListener("pagehide", this.#onPageHide);
+    removeEventListener("pageshow", this.#onPageShow);
     for (const { reject } of this.#pending.values()) reject(this.#failed);
     this.#pending.clear();
     this.#worker.terminate();

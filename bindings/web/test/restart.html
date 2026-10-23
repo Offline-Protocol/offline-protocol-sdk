@@ -6,7 +6,8 @@
 // A durable node is killed mid-session and started again. It must come back
 // as the same member: the same address, and able to read the group's next
 // message, with no decryption failure. A second node for an account that is
-// already running is refused. The title ends as PASS or FAIL: <step>.
+// already running is refused, and so is a node whose wrapping key is gone,
+// with its files untouched. The title ends as PASS or FAIL: <step>.
 import { OfflineNode } from "../src/index.js";
 import { log, waitFor, invite, run } from "./common.js";
 
@@ -17,6 +18,9 @@ await run(async (step) => {
   let player = await OfflineNode.start({ appId, profile: "player" });
   const address = player.address;
   log(`host ${host.address}\nplayer ${address}`);
+  // Listening before the refusal below, which waits out the lock for two
+  // seconds while the session forms.
+  const session = waitFor(host, "secure_session_established", (e) => e.peer_id === address);
 
   step.name = "one node per account";
   try {
@@ -29,7 +33,7 @@ await run(async (step) => {
   log("a second node for the account was refused");
 
   step.name = "session";
-  await waitFor(host, "secure_session_established", (e) => e.peer_id === address);
+  await session;
 
   step.name = "group";
   const group = await host.createGroup("lobby");
@@ -66,6 +70,75 @@ await run(async (step) => {
   if (failures.length) throw new Error(`decryption failed: ${JSON.stringify(failures)}`);
   log("the restarted member read the group's next message");
 
+  step.name = "a missing wrapping key is refused";
+  await player.stop();
+  const namespace = await accountNamespace(appId, "player");
+  const files = await logDigest(namespace);
+  const wrapping = await keys("readonly", (store) => store.get(namespace));
+  if (!wrapping) throw new Error("no wrapping key was stored for the account");
+  await keys("readwrite", (store) => store.delete(namespace));
+  try {
+    const started = await OfflineNode.start({ appId, profile: "player" });
+    await started.stop();
+    throw new Error("a node started without its wrapping key");
+  } catch (error) {
+    if (!/wrapping key is gone/.test(error.message)) throw error;
+  }
+  if ((await logDigest(namespace)) !== files) throw new Error("the refused start changed the logs");
+  log("refused without its wrapping key, logs untouched");
+
+  step.name = "the key put back";
+  await keys("readwrite", (store) => store.put(wrapping, namespace));
+  player = await OfflineNode.start({ appId, profile: "player" });
+  if (player.address !== address) throw new Error(`came back as ${player.address}`);
+  log("with the key back it is the same device");
+
   await Promise.all([host.stop(), player.stop()]);
 });
+
+// The account's folder name, as account_storage_namespace derives it.
+async function accountNamespace(app, profile) {
+  const text = new TextEncoder();
+  const parts = [text.encode("offline-protocol-storage-v1"), [0], text.encode(app), [0], text.encode(profile)];
+  const bytes = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const part of parts) {
+    bytes.set(part, at);
+    at += part.length;
+  }
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return "account-" + [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// One digest over every file in the account's folder, names included.
+async function logDigest(namespace) {
+  const root = await navigator.storage.getDirectory();
+  const folder = await (await root.getDirectoryHandle("offline-protocol")).getDirectoryHandle(namespace);
+  const chunks = [];
+  for (const name of ["mls.0", "mls.1", "state.0", "state.1", "store-key"]) {
+    const data = new Uint8Array(await (await (await folder.getFileHandle(name)).getFile()).arrayBuffer());
+    chunks.push(`${name}:${data.length}:`, data);
+  }
+  const whole = new Uint8Array(await new Blob(chunks).arrayBuffer());
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", whole));
+  return [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// One request against the worker's wrapping-key store.
+function keys(mode, run) {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open("offline-protocol-keys");
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const db = open.result;
+      const tx = db.transaction("wrapping-keys", mode);
+      const request = run(tx.objectStore("wrapping-keys"));
+      tx.oncomplete = () => {
+        db.close();
+        resolve(request.result);
+      };
+      tx.onerror = () => reject(tx.error);
+    };
+  });
+}
 </script>
