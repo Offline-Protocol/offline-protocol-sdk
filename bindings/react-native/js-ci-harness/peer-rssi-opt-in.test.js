@@ -38,6 +38,8 @@ function compileSdk() {
 
 /** Every `setPeerRssiEvents` argument, in order. */
 let switches = [];
+/** The config JSON the last `create` received. */
+let createdWith = null;
 
 const nativeModule = new Proxy(
   {},
@@ -46,6 +48,7 @@ const nativeModule = new Proxy(
       if (typeof method !== 'string') return undefined;
       return (...args) => {
         if (method === 'setPeerRssiEvents') switches.push(args[0]);
+        if (method === 'create') createdWith = JSON.parse(args[0]);
         if (method === 'isMlsInitialized') return Promise.resolve(true);
         return Promise.resolve();
       };
@@ -123,6 +126,19 @@ test('a restart after destroy() switches it on again for the new engine', async 
   sdk.on('peer_rssi', noop);
   await sdk.start();
   assert.deepEqual(switches, [true, false, true]);
+});
+
+test('advertiseNodeHash reaches the native config, and is absent unless set', async () => {
+  // Android reads `transports.ble.advertiseNodeHash`; a transform that drops
+  // it leaves the scan response without the hash and no error anywhere.
+  await new OfflineProtocol({
+    appId: 'harness',
+    profile: 'harness-profile',
+    transports: { ble: { enabled: true, advertiseNodeHash: true } },
+  }).start();
+  assert.equal(createdWith.transports.ble.advertiseNodeHash, true);
+  await newSdk().start();
+  assert.equal(createdWith.transports?.ble?.advertiseNodeHash, undefined);
 });
 
 (async () => {

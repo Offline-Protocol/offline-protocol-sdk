@@ -451,6 +451,8 @@ public class BleManager: NSObject, TransportManager {
     private var lastProactiveScanRefresh: Date?
     /// Tracks recently seen advertisement hashes to avoid duplicate processing
     private var recentAdvertisementHashes: [UUID: (hash: Int, timestamp: Date)] = [:]
+    /// When each peripheral last fed a reading to the core; main thread only.
+    private var lastRssiFeedAt: [UUID: Date] = [:]
     /// Initial aggressive discovery phase duration - more frequent scanning initially
     private let AGGRESSIVE_DISCOVERY_PHASE: TimeInterval = 30.0
     /// Tracks when aggressive discovery phase started
@@ -3219,6 +3221,33 @@ extension BleManager: CBCentralManagerDelegate {
         // Adaptive scanning: track discoveries for density estimation
         recordDiscoveryForDensity(now: now)
         
+        // Live signal strength, above the duplicate check: that check skips a
+        // repeat within the same 5 dB bucket for a second, which sheds work
+        // but would also bias the readings toward bucket changes. Its own
+        // throttle keeps this to four calls a second per peripheral instead.
+        // The core attributes the reading to a linked peer, by this link or by
+        // the node hash an Android peer carries in its scan response (a peer
+        // linked to us as central advertises from an identifier no link of
+        // ours has), and drops anything else, so no mesh gate is needed in
+        // front of it. Off the main thread, like every protocol call here.
+        if now.timeIntervalSince(lastRssiFeedAt[peripheral.identifier] ?? .distantPast) >= 0.25 {
+            let linkedPeerId = connections.peripheralDeviceId(for: peripheral.identifier)
+            let advertisedHash = (advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data])?[SERVICE_UUID]
+            if linkedPeerId != nil || advertisedHash != nil {
+                // ponytail: cleared rather than aged out; costs one early reading.
+                if lastRssiFeedAt.count > 100 { lastRssiFeedAt.removeAll() }
+                lastRssiFeedAt[peripheral.identifier] = now
+                let reading = rssiValue
+                onProtocolQueue { [weak self] in
+                    self?.protocolInstance.blePeerRssi(
+                        peerId: linkedPeerId,
+                        nodeHash: advertisedHash.map { [UInt8]($0) },
+                        rssi: reading
+                    )
+                }
+            }
+        }
+
         // Duplicate advertisement detection - avoid processing identical advertisements
         // This improves performance in dense networks where the same device may be seen many times
         let advertHash = computeAdvertisementHash(peripheral: peripheral, advertisementData: advertisementData, rssi: rssiValue)
@@ -3279,25 +3308,6 @@ extension BleManager: CBCentralManagerDelegate {
         // would spend the 200-entry cap on passing headphones.
         peripheralRestorationPolicy.recordSeen(uuid: peripheral.identifier, at: now, source: .advertisement)
         lastAdvertisedAt[peripheral.identifier] = now
-
-        // Live signal strength, above the two filters for the same reason:
-        // they shed work, not readings. The core attributes the reading to a
-        // linked peer, by this link or by the node hash an Android peer
-        // carries in its scan response (a peer linked to us as central
-        // advertises from an identifier no link of ours has), and rate-caps
-        // the event. Off the main thread, like every protocol call here.
-        let linkedPeerId = connections.peripheralDeviceId(for: peripheral.identifier)
-        let advertisedHash = (advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data])?[SERVICE_UUID]
-        if linkedPeerId != nil || advertisedHash != nil {
-            let reading = rssiValue
-            onProtocolQueue { [weak self] in
-                self?.protocolInstance.blePeerRssi(
-                    peerId: linkedPeerId,
-                    nodeHash: advertisedHash.map { [UInt8]($0) },
-                    rssi: reading
-                )
-            }
-        }
 
         // Mesh density is counted here too, for the same reasons: after the
         // gate, so it counts mesh candidates and not every Bluetooth device in

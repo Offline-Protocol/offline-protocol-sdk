@@ -388,6 +388,16 @@ export interface NetworkConfig {
 export interface BleTransportConfig {
   /** Enable BLE transport */
   enabled: boolean;
+  /**
+   * Android only, default `false`. Carry an 8-byte digest of this device's
+   * address in its scan response, so an iPhone can attribute `peer_rssi`
+   * readings to this phone when the link between them was opened by this
+   * phone. Without it the iPhone names this phone only on a link it opened
+   * itself. The digest never changes, so anyone in radio range who knows
+   * the address can recognise the phone without connecting, across
+   * Bluetooth address rotation (threat model R29). iOS cannot advertise it.
+   */
+  advertiseNodeHash?: boolean;
 }
 
 /**

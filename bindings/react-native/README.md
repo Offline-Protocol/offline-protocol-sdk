@@ -943,13 +943,16 @@ so they cost no extra radio time.
 - **Opt-in by listening.** The engine emits it only while at least one
   `on('peer_rssi', ...)` listener is registered; an `'all'` listener does not
   turn it on. With no listener nothing crosses the bridge.
-- **Bounded.** At most four a second per peer. Expect about 1.5 a second on
-  iOS and 3 to 4 on Android: iOS reports advertisements less often, and both
-  platforms skip a repeat within 5 dB inside a second.
+- **Bounded.** At most four a second per peer, sampled evenly rather than
+  only when the signal changes. iOS reports advertisements less often than
+  Android, so expect fewer there.
 - **Only linked peers.** A reading is named only for a peer that proved its
-  address on a link, matched by that link or by the digest of its address an
-  Android peer advertises. iOS cannot advertise one, so an iPhone linked to
-  another iPhone as central is not named on that side.
+  address on a link, matched by that link or by a digest of its address the
+  peer advertises. An iPhone names an Android peer whose link was opened by
+  the Android phone only when that app sets
+  `transports.ble.advertiseNodeHash: true` (off by default; see its
+  documentation for the privacy cost). iOS cannot advertise a digest, so an
+  iPhone linked to another iPhone as central is not named on that side.
 - **Raw.** Readings swing by about ±8 dB between samples. Smooth them for a
   display, for example with an exponential moving average:
 

@@ -1252,7 +1252,8 @@ admits none of those joiners to anything until the host invites them.
 
 ### R29. The Bluetooth LE scan response names the device, and RSSI is unauthenticated
 
-An Android device advertises the first eight bytes of SHA-256 over its own
+An Android device whose application sets `transports.ble.advertiseNodeHash`
+(off by default) advertises the first eight bytes of SHA-256 over its own
 address, as service data under the mesh UUID in its scan response. It is
 how a scanner attributes a signal reading to a linked peer when the link
 was opened from the other side, which on iOS runs under a CoreBluetooth
@@ -1267,10 +1268,11 @@ address, has its readings attributed to that peer, which moves the peer's
 **Why it stands:** the address is already served to anyone who connects,
 in the `DEVICE_ID` characteristic, and is stable and linkable like the app
 tag beside it ([R15](#r15-the-bluetooth-le-app-tag-is-unsigned-and-readable)).
-The digest makes that passive, which is the cost. A rotating digest would
-close tracking by strangers, but it means re-advertising on a schedule
-every scanner shares, and the SDK's advertising duty cycle is tuned for
-discovery.
+The digest makes that passive, which is the cost, and why an application
+opts in: one that builds no proximity feature never pays it. A rotating
+digest would close tracking by strangers, but it means re-advertising on a
+schedule every scanner shares, and the SDK's advertising duty cycle is
+tuned for discovery.
 
 **What bounds it:** a reading is attributed only to a peer that already
 proved its address on a link, so a forged digest never introduces anyone,

@@ -152,7 +152,8 @@ already proved their address on a link: it proves nothing itself, and it
 never starts a link or names a new peer. A scanner MUST NOT read service data
 of any other length under this UUID as a node hash.
 
-The shipped Android peripheral puts it in its scan response once its
+The shipped Android peripheral puts it in its scan response when the
+application sets `transports.ble.advertiseNodeHash` (off by default) and its
 identity is open, as the 26-byte service data structure (2 + 16 + 8) in place
 of the 18-byte Service UUID list, because both do not fit in 31 bytes; the
 main advertisement still lists the UUID, and the shipped scanners accept

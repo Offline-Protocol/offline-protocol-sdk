@@ -164,6 +164,10 @@ class BleTransportFacade(
     private val protocol: OfflineProtocol,
     private val deviceId: String,
     appId: String,
+    // Whether the scan response carries this device's node hash. Off unless
+    // the app sets `transports.ble.advertiseNodeHash`: the hash lets anyone
+    // who knows the address recognise the phone passively (R29).
+    private val advertiseNodeHash: Boolean = false,
     private val diagnosticEmitter: ((String, String, Map<String, Any?>) -> Unit)? = null
 ) : TransportManager {
 
@@ -202,6 +206,9 @@ class BleTransportFacade(
         // Fallback interval for fragment polling. Primary send path is event-driven
         // via onFragmentsAvailable(); this timer only catches edge cases.
         private const val FRAGMENT_POLL_INTERVAL_MS = 2000L
+        // The core caps `peer_rssi` at four a second per peer; feeding it
+        // faster per address only costs protocol-lock round trips.
+        private const val RSSI_FEED_INTERVAL_MS = 250L
         private const val MAX_FRAGMENT_SIZE = 185
         /**
          * Hard cap on the number of fragments [drainAndSendFragments] will
@@ -633,7 +640,8 @@ class BleTransportFacade(
     private var cachedLocalAddress: String? = null
 
     // The core's digest of [cachedLocalAddress], carried in the scan response
-    // so a scanner can attribute its RSSI readings to us. Primed with it.
+    // so a scanner can attribute its RSSI readings to us. Primed with it, and
+    // only when [advertiseNodeHash] is on.
     @Volatile
     private var cachedNodeHash: ByteArray? = null
 
@@ -810,6 +818,9 @@ class BleTransportFacade(
     /** Tracks recently seen advertisements to avoid duplicate processing (hash, timestamp) */
     private data class AdvertisementCacheEntry(val hash: Int, val timestamp: Long)
     private val recentAdvertisementHashes = ConcurrentHashMap<String, AdvertisementCacheEntry>()
+
+    // When each address last fed a reading to the core. BLE-thread only.
+    private val lastRssiFeedAt = HashMap<String, Long>()
     /** Negative cache: devices verified via GATT as non-mesh (address -> timestamp) */
     private val verifiedNonMeshDevices = ConcurrentHashMap<String, Long>()
     /** Counter for consecutive scan restarts without discoveries */
@@ -1671,7 +1682,9 @@ class BleTransportFacade(
             // `localAddress()` as `Message.sender` — also made our own control
             // frames fail the receiver's `validate_transport_sender`.
             cachedLocalAddress = protocol.localAddress()
-            cachedNodeHash = protocol.bleNodeHash()?.map { it.toByte() }?.toByteArray()
+            if (advertiseNodeHash) {
+                cachedNodeHash = protocol.bleNodeHash()?.map { it.toByte() }?.toByteArray()
+            }
 
             val publicKey = protocol.getIdentityPublicKey()
             val meshData = meshController.toAdvertisement()
@@ -2338,14 +2351,15 @@ class BleTransportFacade(
      * service UUIDs from Android's main advertisement packet format.
      */
     private fun buildScanResponse(): AdvertiseData {
-        // With the identity open, the node hash goes in as service data under
+        // With the identity open and the app opted in
+        // ([advertiseNodeHash]), the node hash goes in as service data under
         // the mesh UUID instead of the bare UUID: 2 + 16 + 8 = 26 of the 31
         // bytes, where both would need 44. The UUID still travels, inside the
         // service data, the main packet still lists it, and both scanners'
         // gates accept service data under it. Service data under our own
         // 128-bit UUID needs no SIG assignment, unlike a 16-bit UUID or a
         // company id. It names this device to a scanner that hears it, which
-        // the threat model records.
+        // is why it is opt-in (R29).
         val builder = AdvertiseData.Builder().setIncludeDeviceName(false)
         val nodeHash = cachedNodeHash
         return if (nodeHash != null) {
@@ -2379,6 +2393,24 @@ class BleTransportFacade(
         if (!adapterWasOff) {
             bleRecoveryScheduler.resetBackoff()
             reportBleAvailability(true, "scan_result")
+        }
+
+        // Live signal strength, above the duplicate check: that check skips a
+        // repeat within the same 5 dB bucket for a second, which sheds work
+        // but would also bias the readings toward bucket changes. Its own
+        // throttle keeps this to four calls a second per address instead.
+        // The core attributes the reading to a linked peer, by this address's
+        // link or by the node hash an Android peer's scan response carries,
+        // and drops anything else, so no mesh gate is needed in front of it.
+        if (now - (lastRssiFeedAt[address] ?: 0L) >= RSSI_FEED_INTERVAL_MS) {
+            val linkedPeerId = connections.deviceIdForAddress(address)
+            val advertisedHash = result.scanRecord?.getServiceData(ParcelUuid(SERVICE_UUID))
+            if (linkedPeerId != null || advertisedHash != null) {
+                // ponytail: cleared rather than aged out; costs one early reading.
+                if (lastRssiFeedAt.size > 100) lastRssiFeedAt.clear()
+                lastRssiFeedAt[address] = now
+                protocol.blePeerRssi(linkedPeerId, advertisedHash?.map { it.toUByte() }, rssi.toShort())
+            }
         }
 
         // Duplicate advertisement detection - avoid processing identical advertisements
@@ -2415,17 +2447,6 @@ class BleTransportFacade(
         
         if (!shouldProcessDiscoveredDevice(address, scanRecord, rssi, isConnectable, now)) {
             return
-        }
-
-        // Live signal strength, after the gate and above the two filters for
-        // the same reason as the count below: they shed work, not readings.
-        // The core attributes the reading to a linked peer, by this address's
-        // link or by the node hash another Android peer's scan response
-        // carries, and rate-caps the event.
-        val linkedPeerId = connections.deviceIdForAddress(address)
-        val advertisedHash = scanRecord?.getServiceData(ParcelUuid(SERVICE_UUID))
-        if (linkedPeerId != null || advertisedHash != null) {
-            protocol.blePeerRssi(linkedPeerId, advertisedHash?.map { it.toUByte() }, rssi.toShort())
         }
 
         // Counted after the gate, which is what makes this a mesh candidate

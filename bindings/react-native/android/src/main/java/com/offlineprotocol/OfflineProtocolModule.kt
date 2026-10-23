@@ -196,6 +196,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
 
     private var currentConfig: ProtocolConfig? = null
 
+    // `transports.ble.advertiseNodeHash`, off by default: whether the
+    // facade puts this device's node hash in its scan response (R29).
+    private var bleAdvertiseNodeHash = false
+
     companion object {
         const val NAME = "OfflineProtocolModule"
         const val EVENT_NAME = "OfflineProtocol_Event"
@@ -620,6 +624,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             val config = parsed.coreConfig
             val proto = OfflineProtocol(config)
             currentConfig = config
+            bleAdvertiseNodeHash = parsed.rawJson.optJSONObject("transports")
+                ?.optJSONObject("ble")?.optBoolean("advertiseNodeHash", false) ?: false
             emitDiagnostic("info", "Protocol core created", mapOf(
                 "appId" to config.appId,
                 "userId" to config.profile,
@@ -675,6 +681,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     proto,
                     config.profile,
                     config.appId,
+                    advertiseNodeHash = bleAdvertiseNodeHash,
                 ) { level, message, context ->
                     emitDiagnostic(level, message, context)
                 }.also { manager ->
@@ -2590,6 +2597,7 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                             proto,
                             currentConfig?.profile ?: "unknown",
                             currentConfig?.appId ?: "",
+                            advertiseNodeHash = bleAdvertiseNodeHash,
                         ) { level, message, context ->
                             emitDiagnostic(level, message, context)
                         }

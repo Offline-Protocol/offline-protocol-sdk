@@ -20,10 +20,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   scan, at most four a second per peer, and only while the app listens for
   it; see [peer_rssi](bindings/react-native/README.md#peer_rssi). The engine
   attributes each reading to the peer itself, so an app no longer joins
-  scans to peers. Android now advertises an 8-byte digest of its address as
-  service data under the mesh UUID in its scan response, in place of the
-  bare UUID, so an iPhone can name an Android peer that linked to it as
-  central ([R29](docs/security/threat-model.md#r29-the-bluetooth-le-scan-response-names-the-device-and-rssi-is-unauthenticated)).
+  scans to peers. With `transports.ble.advertiseNodeHash: true` (off by
+  default), Android advertises an 8-byte digest of its address as service
+  data under the mesh UUID in its scan response, in place of the bare UUID,
+  so an iPhone can name an Android peer that linked to it as central; the
+  digest lets anyone who knows the address recognise the phone passively
+  ([R29](docs/security/threat-model.md#r29-the-bluetooth-le-scan-response-names-the-device-and-rssi-is-unauthenticated)).
   Readings also keep each link's quality current, which the mesh relay ranks
   neighbours by; it used the reading from discovery until now.
 
