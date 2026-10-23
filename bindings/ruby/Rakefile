@@ -1,0 +1,23 @@
+# frozen_string_literal: true
+
+require "rake/testtask"
+
+# The generated code loads the library by name, so the directory holding it has
+# to be on the loader's search path when the test process starts. The loader
+# reads that variable at launch, which is why it is set here, before the task
+# spawns Ruby, and not in a helper the test process runs. Default: the debug
+# build of this repository (`cargo build -p offline-protocol-uniffi`).
+library_dir = File.expand_path(
+  ENV.fetch("OFFLINE_PROTOCOL_LIBRARY_DIR", "../../target/debug"), __dir__
+)
+%w[LD_LIBRARY_PATH DYLD_LIBRARY_PATH].each do |name|
+  ENV[name] = [library_dir, ENV[name]].compact.reject(&:empty?).join(File::PATH_SEPARATOR)
+end
+
+Rake::TestTask.new(:test) do |t|
+  t.libs << "lib" << "test"
+  t.pattern = "test/**/*_test.rb"
+  t.warning = false
+end
+
+task default: :test
