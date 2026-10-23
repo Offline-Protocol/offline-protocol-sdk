@@ -426,8 +426,9 @@ the owner's plaintext probe confirmed it. The adopter then flushed its queue
 under a group the owner never joined.
 
 So a probe and its acknowledgement carry a corroboration: the sender's epoch
-and an MLS exporter tag over a fresh nonce, which only a member of the same
-group at the same epoch computes (see
+and an MLS exporter tag over a nonce (a probe's challenge, or the nonce of the
+probe an acknowledgement answers), which only a member of the same group at
+the same epoch computes (see
 [the spec](../spec/control-messages.md#session-corroboration)).
 
 | What the frame shows | What the receiver does |
@@ -489,9 +490,9 @@ rules keep the comparison honest:
   signed stamp of the frame the session was built from (the key package it was
   created from, or the Welcome it was joined from), so a `no_session` (or
   reset) frame older than that is refused: a first-contact push delivered
-  late, or a recording. Only those frames, since the mark is durable and a
-  peer clock that ran fast and was set back would otherwise lock that peer's
-  resets out. The teardown also needs the frame's stamp to be signed at all;
+  late, or a recording. Only those frames, and never past this device's own
+  clock, since the mark is durable and a peer clock that ran fast and was set
+  back would otherwise lock that peer's resets out. The teardown also needs the frame's stamp to be signed at all;
   resending a Welcome needs neither.
 - **An adopted Welcome retires our own.** Adopting the peer's Welcome in the
   both-create tiebreak gives up our group, and our outbound Welcome for it is

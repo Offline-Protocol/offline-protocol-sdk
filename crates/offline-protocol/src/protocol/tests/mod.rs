@@ -44994,3 +44994,125 @@ fn an_ordinary_key_package_does_not_move_the_spent_mark() {
         "a reset after the peer's clock was set back must still be honoured"
     );
 }
+
+/// The mark never moves past this device's clock. A peer whose clock ran an
+/// hour fast when it built the session, and was then corrected, must still
+/// be able to reset it: before the clamp its every reset was refused for
+/// that hour, and a peer that had already dropped its session could not
+/// heal.
+#[test]
+fn a_peer_clock_set_back_after_building_the_session_can_still_reset_it() {
+    let (alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&proof, None);
+
+    let bob_kp = {
+        let m = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap()
+    };
+    let welcome = {
+        let m = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        m.import_key_package(&id("bob"), &bob_kp.key_package_data)
+            .unwrap();
+        m.create_session(&id("bob")).unwrap()
+    };
+    let now = Utc::now().timestamp_millis();
+    bob.handle_welcome_message(
+        &id("alice"),
+        &serde_json::to_string(&welcome).unwrap(),
+        Some(now + 3_600_000),
+    );
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "precondition: bob joined"
+    );
+
+    let reset = key_package_frame_body(&id("alice"), true, Vec::new());
+    let reset = reset.strip_prefix(internal_prefixes::KEY_PACKAGE).unwrap();
+    bob.handle_key_package_message(&id("alice"), reset, true, Some(now + 5_000));
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "a reset from the corrected clock must be honoured"
+    );
+}
+
+/// A `no_session` package this side cannot compare with its retained
+/// Welcome (here, bytes that are not a key package) proves nothing, so the
+/// session is kept: a teardown there could leave neither side a session.
+#[test]
+fn a_no_session_package_we_cannot_compare_keeps_our_session() {
+    let (alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&proof, None);
+
+    // Bob builds the session on alice's real package and keeps his Welcome.
+    let alice_kp = {
+        let m = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap()
+    };
+    let mut payload: KeyPackagePayload = serde_json::from_str(
+        key_package_frame_body(&id("alice"), false, Vec::new())
+            .strip_prefix(internal_prefixes::KEY_PACKAGE)
+            .unwrap(),
+    )
+    .unwrap();
+    payload.key_package_data = alice_kp.key_package_data.clone();
+    let now = Utc::now().timestamp_millis();
+    bob.handle_key_package_message(
+        &id("alice"),
+        &serde_json::to_string(&payload).unwrap(),
+        true,
+        Some(now - 10_000),
+    );
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "precondition: bob built a session"
+    );
+    assert!(bob.welcome_lifecycles.contains_key(&id("alice")));
+
+    payload.key_package_data = vec![1, 2, 3, 4];
+    payload.no_session = true;
+    bob.handle_key_package_message(
+        &id("alice"),
+        &serde_json::to_string(&payload).unwrap(),
+        true,
+        Some(now),
+    );
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "a package that cannot be compared must not tear the session down"
+    );
+}
+
+/// A successful decrypt shows the groups agree now, so the challenge out is
+/// retired: an answer the peer sealed under a group it has since left must
+/// not find it live.
+#[test]
+fn a_successful_decrypt_retires_the_challenge() {
+    let (mut alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, bob_h) = make_encrypted_protocol("bob");
+    alice.start().unwrap();
+    bob.start().unwrap();
+    establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
+
+    let challenge = offline_protocol_sealed::SessionCorroboration::parse(
+        &alice.session_challenge_body(&id("bob")),
+    )
+    .unwrap()
+    .nonce;
+    bob.send_message(&id("alice"), "hello", None, None::<String>)
+        .unwrap();
+    let sealed = bob_h
+        .sent_messages()
+        .into_iter()
+        .rev()
+        .find(|m| m.content.starts_with(internal_prefixes::ENCRYPTED))
+        .expect("bob sealed a message");
+    let _ = alice.process_internal_message(&sealed);
+    assert!(
+        !alice.answers_live_challenge(&id("bob"), &challenge),
+        "a decrypt must retire the challenge"
+    );
+}

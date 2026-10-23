@@ -162,7 +162,8 @@ impl SessionManager {
     /// Two groups for one slot sit at the same epoch, since a session never
     /// commits after it is created, so the epoch alone cannot tell them
     /// apart and the tag is what does. It is an MLS exporter value: it shows
-    /// nothing about the group, and a fresh `nonce` per frame links no two.
+    /// nothing about the group, and tags over different nonces cannot be
+    /// linked to each other.
     pub fn corroboration(
         &self,
         other_user_id: &str,

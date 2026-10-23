@@ -1508,13 +1508,19 @@ impl OfflineProtocol {
     /// frame unspent and able to tear a healthy session down. The stamps are
     /// the peer's own clock, so skew between the two devices does not enter.
     ///
-    /// Only those frames, and not every key package or Welcome: the mark is
-    /// durable, so a peer whose clock ran fast and was set back would have
-    /// its resets refused until its clock caught up, and each move is a
-    /// secure-storage write.
+    /// Only those frames, and not every key package or Welcome, because each
+    /// move is a secure-storage write. And never past this device's own
+    /// clock: the mark is durable, so a stamp from a peer whose clock ran fast
+    /// and was then set back would refuse that peer's every reset and
+    /// `no_session` teardown until its clock caught up, up to the two days the
+    /// freshness window admits, with neither side able to heal meanwhile. The
+    /// clamp changes nothing for an accurate or slow peer clock. The cost is
+    /// on a slow clock of ours, where a recording made between our clock and
+    /// the session's true start is no longer refused by this mark.
     pub(crate) fn note_session_frame_stamp(&mut self, peer_id: &str, signed_ms: i64) {
-        if self.reset_is_unspent(peer_id, signed_ms) {
-            self.record_reset_spent(peer_id, signed_ms);
+        let stamp = signed_ms.min(Utc::now().timestamp_millis());
+        if self.reset_is_unspent(peer_id, stamp) {
+            self.record_reset_spent(peer_id, stamp);
         }
     }
 

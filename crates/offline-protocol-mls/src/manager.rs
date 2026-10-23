@@ -4251,7 +4251,8 @@ mod tests {
     }
 
     /// Both members of one session compute the same tag for a nonce, and a
-    /// different nonce gives a different tag, so a tag links no two frames.
+    /// different nonce gives a different tag, so tags over different nonces
+    /// cannot be linked.
     #[test]
     fn test_one_session_corroborates_on_both_sides() {
         let (alice, bob) = create_test_session();

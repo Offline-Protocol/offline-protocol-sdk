@@ -692,17 +692,24 @@ impl OfflineProtocol {
                 .strip_prefix(internal_prefixes::WELCOME)
                 .and_then(|body| serde_json::from_str::<WelcomeMessage>(body).ok())
         });
-        let still_joinable = retained.is_some_and(|welcome| {
-            self.mls_manager
-                .as_ref()
-                .and_then(|mls| mls.read().ok())
-                .and_then(|manager| {
-                    manager
-                        .welcome_targets_key_package(&welcome, key_package_data)
-                        .ok()
-                })
-                .unwrap_or(false)
-        });
+        // Only a definite "no" tears down. A comparison that fails (the
+        // package refused for its validity window under clock skew, a
+        // poisoned lock) cannot tell, and tearing down a session whose
+        // Welcome the peer could still join would leave neither side one.
+        let still_joinable = match retained {
+            None => false,
+            Some(welcome) => match self.mls_manager.as_ref().map(|mls| {
+                mls.read()
+                    .ok()
+                    .map(|manager| manager.welcome_targets_key_package(&welcome, key_package_data))
+            }) {
+                Some(Some(Ok(targets))) => targets,
+                _ => {
+                    debug!(sender = %peer_id, "Cannot compare our Welcome with the peer's package, keeping our session");
+                    return;
+                }
+            },
+        };
         if still_joinable {
             info!(sender = %peer_id, "Peer holds no session and can still join ours, re-sending the Welcome");
             self.resend_welcome(peer_id, "peer_holds_no_session", true);
@@ -1822,6 +1829,10 @@ impl OfflineProtocol {
     /// group-aware decrypt (text or media chunk). No-op when confirmation is
     /// gated or already recorded.
     pub(super) fn confirm_session_from_successful_decrypt(&mut self, sender: &str, group_id: &str) {
+        // The groups agree now, so any challenge out was answered: an answer
+        // sealed under an older group of the peer's and delivered late must
+        // not find it live.
+        self.corroboration_challenges.remove(sender);
         if !self.can_confirm_from_source(sender, "decrypt_success") {
             debug!(
                 sender = %sender,

@@ -73,7 +73,11 @@ if probes were acted on, because the greater side first issues its own
 challenge.
 
 **Residual.** None from stale or replayed corroborations: only a fresh
-answer to a live challenge drives a heal. A `no_session` teardown is bounded
+answer to a live challenge drives a heal, and a successful decrypt retires
+the challenge, so an answer the peer sealed under a group it has since left
+finds nothing live. The mark is clamped to this device's clock, so on a slow
+clock of ours a recording made just before the session is refused only as a
+reset always was. A `no_session` teardown is bounded
 like a reset, by the spent mark, which the frame that built the session now
 moves. A session the send path builds later from a cached package records no
 stamp, so a recording older than it is bounded only as a reset always was.
