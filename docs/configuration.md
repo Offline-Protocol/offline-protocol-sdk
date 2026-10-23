@@ -563,7 +563,7 @@ numbers mean and what a custodian owes.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `defaultTimeoutMs` | number | 10000 | ACK timeout (milliseconds) |
-| `maxPendingAcks` | number | 1000 | Max pending ACKs |
+| `maxPendingAcks` | number | 1000 | Max pending ACKs. At the ceiling a send is held for the retry queue and reported as `message_deferred` with reason `ack_capacity`, never failed |
 
 **Retry Config**:
 | Parameter | Type | Default | Description |

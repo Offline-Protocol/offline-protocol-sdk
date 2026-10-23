@@ -1,0 +1,2 @@
+services.register_service
+{"service_type":"echo","metadata":{"k":"v"}}

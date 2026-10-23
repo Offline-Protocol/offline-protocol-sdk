@@ -503,6 +503,114 @@ The pieces, each of which the failure needs only one of to come back:
 `test_ble_hello.py` pins each of these, and each has a mutation that turns it
 red. The macOS pieces were run between two Macs and a Galaxy M36 (Android 16).
 
+## P16. On BlueZ the central scans unfiltered, and both roles register again when bluetoothd restarts
+
+**Invariant:** what a Bluetooth LE role registered with bluetoothd is
+registered with the bluetoothd that is running now. Everything either role
+registers lives in the bluetoothd process (the central's discovery session,
+the peripheral's GATT application and advertisement), a new bluetoothd starts
+with none of it, and nothing on the bus tells the process that registered it.
+On BlueZ 5.87 both roles kept logging themselves running for the
+life of the service while the device was off the air: the peripheral said
+"advertising" with no advertisement registered, the central waited on a scan
+that had ended, and a peer's identity read failed with `Unlikely Error`
+because the link died with bluetoothd mid-read.
+
+Two pieces, each closing a different half:
+
+- **No service filter on the BlueZ scan.** bluetoothd 5.87 exits the moment a
+  discovery filter naming a service UUID is set (bisected on a Raspberry Pi 4 running BlueZ 5.87:
+  an unfiltered scan, a GATT application and an advertisement each leave it
+  running; `SetDiscoveryFilter` with `UUIDs` alone ends it). The central set
+  exactly that filter at every start, so every start of the service took the
+  adapter down, usually within half a second of the peripheral registering.
+  On Linux `BleManager` scans unfiltered and `_on_advertisement` drops any
+  advertisement without the mesh service UUID before tracking or dialling
+  it. CoreBluetooth keeps the filter: bleak delivers no advertisement data
+  without one on macOS 12.0 to 12.2, and it already drops non-matching
+  advertisements in-process, so the callback check changes nothing there.
+- **Both roles follow bluetoothd.** `bluez_restarts.StaysRegistered` watches
+  the bus's `NameOwnerChanged` for `org.bluez`. A start cut short because
+  bluetoothd exited part-way (BlueZ answers "Message recipient disconnected
+  from message bus without replying") is tried again once the new bluetoothd
+  holds the name; a start refused for any other reason is raised at once. A
+  role running when bluetoothd restarts is torn down and brought up again,
+  retrying with backoff for about fifteen seconds, because a bluetoothd that
+  has just started refuses for a while (`InProgress` for a discovery it is
+  still setting up). The helper holds the role's methods weakly: a strong
+  cycle kept a dropped `ProtocolManager`, and the stores it holds open, alive
+  until the cycle collector ran, and the next manager over the same
+  directories was refused.
+
+Three details, each of which a simpler version got wrong:
+
+- **One driver at a time.** A start cut short by an exit is followed about
+  150 ms later by the successor claiming the name. While a start is in
+  progress that claim does not start a recovery: the start waits for the
+  claim itself and tries again. With both reacting, the role was brought up
+  twice at once (two scanners, or two copies of the GATT service), or the
+  start failed with "already running" while the recovery had the role up. A
+  `stop()` that arrives while the start waits wins, and the start raises.
+- **A failed start releases what it built.** Once a role is `STOPPED` its
+  stop returns at once, so the start's own failure branch gives up the
+  scanner or the bless server. On BlueZ bless's `stop()` removes the
+  advertisement first and raises when there is none, which skips
+  unregistering the GATT application, and it never closes the bus connection
+  it opened; the peripheral unregisters the application itself and closes the
+  bus, on a failed start and on every stop. Without that, each retry
+  registered another copy of the service and each recovery leaked a
+  system-bus connection.
+- **A recovery that runs out of tries stays down.** After the last try fails
+  the role reports "could not register with bluetoothd again" at
+  error level, and nothing tries again until bluetoothd restarts once more or
+  the owner restarts the role.
+
+The watch is Linux only and best effort: with no system bus to watch it logs
+and stays inert, which is the behaviour before it existed.
+
+## P17. On BlueZ a controller left advertising behind the kernel's back is reset once
+
+**Invariant:** a peripheral whose advertisement the kernel refused while BlueZ
+reports free advertising slots resets the adapter once and starts again, and
+both roles register again once the adapter is powered back on.
+
+The kernel loses track of the controller's advertising. Linux clears its own
+"advertising" flag on every LE connection complete, assuming the controller
+stopped advertising, but a controller only stops for a link in which it is the
+peripheral. When advertising is on while our central's dial is pending (a
+discovery restart re-enables it in the window), the dial completes in the
+central role, the controller keeps advertising, and the kernel believes it
+stopped. From then on the kernel never disables it, every `LE Set Advertising
+Parameters` is answered `Command Disallowed`, and every new advertisement is
+refused with "Failed to register advertisement". The state outlives the
+process: on two Raspberry Pi 4s (Linux 6.18, BlueZ 5.87) a replaced service
+could not advertise again, which looked like advertisements left behind by the
+replaced container holding the slots, while BlueZ reported all of them free.
+The trace that showed it is in the HCI log: a central-role `LE Connection
+Complete` with advertising enabled, then `Command Disallowed` on every
+advertising and random address command, and no `LE Set Advertise Enable`
+again.
+
+- **The reset.** Powering the adapter off and on re-initialises the controller
+  with an HCI Reset, which ends the stale advertising.
+  `ble_peripheral._reset_wedged_advertising` does it through BlueZ's own
+  `Adapter1.Powered`, so it needs no more than the Bluetooth grant the
+  peripheral already has.
+- **Only for this refusal, and only once.** The reset drops every link the
+  adapter holds, for every process using it. It runs only for "Failed to
+  register advertisement", only when `SupportedInstances` (the free slots)
+  is above zero, and only once per start: with no slot free the refusal is
+  about the slots, and a refusal that survives a reset has another cause.
+- **The central follows the power.** BlueZ drops every discovery session when
+  the adapter powers off, and the scan does not come back with the power.
+  `bluez_restarts` treats `Powered` turning true on `org.bluez.Adapter1` like a
+  new bluetoothd, so a running central registers again. Without it the
+  central in the same process stopped hearing anyone after the peripheral's
+  reset, and after any power toggle by anyone else.
+
+The kernel's flag is the defect, and a kernel without it never takes this
+path: the refusal never comes.
+
 ## Testing
 
 ```bash

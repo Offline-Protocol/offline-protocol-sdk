@@ -1,14 +1,14 @@
 # Upgrading
 
 Everything an application team has to change to move off `v0.16.x` and onto the
-current `v0.29.x` line.
+current `v0.30.x` line.
 
 The breaking changes all landed in the **storage-split release**, `v0.17.0` —
 `initialize_mls` changes shape, three config updaters become fallible, and
 several previously-accepted inputs are now rejected at the boundary. Sections
 1–12 below cover that release and are the ones that can stop your build.
 
-Since `v0.17.0` seven releases can break a build. `v0.20.0` enables iOS
+Since `v0.17.0` nine releases can break a build. `v0.20.0` enables iOS
 autolinking, so a manual `pod 'MeshSdk'` line left in your `Podfile` now fails
 `pod install` — React Native on iOS only; it is a one-line deletion, and
 [§12.1](#121-react-native-ios-delete-your-manual-pod-meshsdk-line-v0200) has the
@@ -57,6 +57,13 @@ breaks one build, narrowly: Rust code that names every field of
 new `encrypted` field or a `..`. Android's peer-stream slot joins the Wi-Fi
 network it is on, and service bodies are sealed between peers
 ([§27](#27-behaviour-that-changes-without-a-compile-error-v0290)).
+`v0.30.0` breaks builds through its toolchain, not its API: building the
+native library from source needs Rust 1.91 and the iOS bridge needs Swift 5.10
+(Xcode 15.3), because UniFFI moves to 0.32. The `offline-protocol-transport`
+crate drops `BleTransport::record_send_success` and `record_send_failure`.
+React Native recovers events it lost, a burst to one nearby peer is sent
+sixteen at a time, and the telemetry dashboard's delivered count drops
+([§28](#28-behaviour-that-changes-without-a-compile-error-v0300)).
 
 Otherwise, where a later section documents an
 addition or a behaviour change, it is labelled inline with the release that
@@ -1277,13 +1284,15 @@ wire-format change, Android untouched.
 `pending_message_max_lifetime_ms` on `RetryConfig`.
 
 ```bash
-./scripts/generate-bindings.sh   # after UDL changes — Swift, Kotlin, Python
+./scripts/generate-bindings.sh   # after UDL changes — Swift, Kotlin, Python, Ruby, Java
 
 cd bindings/react-native
 npm run build:uniffi:all         # or :ios / :android
 ```
 
-Requires `uniffi` CLI `0.30.0` matching the workspace pin.
+Requires the `uniffi` CLI at the version the workspace pinned at the time
+(`0.30.0` for this release; see `crates/offline-protocol-uniffi/Cargo.toml`
+for the current pin).
 
 **React Native native rebuild required** — new source files are compiled in:
 
@@ -2608,6 +2617,92 @@ re-seals and resends once, then leaves the message to its retry ladder
 to honour, so an offline peer is no longer woken with "new message" for them.
 User messages, connection requests and accepts, group chat messages and group
 invites still push.
+
+---
+
+## 28. Behaviour that changes without a compile error *(v0.30.0)*
+
+The API compiles unchanged, except the two `BleTransport` methods the
+`offline-protocol-transport` crate drops, which had no caller outside their
+own test. The toolchain is what can stop a build; the first paragraph covers
+it. Each paragraph says what to check.
+
+**Toolchain floors.** UniFFI is now 0.32. Building `offline-protocol-uniffi`
+(every binding's native library, and the C library from source) needs Rust
+1.91; the library crates still build on 1.87. The generated Swift needs Swift
+5.10, so Xcode 15.3 or newer. A checkout that regenerates bindings installs
+`uniffi-bindgen` 0.32.2. A React Native app rebuilds its native code to pick
+up the regenerated files. On iOS an error the bridge does not map to a code
+now reaches JavaScript as the error's own case and message rather than a
+generic Foundation description.
+
+**Telemetry: the dashboard's delivered count drops.** Only messages sent
+through the application's send path count as delivered or failed. Media
+chunks and internal frames (key packages, Welcomes, sync frames) used to count
+as delivered and never as sent, so the delivered count, success rate, hop
+count and latency on the dashboard were inflated. Expect lower delivered
+counts from 0.30.0 devices; `on_event` is unchanged.
+
+**`MessageDelivered.latency_ms` runs from the first send.** A message that
+was resent, or parked and later settled, now reports the whole wait since a
+carrier first accepted it, not the last attempt. Latency figures an app
+records will rise for messages that needed retries.
+
+**React Native: a lost event is fetched back, so events can pause briefly.**
+When the SDK sees a skipped event number it now asks the native module for
+the missing events and delivers them in order before anything that arrived
+after them. That pause is normally a fraction of a millisecond and is capped
+at two seconds. A recovered loss is reported as a `diagnostic` at level
+`info` with `message: "native_event_replayed"` and
+`context: { from, to, recovered, missing }`. `native_event_gap` still
+reports what could not be recovered, which is now only an event older than
+the last 256 the module kept.
+
+**React Native: `message_delivered` and `message_failed` can arrive late.**
+Both are now held while JavaScript cannot take them, such as while the app is
+backgrounded, and are delivered on the next subscription or foreground, as
+`message_received` already was. Each still names the message it settles.
+An app that compared a delivery's arrival time with its send time to measure
+latency should read the event's `latency_ms` instead. Keep the handlers
+idempotent on `message_id`.
+
+**React Native, custom native modules:** a module that replaces the SDK's
+own must add `replayEvents(fromSeq, toSeq)`, resolving the kept events as
+`{ seq, eventJson }`, or the SDK falls back to reporting gaps without
+recovering them.
+
+**iOS and Android: the native library is built for size.** The libraries
+are now built with the workspace's `mobile` profile, opt-level "s" with
+link-time optimisation, where every earlier release used opt-level 3 with
+none. They are smaller, and CPU-bound work in the SDK is slower: on the
+benches, MLS sealing and opening take about 40% longer and most other paths
+under a third longer, a fraction of a millisecond per message. Replicated
+documents have no bench, so their cost is unmeasured. A panic in the
+SDK still reaches the app as an exception, as it always did; the documents
+that said the mobile library aborted on a panic were wrong. An app that
+builds the library from source with its own command and copies it from
+`target/<triple>/release/` should build with `--profile mobile` and copy from
+`target/<triple>/mobile/`; the SDK's build scripts already do
+([ADR 0029](adr/0029-mobile-libraries-are-sized-not-aborting.md)).
+
+**A burst of direct messages to a nearby peer is sent sixteen at a time.**
+Over Bluetooth LE or Wi-Fi Direct, at most 16 messages to one peer wait for
+its acknowledgement at once. The 17th onward return their id as usual, emit
+`message_deferred` with reason `peer_window` instead of `message_sent`, and
+go out in order as acknowledgements return; `message_delivered` follows as
+before. An app that shows a message as "sent" only on `message_sent` should
+show a `peer_window` deferral as queued, not failed. Messages through the
+relay are not affected. The burst used to be handed to the radio all at
+once, which on a slow link ended in mass retries and "Outbox capacity
+exceeded" failures.
+
+**A full outbox refuses the new message rather than failing an old one.** When
+500 messages are already queued, `send` for a recipient that holds the largest
+share of them still returns an id, but that id gets `message_failed` with
+reason "Outbox capacity exceeded" and a retry count of 0, usually before
+`send` returns. Treat it as "queue full, try later" for that conversation.
+Messages already queued are no longer failed to make room for it, and a
+message awaiting its acknowledgement is never failed for capacity.
 
 ---
 

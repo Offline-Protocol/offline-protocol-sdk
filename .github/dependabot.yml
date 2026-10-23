@@ -30,8 +30,28 @@ updates:
     cooldown:
       default-days: 7
 
+  # Playwright, which pins the three browser engines the web binding's
+  # pages run in.
+  - package-ecosystem: npm
+    directory: /bindings/web
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
   - package-ecosystem: gradle
     directory: /bindings/react-native/android
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
+  # The Ruby binding's test gems and the example's. ffi is the one runtime
+  # dependency; both lockfiles pin it.
+  - package-ecosystem: bundler
+    directories:
+      - /bindings/ruby
+      - /examples/ruby-app
     schedule:
       interval: weekly
     cooldown:

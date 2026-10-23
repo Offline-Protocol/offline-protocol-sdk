@@ -253,8 +253,8 @@ pub fn record_seal_keypair_for_address(address: &Address) -> Result<NostrKeypair
 /// Saturates to 0 rather than panicking if the system clock is set before the
 /// epoch; a zero here only widens a subscription window.
 pub(crate) fn now_unix_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    offline_protocol_core::time::SystemTime::now()
+        .duration_since(offline_protocol_core::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
@@ -500,6 +500,15 @@ pub const NOSTR_DISCOVERY_KIND: u32 = 30777;
 /// rather than the relay's goodwill.
 pub const NOSTR_DELETION_KIND: u32 = 5;
 
+/// Kind for a browser node's WebRTC signalling event: a sealed connection
+/// code addressed to a room's topic.
+///
+/// In NIP-01's ephemeral range (20000 to 29999), which a relay forwards to
+/// the subscriptions open at that moment and never stores. A connection code
+/// is useful for the seconds both sides are waiting and names local
+/// addresses, so a relay keeping it would only lengthen what it exposes.
+pub const NOSTR_SIGNAL_KIND: u32 = 25_912;
+
 /// Picks a `created_at` uniformly in `[now - NOSTR_CREATED_AT_JITTER_SECS, now]`.
 ///
 /// NIP-59 requires the wrapper's timestamp be randomized into the **past** —
@@ -742,6 +751,18 @@ impl NostrEvent {
             vec!["k".to_string(), NOSTR_DISCOVERY_KIND.to_string()],
         ];
         Self::sign_with_tags(keypair, NOSTR_DELETION_KIND, tags, "", now_unix_secs())
+    }
+
+    /// Builds and signs a signalling event: `sealed` (already sealed by the
+    /// caller under the room's key) at the room's `topic`.
+    ///
+    /// Signed by `keypair`, which the caller makes single-use, so the events
+    /// of one room are not linked by their author. `created_at` is the true
+    /// time: a subscriber filters with `since`, and a backdated event would
+    /// fall outside it.
+    pub fn create_signal(keypair: &NostrKeypair, topic: &str, sealed: &str) -> Result<Self> {
+        let tags = vec![vec!["t".to_string(), topic.to_string()]];
+        Self::sign_with_tags(keypair, NOSTR_SIGNAL_KIND, tags, sealed, now_unix_secs())
     }
 
     /// Builds and signs a NIP-01 event with a single `p` tag.
@@ -1081,6 +1102,29 @@ pub(crate) fn create_discovery_query_message(
     });
     let msg = serde_json::json!(["REQ", subscription_id, filter]);
     serde_json::to_string(&msg).map_err(|e| Error::SerializationError(e.to_string()))
+}
+
+/// The REQ for a room's signalling events published from `since` (Unix
+/// seconds) on.
+pub fn create_signal_subscription(
+    topic: &str,
+    subscription_id: &str,
+    since: i64,
+) -> Result<String> {
+    let filter = serde_json::json!({
+        "#t": [topic],
+        "kinds": [NOSTR_SIGNAL_KIND],
+        "since": since
+    });
+    let msg = serde_json::json!(["REQ", subscription_id, filter]);
+    serde_json::to_string(&msg).map_err(|e| Error::SerializationError(e.to_string()))
+}
+
+/// Whether a relay-supplied event's id is its NIP-01 hash and its signature
+/// verifies under its `pubkey`. The same check this crate applies to every
+/// record it reads, for callers outside it.
+pub fn verify_event(event: &serde_json::Value) -> bool {
+    event_is_authentic(event)
 }
 
 /// Whether `data` has the shape of a sealed gift-wrap payload.

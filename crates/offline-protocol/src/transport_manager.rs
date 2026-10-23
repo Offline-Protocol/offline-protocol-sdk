@@ -9,6 +9,7 @@ use crate::events::{DorsEscalationPhase, DorsEscalationReasonCode, DorsReasonCod
 use crate::telemetry::routing::{RoutingDecision, RoutingPhase, RoutingReasonCode};
 use crate::{Error, Result};
 use chrono::Utc;
+use offline_protocol_core::time::Instant;
 use offline_protocol_core::{Message, Username, WireCodec};
 use offline_protocol_router::{
     display_routing_score, DorsConfig, EscalationTriggerReason, TransportScore, TransportSelector,
@@ -19,7 +20,6 @@ use offline_protocol_transport::{
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
 use tracing::{debug, warn};
 
 /// Manages multiple transports and handles transport selection.
@@ -56,7 +56,10 @@ pub struct TransportManager {
     routing_diagnostic: bool,
 
     /// Last escalation trigger event emitted (reason, time) for dedupe window.
-    last_escalation_trigger_emitted: Option<(DorsEscalationReasonCode, std::time::Instant)>,
+    last_escalation_trigger_emitted: Option<(
+        DorsEscalationReasonCode,
+        offline_protocol_core::time::Instant,
+    )>,
 
     /// Peers known to decode the binary wire codec (from their signed key
     /// package). Messages addressed to a listed peer are stamped
@@ -639,7 +642,7 @@ impl TransportManager {
         reason_detail: Option<String>,
         detailed_scores: Option<&[(TransportType, TransportScore)]>,
     ) {
-        let now = std::time::Instant::now();
+        let now = offline_protocol_core::time::Instant::now();
         let emit = match &self.last_escalation_trigger_emitted {
             Some((last_code, last_at)) => {
                 *last_code != reason_code
@@ -1200,6 +1203,15 @@ impl TransportManager {
             !MESH_TRANSPORTS.contains(transport_type)
                 && transport.status() == TransportStatus::Available
         })
+    }
+
+    /// Ids of messages some carrier has accepted but not yet started writing
+    /// (see [`Transport::queued_message_ids`]).
+    pub fn queued_message_ids(&self) -> std::collections::HashSet<String> {
+        self.transports
+            .values()
+            .flat_map(|transport| transport.queued_message_ids())
+            .collect()
     }
 
     /// Whether a mesh carrier holds a live link straight to `peer_id`.
@@ -1831,7 +1843,7 @@ mod tests {
             device_id: "bob".to_string(),
             address: "AA:BB:CC:DD:EE:FF".to_string(),
             rssi: -60,
-            last_seen: std::time::SystemTime::now(),
+            last_seen: offline_protocol_core::time::SystemTime::now(),
             connected: true,
         });
         manager.add_transport(TransportType::BLE, Box::new(ble));

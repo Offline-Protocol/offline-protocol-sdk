@@ -73,8 +73,8 @@
 //! until it has survived, so a blob that kills the process kills it once
 //! rather than every time the sender retries.
 
+use offline_protocol_core::time::{Duration, Instant};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use offline_protocol_data::{CatchUp, RemoteImport, VersionToken};
@@ -1125,8 +1125,10 @@ impl OfflineProtocol {
         // this and spends its whole retry budget on dead bytes; there is no
         // reason to inherit that. Staged after the duplicate check so the
         // entry belongs to a frame that is actually on the ladder.
+        let recipient = message.recipient.as_str().to_string();
         self.stage_outbox_reseal(
             &message.id,
+            &recipient,
             crate::protocol::types::OutboxReseal {
                 content: plaintext,
                 priority: message.priority,
@@ -1135,6 +1137,7 @@ impl OfflineProtocol {
                 content_type: message.content_type,
                 media_metadata: None,
                 rich: None,
+                seal_mark: None,
             },
         );
 

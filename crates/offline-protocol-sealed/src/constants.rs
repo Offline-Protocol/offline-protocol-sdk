@@ -43,8 +43,39 @@ pub const ACK_FOR_KEY: &str = "ack_for";
 pub const SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE: u32 = 32;
 
 /// How far ahead of the highest seen generation a sender ratchet may be
-/// fast-forwarded when messages are lost (OpenMLS default).
-pub const SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE: u32 = 1000;
+/// fast-forwarded when messages are lost.
+///
+/// A receiver more than this far behind cannot decrypt anything from that
+/// sender again until the pair re-keys, so the window has to sit well above
+/// the gap a congested link can open. The engine keeps up to
+/// `DEFAULT_MAX_PENDING_ACKS` (1000) messages in flight and re-seals each
+/// resend, which spends a fresh generation every time; a receiver that drops
+/// a resend as a duplicate of a message it already has skips that generation.
+/// The OpenMLS default of 1000 was therefore reachable, and the 2026-10-19
+/// volume test reached it: the sender logged 12,152 retries against 2,434
+/// messages the receiver decrypted. 8192 keeps more than four in-flight
+/// ceilings of headroom (pinned in `offline-protocol`), and the cost of using
+/// it is one fast-forward of up to 8192 key derivations when a gap opens.
+///
+/// It is receiver-local policy: nothing on the wire carries it, and a peer
+/// configured with a different value still interoperates. It configures the
+/// phone's OpenMLS groups only: a leaf's receiver window is
+/// [`LEAF_SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE`], which mls-rs does not let
+/// anyone set.
+pub const SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE: u32 = 8192;
+
+/// How far ahead a leaf node's receiver ratchet may be fast-forwarded: a frame
+/// more than this many generations past the next one it expects is refused.
+///
+/// Not configuration. mls-rs fixes it (`MAX_RATCHET_BACK_HISTORY` in its
+/// secret tree, 1024 in the pinned 0.56.0) and exposes no setting, so a phone
+/// sealing for a leaf has this much room, not
+/// [`SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE`]. Anything a phone derives from
+/// "how far ahead a receiver tolerates" has to take the smaller of the two:
+/// the re-seal budget in `offline-protocol` does. Stated here so that
+/// derivation has one name to read, and pinned against the real mls-rs by
+/// `tools/mls-interop`, which fails if an mls-rs upgrade moves it.
+pub const LEAF_SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE: u32 = 1024;
 
 /// How long a leaf node's key package claims to be valid.
 ///

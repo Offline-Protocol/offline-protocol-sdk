@@ -1,17 +1,22 @@
 # Bridge contracts
 
-The Rust core is exposed to Swift, Kotlin, Python, and TypeScript. This
-directory states what each binding owes the core and what the core owes each
-binding.
+The Rust core is exposed to Swift, Kotlin, Python, TypeScript, C, Java, Ruby
+and the browser. This directory states what each binding owes the core and
+what the core owes each binding.
 
 | Document | Scope |
 |----------|-------|
 | This file | The contract every binding shares |
 | [Swift](swift.md) | iOS native, the Swift package and the React Native iOS bridge |
 | [Kotlin](kotlin.md) | Android native, the Android library and the React Native Android bridge |
+| [Flutter](flutter.md) | Flutter plugin (`bindings/flutter/offline_protocol`) |
 | [Python](python.md) | Desktop and tooling |
 | [TypeScript](typescript.md) | The React Native JavaScript surface |
 | [Local API](local-api.md) | A server fronting one engine for several local clients over a socket, and the reference server |
+| [C](c.md) | The C API in `bindings/c`: the local API called in process |
+| [Java](java.md) | The generated Java binding in `bindings/java` |
+| [Ruby](ruby.md) | The generated Ruby binding in `bindings/ruby` |
+| [Web](web.md) | The engine in a browser worker: `crates/offline-protocol-web` and `bindings/web` |
 
 Integration **guides** live elsewhere: [iOS](../ios-integration.md),
 [Android](../android-integration.md),
@@ -30,9 +35,10 @@ green `tsc` say nothing about any of them.
 
 ## C1. Regenerate every binding together
 
-The Swift, Kotlin, and Python bindings are **one artifact set**, not three
-independent ones. They come from one bindgen run over one interface definition
-and carry the FFI checksums of the library they were generated against.
+The Swift, Kotlin, Python, Ruby and Java bindings are **one artifact set**, not five
+independent ones. They come from one interface definition, through
+`uniffi-bindgen` for the first four and `uniffi-bindgen-java` for the last, and
+carry the FFI checksums of the library they were generated against.
 
 ```bash
 ./scripts/generate-bindings.sh
@@ -58,6 +64,11 @@ Inserting or removing a variant, or reordering, breaks every committed binding
 in every language, silently, by shifting every variant after the edit.
 
 New variants are appended. Never inserted, never removed, never reordered.
+
+The same holds for `MlsStorageError`. The C binding's
+`OfflineProtocolStorageStatus` gives each of its variants its position plus
+one, so a compiled C storage provider answers by position too
+([K6](c.md#k6-storage-providers)).
 
 The core maps its internal errors to this enum by classifying every variant
 explicitly. That match is **no longer compiler-enforced**: the engine error
@@ -349,6 +360,7 @@ and they are fast enough that there is no excuse:
 | Kotlin | Gradle unit tests, Robolectric where a platform type is needed | tens of seconds |
 | Python | pytest against the built desktop library | seconds |
 | TypeScript | `tsc` plus the JS harness | seconds |
+| Web | `bindings/web/scripts/test-browser.sh` in Chromium, Firefox and WebKit, `test-conformance.sh` in Chrome and Firefox | minutes |
 
 **After a rename, grep for the old identifier across every binding.** The
 compiler will not find it in the three languages that do not share a type system
@@ -379,6 +391,10 @@ the two above:
   and the `message_decryption_failed` that stands in for one. By the time they
   are emitted the core has ACKed the message, dedup-marked its id and dropped
   its queued copy, so nothing will restate them and a drop is a lost message.
+  `message_delivered` and `message_failed` are held for the sender's half of
+  the same reason: each is emitted after the pending acknowledgement, retry
+  and outbox entry are gone, so a drop leaves the message shown as in flight
+  forever (#514).
   They do not collapse per type, since every message is its own fact, so the
   hold is keyed `type:message_id`, kept in arrival order, and capped at a real
   capacity (256, oldest dropped) rather than a backstop. Each bridge holds
@@ -392,14 +408,26 @@ the two above:
 
 None of the three shapes covers an event the native module hands over and
 React Native then loses: a bridgeless emit reports failure by rejecting a task
-rather than throwing, so the module sees a success. Such a loss is made
-**visible**, not prevented. Both native modules number every event they hand
-over on the main event name (`seq`, given out and handed over under one lock),
-and the TypeScript layer reports a gap as a `diagnostic` event at level
-`warning` with message `native_event_gap` and the missing range. A gap says
-the event left the native module; no gap and no event says it never reached
-it. Nothing is refetched. `react_native_events_are_numbered_for_gap_detection`
-pins the field name in all three languages.
+rather than throwing, so the module sees a success. Such a loss is
+**recovered** by a fourth shape, a numbered replay. Both native modules number
+every event they hand over on the main event name (`seq`) and keep the last
+256 of them (`EventReplayRing`), and the number, the hand-over and the record
+happen under one lock, so the ring holds a contiguous run with each event
+under its own number. When the TypeScript layer sees a number skipped it
+pauses dispatch, pulls the missing range with `replayEvents`, and dispatches
+the recovered events in their place before anything that arrived after them,
+reporting a `diagnostic` at level `info` with message `native_event_replayed`.
+Only a number the ring no longer holds is reported as lost, at level `warning`
+with message `native_event_gap` and the missing range. A gap says the event
+left the native module; no gap and no event says it never reached it.
+
+The pull, not a re-emit, is the shape for a reason: a re-emit would be
+numbered again and arrive after the events that followed the lost one, and a
+push from the native side has no way to know JavaScript missed anything. The
+pause is bounded (2 s, 1024 deferred events) so a module that never answers
+degrades to the reporting-only behaviour rather than stalling the app.
+`react_native_events_are_numbered_for_gap_detection` pins the field name, the
+record, the bridge method and the ring capacity in all three languages.
 
 ## C11. A storage adapter is a supported extension point, and is verified
 
@@ -561,7 +589,12 @@ level, Swift sets `.ios` and the major of `UIDevice.current.systemVersion`,
 Python maps `platform.system()`. The TypeScript `TelemetryConfig` does not
 expose them, and `every_bridge_reads_the_telemetry_config_section` pins both
 halves: every other field is read under its camelCase name, and these two
-are not read at all.
+are not read at all. The C binding is the one exception, for `os_major`
+only: it fills `os` from the target it was built for and refuses one from
+the caller, and takes `os_major` from the host, because there the host is
+the platform and the only side that can read its version
+([c.md K3](c.md#k3-the-binding-fills-the-telemetry-platform)). The same guard
+pins that the C binding fills `os`.
 
 **The binding owns the lifecycle.** Entering the background is the session
 boundary. Kotlin reports it from an `ActivityLifecycleCallbacks` watcher on
@@ -604,19 +637,27 @@ except the ones named as needing it:
 | Android | `OfflineProtocolModule.kt`, `OfflineProtocolPackage.kt`, `MeshHeadlessWakeService.kt` |
 | iOS | `OfflineProtocolModule.swift`, `OfflineProtocolModule.m` |
 
-The Swift package and the Android library are built from the files the React
-Native module compiles, where they are, less those five
-([ADR 0025](../adr/0025-native-packages-are-assembled-in-place.md)). So a
-transport manager that takes a `Promise`, or a policy class that imports
-React for one type, still builds in React Native and breaks both native
-packages for every application that uses them.
+The Swift package, the Android library, and the Flutter plugin are built from
+the files the React Native module compiles, where they are, less the React-only
+entry points
+([ADR 0025](../adr/0025-native-packages-are-assembled-in-place.md)). Flutter
+compiles them through a list of what to leave out in `android/build.gradle`
+and `offline_protocol.podspec` instead of assembling a separate package tree
+([F1](flutter.md#f1-shared-bridge-sources-compiled-less-a-named-list)). So a
+transport manager that takes a `Promise`, or a policy class that imports React
+for one type, still builds in React Native and breaks the native packages and
+the Flutter plugin for every application that uses them.
 
 The check is the package build, on every pull request: the `Swift Package`
-job builds the package and runs it on a simulator, and the `Android Library`
-job compiles the library and its suite. Each list of what to leave out is
+job builds the package and runs it on a simulator, the `Android Library`
+job compiles the library and its suite, and the `Flutter Binding` job runs
+Dart tests, assembles the plugin release AAR (shared Kotlin + jniLibs), and
+checks the committed footprint baseline when Flutter-related paths change.
+Each list of what to leave out is
 checked the other way too. A name on it that matches no file is a rename
-nobody carried over, and both builds refuse it, because the renamed file
-would otherwise be taken.
+nobody carried over, and the two native package builds refuse it, because the
+renamed file would otherwise be taken. For the Flutter plugin two Rust guards
+refuse it instead.
 
 **A value the React Native package declares, and that would drift without
 anything failing, is read and not written again.** The packages read the iOS
@@ -634,8 +675,11 @@ found by the first application to update.
 |---------|------|
 | Swift | The manual Objective-C bridge kept in step with every `@objc` method; secure storage backed by Keychain; a live-instance check before emitting; the telemetry session boundary inside a background task (C12); a Network-framework peer-stream manager that announces a peer only under the address its preamble proved, one per address (S8) |
 | Kotlin | Secure storage backed by Keystore; no blocking work on the main looper; awareness that platform callbacks arrive on binder threads; the telemetry session boundary from an `Application.ActivityLifecycleCallbacks` watcher, never `onHostPause` (C12); a peer-stream manager, over a Wi-Fi Direct group and the Wi-Fi network, that announces a peer only under the address its preamble proved, one per address, by the lower-opened rule (K8) |
-| Python | Nothing platform-specific; it is the thinnest binding and therefore the best place to smoke-test an ABI change; a re-entrant lock on the generated callback handle map, installed at import, because the collector can free a core object inside a callback lookup and the core's drop then asks for that lock again (P10); the host platform for telemetry from `platform`; a BLE peripheral that serves the address and the core-built identity assertion, and a central that verifies before it announces (P8); a peripheral that binds each central to the address its hello proved, and a central that writes its hello before its first write (P15); a peer-stream manager that announces a host only under the address its preamble proved, and keeps one announced stream per address (P9); a gateway-daemon client that announces a session only once the gateway bound it to this device's address, and settles a frame only on the gateway's verdict, never on the write (P11) |
+| Python | Nothing platform-specific; it is the thinnest binding and therefore the best place to smoke-test an ABI change; a re-entrant lock on the generated callback handle map, installed at import, because the collector can free a core object inside a callback lookup and the core's drop then asks for that lock again (P10); the host platform for telemetry from `platform`; a BLE peripheral that serves the address and the core-built identity assertion, and a central that verifies before it announces (P8); a peripheral that binds each central to the address its hello proved, and a central that writes its hello before its first write (P15); a central that scans unfiltered on BlueZ, and both roles registering again when bluetoothd restarts or the adapter powers on (P16, P17); a peripheral that resets, once, a controller the kernel lost track of and that refuses every advertisement (P17); a peer-stream manager that announces a host only under the address its preamble proved, and keeps one announced stream per address (P9); a gateway-daemon client that announces a session only once the gateway bound it to this device's address, and settles a frame only on the gateway's verdict, never on the write (P11) |
 | TypeScript | Config normalization, event typing kept in step with the core, no assumption that a native method exists in an older binary, and no telemetry lifecycle code of its own |
+| Flutter | Shared bridge sources compiled less a named list of React-only ones (F1); engine-thread UniFFI with main-thread channel callbacks (F2); method-channel names pinned to Dart (F3); event seq/replay parity with React Native (F4); config via shared parsers (F5); secure storage via shared Kotlin/Swift adapters (F6) |
+| C | Nothing the library can do for it: the transports, storage and lifecycle are all the host's; callbacks callable from any thread that never call back into the engine and never unwind; every string the library hands out freed with `offline_protocol_string_free`; `os_major` supplied for telemetry, `os` never (K1 to K3 in [c.md](c.md)) |
+| Web | One dedicated worker per engine, nothing that calls back into the page, carriers that move bytes and never interpret them, and one durable node per account per origin (W1 to W3, W8 in [web.md](web.md)) |
 
 A storage adapter written in any of them owes the same thing: a green
 conformance report (C11).

@@ -21,6 +21,13 @@
 
 [advisories]
 ignore = [
+    # --- The browser build ----------------------------------------------
+    #
+    # RUSTSEC-2024-0384: instant unmaintained. wasm32 only, through OpenMLS's
+    # mandatory `js` feature (fluvio-wasm-timer -> parking_lot 0.11). Mirrors
+    # deny.toml, where the full rationale is.
+    "RUSTSEC-2024-0384",
+
     # --- Lockfile-only: the libcrux HPKE backend is never compiled ---------
     #
     # `hpke-rs-libcrux` and its `libcrux-aesgcm` dependency appear in Cargo.lock
@@ -73,6 +80,18 @@ ignore = [
     # never links into a shipped artifact, and the advisory itself states no
     # safe upgrade exists.
     "RUSTSEC-2026-0173",
+    #
+    # Mirrors deny.toml. Unmaintained notice for basic-toml, which reaches us
+    # only through offline-protocol-uniffi's build script: uniffi 0.32 ->
+    # uniffi_build -> uniffi_bindgen -> askama 0.16 (feature `config`) ->
+    # askama_derive, which parses its template config with it at compile
+    # time. It never links into a shipped artifact. uniffi 0.32.2 and askama
+    # 0.16.1 are the latest releases and both still depend on it; the
+    # upstream replacement is tracked by askama-rs/askama#594 and drafted in
+    # askama-rs/askama#771.
+    #
+    # RUSTSEC-2026-0374: basic-toml unmaintained.
+    "RUSTSEC-2026-0374",
 
     # --- Unsoundness notices in transitive dependencies --------------------
     #

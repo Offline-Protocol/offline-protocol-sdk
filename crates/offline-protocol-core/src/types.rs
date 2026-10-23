@@ -32,7 +32,7 @@ pub type MetadataMap = alloc::collections::BTreeMap<String, String>;
 /// to wrap through the unsigned duration.
 #[cfg(feature = "std")]
 fn unix_millis_now() -> i64 {
-    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+    match crate::time::SystemTime::now().duration_since(crate::time::UNIX_EPOCH) {
         Ok(since_epoch) => since_epoch.as_millis() as i64,
         Err(before_epoch) => -(before_epoch.duration().as_millis() as i64),
     }
@@ -500,17 +500,17 @@ impl fmt::Display for LamportClock {
 /// Cannot be serialized — physically cannot cross a device boundary.
 /// Use this instead of `Timestamp::elapsed_millis()` for single-device timing.
 ///
-/// Requires the `std` feature: this is a `std::time::Instant` wrapper through
+/// Requires the `std` feature: this is a `crate::time::Instant` wrapper through
 /// and through, and a bare-metal target supplies the monotonic clock itself.
 #[cfg(feature = "std")]
 #[derive(Debug, Clone, Copy)]
-pub struct LocalInstant(std::time::Instant);
+pub struct LocalInstant(crate::time::Instant);
 
 #[cfg(feature = "std")]
 impl LocalInstant {
     /// Captures the current monotonic instant.
     pub fn now() -> Self {
-        Self(std::time::Instant::now())
+        Self(crate::time::Instant::now())
     }
 
     /// Returns the elapsed time since this instant in milliseconds.
@@ -518,8 +518,9 @@ impl LocalInstant {
         self.0.elapsed().as_millis() as u64
     }
 
-    /// Returns the underlying `std::time::Instant`.
-    pub fn as_std(&self) -> std::time::Instant {
+    /// Returns the underlying [`crate::time::Instant`]: the standard
+    /// library's own on every target but the browser.
+    pub fn as_std(&self) -> crate::time::Instant {
         self.0
     }
 }

@@ -116,11 +116,11 @@ pip install -e .
 ```
 
 `build-desktop.sh` compiles the Rust core for your platform and generates the
-FFI bindings. It regenerates Swift and Kotlin alongside Python by delegating to
-the repo-root `scripts/generate-bindings.sh`: the three are one artifact set
+FFI bindings. It regenerates Swift, Kotlin, Ruby and Java alongside Python by delegating to
+the repo-root `scripts/generate-bindings.sh`: the five are one artifact set
 off one UDL, so they are never refreshed apart.
 
-**Prerequisites:** Rust toolchain, `uniffi-bindgen` (`cargo install uniffi --version 0.30.0 --features cli --locked`).
+**Prerequisites:** Rust toolchain, `uniffi-bindgen` (`cargo install uniffi --version 0.32.2 --features cli --locked`) and `uniffi-bindgen-java` (`cargo install uniffi-bindgen-java --version 0.5.2 --locked`).
 
 ### A Linux wheel from a checkout, on another host
 
@@ -143,7 +143,7 @@ docker run --rm -v "$src":/src -w /src rust:1-bookworm sh -euc '
     python3 -m venv /tmp/venv && . /tmp/venv/bin/activate
     pip install -q build wheel
     bash bindings/python/scripts/build-wheel.sh linux-aarch64 \
-        target/release/liboffline_protocol_uniffi.so 0.29.0'
+        target/release/liboffline_protocol_uniffi.so 0.30.0'
 cp "$src"/bindings/python/dist/*.whl bindings/python/docker/wheels/
 ```
 

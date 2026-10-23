@@ -22,11 +22,11 @@ target is `x86_64-apple-ios`.
 # 1. The Rust library, for the simulator, built for the pod's deployment
 #    target.
 IPHONEOS_DEPLOYMENT_TARGET="$(bash scripts/ios-deployment-target.sh)" \
-  cargo build --release --target aarch64-apple-ios-sim --package offline-protocol-uniffi
+  cargo build --profile mobile --target aarch64-apple-ios-sim --package offline-protocol-uniffi
 
 # 2. The XCFramework the package links, with the header inside it.
 bash scripts/package-swiftpm-xcframework.sh build/swiftpm \
-  target/aarch64-apple-ios-sim/release/liboffline_protocol_uniffi.a
+  target/aarch64-apple-ios-sim/mobile/liboffline_protocol_uniffi.a
 
 # 3. The package itself. The output directory must not exist or must be empty.
 rm -rf build/offline-protocol-swift

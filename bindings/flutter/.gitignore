@@ -1,0 +1,14 @@
+.dart_tool/
+.packages
+build/
+**/example/build/
+**/example/.dart_tool/
+**/example/.flutter-plugins-dependencies
+**/example/ios/Flutter/
+**/example/ios/Pods/
+**/example/ios/.symlinks/
+**/example/ios/Runner/GeneratedPluginRegistrant.h
+**/example/ios/Runner/GeneratedPluginRegistrant.m
+**/example/android/.gradle/
+**/example/android/local.properties
+**/example/android/app/src/main/java/io/flutter/plugins/

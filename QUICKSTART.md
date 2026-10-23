@@ -95,7 +95,7 @@ alone strips relay duty from plugged-in devices that should keep it.
 ### 1. Build Rust Library
 
 ```bash
-cargo build --release --target aarch64-linux-android
+cargo build --profile mobile --target aarch64-linux-android
 ```
 
 This produces `liboffline_protocol_uniffi.so`.
@@ -137,7 +137,7 @@ val messageId = protocol.sendMessage(
 ### 1. Build Rust Library
 
 ```bash
-cargo build --release --target aarch64-apple-ios
+cargo build --profile mobile --target aarch64-apple-ios
 ```
 
 This produces `liboffline_protocol_uniffi.a`.

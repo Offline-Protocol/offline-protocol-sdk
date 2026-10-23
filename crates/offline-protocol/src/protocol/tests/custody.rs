@@ -10,8 +10,8 @@
 //! in its store, plus the one thing a device must never do (blank its own
 //! route) and the one thing a receipt must never do (settle anything).
 
+use offline_protocol_core::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use offline_protocol_data::DataValue;

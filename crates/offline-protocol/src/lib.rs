@@ -22,9 +22,11 @@ pub mod mls_observability;
 pub mod protocol;
 pub mod protocol_state_storage;
 pub mod storage_conformance;
+mod storage_namespace;
 /// The conformance suite for [`mls::MlsStorage`] implementations, beside
 /// the protocol-state one, so a Rust host verifies both backends from here.
 pub use offline_protocol_mls::storage_conformance as mls_storage_conformance;
+pub use storage_namespace::{account_storage_namespace, is_account_storage_namespace};
 pub mod telemetry;
 pub mod transport_manager;
 pub mod visualization;
@@ -42,9 +44,8 @@ pub use events::{
 };
 #[cfg(feature = "file-store")]
 pub use file_store::{
-    account_storage_namespace, EnvStoreKey, FileProtocolStateStorage, FileStoreError,
-    FileStorePair, SealedFileMlsStorage, SealedState, StaticStoreKey, StoreKeyError,
-    StoreKeyProvider,
+    EnvStoreKey, FileProtocolStateStorage, FileStoreError, FileStorePair, SealedFileMlsStorage,
+    SealedState, StaticStoreKey, StoreKeyError, StoreKeyProvider,
 };
 pub use group_mesh::{
     GroupRichReadiness, GroupSendOptions, RelaySyncState, MAX_RELAY_CAPABILITIES,

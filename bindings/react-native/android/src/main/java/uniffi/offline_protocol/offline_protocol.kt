@@ -81,7 +81,7 @@ open class RustBuffer : Structure() {
 
     @Suppress("TooGenericExceptionThrown")
     fun asByteBuffer() =
-        this.data?.getByteBuffer(0, this.len.toLong())?.also {
+        this.data?.getByteBuffer(0, this.len)?.also {
             it.order(ByteOrder.BIG_ENDIAN)
         }
 }
@@ -98,6 +98,43 @@ internal open class ForeignBytes : Structure() {
     @JvmField var data: Pointer? = null
 
     class ByValue : ForeignBytes(), Structure.ByValue
+}
+
+// Converter for `&[u8]` / `[ByRef] bytes` arguments.
+//
+// Only `lower` is valid — zero-copy byte buffers only flow foreign -> Rust,
+// and only in argument position. `lift`, `read`, `write`, and
+// `allocationSize` have no sound implementation here and all panic at
+// runtime. The `FfiConverter` interface is implemented so that the
+// compiler enforces the full method set (rather than relying on eyeball).
+//
+// The provided `ByteBuffer` MUST be direct — only direct buffers have a
+// stable native address that JNA can expose via `getDirectBufferPointer`.
+// The returned `ForeignBytes.ByValue` is only valid for the duration of
+// the FFI call; the Rust side treats it as a borrow.
+internal object FfiConverterByRefBytes : FfiConverter<java.nio.ByteBuffer, ForeignBytes.ByValue> {
+    override fun lower(value: java.nio.ByteBuffer): ForeignBytes.ByValue {
+        require(value.isDirect) { "UniFFI zero-copy &[u8] requires a direct ByteBuffer. Use ByteBuffer.allocateDirect()." }
+        val remaining = value.remaining()
+        val fb = ForeignBytes.ByValue()
+        fb.len = remaining
+        // Zero-length direct buffers: skip getDirectBufferPointer (platform-variable behavior)
+        // and pass null. The Rust side treats (null, 0) as &[].
+        fb.data = if (remaining == 0) null else com.sun.jna.Native.getDirectBufferPointer(value)
+        return fb
+    }
+
+    override fun lift(value: ForeignBytes.ByValue): java.nio.ByteBuffer =
+        error("ByRef bytes cannot be lifted: zero-copy &[u8] only flows foreign->Rust")
+
+    override fun read(buf: java.nio.ByteBuffer): java.nio.ByteBuffer =
+        error("ByRef bytes cannot be read from a buffer: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.")
+
+    override fun write(value: java.nio.ByteBuffer, buf: java.nio.ByteBuffer): Unit =
+        error("ByRef bytes cannot be written to a buffer: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.")
+
+    override fun allocationSize(value: java.nio.ByteBuffer): ULong =
+        error("ByRef bytes have no RustBuffer allocation size: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.")
 }
 /**
  * The FfiConverter interface handles converter types to and from the FFI
@@ -282,8 +319,9 @@ internal inline fun<T> uniffiTraitInterfaceCall(
     try {
         writeReturn(makeCall())
     } catch(e: kotlin.Exception) {
+        val err = try { e.stackTraceToString() } catch(_: Throwable) { "" }
         callStatus.code = UNIFFI_CALL_UNEXPECTED_ERROR
-        callStatus.error_buf = FfiConverterString.lower(e.toString())
+        callStatus.error_buf = FfiConverterString.lower(err)
     }
 }
 
@@ -300,8 +338,9 @@ internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallWithError(
             callStatus.code = UNIFFI_CALL_ERROR
             callStatus.error_buf = lowerError(e)
         } else {
+            val err = try { e.stackTraceToString() } catch(_: Throwable) { "" }
             callStatus.code = UNIFFI_CALL_UNEXPECTED_ERROR
-            callStatus.error_buf = FfiConverterString.lower(e.toString())
+            callStatus.error_buf = FfiConverterString.lower(err)
         }
     }
 }
@@ -824,480 +863,484 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
-    external fun uniffi_offline_protocol_uniffi_checksum_func_derive_address(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_func_parse_invite(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_value(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_decline_attachment(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_json(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_size(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_flush(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_list_delete(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_list_docs(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_list_len(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_list_push(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_list_spaces(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_map_delete(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_map_get_json(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_doc(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_set_interest(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_text_value(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_fallback_count(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_next_fragment(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_set_peer_mtu(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_status_changed(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_undersized_mtu_reports(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_block_user(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_connection_request(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_disable_telemetry(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry_blocking(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_delivery_success_rate(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_establishment_state(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_info(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_roles(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_latency(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_topology(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declared(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_group_report_received(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_relay_capabilities(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_invite_to_group(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_mls_initialized(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_local_address(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_session(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_user(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_delete_session(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_user(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_generate_key_package(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_or_create_key_package(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_key_packages(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_welcome(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_has_session(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_import_key_package(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_session(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_sessions(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_mark_key_package_synced(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_confirm_sent(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed_with_reason(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_notify_app_state(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rekey_session(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolve_username(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed_with_reason(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_read_receipt(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_member_role(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_telemetry_enabled(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data_bytes(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_stats(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_constructor_offlineprotocol_new(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_bletransportcallback_on_fragments_available(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_eventcallback_on_event(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_store(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_load(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_delete(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_list_keys(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_nostrtransportcallback_on_messages_available(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_store(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_load(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_delete(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_list_keys(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_reticulumtransportcallback_on_messages_available(
-): Short
-external fun uniffi_offline_protocol_uniffi_checksum_method_wifidirecttransportcallback_on_messages_available(
-): Short
-external fun ffi_offline_protocol_uniffi_uniffi_contract_version(
-): Int
 
-    
+    internal fun ensureInitialized() = Unit
+    external fun uniffi_offline_protocol_uniffi_checksum_func_derive_address(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_func_parse_invite(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_value(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_decline_attachment(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_json(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_size(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_flush(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_list_delete(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_list_docs(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_list_len(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_list_push(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_list_spaces(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_map_delete(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_map_get_json(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_doc(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_set_interest(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_text_value(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_fallback_count(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_next_fragment(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_set_peer_mtu(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_status_changed(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_undersized_mtu_reports(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_block_user(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_connection_request(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_disable_telemetry(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry_blocking(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_delivery_success_rate(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_establishment_state(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_info(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_roles(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_latency(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_topology(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declared(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_group_report_received(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_relay_capabilities(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_invite_to_group(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_mls_initialized(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_local_address(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_session(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_user(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_delete_session(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_user(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_generate_key_package(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_or_create_key_package(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_key_packages(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_welcome(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_has_session(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_import_key_package(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_session(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_sessions(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_mark_key_package_synced(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_confirm_sent(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed_with_reason(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_notify_app_state(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rekey_session(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolve_username(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed_with_reason(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file_from_path(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_read_receipt(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_member_role(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_telemetry_enabled(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data_bytes(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_stats(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_constructor_offlineprotocol_new(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_bletransportcallback_on_fragments_available(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_eventcallback_on_event(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_store(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_load(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_delete(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_list_keys(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_nostrtransportcallback_on_messages_available(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_store(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_load(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_delete(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_list_keys(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_reticulumtransportcallback_on_messages_available(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_wifidirecttransportcallback_on_messages_available(
+    ): Int
+    external fun ffi_offline_protocol_uniffi_uniffi_contract_version(
+    ): Int
+
+        
 }
 
 internal object UniffiLib {
@@ -1319,582 +1362,586 @@ internal object UniffiLib {
         uniffiCallbackInterfaceWifiDirectTransportCallback.register(this)
         
     }
-    external fun uniffi_offline_protocol_uniffi_fn_clone_datastore(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_offline_protocol_uniffi_fn_free_datastore(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_constructor_datastore_new(`protocol`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_offline_protocol_uniffi_fn_constructor_datastore_with_storage(`protocol`: Long,`storage`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_attachment_hash(`ptr`: Long,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_counter_increment(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`amount`: Double,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_counter_value(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Double
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_create_doc(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_decline_attachment(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`peerId`: RustBuffer.ByValue,`hash`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_delete_doc(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_doc_json(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_doc_size(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_export_raw(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`hash`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment_from(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`peerId`: RustBuffer.ByValue,`hash`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_flush(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_flush_all(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_list_delete(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`index`: Int,`count`: Int,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_list_docs(`ptr`: Long,`spaceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_list_len(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Int
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_list_push(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`valueJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_list_spaces(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_map_delete(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_map_get_json(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_map_set(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`valueJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_provide_attachment(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`peerId`: RustBuffer.ByValue,`hash`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_remove_doc(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_remove_space(`ptr`: Long,`spaceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_set_interest(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`patterns`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_text_delete(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`position`: Int,`count`: Int,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_text_insert(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`position`: Int,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_text_value(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_datastore_wipe_all(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_clone_meshservices(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_offline_protocol_uniffi_fn_free_meshservices(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_constructor_meshservices_new(`protocol`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_discover_services(`ptr`: Long,`serviceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_register_service(`ptr`: Long,`serviceId`: RustBuffer.ByValue,`version`: RustBuffer.ByValue,`capabilities`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_respond_to_service_request(`ptr`: Long,`requestId`: RustBuffer.ByValue,`requester`: RustBuffer.ByValue,`serviceId`: RustBuffer.ByValue,`status`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_send_service_request(`ptr`: Long,`provider`: RustBuffer.ByValue,`serviceId`: RustBuffer.ByValue,`method`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service(`ptr`: Long,`serviceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun uniffi_offline_protocol_uniffi_fn_clone_offlineprotocol(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_offline_protocol_uniffi_fn_free_offlineprotocol(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_constructor_offlineprotocol_new(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_accept_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,`accepterName`: RustBuffer.ByValue,`keyPackage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_clear_peer_mtu(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_fragment_fallback_count(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_fragment_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`fragment`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_get_next_fragment(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_get_peer_count(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Int
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_discovered(`ptr`: Long,`peerId`: RustBuffer.ByValue,`rssi`: Short,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_lost(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_recipient_not_among_peers_count(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_return_fragment(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_set_peer_mtu(`ptr`: Long,`peerId`: RustBuffer.ByValue,`maxPayload`: Int,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_status_changed(`ptr`: Long,`isAvailable`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_undersized_mtu_reports(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_block_user(`ptr`: Long,`userId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_group(`ptr`: Long,`groupName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_invite(`ptr`: Long,`petname`: RustBuffer.ByValue,`sign`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_derive_user_id_from_public_key(`ptr`: Long,`publicKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_disable_telemetry(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_enable_telemetry(`ptr`: Long,`config`: RustBuffer.ByValue,`appState`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_end_telemetry_session(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_erase_custody(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_establish_secure_session(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_finalize_file(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_flush_telemetry(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_flush_telemetry_blocking(`ptr`: Long,`deadlineMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_force_transport(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message(`ptr`: Long,`originalMessageJson`: RustBuffer.ByValue,`newRecipient`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message_to_group(`ptr`: Long,`originalMessageJson`: RustBuffer.ByValue,`groupId`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_gateway_address_declaration(`ptr`: Long,`challenge`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_active_transports(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_battery_level(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_blocked_users(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_custody_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_dedup_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_delivery_success_rate(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Float
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_dors_config(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_establishment_state(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_file_progress(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_group_info(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_group_roles(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_identity_public_key(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_is_charging(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_hops(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_latency(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_member_role(`ptr`: Long,`groupId`: RustBuffer.ByValue,`userId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_tunables(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_message_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_pending_ack_count(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_config(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_priority(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_retry_queue_size(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_state(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_topology(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_relay_sync_state(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_rich_readiness(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_identity_assertion(`ptr`: Long,`signedData`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(`ptr`: Long,`secureStorage`: Long,`protocolStateStorage`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls_with_file_stores(`ptr`: Long,`mlsRoot`: RustBuffer.ByValue,`stateRoot`: RustBuffer.ByValue,`storeKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declaration_refused(`ptr`: Long,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declared(`ptr`: Long,`address`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_confirm_sent(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_group_report_received(`ptr`: Long,`reportJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_peer_presence(`ptr`: Long,`peerId`: RustBuffer.ByValue,`online`: Byte,`lastSeenMs`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_presence_watchlist(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_relay_capabilities(`ptr`: Long,`capabilities`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed_with_reason(`ptr`: Long,`messageId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_invite_to_group(`ptr`: Long,`groupId`: RustBuffer.ByValue,`inviteeUserId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_mls_initialized(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_relay(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_user_blocked(`ptr`: Long,`userId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_leave_group(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_list_groups(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_local_address(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_clear_pending_welcome(`ptr`: Long,`otherUserId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_create_session(`ptr`: Long,`otherUserId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt(`ptr`: Long,`encrypted`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt_from_user(`ptr`: Long,`encrypted`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_delete_session(`ptr`: Long,`otherUserId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_encrypt_for_user(`ptr`: Long,`otherUserId`: RustBuffer.ByValue,`plaintext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_generate_key_package(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_or_create_key_package(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_pending_key_packages(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_pending_welcome(`ptr`: Long,`otherUserId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_has_session(`ptr`: Long,`otherUserId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_import_key_package(`ptr`: Long,`userId`: RustBuffer.ByValue,`keyPackageData`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_join_session(`ptr`: Long,`welcome`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_list_sessions(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_mark_key_package_synced(`ptr`: Long,`packageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_process_welcome(`ptr`: Long,`welcome`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_confirm_sent(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_query(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_public_key(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_subscription_filter(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received_at(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,`createdAt`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_completed(`ptr`: Long,`queryId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_event_received(`ptr`: Long,`queryId`: RustBuffer.ByValue,`eventJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed_with_reason(`ptr`: Long,`messageId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_notify_app_state(`ptr`: Long,`state`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_pause(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_event(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process_file_chunk(`ptr`: Long,`fileId`: RustBuffer.ByValue,`chunkIndex`: Int,`totalChunks`: Int,`fileSize`: Long,`fileName`: RustBuffer.ByValue,`fileChecksum`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_protocol_lock_diagnostics(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_receive_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reject_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rekey_session(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_release_transport_lock(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_from_group(`ptr`: Long,`groupId`: RustBuffer.ByValue,`memberId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_transport(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rename_group(`ptr`: Long,`groupId`: RustBuffer.ByValue,`newName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resolve_username(`ptr`: Long,`username`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declaration_refused(`ptr`: Long,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declared(`ptr`: Long,`address`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_confirm_sent(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_gateway_capabilities(`ptr`: Long,`capabilities`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_peer_presence(`ptr`: Long,`peerId`: RustBuffer.ByValue,`online`: Byte,`lastSeenMs`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_presence_watchlist(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_send_failed(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_send_failed_with_reason(`ptr`: Long,`messageId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,`keyPackage`: RustBuffer.ByValue,`initialMessage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(`ptr`: Long,`recipient`: RustBuffer.ByValue,`fileData`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_group_message(`ptr`: Long,`groupId`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,`replyToMsg`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media(`ptr`: Long,`recipient`: RustBuffer.ByValue,`fileData`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,`contentType`: RustBuffer.ByValue,`mediaMetadata`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media_rich(`ptr`: Long,`recipient`: RustBuffer.ByValue,`fileData`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,`contentType`: RustBuffer.ByValue,`options`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message(`ptr`: Long,`recipient`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,`replyToMsg`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message_rich(`ptr`: Long,`recipient`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`options`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_presence_update(`ptr`: Long,`recipient`: RustBuffer.ByValue,`status`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_read_receipt(`ptr`: Long,`recipient`: RustBuffer.ByValue,`messageIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_typing_indicator(`ptr`: Long,`recipient`: RustBuffer.ByValue,`conversationId`: RustBuffer.ByValue,`isTyping`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level(`ptr`: Long,`level`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_state(`ptr`: Long,`level`: Byte,`isCharging`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_ble_transport_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_event_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_member_role(`ptr`: Long,`groupId`: RustBuffer.ByValue,`userId`: RustBuffer.ByValue,`role`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_nostr_transport_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_priority(`ptr`: Long,`priority`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_reticulum_transport_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_telemetry_enabled(`ptr`: Long,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_wifi_direct_transport_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_should_escalate_to_wifi(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data(`ptr`: Long,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data_bytes(`ptr`: Long,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_start(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_stop(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_install_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unblock_user(`ptr`: Long,`userId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_ack_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dedup_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dors_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_relay_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_retry_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_transport_metrics(`ptr`: Long,`transportType`: RustBuffer.ByValue,`metrics`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature(`ptr`: Long,`publicKey`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,`signature`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature_bytes(`ptr`: Long,`publicKey`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,`signature`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_connected(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_bletransportcallback(`vtable`: UniffiVTableCallbackInterfaceBleTransportCallback,
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_eventcallback(`vtable`: UniffiVTableCallbackInterfaceEventCallback,
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_mlsstorageprovider(`vtable`: UniffiVTableCallbackInterfaceMlsStorageProvider,
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_nostrtransportcallback(`vtable`: UniffiVTableCallbackInterfaceNostrTransportCallback,
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_protocolstatestorageprovider(`vtable`: UniffiVTableCallbackInterfaceProtocolStateStorageProvider,
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_reticulumtransportcallback(`vtable`: UniffiVTableCallbackInterfaceReticulumTransportCallback,
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_wifidirecttransportcallback(`vtable`: UniffiVTableCallbackInterfaceWifiDirectTransportCallback,
-): Unit
-external fun uniffi_offline_protocol_uniffi_fn_func_derive_address(`publicKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_func_parse_invite(`blob`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance(`storage`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion(`assertion`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun ffi_offline_protocol_uniffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun ffi_offline_protocol_uniffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun ffi_offline_protocol_uniffi_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
-external fun ffi_offline_protocol_uniffi_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun ffi_offline_protocol_uniffi_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_cancel_u8(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_free_u8(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun ffi_offline_protocol_uniffi_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_cancel_i8(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_free_i8(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Byte
-external fun ffi_offline_protocol_uniffi_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_cancel_u16(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_free_u16(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Short
-external fun ffi_offline_protocol_uniffi_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_cancel_i16(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_free_i16(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Short
-external fun ffi_offline_protocol_uniffi_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_cancel_u32(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_free_u32(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Int
-external fun ffi_offline_protocol_uniffi_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_cancel_i32(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_free_i32(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Int
-external fun ffi_offline_protocol_uniffi_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_cancel_u64(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_free_u64(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun ffi_offline_protocol_uniffi_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_cancel_i64(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_free_i64(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Long
-external fun ffi_offline_protocol_uniffi_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_cancel_f32(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_free_f32(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Float
-external fun ffi_offline_protocol_uniffi_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_cancel_f64(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_free_f64(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Double
-external fun ffi_offline_protocol_uniffi_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_cancel_rust_buffer(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_free_rust_buffer(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): RustBuffer.ByValue
-external fun ffi_offline_protocol_uniffi_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_cancel_void(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_free_void(`handle`: Long,
-): Unit
-external fun ffi_offline_protocol_uniffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
-): Unit
 
-    
+    internal fun ensureInitialized() = Unit
+    external fun uniffi_offline_protocol_uniffi_fn_clone_datastore(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_offline_protocol_uniffi_fn_free_datastore(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_constructor_datastore_new(`protocol`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_offline_protocol_uniffi_fn_constructor_datastore_with_storage(`protocol`: Long,`storage`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_attachment_hash(`ptr`: Long,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_counter_increment(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`amount`: Double,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_counter_value(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Double
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_create_doc(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_decline_attachment(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`peerId`: RustBuffer.ByValue,`hash`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_delete_doc(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_doc_json(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_doc_size(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_export_raw(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`hash`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment_from(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`peerId`: RustBuffer.ByValue,`hash`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_flush(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_flush_all(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_list_delete(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`index`: Int,`count`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_list_docs(`ptr`: Long,`spaceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_list_len(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_list_push(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`valueJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_list_spaces(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_map_delete(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_map_get_json(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_map_set(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`key`: RustBuffer.ByValue,`valueJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_provide_attachment(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`peerId`: RustBuffer.ByValue,`hash`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_remove_doc(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_remove_space(`ptr`: Long,`spaceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_set_interest(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`patterns`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_text_delete(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`position`: Int,`count`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_text_insert(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,`position`: Int,`text`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_text_value(`ptr`: Long,`spaceId`: RustBuffer.ByValue,`docId`: RustBuffer.ByValue,`collection`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_datastore_wipe_all(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_clone_meshservices(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_offline_protocol_uniffi_fn_free_meshservices(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_constructor_meshservices_new(`protocol`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_discover_services(`ptr`: Long,`serviceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_register_service(`ptr`: Long,`serviceId`: RustBuffer.ByValue,`version`: RustBuffer.ByValue,`capabilities`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_respond_to_service_request(`ptr`: Long,`requestId`: RustBuffer.ByValue,`requester`: RustBuffer.ByValue,`serviceId`: RustBuffer.ByValue,`status`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_send_service_request(`ptr`: Long,`provider`: RustBuffer.ByValue,`serviceId`: RustBuffer.ByValue,`method`: RustBuffer.ByValue,`body`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service(`ptr`: Long,`serviceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_clone_offlineprotocol(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_offline_protocol_uniffi_fn_free_offlineprotocol(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_constructor_offlineprotocol_new(`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_accept_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,`accepterName`: RustBuffer.ByValue,`keyPackage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_clear_peer_mtu(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_fragment_fallback_count(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_fragment_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`fragment`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_get_next_fragment(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_get_peer_count(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_discovered(`ptr`: Long,`peerId`: RustBuffer.ByValue,`rssi`: Short,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_lost(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_recipient_not_among_peers_count(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_return_fragment(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_set_peer_mtu(`ptr`: Long,`peerId`: RustBuffer.ByValue,`maxPayload`: Int,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_status_changed(`ptr`: Long,`isAvailable`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_undersized_mtu_reports(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_block_user(`ptr`: Long,`userId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_group(`ptr`: Long,`groupName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_invite(`ptr`: Long,`petname`: RustBuffer.ByValue,`sign`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_derive_user_id_from_public_key(`ptr`: Long,`publicKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_disable_telemetry(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_enable_telemetry(`ptr`: Long,`config`: RustBuffer.ByValue,`appState`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_end_telemetry_session(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_erase_custody(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_establish_secure_session(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_finalize_file(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_flush_telemetry(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_flush_telemetry_blocking(`ptr`: Long,`deadlineMs`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_force_transport(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message(`ptr`: Long,`originalMessageJson`: RustBuffer.ByValue,`newRecipient`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message_to_group(`ptr`: Long,`originalMessageJson`: RustBuffer.ByValue,`groupId`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_gateway_address_declaration(`ptr`: Long,`challenge`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_active_transports(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_battery_level(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_blocked_users(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_custody_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_dedup_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_delivery_success_rate(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Float
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_dors_config(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_establishment_state(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_file_progress(`ptr`: Long,`fileId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_group_info(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_group_roles(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_identity_public_key(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_is_charging(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_hops(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_latency(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_member_role(`ptr`: Long,`groupId`: RustBuffer.ByValue,`userId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_tunables(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_message_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_pending_ack_count(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_config(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_priority(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_retry_queue_size(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_state(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_topology(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_relay_sync_state(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_rich_readiness(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_identity_assertion(`ptr`: Long,`signedData`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(`ptr`: Long,`secureStorage`: Long,`protocolStateStorage`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls_with_file_stores(`ptr`: Long,`mlsRoot`: RustBuffer.ByValue,`stateRoot`: RustBuffer.ByValue,`storeKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declaration_refused(`ptr`: Long,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declared(`ptr`: Long,`address`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_confirm_sent(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_group_report_received(`ptr`: Long,`reportJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_peer_presence(`ptr`: Long,`peerId`: RustBuffer.ByValue,`online`: Byte,`lastSeenMs`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_presence_watchlist(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_relay_capabilities(`ptr`: Long,`capabilities`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed_with_reason(`ptr`: Long,`messageId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_invite_to_group(`ptr`: Long,`groupId`: RustBuffer.ByValue,`inviteeUserId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_mls_initialized(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_relay(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_user_blocked(`ptr`: Long,`userId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_leave_group(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_list_groups(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_local_address(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_clear_pending_welcome(`ptr`: Long,`otherUserId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_create_session(`ptr`: Long,`otherUserId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt(`ptr`: Long,`encrypted`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt_from_user(`ptr`: Long,`encrypted`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_delete_session(`ptr`: Long,`otherUserId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_encrypt_for_user(`ptr`: Long,`otherUserId`: RustBuffer.ByValue,`plaintext`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_generate_key_package(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_or_create_key_package(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_pending_key_packages(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_pending_welcome(`ptr`: Long,`otherUserId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_has_session(`ptr`: Long,`otherUserId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_import_key_package(`ptr`: Long,`userId`: RustBuffer.ByValue,`keyPackageData`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_join_session(`ptr`: Long,`welcome`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_list_sessions(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_mark_key_package_synced(`ptr`: Long,`packageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_process_welcome(`ptr`: Long,`welcome`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_confirm_sent(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_query(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_public_key(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_subscription_filter(`ptr`: Long,`subscriptionId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received_at(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,`createdAt`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_completed(`ptr`: Long,`queryId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_event_received(`ptr`: Long,`queryId`: RustBuffer.ByValue,`eventJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed_with_reason(`ptr`: Long,`messageId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_notify_app_state(`ptr`: Long,`state`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_pause(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_event(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process_file_chunk(`ptr`: Long,`fileId`: RustBuffer.ByValue,`chunkIndex`: Int,`totalChunks`: Int,`fileSize`: Long,`fileName`: RustBuffer.ByValue,`fileChecksum`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_protocol_lock_diagnostics(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_receive_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reject_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rekey_session(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_release_transport_lock(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_from_group(`ptr`: Long,`groupId`: RustBuffer.ByValue,`memberId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_transport(`ptr`: Long,`transportType`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rename_group(`ptr`: Long,`groupId`: RustBuffer.ByValue,`newName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration(`ptr`: Long,`groupId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resolve_username(`ptr`: Long,`username`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declaration_refused(`ptr`: Long,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declared(`ptr`: Long,`address`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_confirm_sent(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_gateway_capabilities(`ptr`: Long,`capabilities`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_peer_presence(`ptr`: Long,`peerId`: RustBuffer.ByValue,`online`: Byte,`lastSeenMs`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_presence_watchlist(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_send_failed(`ptr`: Long,`messageId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_send_failed_with_reason(`ptr`: Long,`messageId`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_connection_request(`ptr`: Long,`recipient`: RustBuffer.ByValue,`senderName`: RustBuffer.ByValue,`keyPackage`: RustBuffer.ByValue,`initialMessage`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(`ptr`: Long,`recipient`: RustBuffer.ByValue,`fileData`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file_from_path(`ptr`: Long,`recipient`: RustBuffer.ByValue,`filePath`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_group_message(`ptr`: Long,`groupId`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,`replyToMsg`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media(`ptr`: Long,`recipient`: RustBuffer.ByValue,`fileData`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,`contentType`: RustBuffer.ByValue,`mediaMetadata`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media_rich(`ptr`: Long,`recipient`: RustBuffer.ByValue,`fileData`: RustBuffer.ByValue,`fileName`: RustBuffer.ByValue,`contentType`: RustBuffer.ByValue,`options`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message(`ptr`: Long,`recipient`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`priority`: RustBuffer.ByValue,`replyToMsg`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message_rich(`ptr`: Long,`recipient`: RustBuffer.ByValue,`content`: RustBuffer.ByValue,`options`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_presence_update(`ptr`: Long,`recipient`: RustBuffer.ByValue,`status`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_read_receipt(`ptr`: Long,`recipient`: RustBuffer.ByValue,`messageIds`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_typing_indicator(`ptr`: Long,`recipient`: RustBuffer.ByValue,`conversationId`: RustBuffer.ByValue,`isTyping`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level(`ptr`: Long,`level`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_state(`ptr`: Long,`level`: Byte,`isCharging`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_ble_transport_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_event_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_member_role(`ptr`: Long,`groupId`: RustBuffer.ByValue,`userId`: RustBuffer.ByValue,`role`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_nostr_transport_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_priority(`ptr`: Long,`priority`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_reticulum_transport_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_telemetry_enabled(`ptr`: Long,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_wifi_direct_transport_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_should_escalate_to_wifi(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data(`ptr`: Long,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data_bytes(`ptr`: Long,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_start(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_stop(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_install_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unblock_user(`ptr`: Long,`userId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_ack_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dedup_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dors_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_relay_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_retry_config(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_transport_metrics(`ptr`: Long,`transportType`: RustBuffer.ByValue,`metrics`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature(`ptr`: Long,`publicKey`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,`signature`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature_bytes(`ptr`: Long,`publicKey`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,`signature`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_message_received(`ptr`: Long,`senderId`: RustBuffer.ByValue,`data`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_connected(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_status_changed(`ptr`: Long,`isConnected`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_bletransportcallback(`vtable`: UniffiVTableCallbackInterfaceBleTransportCallback,
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_eventcallback(`vtable`: UniffiVTableCallbackInterfaceEventCallback,
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_mlsstorageprovider(`vtable`: UniffiVTableCallbackInterfaceMlsStorageProvider,
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_nostrtransportcallback(`vtable`: UniffiVTableCallbackInterfaceNostrTransportCallback,
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_protocolstatestorageprovider(`vtable`: UniffiVTableCallbackInterfaceProtocolStateStorageProvider,
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_reticulumtransportcallback(`vtable`: UniffiVTableCallbackInterfaceReticulumTransportCallback,
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_init_callback_vtable_wifidirecttransportcallback(`vtable`: UniffiVTableCallbackInterfaceWifiDirectTransportCallback,
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_func_derive_address(`publicKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_func_parse_invite(`blob`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance(`storage`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion(`assertion`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun ffi_offline_protocol_uniffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun ffi_offline_protocol_uniffi_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun ffi_offline_protocol_uniffi_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun ffi_offline_protocol_uniffi_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_cancel_u8(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_free_u8(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun ffi_offline_protocol_uniffi_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_cancel_i8(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_free_i8(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Byte
+    external fun ffi_offline_protocol_uniffi_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_cancel_u16(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_free_u16(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun ffi_offline_protocol_uniffi_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_cancel_i16(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_free_i16(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Short
+    external fun ffi_offline_protocol_uniffi_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_cancel_u32(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_free_u32(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun ffi_offline_protocol_uniffi_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_cancel_i32(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_free_i32(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Int
+    external fun ffi_offline_protocol_uniffi_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_cancel_u64(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_free_u64(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun ffi_offline_protocol_uniffi_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_cancel_i64(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_free_i64(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Long
+    external fun ffi_offline_protocol_uniffi_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_cancel_f32(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_free_f32(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Float
+    external fun ffi_offline_protocol_uniffi_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_cancel_f64(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_free_f64(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Double
+    external fun ffi_offline_protocol_uniffi_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_cancel_rust_buffer(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_free_rust_buffer(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
+    external fun ffi_offline_protocol_uniffi_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_cancel_void(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_free_void(`handle`: Long,
+    ): Unit
+    external fun ffi_offline_protocol_uniffi_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+
+        
 }
 
 private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
@@ -1908,709 +1955,712 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
-    if (lib.uniffi_offline_protocol_uniffi_checksum_func_derive_address() != 55050.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_func_derive_address() and 0xFFFF) != 64789) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_func_parse_invite() != 15865.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_func_parse_invite() and 0xFFFF) != 15865) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() != 20699.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() and 0xFFFF) != 20699) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion() != 63230.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion() and 0xFFFF) != 61480) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash() != 20923.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash() and 0xFFFF) != 10852) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment() != 55977.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment() and 0xFFFF) != 50001) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_value() != 24087.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_value() and 0xFFFF) != 19947) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc() != 55339.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc() and 0xFFFF) != 43277) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_decline_attachment() != 36653.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_decline_attachment() and 0xFFFF) != 53249) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc() != 39527.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc() and 0xFFFF) != 23496) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_json() != 47882.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_json() and 0xFFFF) != 62388) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_size() != 43106.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_size() and 0xFFFF) != 1306) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw() != 29802.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw() and 0xFFFF) != 30993) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment() != 64859.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment() and 0xFFFF) != 2774) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from() != 5000.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from() and 0xFFFF) != 44676) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush() != 53125.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush() and 0xFFFF) != 4911) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all() != 40738.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all() and 0xFFFF) != 58838) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_delete() != 9370.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_delete() and 0xFFFF) != 46614) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_docs() != 22411.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_docs() and 0xFFFF) != 43688) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_len() != 15956.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_len() and 0xFFFF) != 53366) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_push() != 38678.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_push() and 0xFFFF) != 58133) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_spaces() != 55668.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_spaces() and 0xFFFF) != 25003) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_delete() != 33661.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_delete() and 0xFFFF) != 61779) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_get_json() != 4286.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_get_json() and 0xFFFF) != 7048) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set() != 53094.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set() and 0xFFFF) != 60305) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment() != 58573.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment() and 0xFFFF) != 57819) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_doc() != 62307.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_doc() and 0xFFFF) != 58710) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space() != 3889.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space() and 0xFFFF) != 242) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_set_interest() != 22009.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_set_interest() and 0xFFFF) != 5786) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete() != 35552.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete() and 0xFFFF) != 12470) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert() != 11172.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert() and 0xFFFF) != 42508) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_value() != 15927.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_value() and 0xFFFF) != 6495) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all() != 49136.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all() and 0xFFFF) != 58624) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() != 866.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() and 0xFFFF) != 43941) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service() != 60914.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service() and 0xFFFF) != 46597) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request() != 44115.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request() and 0xFFFF) != 20926) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request() != 22898.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request() and 0xFFFF) != 34689) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service() != 2487.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service() and 0xFFFF) != 4997) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() != 34655.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() and 0xFFFF) != 50880) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu() != 60227.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu() and 0xFFFF) != 19884) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_fallback_count() != 52135.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_fallback_count() and 0xFFFF) != 60784) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received() != 44733.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received() and 0xFFFF) != 9764) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_next_fragment() != 27429.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_next_fragment() and 0xFFFF) != 30344) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count() != 32781.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count() and 0xFFFF) != 11879) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered() != 53124.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered() and 0xFFFF) != 26789) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost() != 38687.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost() and 0xFFFF) != 22804) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count() != 46559.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count() and 0xFFFF) != 42065) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment() != 4155.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment() and 0xFFFF) != 51260) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_set_peer_mtu() != 19690.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_set_peer_mtu() and 0xFFFF) != 7996) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_status_changed() != 19618.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_status_changed() and 0xFFFF) != 63523) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_undersized_mtu_reports() != 62201.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_undersized_mtu_reports() and 0xFFFF) != 53668) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_block_user() != 26742.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_block_user() and 0xFFFF) != 27957) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_connection_request() != 4233.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_connection_request() and 0xFFFF) != 17522) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 6632.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() and 0xFFFF) != 44634) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores() != 28531.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores() and 0xFFFF) != 57369) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 8723.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() and 0xFFFF) != 13199) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite() != 26172.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite() and 0xFFFF) != 21745) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() != 23152.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() and 0xFFFF) != 46701) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_disable_telemetry() != 40509.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_disable_telemetry() and 0xFFFF) != 12013) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 6796.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() and 0xFFFF) != 29503) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry() != 23696.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry() and 0xFFFF) != 52940) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session() != 51941.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session() and 0xFFFF) != 55610) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody() != 5086.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody() and 0xFFFF) != 39575) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session() != 25919.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session() and 0xFFFF) != 52793) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file() != 55328.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file() and 0xFFFF) != 48884) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry() != 21794.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry() and 0xFFFF) != 52440) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry_blocking() != 20024.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry_blocking() and 0xFFFF) != 60745) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport() != 28940.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport() and 0xFFFF) != 65079) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message() != 46590.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message() and 0xFFFF) != 4746) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group() != 44359.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group() and 0xFFFF) != 43987) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration() != 2743.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration() and 0xFFFF) != 21061) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports() != 5327.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports() and 0xFFFF) != 23761) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level() != 12938.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level() and 0xFFFF) != 56170) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users() != 24603.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users() and 0xFFFF) != 28218) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats() != 42535.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats() and 0xFFFF) != 29466) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats() != 43759.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats() and 0xFFFF) != 51917) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_delivery_success_rate() != 62412.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_delivery_success_rate() and 0xFFFF) != 23445) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config() != 28708.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config() and 0xFFFF) != 10752) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_establishment_state() != 26411.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_establishment_state() and 0xFFFF) != 61148) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress() != 37575.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress() and 0xFFFF) != 25115) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_info() != 40065.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_info() and 0xFFFF) != 11773) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_roles() != 44654.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_roles() and 0xFFFF) != 19243) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key() != 21794.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key() and 0xFFFF) != 48103) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging() != 59743.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging() and 0xFFFF) != 42857) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops() != 22077.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops() and 0xFFFF) != 54486) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_latency() != 9158.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_latency() and 0xFFFF) != 20827) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role() != 61568.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role() and 0xFFFF) != 5518) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats() != 43508.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats() and 0xFFFF) != 29444) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables() != 2956.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables() and 0xFFFF) != 34919) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats() != 30825.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats() and 0xFFFF) != 26794) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count() != 9023.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count() and 0xFFFF) != 14526) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config() != 18410.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config() and 0xFFFF) != 41352) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority() != 38001.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority() and 0xFFFF) != 56317) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size() != 53188.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size() and 0xFFFF) != 11855) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state() != 51778.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state() and 0xFFFF) != 56454) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_topology() != 3250.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_topology() and 0xFFFF) != 14852) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 62682.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() and 0xFFFF) != 47103) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state() != 42204.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state() and 0xFFFF) != 2982) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness() != 760.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness() and 0xFFFF) != 33044) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 30881.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() and 0xFFFF) != 50833) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion() != 46988.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion() and 0xFFFF) != 12802) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 43685.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() and 0xFFFF) != 28255) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores() != 58803.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores() and 0xFFFF) != 54918) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused() != 30965.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused() and 0xFFFF) != 52855) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declared() != 11812.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declared() and 0xFFFF) != 5462) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent() != 10435.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent() and 0xFFFF) != 22824) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message() != 48075.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message() and 0xFFFF) != 42018) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_group_report_received() != 31734.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_group_report_received() and 0xFFFF) != 12840) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received() != 62143.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received() and 0xFFFF) != 4763) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence() != 1618.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence() and 0xFFFF) != 6161) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist() != 10876.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist() and 0xFFFF) != 9479) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_relay_capabilities() != 4047.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_relay_capabilities() and 0xFFFF) != 379) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed() != 56204.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed() and 0xFFFF) != 12455) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason() != 21563.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason() and 0xFFFF) != 50456) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed() != 25243.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed() and 0xFFFF) != 58507) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_invite_to_group() != 35932.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_invite_to_group() and 0xFFFF) != 38704) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_mls_initialized() != 21230.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_mls_initialized() and 0xFFFF) != 58599) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay() != 34892.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay() and 0xFFFF) != 22217) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked() != 39343.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked() and 0xFFFF) != 9262) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group() != 2480.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group() and 0xFFFF) != 13144) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups() != 60142.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups() and 0xFFFF) != 26113) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_local_address() != 44586.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_local_address() and 0xFFFF) != 54626) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome() != 30627.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome() and 0xFFFF) != 33145) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_session() != 13910.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_session() and 0xFFFF) != 13710) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt() != 52691.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt() and 0xFFFF) != 22215) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_user() != 30590.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_user() and 0xFFFF) != 29387) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_delete_session() != 59813.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_delete_session() and 0xFFFF) != 11647) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_user() != 4753.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_user() and 0xFFFF) != 1970) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_generate_key_package() != 29747.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_generate_key_package() and 0xFFFF) != 34344) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_or_create_key_package() != 16795.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_or_create_key_package() and 0xFFFF) != 26823) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_key_packages() != 4278.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_key_packages() and 0xFFFF) != 3234) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_welcome() != 26978.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_welcome() and 0xFFFF) != 39261) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_has_session() != 39479.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_has_session() and 0xFFFF) != 56067) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_import_key_package() != 47052.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_import_key_package() and 0xFFFF) != 44533) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_session() != 32375.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_session() and 0xFFFF) != 14485) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_sessions() != 9128.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_sessions() and 0xFFFF) != 23429) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_mark_key_package_synced() != 49511.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_mark_key_package_synced() and 0xFFFF) != 6355) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome() != 44299.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome() and 0xFFFF) != 12812) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_confirm_sent() != 5599.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_confirm_sent() and 0xFFFF) != 9310) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message() != 15697.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message() and 0xFFFF) != 20908) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query() != 45315.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query() and 0xFFFF) != 23327) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key() != 55139.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key() and 0xFFFF) != 59792) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter() != 62102.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter() and 0xFFFF) != 35803) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received() != 46056.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received() and 0xFFFF) != 32701) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at() != 56173.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at() and 0xFFFF) != 4372) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed() != 2867.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed() and 0xFFFF) != 45714) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received() != 9552.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received() and 0xFFFF) != 35705) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed() != 14770.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed() and 0xFFFF) != 34587) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed_with_reason() != 43745.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed_with_reason() and 0xFFFF) != 46967) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed() != 10118.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed() and 0xFFFF) != 10042) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_notify_app_state() != 37727.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_notify_app_state() and 0xFFFF) != 64828) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause() != 51362.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause() and 0xFFFF) != 2754) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event() != 28496.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event() and 0xFFFF) != 2150) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process() != 16160.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process() and 0xFFFF) != 28590) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk() != 46065.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk() and 0xFFFF) != 38467) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics() != 26003.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics() and 0xFFFF) != 63421) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() != 33217.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() and 0xFFFF) != 24572) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request() != 27126.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request() and 0xFFFF) != 17619) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rekey_session() != 20206.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rekey_session() and 0xFFFF) != 49857) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock() != 4494.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock() and 0xFFFF) != 9066) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group() != 64736.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group() and 0xFFFF) != 50435) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport() != 16891.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport() and 0xFFFF) != 37995) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group() != 32723.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group() and 0xFFFF) != 36114) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration() != 5596.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration() and 0xFFFF) != 3982) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolve_username() != 5393.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolve_username() and 0xFFFF) != 56081) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() and 0xFFFF) != 23596) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused() != 26875.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused() and 0xFFFF) != 6207) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared() != 60480.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared() and 0xFFFF) != 14810) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent() != 38323.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent() and 0xFFFF) != 49416) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities() != 42139.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities() and 0xFFFF) != 38346) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message() != 41914.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message() and 0xFFFF) != 43573) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received() != 11523.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received() and 0xFFFF) != 6557) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence() != 61011.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence() and 0xFFFF) != 9523) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist() != 33963.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist() and 0xFFFF) != 26815) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed() != 40553.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed() and 0xFFFF) != 54693) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed_with_reason() != 13863.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed_with_reason() and 0xFFFF) != 59249) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed() != 32395.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed() and 0xFFFF) != 14680) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() != 18268.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() and 0xFFFF) != 32445) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 11824.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() and 0xFFFF) != 51826) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message() != 54773.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file_from_path() and 0xFFFF) != 60049) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media() != 42952.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message() and 0xFFFF) != 11928) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich() != 59880.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media() and 0xFFFF) != 26391) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 52559.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich() and 0xFFFF) != 17024) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich() != 55139.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() and 0xFFFF) != 58608) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update() != 20289.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich() and 0xFFFF) != 3404) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_read_receipt() != 8350.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update() and 0xFFFF) != 56108) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator() != 47532.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_read_receipt() and 0xFFFF) != 4730) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 45763.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator() and 0xFFFF) != 7836) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state() != 62177.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() and 0xFFFF) != 44179) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback() != 28420.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state() and 0xFFFF) != 59397) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback() != 14659.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback() and 0xFFFF) != 15468) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_member_role() != 56849.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback() and 0xFFFF) != 57350) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback() != 56341.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_member_role() and 0xFFFF) != 9132) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority() != 33715.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback() and 0xFFFF) != 36253) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback() != 27956.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority() and 0xFFFF) != 26597) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_telemetry_enabled() != 61336.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback() and 0xFFFF) != 53618) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback() != 39894.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_telemetry_enabled() and 0xFFFF) != 65413) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi() != 40161.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback() and 0xFFFF) != 33195) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data() != 3647.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi() and 0xFFFF) != 36523) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data_bytes() != 45196.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data() and 0xFFFF) != 58338) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start() != 10699.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data_bytes() and 0xFFFF) != 21454) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop() != 37179.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start() and 0xFFFF) != 63301) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id() != 11199.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop() and 0xFFFF) != 30235) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_stats() != 7562.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id() and 0xFFFF) != 43250) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user() != 7771.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_stats() and 0xFFFF) != 57652) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 52736.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user() and 0xFFFF) != 52650) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config() != 33135.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() and 0xFFFF) != 50568) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config() != 2649.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config() and 0xFFFF) != 37188) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config() != 19698.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config() and 0xFFFF) != 42995) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config() != 27543.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config() and 0xFFFF) != 33211) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics() != 51165.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config() and 0xFFFF) != 3523) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature() != 13732.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics() and 0xFFFF) != 15902) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes() != 56211.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature() and 0xFFFF) != 16718) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() != 1936.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes() and 0xFFFF) != 24438) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received() != 62211.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() and 0xFFFF) != 50868) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected() != 3197.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received() and 0xFFFF) != 59107) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected() != 17734.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected() and 0xFFFF) != 38596) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() != 35006.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected() and 0xFFFF) != 15986) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new() != 36671.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() and 0xFFFF) != 12337) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage() != 2283.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new() and 0xFFFF) != 36671) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new() != 61363.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage() and 0xFFFF) != 2283) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_constructor_offlineprotocol_new() != 30125.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new() and 0xFFFF) != 61363) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_bletransportcallback_on_fragments_available() != 11079.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_constructor_offlineprotocol_new() and 0xFFFF) != 30125) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_eventcallback_on_event() != 4769.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_bletransportcallback_on_fragments_available() and 0xFFFF) != 43182) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_store() != 4704.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_eventcallback_on_event() and 0xFFFF) != 15485) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_load() != 41626.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_store() and 0xFFFF) != 9534) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_delete() != 64734.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_load() and 0xFFFF) != 33472) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_list_keys() != 24837.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_delete() and 0xFFFF) != 40050) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_nostrtransportcallback_on_messages_available() != 5919.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_list_keys() and 0xFFFF) != 29193) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_store() != 46080.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_nostrtransportcallback_on_messages_available() and 0xFFFF) != 6903) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_load() != 11563.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_store() and 0xFFFF) != 40025) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_delete() != 43686.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_load() and 0xFFFF) != 12081) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_list_keys() != 44296.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_delete() and 0xFFFF) != 51503) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_reticulumtransportcallback_on_messages_available() != 48810.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_list_keys() and 0xFFFF) != 5874) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_offline_protocol_uniffi_checksum_method_wifidirecttransportcallback_on_messages_available() != 4635.toShort()) {
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_reticulumtransportcallback_on_messages_available() and 0xFFFF) != 26982) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_wifidirecttransportcallback_on_messages_available() and 0xFFFF) != 16192) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -2619,10 +2669,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
  * @suppress
  */
 public fun uniffiEnsureInitialized() {
-    IntegrityCheckingUniffiLib
-    // UniffiLib() initialized as objects are used, but we still need to explicitly
-    // reference it so initialization across crates works as expected.
-    UniffiLib
+    // Call arbitrary methods on IntegrityCheckingUniffiLib and UniffiLib to ensure that
+    // their init blocks run. This ensures initialization across crates works as expected.
+    IntegrityCheckingUniffiLib.ensureInitialized()
+    UniffiLib.ensureInitialized()
 }
 
 // Async support
@@ -2809,6 +2859,10 @@ public object FfiConverterUByte: FfiConverter<UByte, Byte> {
         return value.toUByte()
     }
 
+    fun lift(value: Int): UByte {
+        return value.toUByte()
+    }
+
     override fun read(buf: ByteBuffer): UByte {
         return lift(buf.get())
     }
@@ -2829,6 +2883,10 @@ public object FfiConverterUByte: FfiConverter<UByte, Byte> {
  */
 public object FfiConverterUShort: FfiConverter<UShort, Short> {
     override fun lift(value: Short): UShort {
+        return value.toUShort()
+    }
+
+    fun lift(value: Int): UShort {
         return value.toUShort()
     }
 
@@ -3180,7 +3238,6 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 //
 
 
-//
 public interface DataStoreInterface {
     
     fun `attachmentHash`(`data`: kotlin.ByteArray): kotlin.String
@@ -3266,22 +3323,28 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     @Suppress("UNUSED_PARAMETER")
     constructor(noHandle: NoHandle) {
         this.handle = 0
-        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+        this.cleanable = null
     }
     constructor(`protocol`: OfflineProtocol) :
         this(UniffiWithHandle, 
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_new(
     
+        
         FfiConverterTypeOfflineProtocol.lower(`protocol`),_status)
 }
     )
 
     protected val handle: Long
-    protected val cleanable: UniffiCleaner.Cleanable
+    protected val cleanable: UniffiCleaner.Cleanable?
 
     private val wasDestroyed = AtomicBoolean(false)
     private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
 
     override fun destroy() {
         // Only allow a single call to this method.
@@ -3289,7 +3352,7 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable.clean()
+                cleanable?.clean()
             }
         }
     }
@@ -3317,7 +3380,7 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
         } finally {
             // This decrement always matches the increment we performed above.
             if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable.clean()
+                cleanable?.clean()
             }
         }
     }
@@ -3354,6 +3417,7 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_attachment_hash(
         it,
+        
         FfiConverterByteArray.lower(`data`),_status)
 }
     }
@@ -3368,7 +3432,11 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_counter_increment(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),FfiConverterString.lower(`collection`),FfiConverterDouble.lower(`amount`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),
+        FfiConverterString.lower(`collection`),
+        FfiConverterDouble.lower(`amount`),_status)
 }
     }
     
@@ -3381,7 +3449,10 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_counter_value(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),FfiConverterString.lower(`collection`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),
+        FfiConverterString.lower(`collection`),_status)
 }
     }
     )
@@ -3395,7 +3466,9 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_create_doc(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),_status)
 }
     }
     
@@ -3408,7 +3481,10 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_decline_attachment(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`peerId`),FfiConverterString.lower(`hash`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`peerId`),
+        FfiConverterString.lower(`hash`),_status)
 }
     }
     
@@ -3421,7 +3497,9 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_delete_doc(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),_status)
 }
     }
     
@@ -3434,7 +3512,9 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_doc_json(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),_status)
 }
     }
     )
@@ -3448,7 +3528,9 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_doc_size(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),_status)
 }
     }
     )
@@ -3462,7 +3544,9 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_export_raw(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),_status)
 }
     }
     )
@@ -3476,7 +3560,9 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`hash`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`hash`),_status)
 }
     }
     
@@ -3489,7 +3575,10 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment_from(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`peerId`),FfiConverterString.lower(`hash`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`peerId`),
+        FfiConverterString.lower(`hash`),_status)
 }
     }
     
@@ -3502,7 +3591,9 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_flush(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),_status)
 }
     }
     
@@ -3528,7 +3619,12 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_delete(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),FfiConverterString.lower(`collection`),FfiConverterUInt.lower(`index`),FfiConverterUInt.lower(`count`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),
+        FfiConverterString.lower(`collection`),
+        FfiConverterUInt.lower(`index`),
+        FfiConverterUInt.lower(`count`),_status)
 }
     }
     
@@ -3541,6 +3637,7 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_docs(
         it,
+        
         FfiConverterString.lower(`spaceId`),_status)
 }
     }
@@ -3555,7 +3652,10 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_len(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),FfiConverterString.lower(`collection`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),
+        FfiConverterString.lower(`collection`),_status)
 }
     }
     )
@@ -3569,7 +3669,11 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_list_push(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),FfiConverterString.lower(`collection`),FfiConverterString.lower(`valueJson`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),
+        FfiConverterString.lower(`collection`),
+        FfiConverterString.lower(`valueJson`),_status)
 }
     }
     
@@ -3596,7 +3700,11 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_map_delete(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),FfiConverterString.lower(`collection`),FfiConverterString.lower(`key`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),
+        FfiConverterString.lower(`collection`),
+        FfiConverterString.lower(`key`),_status)
 }
     }
     
@@ -3609,7 +3717,11 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_map_get_json(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),FfiConverterString.lower(`collection`),FfiConverterString.lower(`key`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),
+        FfiConverterString.lower(`collection`),
+        FfiConverterString.lower(`key`),_status)
 }
     }
     )
@@ -3623,7 +3735,12 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_map_set(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),FfiConverterString.lower(`collection`),FfiConverterString.lower(`key`),FfiConverterString.lower(`valueJson`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),
+        FfiConverterString.lower(`collection`),
+        FfiConverterString.lower(`key`),
+        FfiConverterString.lower(`valueJson`),_status)
 }
     }
     
@@ -3636,7 +3753,11 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_provide_attachment(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`peerId`),FfiConverterString.lower(`hash`),FfiConverterByteArray.lower(`data`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`peerId`),
+        FfiConverterString.lower(`hash`),
+        FfiConverterByteArray.lower(`data`),_status)
 }
     }
     
@@ -3649,7 +3770,9 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_remove_doc(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),_status)
 }
     }
     
@@ -3662,6 +3785,7 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_remove_space(
         it,
+        
         FfiConverterString.lower(`spaceId`),_status)
 }
     }
@@ -3675,7 +3799,9 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_set_interest(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterSequenceString.lower(`patterns`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterSequenceString.lower(`patterns`),_status)
 }
     }
     
@@ -3688,7 +3814,12 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_text_delete(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),FfiConverterString.lower(`collection`),FfiConverterUInt.lower(`position`),FfiConverterUInt.lower(`count`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),
+        FfiConverterString.lower(`collection`),
+        FfiConverterUInt.lower(`position`),
+        FfiConverterUInt.lower(`count`),_status)
 }
     }
     
@@ -3701,7 +3832,12 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_text_insert(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),FfiConverterString.lower(`collection`),FfiConverterUInt.lower(`position`),FfiConverterString.lower(`text`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),
+        FfiConverterString.lower(`collection`),
+        FfiConverterUInt.lower(`position`),
+        FfiConverterString.lower(`text`),_status)
 }
     }
     
@@ -3714,7 +3850,10 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_text_value(
         it,
-        FfiConverterString.lower(`spaceId`),FfiConverterString.lower(`docId`),FfiConverterString.lower(`collection`),_status)
+        
+        FfiConverterString.lower(`spaceId`),
+        FfiConverterString.lower(`docId`),
+        FfiConverterString.lower(`collection`),_status)
 }
     }
     )
@@ -3747,7 +3886,9 @@ open class DataStore: Disposable, AutoCloseable, DataStoreInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_with_storage(
     
-        FfiConverterTypeOfflineProtocol.lower(`protocol`),FfiConverterTypeProtocolStateStorageProvider.lower(`storage`),_status)
+        
+        FfiConverterTypeOfflineProtocol.lower(`protocol`),
+        FfiConverterTypeProtocolStateStorageProvider.lower(`storage`),_status)
 }
     )
     }
@@ -3878,7 +4019,6 @@ public object FfiConverterTypeDataStore: FfiConverter<DataStore, Long> {
 //
 
 
-//
 public interface MeshServicesInterface {
     
     fun `discoverServices`(`serviceId`: kotlin.String?): kotlin.String
@@ -3916,22 +4056,28 @@ open class MeshServices: Disposable, AutoCloseable, MeshServicesInterface
     @Suppress("UNUSED_PARAMETER")
     constructor(noHandle: NoHandle) {
         this.handle = 0
-        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+        this.cleanable = null
     }
     constructor(`protocol`: OfflineProtocol) :
         this(UniffiWithHandle, 
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_meshservices_new(
     
+        
         FfiConverterTypeOfflineProtocol.lower(`protocol`),_status)
 }
     )
 
     protected val handle: Long
-    protected val cleanable: UniffiCleaner.Cleanable
+    protected val cleanable: UniffiCleaner.Cleanable?
 
     private val wasDestroyed = AtomicBoolean(false)
     private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
 
     override fun destroy() {
         // Only allow a single call to this method.
@@ -3939,7 +4085,7 @@ open class MeshServices: Disposable, AutoCloseable, MeshServicesInterface
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable.clean()
+                cleanable?.clean()
             }
         }
     }
@@ -3967,7 +4113,7 @@ open class MeshServices: Disposable, AutoCloseable, MeshServicesInterface
         } finally {
             // This decrement always matches the increment we performed above.
             if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable.clean()
+                cleanable?.clean()
             }
         }
     }
@@ -4005,6 +4151,7 @@ open class MeshServices: Disposable, AutoCloseable, MeshServicesInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_discover_services(
         it,
+        
         FfiConverterOptionalString.lower(`serviceId`),_status)
 }
     }
@@ -4019,7 +4166,10 @@ open class MeshServices: Disposable, AutoCloseable, MeshServicesInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_register_service(
         it,
-        FfiConverterString.lower(`serviceId`),FfiConverterString.lower(`version`),FfiConverterMapStringString.lower(`capabilities`),_status)
+        
+        FfiConverterString.lower(`serviceId`),
+        FfiConverterString.lower(`version`),
+        FfiConverterMapStringString.lower(`capabilities`),_status)
 }
     }
     
@@ -4032,7 +4182,12 @@ open class MeshServices: Disposable, AutoCloseable, MeshServicesInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_respond_to_service_request(
         it,
-        FfiConverterString.lower(`requestId`),FfiConverterString.lower(`requester`),FfiConverterString.lower(`serviceId`),FfiConverterString.lower(`status`),FfiConverterString.lower(`body`),_status)
+        
+        FfiConverterString.lower(`requestId`),
+        FfiConverterString.lower(`requester`),
+        FfiConverterString.lower(`serviceId`),
+        FfiConverterString.lower(`status`),
+        FfiConverterString.lower(`body`),_status)
 }
     }
     )
@@ -4046,7 +4201,11 @@ open class MeshServices: Disposable, AutoCloseable, MeshServicesInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_send_service_request(
         it,
-        FfiConverterString.lower(`provider`),FfiConverterString.lower(`serviceId`),FfiConverterString.lower(`method`),FfiConverterString.lower(`body`),_status)
+        
+        FfiConverterString.lower(`provider`),
+        FfiConverterString.lower(`serviceId`),
+        FfiConverterString.lower(`method`),
+        FfiConverterString.lower(`body`),_status)
 }
     }
     )
@@ -4060,6 +4219,7 @@ open class MeshServices: Disposable, AutoCloseable, MeshServicesInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service(
         it,
+        
         FfiConverterString.lower(`serviceId`),_status)
 }
     }
@@ -4201,7 +4361,6 @@ public object FfiConverterTypeMeshServices: FfiConverter<MeshServices, Long> {
 //
 
 
-//
 public interface OfflineProtocolInterface {
     
     fun `acceptConnectionRequest`(`recipient`: kotlin.String, `accepterName`: kotlin.String, `keyPackage`: List<kotlin.UByte>?): kotlin.String
@@ -4486,6 +4645,8 @@ public interface OfflineProtocolInterface {
     
     fun `sendFile`(`recipient`: kotlin.String, `fileData`: List<kotlin.UByte>, `fileName`: kotlin.String): kotlin.String
     
+    fun `sendFileFromPath`(`recipient`: kotlin.String, `filePath`: kotlin.String, `fileName`: kotlin.String): kotlin.String
+    
     fun `sendGroupMessage`(`groupId`: kotlin.String, `content`: kotlin.String, `priority`: MessagePriority?, `replyToMsg`: kotlin.String?): List<kotlin.String>
     
     fun `sendMedia`(`recipient`: kotlin.String, `fileData`: List<kotlin.UByte>, `fileName`: kotlin.String, `contentType`: ContentType, `mediaMetadata`: MediaMetadata?): kotlin.String
@@ -4589,22 +4750,28 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     @Suppress("UNUSED_PARAMETER")
     constructor(noHandle: NoHandle) {
         this.handle = 0
-        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+        this.cleanable = null
     }
     constructor(`config`: ProtocolConfig) :
         this(UniffiWithHandle, 
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_offlineprotocol_new(
     
+        
         FfiConverterTypeProtocolConfig.lower(`config`),_status)
 }
     )
 
     protected val handle: Long
-    protected val cleanable: UniffiCleaner.Cleanable
+    protected val cleanable: UniffiCleaner.Cleanable?
 
     private val wasDestroyed = AtomicBoolean(false)
     private val callCounter = AtomicLong(1)
+
+    /**
+     * Whether the current object has been destroyed and its reference is gone in the Rust side.
+     */
+    val uniffiIsDestroyed: Boolean get() = wasDestroyed.get()
 
     override fun destroy() {
         // Only allow a single call to this method.
@@ -4612,7 +4779,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
         if (this.wasDestroyed.compareAndSet(false, true)) {
             // This decrement always matches the initial count of 1 given at creation time.
             if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable.clean()
+                cleanable?.clean()
             }
         }
     }
@@ -4640,7 +4807,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
         } finally {
             // This decrement always matches the increment we performed above.
             if (this.callCounter.decrementAndGet() == 0L) {
-                cleanable.clean()
+                cleanable?.clean()
             }
         }
     }
@@ -4678,7 +4845,10 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_accept_connection_request(
         it,
-        FfiConverterString.lower(`recipient`),FfiConverterString.lower(`accepterName`),FfiConverterOptionalSequenceUByte.lower(`keyPackage`),_status)
+        
+        FfiConverterString.lower(`recipient`),
+        FfiConverterString.lower(`accepterName`),
+        FfiConverterOptionalSequenceUByte.lower(`keyPackage`),_status)
 }
     }
     )
@@ -4692,6 +4862,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_clear_peer_mtu(
         it,
+        
         FfiConverterString.lower(`peerId`),_status)
 }
     }
@@ -4718,7 +4889,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_fragment_received(
         it,
-        FfiConverterString.lower(`senderId`),FfiConverterSequenceUByte.lower(`fragment`),_status)
+        
+        FfiConverterString.lower(`senderId`),
+        FfiConverterSequenceUByte.lower(`fragment`),_status)
 }
     }
     
@@ -4757,7 +4930,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_discovered(
         it,
-        FfiConverterString.lower(`peerId`),FfiConverterShort.lower(`rssi`),_status)
+        
+        FfiConverterString.lower(`peerId`),
+        FfiConverterShort.lower(`rssi`),_status)
 }
     }
     
@@ -4770,6 +4945,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_lost(
         it,
+        
         FfiConverterString.lower(`peerId`),_status)
 }
     }
@@ -4808,7 +4984,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_set_peer_mtu(
         it,
-        FfiConverterString.lower(`peerId`),FfiConverterUInt.lower(`maxPayload`),_status)
+        
+        FfiConverterString.lower(`peerId`),
+        FfiConverterUInt.lower(`maxPayload`),_status)
 }
     }
     
@@ -4821,6 +4999,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_status_changed(
         it,
+        
         FfiConverterBoolean.lower(`isAvailable`),_status)
 }
     }
@@ -4847,6 +5026,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_block_user(
         it,
+        
         FfiConverterString.lower(`userId`),_status)
 }
     }
@@ -4860,6 +5040,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_connection_request(
         it,
+        
         FfiConverterString.lower(`recipient`),_status)
 }
     }
@@ -4874,6 +5055,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer(
         it,
+        
         FfiConverterString.lower(`fileId`),_status)
 }
     }
@@ -4900,6 +5082,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_group(
         it,
+        
         FfiConverterString.lower(`groupName`),_status)
 }
     }
@@ -4914,7 +5097,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_invite(
         it,
-        FfiConverterOptionalString.lower(`petname`),FfiConverterBoolean.lower(`sign`),_status)
+        
+        FfiConverterOptionalString.lower(`petname`),
+        FfiConverterBoolean.lower(`sign`),_status)
 }
     }
     )
@@ -4927,6 +5112,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_derive_user_id_from_public_key(
         it,
+        
         FfiConverterSequenceUByte.lower(`publicKey`),_status)
 }
     }
@@ -4966,7 +5152,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_enable_telemetry(
         it,
-        FfiConverterTypeTelemetryConfig.lower(`config`),FfiConverterTypeAppState.lower(`appState`),_status)
+        
+        FfiConverterTypeTelemetryConfig.lower(`config`),
+        FfiConverterTypeAppState.lower(`appState`),_status)
 }
     }
     
@@ -5004,6 +5192,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_establish_secure_session(
         it,
+        
         FfiConverterString.lower(`peerId`),_status)
 }
     }
@@ -5018,6 +5207,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_finalize_file(
         it,
+        
         FfiConverterString.lower(`fileId`),_status)
 }
     }
@@ -5042,6 +5232,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_flush_telemetry_blocking(
         it,
+        
         FfiConverterULong.lower(`deadlineMs`),_status)
 }
     }
@@ -5056,6 +5247,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_force_transport(
         it,
+        
         FfiConverterTypeTransportType.lower(`transportType`),_status)
 }
     }
@@ -5069,7 +5261,10 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message(
         it,
-        FfiConverterString.lower(`originalMessageJson`),FfiConverterString.lower(`newRecipient`),FfiConverterOptionalTypeMessagePriority.lower(`priority`),_status)
+        
+        FfiConverterString.lower(`originalMessageJson`),
+        FfiConverterString.lower(`newRecipient`),
+        FfiConverterOptionalTypeMessagePriority.lower(`priority`),_status)
 }
     }
     )
@@ -5083,7 +5278,10 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message_to_group(
         it,
-        FfiConverterString.lower(`originalMessageJson`),FfiConverterString.lower(`groupId`),FfiConverterOptionalTypeMessagePriority.lower(`priority`),_status)
+        
+        FfiConverterString.lower(`originalMessageJson`),
+        FfiConverterString.lower(`groupId`),
+        FfiConverterOptionalTypeMessagePriority.lower(`priority`),_status)
 }
     }
     )
@@ -5097,6 +5295,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_gateway_address_declaration(
         it,
+        
         FfiConverterSequenceUByte.lower(`challenge`),_status)
 }
     }
@@ -5203,6 +5402,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_establishment_state(
         it,
+        
         FfiConverterString.lower(`peerId`),_status)
 }
     }
@@ -5216,6 +5416,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_file_progress(
         it,
+        
         FfiConverterString.lower(`fileId`),_status)
 }
     }
@@ -5230,6 +5431,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_group_info(
         it,
+        
         FfiConverterString.lower(`groupId`),_status)
 }
     }
@@ -5244,6 +5446,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_group_roles(
         it,
+        
         FfiConverterString.lower(`groupId`),_status)
 }
     }
@@ -5311,7 +5514,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_member_role(
         it,
-        FfiConverterString.lower(`groupId`),FfiConverterString.lower(`userId`),_status)
+        
+        FfiConverterString.lower(`groupId`),
+        FfiConverterString.lower(`userId`),_status)
 }
     }
     )
@@ -5442,6 +5647,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics(
         it,
+        
         FfiConverterTypeTransportType.lower(`transportType`),_status)
 }
     }
@@ -5456,6 +5662,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_relay_sync_state(
         it,
+        
         FfiConverterString.lower(`groupId`),_status)
 }
     }
@@ -5470,6 +5677,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_rich_readiness(
         it,
+        
         FfiConverterString.lower(`groupId`),_status)
 }
     }
@@ -5483,6 +5691,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(
         it,
+        
         FfiConverterString.lower(`peerId`),_status)
 }
     }
@@ -5497,6 +5706,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_identity_assertion(
         it,
+        
         FfiConverterSequenceUByte.lower(`signedData`),_status)
 }
     }
@@ -5511,7 +5721,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(
         it,
-        FfiConverterTypeMlsStorageProvider.lower(`secureStorage`),FfiConverterTypeProtocolStateStorageProvider.lower(`protocolStateStorage`),_status)
+        
+        FfiConverterTypeMlsStorageProvider.lower(`secureStorage`),
+        FfiConverterTypeProtocolStateStorageProvider.lower(`protocolStateStorage`),_status)
 }
     }
     
@@ -5524,7 +5736,10 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls_with_file_stores(
         it,
-        FfiConverterString.lower(`mlsRoot`),FfiConverterString.lower(`stateRoot`),FfiConverterByteArray.lower(`storeKey`),_status)
+        
+        FfiConverterString.lower(`mlsRoot`),
+        FfiConverterString.lower(`stateRoot`),
+        FfiConverterByteArray.lower(`storeKey`),_status)
 }
     }
     
@@ -5536,6 +5751,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declaration_refused(
         it,
+        
         FfiConverterString.lower(`reason`),_status)
 }
     }
@@ -5548,6 +5764,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declared(
         it,
+        
         FfiConverterString.lower(`address`),_status)
 }
     }
@@ -5560,6 +5777,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_confirm_sent(
         it,
+        
         FfiConverterString.lower(`messageId`),_status)
 }
     }
@@ -5586,6 +5804,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_group_report_received(
         it,
+        
         FfiConverterString.lower(`reportJson`),_status)
 }
     }
@@ -5599,7 +5818,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_message_received(
         it,
-        FfiConverterString.lower(`senderId`),FfiConverterSequenceUByte.lower(`data`),_status)
+        
+        FfiConverterString.lower(`senderId`),
+        FfiConverterSequenceUByte.lower(`data`),_status)
 }
     }
     
@@ -5611,7 +5832,10 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_peer_presence(
         it,
-        FfiConverterString.lower(`peerId`),FfiConverterBoolean.lower(`online`),FfiConverterOptionalLong.lower(`lastSeenMs`),_status)
+        
+        FfiConverterString.lower(`peerId`),
+        FfiConverterBoolean.lower(`online`),
+        FfiConverterOptionalLong.lower(`lastSeenMs`),_status)
 }
     }
     
@@ -5637,6 +5861,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_relay_capabilities(
         it,
+        
         FfiConverterSequenceString.lower(`capabilities`),_status)
 }
     }
@@ -5649,6 +5874,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed(
         it,
+        
         FfiConverterString.lower(`messageId`),_status)
 }
     }
@@ -5661,7 +5887,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed_with_reason(
         it,
-        FfiConverterString.lower(`messageId`),FfiConverterOptionalString.lower(`reason`),_status)
+        
+        FfiConverterString.lower(`messageId`),
+        FfiConverterOptionalString.lower(`reason`),_status)
 }
     }
     
@@ -5674,6 +5902,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_status_changed(
         it,
+        
         FfiConverterBoolean.lower(`isConnected`),_status)
 }
     }
@@ -5687,7 +5916,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_invite_to_group(
         it,
-        FfiConverterString.lower(`groupId`),FfiConverterString.lower(`inviteeUserId`),_status)
+        
+        FfiConverterString.lower(`groupId`),
+        FfiConverterString.lower(`inviteeUserId`),_status)
 }
     }
     
@@ -5726,6 +5957,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_user_blocked(
         it,
+        
         FfiConverterString.lower(`userId`),_status)
 }
     }
@@ -5740,6 +5972,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_leave_group(
         it,
+        
         FfiConverterString.lower(`groupId`),_status)
 }
     }
@@ -5780,6 +6013,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_clear_pending_welcome(
         it,
+        
         FfiConverterString.lower(`otherUserId`),_status)
 }
     }
@@ -5793,6 +6027,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_create_session(
         it,
+        
         FfiConverterString.lower(`otherUserId`),_status)
 }
     }
@@ -5807,6 +6042,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt(
         it,
+        
         FfiConverterTypeMlsEncryptedMessage.lower(`encrypted`),_status)
 }
     }
@@ -5821,6 +6057,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt_from_user(
         it,
+        
         FfiConverterTypeMlsEncryptedMessage.lower(`encrypted`),_status)
 }
     }
@@ -5835,6 +6072,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_delete_session(
         it,
+        
         FfiConverterString.lower(`otherUserId`),_status)
 }
     }
@@ -5848,7 +6086,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_encrypt_for_user(
         it,
-        FfiConverterString.lower(`otherUserId`),FfiConverterSequenceUByte.lower(`plaintext`),_status)
+        
+        FfiConverterString.lower(`otherUserId`),
+        FfiConverterSequenceUByte.lower(`plaintext`),_status)
 }
     }
     )
@@ -5902,6 +6142,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_pending_welcome(
         it,
+        
         FfiConverterString.lower(`otherUserId`),_status)
 }
     }
@@ -5915,6 +6156,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_has_session(
         it,
+        
         FfiConverterString.lower(`otherUserId`),_status)
 }
     }
@@ -5929,7 +6171,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_import_key_package(
         it,
-        FfiConverterString.lower(`userId`),FfiConverterSequenceUByte.lower(`keyPackageData`),_status)
+        
+        FfiConverterString.lower(`userId`),
+        FfiConverterSequenceUByte.lower(`keyPackageData`),_status)
 }
     }
     
@@ -5942,6 +6186,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_join_session(
         it,
+        
         FfiConverterTypeMlsWelcomeMessage.lower(`welcome`),_status)
 }
     }
@@ -5969,6 +6214,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_mark_key_package_synced(
         it,
+        
         FfiConverterString.lower(`packageId`),_status)
 }
     }
@@ -5982,6 +6228,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_process_welcome(
         it,
+        
         FfiConverterTypeMlsWelcomeMessage.lower(`welcome`),_status)
 }
     }
@@ -5995,6 +6242,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_confirm_sent(
         it,
+        
         FfiConverterString.lower(`messageId`),_status)
 }
     }
@@ -6046,6 +6294,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_subscription_filter(
         it,
+        
         FfiConverterString.lower(`subscriptionId`),_status)
 }
     }
@@ -6060,7 +6309,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received(
         it,
-        FfiConverterString.lower(`senderId`),FfiConverterSequenceUByte.lower(`data`),_status)
+        
+        FfiConverterString.lower(`senderId`),
+        FfiConverterSequenceUByte.lower(`data`),_status)
 }
     }
     
@@ -6073,7 +6324,10 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received_at(
         it,
-        FfiConverterString.lower(`senderId`),FfiConverterSequenceUByte.lower(`data`),FfiConverterLong.lower(`createdAt`),_status)
+        
+        FfiConverterString.lower(`senderId`),
+        FfiConverterSequenceUByte.lower(`data`),
+        FfiConverterLong.lower(`createdAt`),_status)
 }
     }
     
@@ -6085,6 +6339,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_completed(
         it,
+        
         FfiConverterString.lower(`queryId`),_status)
 }
     }
@@ -6098,7 +6353,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_event_received(
         it,
-        FfiConverterString.lower(`queryId`),FfiConverterString.lower(`eventJson`),_status)
+        
+        FfiConverterString.lower(`queryId`),
+        FfiConverterString.lower(`eventJson`),_status)
 }
     }
     
@@ -6110,6 +6367,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed(
         it,
+        
         FfiConverterString.lower(`messageId`),_status)
 }
     }
@@ -6122,7 +6380,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed_with_reason(
         it,
-        FfiConverterString.lower(`messageId`),FfiConverterOptionalString.lower(`reason`),_status)
+        
+        FfiConverterString.lower(`messageId`),
+        FfiConverterOptionalString.lower(`reason`),_status)
 }
     }
     
@@ -6135,6 +6395,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_status_changed(
         it,
+        
         FfiConverterBoolean.lower(`isConnected`),_status)
 }
     }
@@ -6147,6 +6408,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_notify_app_state(
         it,
+        
         FfiConverterTypeAppState.lower(`state`),_status)
 }
     }
@@ -6199,7 +6461,14 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process_file_chunk(
         it,
-        FfiConverterString.lower(`fileId`),FfiConverterUInt.lower(`chunkIndex`),FfiConverterUInt.lower(`totalChunks`),FfiConverterULong.lower(`fileSize`),FfiConverterString.lower(`fileName`),FfiConverterString.lower(`fileChecksum`),FfiConverterSequenceUByte.lower(`data`),_status)
+        
+        FfiConverterString.lower(`fileId`),
+        FfiConverterUInt.lower(`chunkIndex`),
+        FfiConverterUInt.lower(`totalChunks`),
+        FfiConverterULong.lower(`fileSize`),
+        FfiConverterString.lower(`fileName`),
+        FfiConverterString.lower(`fileChecksum`),
+        FfiConverterSequenceUByte.lower(`data`),_status)
 }
     }
     
@@ -6238,6 +6507,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reject_connection_request(
         it,
+        
         FfiConverterString.lower(`recipient`),_status)
 }
     }
@@ -6252,6 +6522,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rekey_session(
         it,
+        
         FfiConverterString.lower(`peerId`),_status)
 }
     }
@@ -6278,7 +6549,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_from_group(
         it,
-        FfiConverterString.lower(`groupId`),FfiConverterString.lower(`memberId`),_status)
+        
+        FfiConverterString.lower(`groupId`),
+        FfiConverterString.lower(`memberId`),_status)
 }
     }
     
@@ -6291,6 +6564,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_transport(
         it,
+        
         FfiConverterTypeTransportType.lower(`transportType`),_status)
 }
     }
@@ -6304,7 +6578,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rename_group(
         it,
-        FfiConverterString.lower(`groupId`),FfiConverterString.lower(`newName`),_status)
+        
+        FfiConverterString.lower(`groupId`),
+        FfiConverterString.lower(`newName`),_status)
 }
     }
     
@@ -6317,6 +6593,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration(
         it,
+        
         FfiConverterString.lower(`groupId`),_status)
 }
     }
@@ -6331,6 +6608,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resolve_username(
         it,
+        
         FfiConverterString.lower(`username`),_status)
 }
     }
@@ -6357,6 +6635,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declaration_refused(
         it,
+        
         FfiConverterString.lower(`reason`),_status)
 }
     }
@@ -6369,6 +6648,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declared(
         it,
+        
         FfiConverterString.lower(`address`),_status)
 }
     }
@@ -6381,6 +6661,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_confirm_sent(
         it,
+        
         FfiConverterString.lower(`messageId`),_status)
 }
     }
@@ -6394,6 +6675,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_gateway_capabilities(
         it,
+        
         FfiConverterSequenceString.lower(`capabilities`),_status)
 }
     }
@@ -6420,7 +6702,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_message_received(
         it,
-        FfiConverterString.lower(`senderId`),FfiConverterSequenceUByte.lower(`data`),_status)
+        
+        FfiConverterString.lower(`senderId`),
+        FfiConverterSequenceUByte.lower(`data`),_status)
 }
     }
     
@@ -6432,7 +6716,10 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_peer_presence(
         it,
-        FfiConverterString.lower(`peerId`),FfiConverterBoolean.lower(`online`),FfiConverterOptionalLong.lower(`lastSeenMs`),_status)
+        
+        FfiConverterString.lower(`peerId`),
+        FfiConverterBoolean.lower(`online`),
+        FfiConverterOptionalLong.lower(`lastSeenMs`),_status)
 }
     }
     
@@ -6457,6 +6744,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_send_failed(
         it,
+        
         FfiConverterString.lower(`messageId`),_status)
 }
     }
@@ -6469,7 +6757,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_send_failed_with_reason(
         it,
-        FfiConverterString.lower(`messageId`),FfiConverterOptionalString.lower(`reason`),_status)
+        
+        FfiConverterString.lower(`messageId`),
+        FfiConverterOptionalString.lower(`reason`),_status)
 }
     }
     
@@ -6482,6 +6772,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_status_changed(
         it,
+        
         FfiConverterBoolean.lower(`isConnected`),_status)
 }
     }
@@ -6495,7 +6786,11 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_connection_request(
         it,
-        FfiConverterString.lower(`recipient`),FfiConverterString.lower(`senderName`),FfiConverterOptionalSequenceUByte.lower(`keyPackage`),FfiConverterOptionalString.lower(`initialMessage`),_status)
+        
+        FfiConverterString.lower(`recipient`),
+        FfiConverterString.lower(`senderName`),
+        FfiConverterOptionalSequenceUByte.lower(`keyPackage`),
+        FfiConverterOptionalString.lower(`initialMessage`),_status)
 }
     }
     )
@@ -6509,7 +6804,27 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(
         it,
-        FfiConverterString.lower(`recipient`),FfiConverterSequenceUByte.lower(`fileData`),FfiConverterString.lower(`fileName`),_status)
+        
+        FfiConverterString.lower(`recipient`),
+        FfiConverterSequenceUByte.lower(`fileData`),
+        FfiConverterString.lower(`fileName`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    @Throws(ProtocolException::class)override fun `sendFileFromPath`(`recipient`: kotlin.String, `filePath`: kotlin.String, `fileName`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(ProtocolException) { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file_from_path(
+        it,
+        
+        FfiConverterString.lower(`recipient`),
+        FfiConverterString.lower(`filePath`),
+        FfiConverterString.lower(`fileName`),_status)
 }
     }
     )
@@ -6523,7 +6838,11 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_group_message(
         it,
-        FfiConverterString.lower(`groupId`),FfiConverterString.lower(`content`),FfiConverterOptionalTypeMessagePriority.lower(`priority`),FfiConverterOptionalString.lower(`replyToMsg`),_status)
+        
+        FfiConverterString.lower(`groupId`),
+        FfiConverterString.lower(`content`),
+        FfiConverterOptionalTypeMessagePriority.lower(`priority`),
+        FfiConverterOptionalString.lower(`replyToMsg`),_status)
 }
     }
     )
@@ -6537,7 +6856,12 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media(
         it,
-        FfiConverterString.lower(`recipient`),FfiConverterSequenceUByte.lower(`fileData`),FfiConverterString.lower(`fileName`),FfiConverterTypeContentType.lower(`contentType`),FfiConverterOptionalTypeMediaMetadata.lower(`mediaMetadata`),_status)
+        
+        FfiConverterString.lower(`recipient`),
+        FfiConverterSequenceUByte.lower(`fileData`),
+        FfiConverterString.lower(`fileName`),
+        FfiConverterTypeContentType.lower(`contentType`),
+        FfiConverterOptionalTypeMediaMetadata.lower(`mediaMetadata`),_status)
 }
     }
     )
@@ -6551,7 +6875,12 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media_rich(
         it,
-        FfiConverterString.lower(`recipient`),FfiConverterSequenceUByte.lower(`fileData`),FfiConverterString.lower(`fileName`),FfiConverterTypeContentType.lower(`contentType`),FfiConverterTypeMediaSendOptions.lower(`options`),_status)
+        
+        FfiConverterString.lower(`recipient`),
+        FfiConverterSequenceUByte.lower(`fileData`),
+        FfiConverterString.lower(`fileName`),
+        FfiConverterTypeContentType.lower(`contentType`),
+        FfiConverterTypeMediaSendOptions.lower(`options`),_status)
 }
     }
     )
@@ -6565,7 +6894,11 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message(
         it,
-        FfiConverterString.lower(`recipient`),FfiConverterString.lower(`content`),FfiConverterTypeMessagePriority.lower(`priority`),FfiConverterOptionalString.lower(`replyToMsg`),_status)
+        
+        FfiConverterString.lower(`recipient`),
+        FfiConverterString.lower(`content`),
+        FfiConverterTypeMessagePriority.lower(`priority`),
+        FfiConverterOptionalString.lower(`replyToMsg`),_status)
 }
     }
     )
@@ -6579,7 +6912,10 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message_rich(
         it,
-        FfiConverterString.lower(`recipient`),FfiConverterString.lower(`content`),FfiConverterTypeSendMessageOptions.lower(`options`),_status)
+        
+        FfiConverterString.lower(`recipient`),
+        FfiConverterString.lower(`content`),
+        FfiConverterTypeSendMessageOptions.lower(`options`),_status)
 }
     }
     )
@@ -6593,7 +6929,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_presence_update(
         it,
-        FfiConverterString.lower(`recipient`),FfiConverterTypePresenceStatus.lower(`status`),_status)
+        
+        FfiConverterString.lower(`recipient`),
+        FfiConverterTypePresenceStatus.lower(`status`),_status)
 }
     }
     )
@@ -6607,7 +6945,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_read_receipt(
         it,
-        FfiConverterString.lower(`recipient`),FfiConverterSequenceString.lower(`messageIds`),_status)
+        
+        FfiConverterString.lower(`recipient`),
+        FfiConverterSequenceString.lower(`messageIds`),_status)
 }
     }
     )
@@ -6621,7 +6961,10 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_typing_indicator(
         it,
-        FfiConverterString.lower(`recipient`),FfiConverterString.lower(`conversationId`),FfiConverterBoolean.lower(`isTyping`),_status)
+        
+        FfiConverterString.lower(`recipient`),
+        FfiConverterString.lower(`conversationId`),
+        FfiConverterBoolean.lower(`isTyping`),_status)
 }
     }
     )
@@ -6635,6 +6978,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level(
         it,
+        
         FfiConverterUByte.lower(`level`),_status)
 }
     }
@@ -6648,7 +6992,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_state(
         it,
-        FfiConverterUByte.lower(`level`),FfiConverterBoolean.lower(`isCharging`),_status)
+        
+        FfiConverterUByte.lower(`level`),
+        FfiConverterBoolean.lower(`isCharging`),_status)
 }
     }
     
@@ -6660,6 +7006,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_ble_transport_callback(
         it,
+        
         FfiConverterTypeBleTransportCallback.lower(`callback`),_status)
 }
     }
@@ -6672,6 +7019,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_event_callback(
         it,
+        
         FfiConverterTypeEventCallback.lower(`callback`),_status)
 }
     }
@@ -6685,7 +7033,10 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_member_role(
         it,
-        FfiConverterString.lower(`groupId`),FfiConverterString.lower(`userId`),FfiConverterString.lower(`role`),_status)
+        
+        FfiConverterString.lower(`groupId`),
+        FfiConverterString.lower(`userId`),
+        FfiConverterString.lower(`role`),_status)
 }
     }
     
@@ -6697,6 +7048,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_nostr_transport_callback(
         it,
+        
         FfiConverterTypeNostrTransportCallback.lower(`callback`),_status)
 }
     }
@@ -6710,6 +7062,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_priority(
         it,
+        
         FfiConverterTypeRelayPriority.lower(`priority`),_status)
 }
     }
@@ -6722,6 +7075,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_reticulum_transport_callback(
         it,
+        
         FfiConverterTypeReticulumTransportCallback.lower(`callback`),_status)
 }
     }
@@ -6734,6 +7088,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_telemetry_enabled(
         it,
+        
         FfiConverterBoolean.lower(`enabled`),_status)
 }
     }
@@ -6746,6 +7101,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_wifi_direct_transport_callback(
         it,
+        
         FfiConverterTypeWifiDirectTransportCallback.lower(`callback`),_status)
 }
     }
@@ -6772,6 +7128,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data(
         it,
+        
         FfiConverterSequenceUByte.lower(`data`),_status)
 }
     }
@@ -6786,6 +7143,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data_bytes(
         it,
+        
         FfiConverterByteArray.lower(`data`),_status)
 }
     }
@@ -6852,6 +7210,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unblock_user(
         it,
+        
         FfiConverterString.lower(`userId`),_status)
 }
     }
@@ -6865,6 +7224,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_ack_config(
         it,
+        
         FfiConverterTypeAckConfig.lower(`config`),_status)
 }
     }
@@ -6878,6 +7238,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dedup_config(
         it,
+        
         FfiConverterTypeDedupConfig.lower(`config`),_status)
 }
     }
@@ -6891,6 +7252,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dors_config(
         it,
+        
         FfiConverterTypeDorsConfig.lower(`config`),_status)
 }
     }
@@ -6904,6 +7266,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_relay_config(
         it,
+        
         FfiConverterTypeRelayConfig.lower(`config`),_status)
 }
     }
@@ -6917,6 +7280,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_retry_config(
         it,
+        
         FfiConverterTypeRetryConfig.lower(`config`),_status)
 }
     }
@@ -6930,7 +7294,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_transport_metrics(
         it,
-        FfiConverterTypeTransportType.lower(`transportType`),FfiConverterTypeTransportMetrics.lower(`metrics`),_status)
+        
+        FfiConverterTypeTransportType.lower(`transportType`),
+        FfiConverterTypeTransportMetrics.lower(`metrics`),_status)
 }
     }
     
@@ -6943,7 +7309,10 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature(
         it,
-        FfiConverterSequenceUByte.lower(`publicKey`),FfiConverterSequenceUByte.lower(`data`),FfiConverterSequenceUByte.lower(`signature`),_status)
+        
+        FfiConverterSequenceUByte.lower(`publicKey`),
+        FfiConverterSequenceUByte.lower(`data`),
+        FfiConverterSequenceUByte.lower(`signature`),_status)
 }
     }
     )
@@ -6957,7 +7326,10 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature_bytes(
         it,
-        FfiConverterByteArray.lower(`publicKey`),FfiConverterByteArray.lower(`data`),FfiConverterByteArray.lower(`signature`),_status)
+        
+        FfiConverterByteArray.lower(`publicKey`),
+        FfiConverterByteArray.lower(`data`),
+        FfiConverterByteArray.lower(`signature`),_status)
 }
     }
     )
@@ -6984,7 +7356,9 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_message_received(
         it,
-        FfiConverterString.lower(`senderId`),FfiConverterSequenceUByte.lower(`data`),_status)
+        
+        FfiConverterString.lower(`senderId`),
+        FfiConverterSequenceUByte.lower(`data`),_status)
 }
     }
     
@@ -6997,6 +7371,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_connected(
         it,
+        
         FfiConverterString.lower(`peerId`),_status)
 }
     }
@@ -7010,6 +7385,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected(
         it,
+        
         FfiConverterString.lower(`peerId`),_status)
 }
     }
@@ -7023,6 +7399,7 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_status_changed(
         it,
+        
         FfiConverterBoolean.lower(`isConnected`),_status)
 }
     }
@@ -7078,6 +7455,8 @@ data class AckConfig (
     
 
     
+
+    
     companion object
 }
 
@@ -7111,6 +7490,8 @@ data class BleFragment (
     var `data`: List<kotlin.UByte>
     
 ){
+    
+
     
 
     
@@ -7161,6 +7542,8 @@ data class CustodyConfig (
     var `overflowPolicy`: OverflowPolicy? = null 
     
 ){
+    
+
     
 
     
@@ -7261,6 +7644,8 @@ data class CustodyStats (
     
 
     
+
+    
     companion object
 }
 
@@ -7357,6 +7742,8 @@ data class DedupConfig (
     
 
     
+
+    
     companion object
 }
 
@@ -7394,6 +7781,8 @@ data class DedupStats (
     var `mode`: kotlin.String
     
 ){
+    
+
     
 
     
@@ -7468,6 +7857,8 @@ data class DorsConfig (
     var `relayOptimalConnectionCount`: kotlin.UByte
     
 ){
+    
+
     
 
     
@@ -7561,6 +7952,8 @@ data class EncryptionConfig (
     
 
     
+
+    
     companion object
 }
 
@@ -7610,6 +8003,8 @@ data class FileProgress (
     
 
     
+
+    
     companion object
 }
 
@@ -7653,6 +8048,8 @@ data class ForwardInfo (
     var `forwardCount`: kotlin.UInt
     
 ){
+    
+
     
 
     
@@ -7700,6 +8097,8 @@ data class GatewayAddressDeclaration (
     
 
     
+
+    
     companion object
 }
 
@@ -7736,6 +8135,8 @@ data class GroupRichReadiness (
     var `unknownMembers`: List<kotlin.String>
     
 ){
+    
+
     
 
     
@@ -7780,6 +8181,8 @@ data class InternetMessage (
     var `controlPayload`: kotlin.String?
     
 ){
+    
+
     
 
     
@@ -7832,6 +8235,8 @@ data class InviteInfo (
     var `signed`: kotlin.Boolean
     
 ){
+    
+
     
 
     
@@ -7902,6 +8307,8 @@ data class MediaMetadata (
     var `stickerKind`: kotlin.String? = null 
     
 ){
+    
+
     
 
     
@@ -7993,6 +8400,8 @@ data class MediaSendOptions (
     
 
     
+
+    
     companion object
 }
 
@@ -8069,6 +8478,8 @@ data class MeshRelayConfig (
     var `activityIdleWindows`: kotlin.UInt? = null 
     
 ){
+    
+
     
 
     
@@ -8172,6 +8583,8 @@ data class MeshRelayStats (
     
 
     
+
+    
     companion object
 }
 
@@ -8269,6 +8682,8 @@ data class MeshRelayTunables (
     
 
     
+
+    
     companion object
 }
 
@@ -8353,6 +8768,8 @@ data class MessageStats (
     
 
     
+
+    
     companion object
 }
 
@@ -8398,6 +8815,8 @@ data class MlsAddMemberResult (
     
 
     
+
+    
     companion object
 }
 
@@ -8439,6 +8858,8 @@ data class MlsEncryptedMessage (
     var `timestampMs`: kotlin.ULong
     
 ){
+    
+
     
 
     
@@ -8497,6 +8918,8 @@ data class MlsGroupInfo (
     var `lastActivityMs`: kotlin.ULong
     
 ){
+    
+
     
 
     
@@ -8559,6 +8982,8 @@ data class MlsKeyPackageBundle (
     
 
     
+
+    
     companion object
 }
 
@@ -8613,6 +9038,8 @@ data class MlsWelcomeMessage (
     
 
     
+
+    
     companion object
 }
 
@@ -8659,6 +9086,8 @@ data class NetworkLink (
     var `quality`: kotlin.Float
     
 ){
+    
+
     
 
     
@@ -8712,6 +9141,8 @@ data class NetworkNode (
     
 
     
+
+    
     companion object
 }
 
@@ -8762,6 +9193,8 @@ data class NetworkTopology (
     
 
     
+
+    
     companion object
 }
 
@@ -8800,6 +9233,8 @@ data class NostrMessage (
     var `eventJson`: kotlin.String
     
 ){
+    
+
     
 
     
@@ -8842,6 +9277,8 @@ data class NostrQuery (
     
 
     
+
+    
     companion object
 }
 
@@ -8877,6 +9314,8 @@ data class PeerDevice (
     var `lastSeenMs`: kotlin.ULong
     
 ){
+    
+
     
 
     
@@ -8920,6 +9359,8 @@ data class PendingQueueConfig (
     var `overflowPolicy`: OverflowPolicy
     
 ){
+    
+
     
 
     
@@ -9028,6 +9469,8 @@ data class ProtocolConfig (
     var `encryptServiceMessages`: kotlin.Boolean = true 
     
 ){
+    
+
     
 
     
@@ -9170,6 +9613,8 @@ data class ProtocolLockDiagnostics (
     
 
     
+
+    
     companion object
 }
 
@@ -9214,6 +9659,8 @@ data class RelayConfig (
     
 
     
+
+    
     companion object
 }
 
@@ -9252,6 +9699,8 @@ data class ReliabilityConfig (
     var `dedup`: DedupConfig
     
 ){
+    
+
     
 
     
@@ -9297,6 +9746,8 @@ data class ReplyContext (
     var `replyContentType`: kotlin.String? = null 
     
 ){
+    
+
     
 
     
@@ -9349,6 +9800,8 @@ data class ReticulumMessage (
     
 
     
+
+    
     companion object
 }
 
@@ -9398,6 +9851,8 @@ data class RetryConfig (
     var `edgeDrivenUnreachableDm`: kotlin.Boolean = false 
     
 ){
+    
+
     
 
     
@@ -9459,6 +9914,8 @@ data class SendMessageOptions (
     var `appId`: kotlin.String? = null 
     
 ){
+    
+
     
 
     
@@ -9536,6 +9993,8 @@ data class TelemetryConfig (
     var `mlsSamplingBypass`: kotlin.Boolean?
     
 ){
+    
+
     
 
     
@@ -9624,6 +10083,8 @@ data class TelemetryStats (
     
 
     
+
+    
     companion object
 }
 
@@ -9684,6 +10145,8 @@ data class TransportConfig (
     var `nostrUsernameDiscoveryEnabled`: kotlin.Boolean = false 
     
 ){
+    
+
     
 
     
@@ -9773,6 +10236,8 @@ data class TransportMetrics (
     
 
     
+
+    
     companion object
 }
 
@@ -9857,6 +10322,8 @@ data class WifiDirectMessage (
     
 
     
+
+    
     companion object
 }
 
@@ -9890,6 +10357,10 @@ enum class AppState {
     ACTIVE,
     BACKGROUND,
     INACTIVE;
+
+    
+
+
     companion object
 }
 
@@ -9927,6 +10398,10 @@ enum class ContentType {
     FILE,
     FILE_CHUNK,
     POLL;
+
+    
+
+
     companion object
 }
 
@@ -9959,6 +10434,10 @@ enum class EstablishmentState {
     HAVE_KEY_PACKAGE,
     SESSION_PENDING,
     SESSION_CONFIRMED;
+
+    
+
+
     companion object
 }
 
@@ -9991,6 +10470,10 @@ enum class MessagePriority {
     MEDIUM,
     HIGH,
     CRITICAL;
+
+    
+
+
     companion object
 }
 
@@ -10092,6 +10575,10 @@ enum class MlsVerbosity {
     OFF,
     LIFECYCLE,
     DIAGNOSTIC;
+
+    
+
+
     companion object
 }
 
@@ -10122,6 +10609,10 @@ enum class OverflowPolicy {
     
     DROP_OLDEST,
     DROP_NEWEST;
+
+    
+
+
     companion object
 }
 
@@ -10153,6 +10644,10 @@ enum class PresenceStatus {
     ONLINE,
     AWAY,
     OFFLINE;
+
+    
+
+
     companion object
 }
 
@@ -10394,6 +10889,10 @@ enum class ProtocolState {
     STOPPED,
     RUNNING,
     PAUSED;
+
+    
+
+
     companion object
 }
 
@@ -10425,6 +10924,10 @@ enum class RelayPriority {
     NEVER,
     AUTO,
     ALWAYS;
+
+    
+
+
     companion object
 }
 
@@ -10456,6 +10959,10 @@ enum class RelaySyncState {
     SYNCED,
     PENDING,
     UNSYNCED;
+
+    
+
+
     companion object
 }
 
@@ -10490,6 +10997,10 @@ enum class TelemetryOs {
     MACOS,
     WINDOWS,
     OTHER;
+
+    
+
+
     companion object
 }
 
@@ -10523,6 +11034,10 @@ enum class TransportType {
     WI_FI_DIRECT,
     RETICULUM,
     NOSTR;
+
+    
+
+
     companion object
 }
 
@@ -12271,6 +12786,7 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_func_derive_address(
     
+        
         FfiConverterSequenceUByte.lower(`publicKey`),_status)
 }
     )
@@ -12282,6 +12798,7 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_func_parse_invite(
     
+        
         FfiConverterString.lower(`blob`),_status)
 }
     )
@@ -12292,6 +12809,7 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     uniffiRustCall() { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance(
     
+        
         FfiConverterTypeProtocolStateStorageProvider.lower(`storage`),_status)
 }
     )
@@ -12303,6 +12821,7 @@ public object FfiConverterMapStringString: FfiConverterRustBuffer<Map<kotlin.Str
     uniffiRustCallWithError(ProtocolException) { _status ->
     UniffiLib.uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion(
     
+        
         FfiConverterSequenceUByte.lower(`assertion`),_status)
 }
     )

@@ -16,13 +16,13 @@ use crate::mls_observability::MlsOperationContext;
 use crate::protocol::reachability::{Claim, FactSource};
 use crate::{Error, EstablishmentState, Event, Result, SessionStateError};
 use chrono::{Duration as ChronoDuration, Utc};
+use offline_protocol_core::time::{Duration as StdDuration, Instant};
 use offline_protocol_core::{Message, MessageId, MessagePriority};
 use offline_protocol_mls::{MlsManager, WelcomeMessage};
 use offline_protocol_transport::TransportType;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration as StdDuration, Instant};
 use tracing::{debug, info, warn};
 
 impl OfflineProtocol {
@@ -597,10 +597,11 @@ impl OfflineProtocol {
                 );
             }
             Err(err) => {
-                // The send can fail after the probe entered the outbox (a
-                // full ACK tracker refuses it), and then no id comes back to
-                // track. Any probe still queued for this peer is such an
-                // orphan, since the tracked one was withdrawn above.
+                // The send can fail after the probe entered the outbox, and
+                // then no id comes back to track. Any probe still queued for
+                // this peer is such an orphan, since the tracked one was
+                // withdrawn above. (A full ACK tracker no longer lands here:
+                // it holds the probe and returns its id.)
                 let orphans: Vec<_> = self
                     .outbox
                     .values()
@@ -1621,7 +1622,7 @@ impl OfflineProtocol {
                 Claim::Unreachable
             },
             FactSource::GatewayPresence,
-            std::time::Instant::now(),
+            offline_protocol_core::time::Instant::now(),
         );
         if online {
             // Carrier-scoped reachability proof: un-park and re-drive the

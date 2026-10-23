@@ -113,6 +113,40 @@ expect_bundle_failure "unexpected-file" extra_file
 expect_bundle_failure "two-versions" second_version
 expect_bundle_failure "wrong-passphrase" no_change wrong-passphrase
 
+echo "== the Java binding's bundle =="
+# The same scripts publish com.offlineprotocol:offline-protocol-java, a jar
+# where the Android library is an aar. The artifact id and the packaging are
+# the only things that differ, and a repository holding the wrong one must be
+# refused, not bundled under another library's name.
+JAVA_COORDINATE="com/offlineprotocol/offline-protocol-java"
+JAVA_ARTIFACT="offline-protocol-java-$VERSION"
+JAVA_REPO="$WORK/java-repo"
+mkdir -p "$JAVA_REPO/$JAVA_COORDINATE/$VERSION"
+for file in "$JAVA_ARTIFACT.jar" "$JAVA_ARTIFACT.pom" "$JAVA_ARTIFACT.module" "$JAVA_ARTIFACT-sources.jar" "$JAVA_ARTIFACT-javadoc.jar"; do
+  echo "fixture $file" >"$JAVA_REPO/$JAVA_COORDINATE/$VERSION/$file"
+done
+java_bundle() {
+  MAVEN_ARTIFACT_ID=offline-protocol-java MAVEN_PACKAGING=jar \
+    SIGNING_KEY="$SIGNING_KEY" SIGNING_KEY_PASSWORD=fixture-passphrase \
+    bash "$BUNDLER" "$1" "$WORK/java-bundle.zip" "$VERSION"
+}
+if java_bundle "$JAVA_REPO" >"$WORK/java-bundle.log" 2>&1; then
+  pass "the Java binding's repository bundles"
+else
+  fail "the Java binding's repository did not bundle"
+  cat "$WORK/java-bundle.log" >&2
+fi
+if unzip -Z1 "$WORK/java-bundle.zip" | grep -qx "$JAVA_COORDINATE/$VERSION/$JAVA_ARTIFACT.jar.asc"; then
+  pass "its jar is signed, under its own coordinate"
+else
+  fail "the Java bundle does not hold a signed jar under $JAVA_COORDINATE"
+fi
+if java_bundle "$WORK/repo" >"$WORK/java-wrong.log" 2>&1; then
+  fail "the Android library's repository was bundled as the Java binding"
+else
+  pass "the Android library's repository is refused as the Java binding"
+fi
+
 # ---------------------------------------------------------------------------
 # A stand-in curl that plays the Portal. It answers the published-POM probe
 # from FAKE_ON_CENTRAL, the upload with a deployment id, each status request
@@ -226,6 +260,21 @@ if upload rehearse "VALIDATED" 1 >/dev/null 2>&1 && grep -q 'upload' "$WORK/curl
   pass "a rehearsal uploads even when the version is on Maven Central"
 else
   fail "a rehearsal skipped its upload"
+fi
+
+# The re-run probe must ask about the Java binding's own POM, or a release of the
+# Android library would make the Java binding look already published.
+: >"$WORK/curl.log"
+if PATH="$FAKE_BIN:$PATH" FAKE_LOG="$WORK/curl.log" FAKE_STATES=PUBLISHED FAKE_ON_CENTRAL=1 \
+  MAVEN_CENTRAL_USERNAME=user MAVEN_CENTRAL_PASSWORD=secret POLL_SECONDS=0 POLLS=5 \
+  CENTRAL_API=https://portal.example/api CENTRAL_REPOSITORY=https://repo.example \
+  MAVEN_ARTIFACT_ID=offline-protocol-java \
+  bash "$UPLOADER" "$WORK/upload.zip" publish "$VERSION" >"$WORK/java-rerun.log" 2>&1 &&
+  grep -q "offline-protocol-java/$VERSION/offline-protocol-java-$VERSION.pom" "$WORK/curl.log"; then
+  pass "the Java binding's re-run probe asks for its own POM"
+else
+  fail "the Java binding's re-run probe did not ask for its own POM"
+  cat "$WORK/curl.log" >&2
 fi
 
 if ! grep -rq 'secret' "$WORK"/*.log; then

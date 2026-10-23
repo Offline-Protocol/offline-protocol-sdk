@@ -1,0 +1,58 @@
+[package]
+name = "capi-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Fuzzes the C binding's JSON boundary: method names and parameters a C host can send"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace: cargo-fuzz builds with a nightly toolchain and
+# sanitizer flags that the main workspace never sees, and a member would put
+# libfuzzer-sys in every `cargo build --workspace`.
+[workspace]
+
+# The FFI crate's own source, compiled here as a Rust library. The crate
+# itself builds no Rust library: a `lib` crate type beside `cdylib` and
+# `staticlib` makes cargo build the shipped libraries without link-time
+# optimisation, silently. So the fuzzer compiles the same files under its
+# own package, and the dependencies and features below mirror that crate's,
+# which `the_fuzzer_compiles_the_ffi_crate_with_its_dependencies` holds.
+[lib]
+name = "offline_protocol_uniffi"
+path = "../../crates/offline-protocol-uniffi/src/lib.rs"
+test = false
+doctest = false
+doc = false
+bench = false
+
+[dependencies]
+offline-protocol = { path = "../../crates/offline-protocol" }
+offline-protocol-core = { path = "../../crates/offline-protocol-core" }
+offline-protocol-router = { path = "../../crates/offline-protocol-router" }
+offline-protocol-transport = { path = "../../crates/offline-protocol-transport" }
+offline-protocol-mls = { path = "../../crates/offline-protocol-mls" }
+base64 = "0.22"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+zeroize = "1"
+tracing = { version = "0.1", features = ["log"] }
+log = "0.4"
+uniffi = "0.32"
+libfuzzer-sys = "0.4"
+
+[build-dependencies]
+uniffi = { version = "0.32", features = ["build"] }
+
+[features]
+default = ["capi"]
+capi = []
+
+[[bin]]
+name = "call"
+path = "fuzz_targets/call.rs"
+test = false
+doc = false
+bench = false

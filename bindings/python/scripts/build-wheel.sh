@@ -266,12 +266,17 @@ WHEEL="$PY_ROOT/dist/offline_protocol_sdk-$PY_VERSION-py3-none-$PLAT_TAG.whl"
   die "dist/ holds more than the retagged wheel"
 
 # What the wheel has to carry: the library under the loader's name, the
-# bindings that open it, and the licences.
+# bindings that open it, the PEP 561 marker that lets a type checker read
+# them, and the licences.
 python - "$WHEEL" "$LOADER_NAME" <<'PYTHON'
 import sys, zipfile
 wheel, loader = sys.argv[1], sys.argv[2]
 names = set(zipfile.ZipFile(wheel).namelist())
-required = [f"offline_protocol_sdk/{loader}", "offline_protocol_sdk/offline_protocol.py"]
+required = [
+    f"offline_protocol_sdk/{loader}",
+    "offline_protocol_sdk/offline_protocol.py",
+    "offline_protocol_sdk/py.typed",
+]
 missing = [n for n in required if n not in names]
 libraries = [n for n in names if n.endswith((".so", ".dylib", ".dll"))]
 licences = [n for n in names if n.endswith(("/LICENSE", "/EXPORT.md"))]

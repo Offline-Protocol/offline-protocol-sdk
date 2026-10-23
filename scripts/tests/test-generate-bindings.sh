@@ -2,11 +2,11 @@
 
 # Guards the single-entry-point rule for UniFFI codegen.
 #
-# scripts/generate-bindings.sh exists so that Swift, Kotlin and Python are
+# scripts/generate-bindings.sh exists so that Swift, Kotlin, Python, Ruby and Java are
 # always regenerated together — they are one artifact set off one UDL, and a
 # partial set does not fail any build, only the app at its first FFI call. That
 # property is only as good as two things nothing else checks: that the
-# generator still writes all three languages to the three committed paths, and
+# generator still writes all five languages to the five committed paths, and
 # that nothing else in the repo shells out to uniffi-bindgen behind its back.
 #
 # Both are asserted here, and deliberately by *behavior* rather than by
@@ -55,10 +55,10 @@ cd "$REPO_ROOT"
 # uniffi-bindgen to generate the bindings" from matching while every command
 # form does.
 SQ=\'
-INVOCATION='(^|[^[:alnum:]_-])uniffi-bindgen([[:space:]]+-{1,2}[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+generate'
-INVOCATION="$INVOCATION"'|(^|[^[:alnum:]_-])uniffi-bindgen[[:space:]]*\\[[:space:]]*$'
+INVOCATION='(^|[^[:alnum:]_-])uniffi-bindgen(-java)?([[:space:]]+-{1,2}[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+generate'
+INVOCATION="$INVOCATION"'|(^|[^[:alnum:]_-])uniffi-bindgen(-java)?[[:space:]]*\\[[:space:]]*$'
 INVOCATION="$INVOCATION"'|--bin[[:space:]]+uniffi-bindgen'
-INVOCATION="$INVOCATION|uniffi-bindgen[\"${SQ}]?[],[:space:]\"${SQ}[]*generate"
+INVOCATION="$INVOCATION|uniffi-bindgen(-java)?[\"${SQ}]?[],[:space:]\"${SQ}[]*generate"
 
 # A line that actually *runs* the generator, as opposed to merely naming it.
 # The interpreter is optional because the script is executable and this PR's
@@ -119,6 +119,7 @@ bindings/react-native/scripts/build-all.sh:build-uniffi-all.sh
 # lists so they are size-pinned too: they are what proves the scan can fire.
 HIT_FIXTURES="
 inline
+java
 continued
 global-option
 cargo-run
@@ -134,15 +135,17 @@ prose
 prose-adjacent
 "
 
-# The three committed paths, repo-relative. CI deletes exactly these before
+# The five committed paths, repo-relative. CI deletes exactly these before
 # regenerating and diffs exactly these afterwards; if the generator ever writes
 # somewhere else, `git diff` on a path nothing wrote to reports no diff and the
 # gate goes green on stale bindings. This list is the single record of what
-# those three places must agree on, and it is checked against both.
+# those five places must agree on, and it is checked against both.
 EXPECTED_OUTPUTS="
 swift:bindings/react-native/ios/Generated
 kotlin:bindings/react-native/android/src/main/java
 python:bindings/python/offline_protocol_sdk
+ruby:bindings/ruby/lib
+java:bindings/java/src/main/java
 "
 
 # Total number of assertions a healthy run makes. This is the backstop for the
@@ -157,7 +160,7 @@ python:bindings/python/offline_protocol_sdk
 # purpose. That is the intended cost: the failure is loud, names the expected
 # and actual counts, and updating it is a deliberate one-line acknowledgement
 # that the guard's coverage changed.
-EXPECTED_ASSERTIONS=54
+EXPECTED_ASSERTIONS=69
 
 FAILURES=0
 ASSERTIONS=0
@@ -249,7 +252,7 @@ ci_step_body() {
 
 echo "Guarding the shared binding generator..."
 
-assert_list_size EXPECTED_OUTPUTS 3 "$EXPECTED_OUTPUTS"
+assert_list_size EXPECTED_OUTPUTS 5 "$EXPECTED_OUTPUTS"
 assert_list_size DELEGATING_CALLERS 6 "$DELEGATING_CALLERS"
 assert_list_size NATIVE_BUILD_ALIASES 3 "$NATIVE_BUILD_ALIASES"
 # EXPECTED_OUTPUTS is covered by assert_set_equals against a hardcoded literal;
@@ -281,7 +284,7 @@ trap 'rm -rf "$STUB_ROOT"' EXIT
 # a temp dir and moving) report "never generated <language>" — a false failure
 # whose message points at the wrong thing entirely.
 make_stub() {
-  local bin_dir="$1" reported="$2"
+  local bin_dir="$1" reported="$2" java_reported="${3:-0.5.2}"
   mkdir -p "$bin_dir"
   cat >"$bin_dir/uniffi-bindgen" <<STUB
 #!/usr/bin/env bash
@@ -294,6 +297,20 @@ printf '%s\0' "\$@" >"\$(mktemp "\$STUB_LOG_DIR/call-XXXXXX")"
 exit 0
 STUB
   chmod +x "$bin_dir/uniffi-bindgen"
+
+  # The Java generator has no --language, so the stub logs one for it: the
+  # per-language checks below then read all five calls the same way.
+  cat >"$bin_dir/uniffi-bindgen-java" <<STUB
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "--version" ]]; then
+  echo "uniffi-bindgen-java $java_reported"
+  exit 0
+fi
+mkdir -p "\$STUB_LOG_DIR"
+printf '%s\0' --language java "\$@" >"\$(mktemp "\$STUB_LOG_DIR/call-XXXXXX")"
+exit 0
+STUB
+  chmod +x "$bin_dir/uniffi-bindgen-java"
 }
 
 # Value of `--flag value` or `--flag=value`, from a NUL-separated argv file.
@@ -374,10 +391,10 @@ else
 fi
 
 call_count="$(find "$call_dir" -type f | wc -l | tr -d ' ')"
-if [[ "$call_count" -eq 3 ]]; then
-  pass "it invoked bindgen exactly 3 times — one per language"
+if [[ "$call_count" -eq 5 ]]; then
+  pass "it invoked bindgen exactly 5 times — one per language"
 else
-  fail "it invoked bindgen $call_count time(s), expected 3 (Swift, Kotlin, Python)"
+  fail "it invoked bindgen $call_count time(s), expected 5 (Swift, Kotlin, Python, Ruby, Java)"
 fi
 
 languages_seen=""
@@ -445,7 +462,26 @@ done <<EOF
 $EXPECTED_OUTPUTS
 EOF
 
-assert_set_equals "the per-language checks" "swift kotlin python" "$languages_seen"
+assert_set_equals "the per-language checks" "swift kotlin python ruby java" "$languages_seen"
+
+# Ruby is the one language generated with a config: without it the generated
+# code loads a library named after the namespace, which no build produces, and
+# the failure is a LoadError in the consumer's first require, not here. The
+# generator ignores a config key it does not know, so only the argument itself
+# can be pinned at this level.
+ruby_call=""
+for candidate in "$call_dir"/*; do
+  [[ -f "$candidate" ]] || continue
+  if [[ "$(arg_value "$candidate" --language || true)" == "ruby" ]]; then
+    ruby_call="$candidate"
+    break
+  fi
+done
+if [[ -n "$ruby_call" && "$(arg_value "$ruby_call" --config || true)" == "$REPO_ROOT/bindings/ruby/uniffi.toml" ]]; then
+  pass "ruby is generated with bindings/ruby/uniffi.toml"
+else
+  fail "ruby is not generated with --config bindings/ruby/uniffi.toml — the generated code would load a library the build does not produce"
+fi
 
 # ---------------------------------------------------------------------------
 # 3. Behavioral: the version gate actually rejects a mismatched bindgen.
@@ -477,6 +513,45 @@ else
   else
     fail "$GENERATOR refused the mismatched bindgen only after invoking it $bad_calls time(s) — the bindings were already written with the wrong bindgen"
   fi
+fi
+
+# The Java generator is versioned apart from uniffi and tracks it by minor, so
+# it needs the same refusal: a 0.6.x generator emits Java that checks a different
+# FFI contract and fails at its first call. The uniffi-bindgen stub here agrees
+# with the pin, which makes the Java series the only thing that can refuse.
+bad_java_bin="$STUB_ROOT/bad-java"
+make_stub "$bad_java_bin" "$PIN_MAJOR.$PIN_MINOR.0" "0.6.0"
+
+if [[ ! -x "$bad_java_bin/uniffi-bindgen-java" ]]; then
+  fail "the mismatched-Java-bindgen stub was not created — this check would pass vacuously"
+elif mkdir -p "$STUB_ROOT/bad-java-calls" \
+  && PATH="$bad_java_bin:$PATH" STUB_LOG_DIR="$STUB_ROOT/bad-java-calls" bash "$GENERATOR" >/dev/null 2>&1; then
+  fail "$GENERATOR generated with a uniffi-bindgen-java outside the series that matches the crate pin"
+else
+  bad_java_calls="$(find "$STUB_ROOT/bad-java-calls" -type f | wc -l | tr -d ' ')"
+  if [[ "$bad_java_calls" -eq 0 ]]; then
+    pass "a uniffi-bindgen-java outside its series is rejected before anything is written"
+  else
+    fail "$GENERATOR refused the mismatched Java bindgen only after $bad_java_calls call(s) — Swift, Kotlin, Python or Ruby was already written"
+  fi
+fi
+
+# The exact Java generator release is written down wherever someone is told to
+# install it, and only the series is checked at run time. A moved pin that misses
+# one place leaves an install that still passes the series gate but is not what
+# CI verified, so every literal is held to the script's JAVA_BINDGEN_VERSION.
+JAVA_VERSION="$(sed -n 's/^JAVA_BINDGEN_VERSION="\([0-9.]*\)"$/\1/p' "$GENERATOR" | head -1)"
+if [[ ! "$JAVA_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  fail "could not read JAVA_BINDGEN_VERSION from $GENERATOR — the pin-agreement checks would pass vacuously"
+else
+  java_pins="$(git grep -hoE 'uniffi-bindgen-java --version [0-9]+\.[0-9]+\.[0-9]+' -- . ':!scripts/tests' | awk '{print $3}' | sort -u)"
+  if [[ -z "$java_pins" ]]; then
+    fail "no document or workflow names a uniffi-bindgen-java version — the scan found nothing to compare"
+  else
+    assert_set_equals "every written uniffi-bindgen-java install" "$JAVA_VERSION" "$(printf '%s' "$java_pins" | tr '\n' ' ' | sed 's/ $//')"
+  fi
+  release_pin="$(sed -n 's/^  UNIFFI_BINDGEN_JAVA_VERSION: "\([0-9.]*\)"$/\1/p' .github/workflows/release.yml | head -1)"
+  assert_set_equals "the release workflow's Java generator version" "$JAVA_VERSION" "$release_pin"
 fi
 
 # ---------------------------------------------------------------------------
@@ -557,6 +632,7 @@ fixtures="$STUB_ROOT/fixtures"
 mkdir -p "$fixtures"
 
 printf 'uniffi-bindgen generate x.udl --language swift\n'            >"$fixtures/hit-inline"
+printf 'uniffi-bindgen-java generate x.udl --out-dir out\n'         >"$fixtures/hit-java"
 printf 'uniffi-bindgen \\\n  generate x.udl --language kotlin\n'     >"$fixtures/hit-continued"
 printf 'uniffi-bindgen --config u.toml generate x.udl\n'             >"$fixtures/hit-global-option"
 printf 'cargo run --bin uniffi-bindgen -- generate x.udl\n'          >"$fixtures/hit-cargo-run"
@@ -574,7 +650,7 @@ printf 'the uniffi-bindgen generator produces code\n'                >"$fixtures
 # the `-f` guard only fires when *nothing* matches. These negative controls are
 # the only evidence INVOCATION can fire at all, so quietly shrinking them is
 # the purest form of the vacuous pass.
-assert_list_size HIT_FIXTURES 8 "$HIT_FIXTURES"
+assert_list_size HIT_FIXTURES 9 "$HIT_FIXTURES"
 assert_list_size MISS_FIXTURES 3 "$MISS_FIXTURES"
 assert_no_duplicates HIT_FIXTURES "$HIT_FIXTURES"
 assert_no_duplicates MISS_FIXTURES "$MISS_FIXTURES"

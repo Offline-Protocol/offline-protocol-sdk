@@ -11,6 +11,10 @@
 #![allow(unsafe_code)] // Required for UniFFI generated scaffolding
 #![allow(missing_docs)] // Types are documented in offline_protocol.udl
 
+#[cfg(test)]
+mod build_profile_tests;
+#[cfg(feature = "capi")]
+pub mod capi;
 mod host_log;
 
 use offline_protocol::{
@@ -2801,7 +2805,20 @@ impl OfflineProtocol {
                     .as_ref()
                     .cloned();
                 if let Some(callback) = callback_arc {
-                    callback.on_event(event_json.clone());
+                    // A foreign callback that throws reaches here as a panic:
+                    // UniFFI has no error type to lift a void callback's
+                    // exception into. Isolated here rather than left to the
+                    // engine's own isolation so the polling queue below still
+                    // gets the event, and the miss is named by type (#514).
+                    let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        callback.on_event(event_json.clone());
+                    }));
+                    if delivered.is_err() {
+                        tracing::error!(
+                            event = event.telemetry_name(),
+                            "EventCallback.on_event threw; the binding missed this event",
+                        );
+                    }
                 }
 
                 // Add to event queue for polling
@@ -3666,6 +3683,9 @@ impl OfflineProtocol {
             forward_info,
             via_transport,
             app_id: options.app_id,
+            // Ephemeral sends reach the browser binding only so far; the UDL
+            // record gains the field when a native binding needs it (ADR 0032).
+            ephemeral: false,
         };
 
         let message_id = protocol
@@ -6036,6 +6056,53 @@ impl OfflineProtocol {
         self.send_media(recipient, file_data, file_name, ContentType::File, None)
     }
 
+    /// Reads a file from `file_path` on the native filesystem and sends it as
+    /// a generic attachment (same semantics as [`Self::send_file`], including
+    /// `ContentType::File`).
+    ///
+    /// Unlike `send_file`, which takes the bytes already in memory on the
+    /// caller side, this call reads the file inside the Rust core. A React
+    /// Native caller passes a path instead of a base64 string, so nothing is
+    /// staged in the JavaScript heap, in the bridge buffer, or (on Android) as
+    /// a `List<UByte>` with one boxed object per byte. The file is read once
+    /// into the Rust heap and chunked there; the chunker copies each slice,
+    /// so the peak while chunking is about twice the file size, and the chunk
+    /// set lives for the transfer, as it does for [`Self::send_file`]. The
+    /// read is not streamed.
+    ///
+    /// `file_path` is an absolute path or a `file://` URI (percent-encoded,
+    /// as `expo-file-system` and the platform pickers produce it); the
+    /// scheme is stripped here so every caller does not hand-roll it. Any
+    /// other scheme, including Android's `content://`, is refused: such a
+    /// URI names a content provider, not a file, and the caller must copy it
+    /// to a file first.
+    ///
+    /// Every refusal is [`ProtocolError::InvalidArgument`] and happens before
+    /// a byte is read:
+    ///
+    /// - a missing file or a permission failure;
+    /// - anything that is not a regular file. A FIFO would block this thread
+    ///   at open forever, and a device file such as `/dev/zero` reports a
+    ///   size of zero and would grow the buffer until the process aborts,
+    ///   which is the out-of-memory failure this entry point exists to
+    ///   remove;
+    /// - a file larger than the engine's transfer limit (100 MiB), which the
+    ///   engine would otherwise refuse only after the whole file was in
+    ///   memory.
+    ///
+    /// The read itself is bounded by the same limit, so a file that grows
+    /// between the check and the read is refused rather than read without
+    /// bound. The path is not retained after the read completes.
+    pub fn send_file_from_path(
+        &self,
+        recipient: String,
+        file_path: String,
+        file_name: String,
+    ) -> Result<String, ProtocolError> {
+        let bytes = read_send_file(&file_path)?;
+        self.send_media(recipient, bytes, file_name, ContentType::File, None)
+    }
+
     /// Processes a received file chunk (manual path, for platforms handling
     /// their own chunk routing outside the protocol receive loop).
     ///
@@ -8135,9 +8202,112 @@ mod error_mapping_tests {
     }
 }
 
+/// Resolves the `file_path` argument of
+/// [`OfflineProtocol::send_file_from_path`] to a filesystem path: a plain path
+/// passes through, a `file://` URI loses its scheme and is percent-decoded,
+/// and any other scheme is refused.
+fn send_file_path(file_path: &str) -> Result<std::path::PathBuf, ProtocolError> {
+    let invalid = |why: &str| {
+        ProtocolError::InvalidArgument(format!("send_file_from_path: {}: {}", file_path, why))
+    };
+    let Some(rest) = file_path.strip_prefix("file://") else {
+        if let Some((scheme, _)) = file_path.split_once("://") {
+            if !scheme.is_empty()
+                && scheme
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+            {
+                return Err(invalid(&format!(
+                    "the {}:// scheme names no file; copy the content to a file and pass its path",
+                    scheme
+                )));
+            }
+        }
+        return Ok(std::path::PathBuf::from(file_path));
+    };
+    // `file:///abs` and `file://localhost/abs` both name `/abs`.
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !rest.starts_with('/') {
+        return Err(invalid(
+            "a file:// URI must name an absolute path on this host",
+        ));
+    }
+    let raw = rest.as_bytes();
+    let mut decoded = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'%' {
+            let hex = raw
+                .get(i + 1..i + 3)
+                .and_then(|h| std::str::from_utf8(h).ok())
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+                .ok_or_else(|| invalid("malformed percent-encoding"))?;
+            decoded.push(hex);
+            i += 3;
+        } else {
+            decoded.push(raw[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(decoded)
+        .map(std::path::PathBuf::from)
+        .map_err(|_| invalid("the decoded path is not UTF-8"))
+}
+
+/// Reads the file behind [`OfflineProtocol::send_file_from_path`], refusing
+/// before the first byte anything that is not a regular file or is over the
+/// engine's transfer limit, and bounding the read by that limit.
+fn read_send_file(file_path: &str) -> Result<Vec<u8>, ProtocolError> {
+    use std::io::Read;
+
+    let invalid = |why: String| {
+        ProtocolError::InvalidArgument(format!("send_file_from_path: {}: {}", file_path, why))
+    };
+    let path = send_file_path(file_path)?;
+    // The engine builds its transfer manager from the default configuration,
+    // and the interface cannot change it, so this is the limit `chunk_file`
+    // enforces. Checking it here refuses before the read instead of after.
+    let max = offline_protocol::file_transfer::FileTransferConfig::default().max_file_size;
+
+    // `metadata` stats without opening: opening a FIFO would block here.
+    let meta = std::fs::metadata(&path).map_err(|e| invalid(format!("cannot read: {}", e)))?;
+    if !meta.is_file() {
+        return Err(invalid("not a regular file".to_string()));
+    }
+    if meta.len() > max {
+        return Err(invalid(format!(
+            "file size {} exceeds maximum {}",
+            meta.len(),
+            max
+        )));
+    }
+
+    let file = std::fs::File::open(&path).map_err(|e| invalid(format!("cannot read: {}", e)))?;
+    // Re-check on the open handle: the path may have been swapped since.
+    let meta = file
+        .metadata()
+        .map_err(|e| invalid(format!("cannot read: {}", e)))?;
+    if !meta.is_file() {
+        return Err(invalid("not a regular file".to_string()));
+    }
+    let capacity = usize::try_from(meta.len().min(max)).unwrap_or(0);
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(max + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| invalid(format!("cannot read: {}", e)))?;
+    if bytes.len() as u64 > max {
+        return Err(invalid(format!(
+            "file grew past the maximum {} while being read",
+            max
+        )));
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     mod file_stores;
+    mod flutter_bridge_guards;
 
     use super::*;
     use std::collections::HashMap;
@@ -8283,7 +8453,7 @@ mod tests {
              false for every app that omits the section"
         );
 
-        let swift = read(rn.join("ios/OfflineProtocolModule.swift"));
+        let swift = read(rn.join("ios/ProtocolConfigParser.swift"));
         assert!(
             swift.contains("raw[\"data\"]") && swift.contains("config.dataEnabled = dataEnabled"),
             "the Swift parser must read the data section AND apply it to the \
@@ -8359,7 +8529,7 @@ mod tests {
              high often enough to be worth honouring"
         );
 
-        let swift = read(rn.join("ios/OfflineProtocolModule.swift"));
+        let swift = read(rn.join("ios/ProtocolConfigParser.swift"));
         assert!(
             swift.contains("raw[\"security\"]")
                 && swift.contains("config.controlFreshnessEnforced = controlFreshnessEnforced"),
@@ -8841,6 +9011,148 @@ mod tests {
         assert_eq!(progress.chunks_sent, 1);
         assert_eq!(progress.total_chunks, 2);
         assert!(progress.percentage < 100);
+    }
+
+    const SEND_FILE_RECIPIENT: &str = "off1q0000000000000000000000000000000000000qapn78n";
+
+    /// A per-process scratch path, so two test binaries on one machine never
+    /// share a fixture.
+    fn send_file_fixture(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("op-sdk-sffp-{}-{}", std::process::id(), name))
+    }
+
+    fn send_file_from_path_error(path: &str) -> ProtocolError {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol
+            .send_file_from_path(
+                SEND_FILE_RECIPIENT.to_string(),
+                path.to_string(),
+                "x.bin".to_string(),
+            )
+            .unwrap_err()
+    }
+
+    #[test]
+    fn send_file_from_path_reports_a_missing_path_before_the_engine_state() {
+        // The engine is stopped, but the path guard runs first: a typo is
+        // reported as a path problem, never as "not started".
+        let err = send_file_from_path_error("/definitely/not/a/real/path-fixture");
+        match err {
+            ProtocolError::InvalidArgument(message) => {
+                assert!(message.contains("send_file_from_path"), "got: {message}");
+                assert!(
+                    message.contains("/definitely/not/a/real/path-fixture"),
+                    "got: {message}"
+                );
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_file_from_path_refuses_a_directory_without_reading() {
+        let dir = send_file_fixture("dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = send_file_from_path_error(&dir.to_string_lossy());
+        let _ = std::fs::remove_dir(&dir);
+        match err {
+            ProtocolError::InvalidArgument(message) => {
+                assert!(message.contains("not a regular file"), "got: {message}")
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn send_file_from_path_refuses_a_device_file_that_would_read_forever() {
+        // `/dev/zero` reports size zero and never ends; reading it would grow
+        // the buffer until the process aborts.
+        let err = send_file_from_path_error("/dev/zero");
+        match err {
+            ProtocolError::InvalidArgument(message) => {
+                assert!(message.contains("not a regular file"), "got: {message}")
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_file_from_path_refuses_a_file_over_the_limit_before_reading_it() {
+        // A sparse file: its length is over the limit without the disk or
+        // the test holding 100 MiB. The refusal comes from the size check,
+        // not from the engine after a full read.
+        let path = send_file_fixture("oversized.bin");
+        let max = offline_protocol::file_transfer::FileTransferConfig::default().max_file_size;
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(max + 1)
+            .unwrap();
+        let err = send_file_from_path_error(&path.to_string_lossy());
+        let _ = std::fs::remove_file(&path);
+        match err {
+            ProtocolError::InvalidArgument(message) => {
+                // The engine's own after-read refusal says "exceeds maximum"
+                // too, but without the entry point's prefix.
+                assert!(
+                    message.starts_with("send_file_from_path:")
+                        && message.contains("exceeds maximum"),
+                    "got: {message}"
+                )
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_file_from_path_hands_a_readable_file_to_the_engine() {
+        // The read succeeds, so the refusal is the stopped engine's own.
+        let path = send_file_fixture("readable.bin");
+        std::fs::write(&path, [0u8; 128]).unwrap();
+        let err = send_file_from_path_error(&path.to_string_lossy());
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(err, ProtocolError::NotStarted), "got: {err:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn send_file_from_path_accepts_a_percent_encoded_file_uri() {
+        let path = send_file_fixture("with space.bin");
+        std::fs::write(&path, [0u8; 16]).unwrap();
+        let uri = format!("file://{}", path.to_string_lossy().replace(' ', "%20"));
+        let err = send_file_from_path_error(&uri);
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(err, ProtocolError::NotStarted), "got: {err:?}");
+    }
+
+    #[test]
+    fn send_file_from_path_resolves_file_uris_and_refuses_other_schemes() {
+        assert_eq!(
+            send_file_path("/plain/path").unwrap(),
+            std::path::PathBuf::from("/plain/path")
+        );
+        assert_eq!(
+            send_file_path("file:///a%20b/c.json").unwrap(),
+            std::path::PathBuf::from("/a b/c.json")
+        );
+        assert_eq!(
+            send_file_path("file://localhost/a").unwrap(),
+            std::path::PathBuf::from("/a")
+        );
+        for refused in [
+            "content://com.android.providers/document/1",
+            "file://otherhost/a",
+            "file:///bad%2",
+            "file:///bad%zz",
+        ] {
+            assert!(
+                matches!(
+                    send_file_path(refused),
+                    Err(ProtocolError::InvalidArgument(_))
+                ),
+                "{refused} must be refused"
+            );
+        }
     }
 
     fn create_reticulum_config() -> ProtocolConfig {
@@ -11695,7 +12007,7 @@ mod tests {
         };
         let udl = read(manifest.join("src/offline_protocol.udl"));
         let swift_reader = read(rn.join("ios/EncryptionConfigReader.swift"));
-        let swift_module = read(rn.join("ios/OfflineProtocolModule.swift"));
+        let swift_parser = read(rn.join("ios/ProtocolConfigParser.swift"));
         let kotlin_parser =
             read(rn.join("android/src/main/java/com/offlineprotocol/ProtocolConfigParser.kt"));
         let index = read(rn.join("src/index.ts"));
@@ -11732,8 +12044,8 @@ mod tests {
                 );
             }
             assert!(
-                swift_module.contains(&format!("encryption.{camel}")),
-                "OfflineProtocolModule.swift does not pass {camel} to the ProtocolConfig"
+                swift_parser.contains(&format!("encryption.{camel}")),
+                "ProtocolConfigParser.swift does not pass {camel} to the ProtocolConfig"
             );
             assert!(
                 kotlin_parser.contains(&format!("{camel} = {camel}")),
@@ -11870,6 +12182,30 @@ mod tests {
         assert!(
             package.contains("js-ci-harness/telemetry-config.test.js"),
             "the JS harness test for the section must run under test:js"
+        );
+
+        // The C binding decodes the section by the definition's own field
+        // list, so every field but the two platform ones is read without a
+        // per-field line to pin. What has to be pinned is that it fills `os`
+        // itself and refuses one from the caller, before the decoder runs.
+        let capi = read(manifest.join("src/capi/mod.rs"));
+        let call = capi
+            .split_once("pub fn call(&self")
+            .expect("the C dispatcher's call")
+            .1;
+        assert!(
+            call.contains("if method == \"enable_telemetry\" {")
+                && call.contains("fill_telemetry_platform(&mut params)?;"),
+            "the C binding must fill the telemetry platform on enable_telemetry"
+        );
+        let fill = capi
+            .split_once("fn fill_telemetry_platform(")
+            .expect("the C binding's platform filler")
+            .1;
+        assert!(
+            fill.contains("config.contains_key(\"os\")")
+                && fill.contains("config.insert(\"os\".to_owned(), TELEMETRY_OS.encode())"),
+            "the C binding must refuse a caller's os and fill its own"
         );
     }
 
@@ -13754,6 +14090,234 @@ mod tests {
     ///    GATT read later, together; if a refactor separates them,
     ///    `fragment_fallback_count` starts ticking in production and nothing
     ///    fails at compile time.
+    /// The two outbound fragment queues share one cap and one backed-up mark,
+    /// the cap holds a whole maximum-size message, and the mark sits below it.
+    ///
+    /// The drain checks the mark before every pop, so a peer never holds more
+    /// than the mark and the overflow discard stays unreachable. With a cap of
+    /// 100 the 2026-10-19 volume test never delivered a 16 KB or 30 KB message
+    /// from Android. The mark is small because the core sees only what it
+    /// still holds: at 3/4 of the cap the bridge pulled 576 fragments ahead of
+    /// the link and the core resent everything behind them. The values are
+    /// hand-mirrored (C5), so a drifted copy would leave one platform tearing
+    /// or resending what the other delivers. iOS also has to hand the cap to
+    /// both of its outbound queues, since it constructs them explicitly.
+    #[test]
+    fn the_outbound_fragment_queue_cap_holds_a_maximum_message_on_both_platforms() {
+        fn value_after(source: &str, marker: &str) -> usize {
+            let rest = &source[source
+                .find(marker)
+                .unwrap_or_else(|| panic!("`{marker}` is gone"))
+                + marker.len()..];
+            rest.trim_start()
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .unwrap_or_else(|_| panic!("`{marker}` is not followed by a number"))
+        }
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/OutboundFragmentQueue.kt",
+        );
+        let swift = rn_source_code_only("ios/OutboundFragmentQueue.swift");
+        let manager = rn_source_code_only("ios/BleManager.swift");
+
+        let android = value_after(&kotlin, "const val DEFAULT_MAX_PER_PEER: Int =");
+        let ios = value_after(&swift, "static let defaultMaxPerPeer =");
+        assert_eq!(
+            android, ios,
+            "the two outbound fragment queue caps must match"
+        );
+        let largest = offline_protocol_transport::constants::BLE_MAX_FRAGMENT_COUNT;
+        assert!(
+            android >= largest,
+            "the cap ({android}) must hold a whole {largest}-fragment message"
+        );
+        let android_mark = value_after(&kotlin, "const val DEFAULT_BACKPRESSURE_MARK: Int =");
+        let ios_mark = value_after(&swift, "static let defaultBackpressureMark =");
+        assert_eq!(
+            android_mark, ios_mark,
+            "the two outbound fragment queue marks must match"
+        );
+        assert!(
+            0 < android_mark && android_mark < android,
+            "the backed-up mark ({android_mark}) must sit below the cap ({android})"
+        );
+        assert!(
+            manager.contains(
+                "private let MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER = OutboundFragmentQueue.defaultMaxPerPeer"
+            ) && manager.matches("maxPerPeer: MAX_PENDING_OUTBOUND_FRAGMENTS_PER_PEER,").count() == 2,
+            "both iOS outbound queues must be built with the shared outbound cap"
+        );
+    }
+
+    /// The bridge wiring the 2026-10-19 volume-test fixes depend on, which CI
+    /// only type-checks. Each line below names the failure its absence
+    /// brought back:
+    ///
+    /// - Both drains stop before the destructive pop only for a recipient with
+    ///   a link. Counting every recipient stopped every peer's egress behind
+    ///   one whose link had closed; checking after the pop overflowed the cap.
+    /// - The iOS connect timeout cancels only the attempt that armed it.
+    ///   Capturing only the peripheral cancelled a healthy redial armed after
+    ///   a failed dial, and the cancel was reported as the peer lost.
+    /// - iOS forgets a link's write stall on connect and disconnect, so a
+    ///   reconnected link is not torn down by the clock of the dead one.
+    /// - iOS retires a dropped identifier, instead of reporting the peer lost,
+    ///   on both connect-failure callbacks while the peer is linked elsewhere,
+    ///   and only a write the link took ends a stall.
+    /// - Android's forced refresh restarts the advertisement only through the
+    ///   policy that keeps a linked peer's address pair stable (ADR 0030).
+    #[test]
+    fn the_ble_bridges_keep_the_volume_test_wiring() {
+        fn swift_body<'a>(source: &'a str, signature: &str) -> &'a str {
+            let start = source
+                .find(signature)
+                .unwrap_or_else(|| panic!("BleManager.swift lost `{signature}`"));
+            let rest = &source[start + signature.len()..];
+            let end = [" func ", " private func ", " public func "]
+                .iter()
+                .filter_map(|marker| rest.find(marker))
+                .min()
+                .unwrap_or(rest.len());
+            &rest[..end]
+        }
+        let swift = rn_source_code_only("ios/BleManager.swift");
+        let kotlin = rn_source_code_only(
+            "android/src/main/java/com/offlineprotocol/ble/BleTransportFacade.kt",
+        );
+
+        // Stop before the pop, for linked recipients only.
+        let pop = swift
+            .find("self.protocolInstance.bleGetNextFragment()")
+            .expect("the iOS drain pops from the core");
+        let stop = swift
+            .find("self.outboundFragments.anyBackedUp(deliverable: deliverable) || self.notifyFragments.anyBackedUp(deliverable: deliverable)")
+            .expect("the iOS drain must stop on backed-up recipients that have a link, in both queues");
+        assert!(
+            stop < pop,
+            "the iOS drain must stop before the pop, not after it"
+        );
+        assert_eq!(swift.matches("bleGetNextFragment()").count(), 1);
+        assert!(
+            !swift.contains("anyBackedUp() ||"),
+            "an unfiltered anyBackedUp() is back in the iOS drain"
+        );
+
+        let kotlin_pops: Vec<usize> = kotlin
+            .match_indices("protocol.bleGetNextFragment()")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            kotlin_pops.len(),
+            2,
+            "the Android drain and the poll floor are the two pops"
+        );
+        let kotlin_stops: Vec<usize> = kotlin
+            .match_indices("outboundQueue.anyBackedUp { hasDeliverableLink(it) }")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            kotlin_stops.len(),
+            2,
+            "each Android pop needs its own linked-only stop"
+        );
+        for (stop, pop) in kotlin_stops.iter().zip(&kotlin_pops) {
+            assert!(stop < pop, "an Android pop runs before its backed-up stop");
+        }
+        assert!(
+            !kotlin.contains("anyBackedUp()"),
+            "an unfiltered anyBackedUp() is back on Android"
+        );
+
+        // The connect timeout belongs to its attempt.
+        let attempt = swift_body(&swift, "private func performConnectionAttempt(");
+        assert!(
+            attempt.contains("connectTimeoutTokens[peripheral.identifier] = attempt")
+                && attempt.contains("self.connectTimeoutTokens[peripheral.identifier] == attempt,"),
+            "the iOS connect timeout must be bound to the attempt that armed it"
+        );
+
+        // The stall clock and the timeout token do not outlive a link.
+        let did_connect = swift_body(&swift, "func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {");
+        let did_fail = swift_body(&swift, "func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {");
+        let did_disconnect = swift_body(&swift, "func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {");
+        for (name, body) in [
+            ("didConnect", did_connect),
+            ("didDisconnectPeripheral", did_disconnect),
+        ] {
+            assert!(
+                body.contains("writeStallPolicy.forget(peripheral.identifier)"),
+                "{name} must forget the link's write stall"
+            );
+            assert!(
+                body.contains("connectTimeoutTokens.removeValue(forKey: peripheral.identifier)"),
+                "{name} must drop the link's connect timeout"
+            );
+        }
+        assert!(
+            did_fail.contains("connectTimeoutTokens.removeValue(forKey: peripheral.identifier)")
+        );
+
+        // A peer linked elsewhere is retired, not lost, on both callbacks, and
+        // the check runs before anything reports or redials.
+        for (name, body, before) in [
+            (
+                "didFailToConnect",
+                did_fail,
+                "guard retryCount <= MAX_CONNECTION_RETRIES",
+            ),
+            (
+                "didDisconnectPeripheral",
+                did_disconnect,
+                "if wasConnected {",
+            ),
+        ] {
+            let retire = body
+                .find("if retireIfLinkedElsewhere(peripheral.identifier, wasConnected:")
+                .unwrap_or_else(|| {
+                    panic!("{name} must retire an identifier of a peer linked elsewhere")
+                });
+            let next = body
+                .find(before)
+                .unwrap_or_else(|| panic!("{name} lost `{before}`"));
+            assert!(
+                retire < next,
+                "{name} must retire before it reports or redials"
+            );
+        }
+        // A dial that never connected unmaps the identifier, so the monitor
+        // does not redial a departed peer forever.
+        assert!(
+            did_disconnect
+                .contains("connections.removePeripheralDeviceId(for: peripheral.identifier)"),
+            "the never-connected branch must unmap the identifier"
+        );
+
+        // Only a write the link took, or a ready callback, ends a stall.
+        let ready = swift_body(
+            &swift,
+            "public func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {",
+        );
+        assert!(ready.contains("writeStallPolicy.noteWritable(peripheral.identifier)"));
+        assert!(swift.contains(
+            "peripheral.writeValue(data, for: characteristic, type: .withoutResponse) writeStallPolicy.noteWritable(peripheral.identifier)"
+        ));
+        assert_eq!(swift.matches("writeStallPolicy.noteRefused(").count(), 1);
+        assert!(
+            swift.contains("writeStallPolicy.reset()"),
+            "stop must reset every link's stall"
+        );
+
+        // Android's forced refresh goes through the policy.
+        assert!(
+            kotlin.contains(
+                "if (AdvertisingRefreshPolicy.restartsAdvertising(identifiedLinks, leAdvertiser.isAdvertising)) { refreshAdvertising(\"forced_refresh\")"
+            ),
+            "the forced refresh must restart the advertisement only through AdvertisingRefreshPolicy"
+        );
+    }
+
     #[test]
     fn react_native_ble_announces_only_cross_checked_addresses() {
         let swift = rn_source_code_only("ios/BleManager.swift");
@@ -14121,8 +14685,13 @@ mod tests {
             .find("is PeerIdentityBinding.Outcome.Verified ->")
             .expect("handleIdentityRead must have a verified arm");
         let check = identity
-            .find("if (host.connections.hasOtherClientLink(outcome.peerId, address)) {")
-            .expect("the verified arm must check for another client link to the peer");
+            .find(
+                "if (host.connections.hasOtherUsableLink(outcome.peerId, address, host::isCentralSubscribed)) {",
+            )
+            .expect(
+                "the verified arm must check for another usable link to the peer: a client \
+                 link, or its subscribed link to our server (ADR 0030)",
+            );
         let refuse = identity
             .find("refuseDuplicateLink(gatt, outcome.peerId)")
             .expect("a duplicate must be refused through refuseDuplicateLink");
@@ -14971,8 +15540,19 @@ mod tests {
         let drain = &facade[drain_start..];
         let drain = &drain[..rn_kotlin_body_end(drain)];
         assert!(
-            drain.contains(
-                "val hasConnection = address?.let { connections.getGatt(it) } != null || \
+            drain.contains("if (!hasDeliverableLink(recipientId, address)) {"),
+            "the drain must decide a peer is linked through hasDeliverableLink"
+        );
+        let link_decl = "private fun hasDeliverableLink(";
+        let link_start = facade
+            .find(link_decl)
+            .expect("the facade decides deliverability in one place")
+            + link_decl.len();
+        let link = &facade[link_start..];
+        let link = &link[..rn_kotlin_body_end(link)];
+        assert!(
+            link.contains(
+                "address?.let { connections.getGatt(it) } != null || \
                  subscribedNotifyAddressFor(recipientId) != null"
             ),
             "the drain must treat a notify-subscribed peer as connected"
@@ -15129,27 +15709,77 @@ mod tests {
     /// bridgeless emit fails without the module seeing it. The field name is
     /// written in three languages; one that drifts makes `seq` undefined at JS,
     /// which reads as "an old native module" and silently reports nothing.
+    ///
+    /// Each module also keeps the events it numbered, so the TypeScript layer
+    /// fetches a lost one back instead of only reporting it. Every half of
+    /// that fails silently too: a module that stops recording, or a method
+    /// the bridge no longer exports, turns recovery back into a report.
     #[test]
     fn react_native_events_are_numbered_for_gap_detection() {
         let kotlin = rn_source_code_only(
             "android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt",
         );
+        let kotlin_ring =
+            rn_source_code_only("android/src/main/java/com/offlineprotocol/EventReplayRing.kt");
         let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        let swift_bridge = rn_source_code_only("ios/OfflineProtocolModule.m");
+        let swift_ring = rn_source_code_only("ios/EventReplayRing.swift");
+        let podspec = rn_source_code_only("MeshSdk.podspec");
         let ts = rn_source_code_only("src/index.ts");
+        let constants = rn_source_code_only("src/constants.ts");
         assert!(
             kotlin.contains("const val EVENT_SEQ_FIELD = \"seq\"")
-                && kotlin.contains("putInt(EVENT_SEQ_FIELD, eventSeq)")
-                && kotlin.contains("if (numbered) eventSeq += 1"),
+                && kotlin.contains("putInt(EVENT_SEQ_FIELD, eventSeq)"),
             "OfflineProtocolModule.kt must number every event on its event name as `seq`"
+        );
+        // Recorded after the emit returned and before the number moves on, in
+        // the block that spends it: an event recorded under the wrong number
+        // would be replayed in another's place (#514).
+        assert!(
+            kotlin.contains(
+                "if (numbered) { replayJson?.let { eventReplay.record(eventSeq, it) } eventSeq += 1 }"
+            ) && kotlin.contains("private val eventReplay = EventReplayRing()")
+                && kotlin.contains(
+                    "fun replayEvents(fromSeq: Double, toSeq: Double, promise: Promise)"
+                )
+                && kotlin.contains("eventReplay.replay(fromSeq.toInt(), toSeq.toInt())"),
+            "OfflineProtocolModule.kt must keep every numbered event for replayEvents"
         );
         assert!(
             swift.contains("static let eventSeqField = \"seq\"")
-                && swift.contains("numbered[Self.eventSeqField] = eventSeq"),
-            "OfflineProtocolModule.swift must number every event on its event name as `seq`"
+                && swift.contains(
+                    "numbered[Self.eventSeqField] = eventSeq if let eventJson = \
+                     numbered[\"eventJson\"] as? String { eventReplay.record(seq: eventSeq, \
+                     eventJson: eventJson) } eventSeq += 1"
+                ),
+            "OfflineProtocolModule.swift must number every event as `seq` and keep it for replay"
         );
         assert!(
-            ts.contains("(data: { eventJson: string; seq?: number }) => { this.checkEventSequence(data.seq);"),
-            "index.ts must check each event's `seq` before handling it"
+            swift.contains("private let eventReplay = EventReplayRing()")
+                && swift.contains("@objc func replayEvents(_ fromSeq: NSNumber,")
+                && swift_bridge
+                    .contains("RCT_EXTERN_METHOD(replayEvents:(nonnull NSNumber *)fromSeq"),
+            "the iOS module must export replayEvents to JavaScript"
+        );
+        assert!(
+            podspec.contains("\"ios/EventReplayRing.swift\","),
+            "MeshSdk.podspec must ship ios/EventReplayRing.swift: the pod lists sources \
+             explicitly, so a missing entry is a link error in every consuming app"
+        );
+        assert!(
+            ts.contains(
+                "(data: { eventJson: string; seq?: number }) => { \
+                 this.admitNativeEvent(data.eventJson, data.seq); }"
+            ) && ts.contains("replayEvents.call(OfflineProtocolNativeModule, fromSeq, toSeq)"),
+            "index.ts must admit each event by its `seq` and fetch a gap back with replayEvents"
+        );
+        // Three capacities, one number: the TypeScript doc promises what the
+        // native rings keep.
+        assert!(
+            kotlin_ring.contains("const val DEFAULT_CAPACITY = 256")
+                && swift_ring.contains("static let defaultCapacity = 256")
+                && constants.contains("export const NATIVE_EVENT_REPLAY_CAPACITY = 256;"),
+            "the replay ring capacity must agree across Kotlin, Swift and TypeScript"
         );
     }
 
@@ -15159,7 +15789,11 @@ mod tests {
     /// `message_received`, `file_received` and `message_decryption_failed`
     /// each report one message the core has already ACKed, dedup-marked and
     /// dropped its queued copy of, so nothing will ever restate them and a
-    /// drop between the core and the app's handler is a lost message. Three
+    /// drop between the core and the app's handler is a lost message.
+    /// `message_delivered` and `message_failed` are the sender's half (#514):
+    /// each settles one outgoing message after its pending acknowledgement,
+    /// retry and outbox entry are gone, so they qualify for the same reason.
+    /// Three
     /// definitions and three holds have to agree for that not to happen —
     /// the native buffers (Kotlin `BUFFERED_INBOUND_EVENT_TYPES`, Swift
     /// `InboundEventBuffer.bufferedEventTypes`) cover the native→JS gap and
@@ -15170,10 +15804,12 @@ mod tests {
     /// periodic event here would replay stale state.
     #[test]
     fn react_native_buffered_inbound_event_set_matches_native() {
-        const INBOUND_TAGS: [&str; 3] = [
+        const INBOUND_TAGS: [&str; 5] = [
             "message_received",
             "file_received",
             "message_decryption_failed",
+            "message_delivered",
+            "message_failed",
         ];
 
         let rn_dir =
@@ -16050,6 +16686,85 @@ mod tests {
         );
     }
 
+    const INTERNET_CONFIGURE_MARKERS: &[&str] = &[
+        "wss://",
+        "setAuthToken",
+        "autoReconnect",
+        "maxReconnectAttempts",
+        "manager.configure",
+    ];
+
+    // InternetTransportBootstrap is the shared home for Flutter; React Native
+    // still inlines configureAndStartInternet on Android. Until RN delegates,
+    // both must keep the same configure knobs.
+    #[test]
+    fn internet_transport_bootstrap_keeps_rn_configure_invariants() {
+        let rn =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let bootstrap = std::fs::read_to_string(
+            rn.join("android/src/main/java/com/offlineprotocol/InternetTransportBootstrap.kt"),
+        )
+        .unwrap_or_else(|e| panic!("cannot read InternetTransportBootstrap.kt: {e}"));
+        let rn_module = std::fs::read_to_string(
+            rn.join("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt"),
+        )
+        .unwrap_or_else(|e| panic!("cannot read OfflineProtocolModule.kt: {e}"));
+        let rn_fn = rn_module
+            .split("private fun configureAndStartInternet")
+            .nth(1)
+            .and_then(|tail| tail.split("\n    private fun ").next())
+            .unwrap_or("");
+        assert!(
+            !rn_fn.is_empty(),
+            "OfflineProtocolModule.configureAndStartInternet not found: the guard needs a stable anchor"
+        );
+        for marker in INTERNET_CONFIGURE_MARKERS {
+            assert!(
+                bootstrap.contains(marker),
+                "InternetTransportBootstrap.kt missing `{marker}`"
+            );
+            assert!(
+                rn_fn.contains(marker),
+                "OfflineProtocolModule.configureAndStartInternet missing `{marker}`: \
+                 update InternetTransportBootstrap.kt or restore RN parity"
+            );
+        }
+    }
+
+    // Same parity pin for the Swift bootstrap and RN iOS module.
+    #[test]
+    fn internet_transport_bootstrap_swift_keeps_rn_configure_invariants() {
+        let rn =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        let bootstrap = std::fs::read_to_string(rn.join("ios/InternetTransportBootstrap.swift"))
+            .unwrap_or_else(|e| panic!("cannot read InternetTransportBootstrap.swift: {e}"));
+        let rn_module = std::fs::read_to_string(rn.join("ios/OfflineProtocolModule.swift"))
+            .unwrap_or_else(|e| panic!("cannot read OfflineProtocolModule.swift: {e}"));
+        let rn_fn = rn_module
+            .split("private func configureAndStartInternet")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("\n    private func configureAndStartReticulum")
+                    .next()
+            })
+            .unwrap_or("");
+        assert!(
+            !rn_fn.is_empty(),
+            "OfflineProtocolModule.configureAndStartInternet (Swift) not found: the guard needs a stable anchor"
+        );
+        for marker in INTERNET_CONFIGURE_MARKERS {
+            assert!(
+                bootstrap.contains(marker),
+                "InternetTransportBootstrap.swift missing `{marker}`"
+            );
+            assert!(
+                rn_fn.contains(marker),
+                "OfflineProtocolModule.configureAndStartInternet (Swift) missing `{marker}`: \
+                 update InternetTransportBootstrap.swift or restore RN parity"
+            );
+        }
+    }
+
     /// Every method React Native can reach on iOS is spelled the same way in
     /// both halves of the hand-written bridge, and hands over each argument
     /// the same way.
@@ -16652,7 +17367,18 @@ mod tests {
     /// and by that guard clause, not by this test.
     #[test]
     fn react_native_ios_bridge_bounds_every_byte_it_builds_from_javascript() {
-        let swift = rn_source_code_only("ios/OfflineProtocolModule.swift");
+        // Config parsing moved out of OfflineProtocolModule.swift (ADR 0025);
+        // every file that still narrows JavaScript numbers must stay bounded.
+        const SWIFT_JS_NUMERIC_SOURCES: &[&str] = &[
+            "ios/OfflineProtocolModule.swift",
+            "ios/ProtocolConfigParser.swift",
+            "ios/InitialRuntimeConfigApplier.swift",
+        ];
+        let swift = SWIFT_JS_NUMERIC_SOURCES
+            .iter()
+            .map(|rel| rn_source_code_only(rel))
+            .collect::<Vec<_>>()
+            .join(" ");
 
         /// Markers that bound a conversion at the point it is written.
         const BOUNDED: &[&str] = &[
@@ -16698,7 +17424,7 @@ mod tests {
 
         assert!(
             found >= 8,
-            "only found {found} UInt8 conversions in OfflineProtocolModule.swift; \
+            "only found {found} UInt8 conversions in {SWIFT_JS_NUMERIC_SOURCES:?}; \
              the scanner is broken, not the bridge"
         );
         assert!(

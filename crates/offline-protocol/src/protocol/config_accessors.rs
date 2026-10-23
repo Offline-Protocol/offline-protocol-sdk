@@ -308,9 +308,11 @@ impl OfflineProtocol {
     pub(crate) fn cleanup_expired_entries(&mut self) {
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
-        self.mesh_relay.maintain(std::time::Instant::now());
-        self.prune_stale_known_peers(std::time::Instant::now());
-        self.reachability.prune(std::time::Instant::now());
+        self.mesh_relay
+            .maintain(offline_protocol_core::time::Instant::now());
+        self.prune_stale_known_peers(offline_protocol_core::time::Instant::now());
+        self.reachability
+            .prune(offline_protocol_core::time::Instant::now());
         self.cleanup_expired_pending_messages_if_due();
         self.cleanup_outbox();
         self.mesh_services.cleanup_expired();
@@ -357,9 +359,28 @@ impl OfflineProtocol {
         self.cleanup_stale_media_state(StdDuration::from_secs(MEDIA_TRANSFER_STALE_TIMEOUT_SECS));
         #[cfg(feature = "data")]
         self.expire_attachment_fetches();
-        // Prune old timed-out ACKs that weren't cleaned up by normal retry flow
+        // Prune old timed-out ACKs that weren't cleaned up by normal retry flow.
+        //
+        // A timed-out entry still holds a slot its scheduled resend will
+        // reuse, so it must outlive the longest wait the retry ladder can
+        // schedule. A fixed five minutes equalled the default ladder's cap
+        // exactly: the slot of a message on its ninth retry was pruned just
+        // before that resend fired, the resend needed a fresh slot, and at
+        // capacity there was none.
         self.ack_manager
-            .prune_old_timeouts(std::time::Duration::from_secs(300)); // 5 minutes
+            .prune_old_timeouts(self.timed_out_ack_retention());
+    }
+
+    /// How long a timed-out pending ACK is kept before the prune drops it:
+    /// twice the longest gap between a timeout and its resend (the ACK timeout
+    /// plus the retry ladder's maximum delay).
+    pub(crate) fn timed_out_ack_retention(&self) -> std::time::Duration {
+        let reliability = &self.config.reliability;
+        let longest_gap_ms = reliability
+            .ack
+            .default_timeout_ms
+            .saturating_add(reliability.retry.max_delay_ms);
+        std::time::Duration::from_millis(longest_gap_ms.saturating_mul(2))
     }
 
     /// Evicts known peers not re-seen within `KNOWN_PEER_TTL_SECS`.
@@ -367,7 +388,7 @@ impl OfflineProtocol {
     /// This is the only removal path for peers on carriers without a
     /// disconnect signal (Internet, Reticulum, Nostr, WiFi Direct
     /// message-path senders). `now` is injected for test determinism.
-    pub(crate) fn prune_stale_known_peers(&mut self, now: std::time::Instant) {
+    pub(crate) fn prune_stale_known_peers(&mut self, now: offline_protocol_core::time::Instant) {
         let ttl = StdDuration::from_secs(KNOWN_PEER_TTL_SECS);
         let stale: Vec<String> = self
             .known_peers

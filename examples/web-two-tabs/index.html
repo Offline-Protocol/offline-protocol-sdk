@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mesh between tabs</title>
+<style>
+  :root { --bg: #fafaf7; --fg: #1c1c1a; --muted: #6b6b66; --line: #ddddd6; --accent: #2457c5; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --fg: #ecece8; --muted: #9a9a94; --line: #33332f; --accent: #7aa2ff; }
+  }
+  body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, sans-serif; max-width: 720px; margin-inline: auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p { color: var(--muted); margin: 0 0 20px; }
+  code { font-size: 13px; word-break: break-all; }
+  section { border-top: 1px solid var(--line); padding: 16px 0; }
+  form { display: flex; gap: 8px; flex-wrap: wrap; }
+  select, input, button { font: inherit; padding: 6px 10px; border: 1px solid var(--line);
+                          border-radius: 6px; background: transparent; color: inherit; }
+  input { flex: 1 1 200px; }
+  button { background: var(--accent); color: #fff; border-color: var(--accent); cursor: pointer; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { padding: 4px 0; }
+  .meta { color: var(--muted); font-size: 13px; }
+</style>
+<h1>Mesh between tabs</h1>
+<p>Open this page in two or more tabs. Each tab runs a full Offline Protocol node in a Web Worker; the tabs find each other over a <code>BroadcastChannel</code>, prove their identities, form MLS sessions and talk end-to-end encrypted. No server is involved.</p>
+
+<section>
+  <div class="meta">This tab</div>
+  <code id="me">starting…</code>
+</section>
+<section>
+  <div class="meta">Neighbours</div>
+  <ul id="neighbours"><li class="meta">none yet</li></ul>
+</section>
+<section>
+  <form id="send">
+    <select id="to" aria-label="Recipient"></select>
+    <input id="text" placeholder="Message" autocomplete="off" required>
+    <button>Send</button>
+  </form>
+</section>
+<section>
+  <div class="meta">Messages</div>
+  <ul id="messages"></ul>
+</section>
+
+<script type="module">
+import { OfflineNode } from "../../bindings/web/src/index.js";
+
+const $ = (id) => document.getElementById(id);
+const short = (address) => `${address.slice(0, 10)}…${address.slice(-6)}`;
+const neighbours = new Map(); // address -> { secure }
+
+function render() {
+  const list = $("neighbours");
+  list.replaceChildren();
+  if (neighbours.size === 0) list.innerHTML = '<li class="meta">none yet</li>';
+  const select = $("to");
+  const chosen = select.value;
+  select.replaceChildren();
+  for (const [address, { secure }] of neighbours) {
+    const item = document.createElement("li");
+    item.textContent = `${short(address)} ${secure ? "· encrypted session" : "· establishing…"}`;
+    list.append(item);
+    select.append(new Option(short(address), address, false, address === chosen));
+  }
+}
+
+function note(text) {
+  const item = document.createElement("li");
+  item.textContent = text;
+  $("messages").prepend(item);
+}
+
+// In memory: every tab is its own device, so any number can be open at once.
+// A durable node is one per account per origin (see examples/web-lobby).
+const node = await OfflineNode.start({ appId: "web-two-tabs-demo", storage: "memory" });
+$("me").textContent = node.address;
+
+node.addEventListener("neighbor_discovered", ({ detail }) => {
+  if (!neighbours.has(detail.peer_id)) neighbours.set(detail.peer_id, { secure: false });
+  render();
+});
+node.addEventListener("neighbor_lost", ({ detail }) => {
+  neighbours.delete(detail.peer_id);
+  render();
+});
+node.addEventListener("secure_session_established", ({ detail }) => {
+  neighbours.set(detail.peer_id, { secure: true });
+  render();
+});
+node.addEventListener("message_received", ({ detail }) => {
+  note(`${short(detail.sender)}: ${detail.content}${detail.encrypted ? "  🔒" : ""}`);
+});
+
+$("send").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const to = $("to").value;
+  const text = $("text").value;
+  if (!to) return;
+  await node.sendMessage(to, text);
+  note(`you → ${short(to)}: ${text}`);
+  $("text").value = "";
+});
+
+addEventListener("pagehide", () => node.stop());
+</script>
+</html>

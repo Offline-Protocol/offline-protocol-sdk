@@ -199,7 +199,7 @@ if (await sdk.isInternetSuperseded()) {
 
 Because `isInternetSuperseded()` reads the latch itself rather than a delivery, it is also the only thing that covers the windows no in-memory delivery reaches — a JS reload, a process restart, or an instance whose hold `start()` has since swept. **An app that reconciles against it on foreground needs nothing from the event but the prompt**, and that is the shape we recommend.
 
-**Lost events are reported.** Every event the native module hands to JavaScript carries a sequence number. If one goes missing between the native module and the SDK (React Native's bridgeless emit can fail without telling the native side), the SDK logs a warning and emits a `diagnostic` event with `message: "native_event_gap"` and `context: { expected, received, missing }`. It does not recover the event. If you collect diagnostics, this is the line that says whether a missing `message_received` or `message_delivered` was lost in React Native (a gap) or never produced (no gap).
+**Lost events are recovered.** Every event the native module hands to JavaScript carries a sequence number, and the module keeps the last 256 it handed over. If one goes missing between the native module and the SDK (React Native's bridgeless emit can fail without telling the native side), the SDK pauses dispatch, fetches the missing events from the module, and delivers them in their place before anything that arrived after them. It reports the recovery as a `diagnostic` event with `message: "native_event_replayed"` and `context: { from, to, recovered, missing }`. Only an event the module no longer holds is lost, and that is reported as a `diagnostic` with `message: "native_event_gap"` and `context: { expected, received, missing }`. If you collect diagnostics, a gap says a missing `message_received` or `message_delivered` was lost in React Native, and no gap says it was never produced.
 
 ### 6.2 Process death, and why the mesh does not resume itself (Android)
 
@@ -276,9 +276,9 @@ Three more things the task has to get right:
 
 ---
 
-### 6.4 Inbound message events are held until you listen (both platforms)
+### 6.4 Per-message events are held until you listen (both platforms)
 
-`message_received`, `file_received` and `message_decryption_failed` each report one message, and nothing restates them. By the time `message_received` or `file_received` is emitted, the core has already acknowledged the content, so its sender has retired it. Dropping one of these events because nothing was listening would lose a message, so the SDK holds them instead.
+`message_received`, `file_received` and `message_decryption_failed` each report one message, and nothing restates them. By the time `message_received` or `file_received` is emitted, the core has already acknowledged the content, so its sender has retired it. `message_delivered` and `message_failed` are the sender's side of the same fact: by the time either is emitted, the core has stopped retrying the message and removed it from the outbox. Dropping one of these events because nothing was listening would lose a message, or leave one shown as in flight forever, so the SDK holds them instead. A held `message_delivered` can therefore arrive after the app comes back to the foreground; its `latency_ms` is still measured from the send.
 
 - **Each native bridge** holds up to 256 of them while JavaScript cannot take them: no subscription yet, or no live React instance while the app is backgrounded. Entries are keyed by event type and message id, kept in arrival order, and redelivered on the next subscription or app foreground.
 - **The JS layer** holds up to 256 that arrive before you have registered a listener for their type, and replays them in arrival order to the first matching `on(...)`, or to an `on('all', ...)` listener.
@@ -518,7 +518,8 @@ Connection-request failure contract: recipient offline emits `connection_request
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| **sendFile** | `sendFile(params: SendFileParams): Promise<string>` | Sends a file; returns file ID. `params`: filePath, recipient, fileName?. |
+| **sendFile** | `sendFile(params: SendFileParams): Promise<string>` | Sends file bytes; returns file ID. `params`: `recipient`, `fileData` (base64), `fileName`. |
+| **sendFileFromPath** | `sendFileFromPath(params: SendFileFromPathParams): Promise<string>` | Sends a file the SDK reads from disk, so no base64 crosses the bridge; returns file ID. `params`: `recipient`, `filePath` (absolute path or `file://` URI, not `content://`), `fileName`. Rejects with `InvalidArgument`, before reading, for a missing file, anything not a regular file, or a file over 100 MiB. |
 | **sendMedia** | `sendMedia(params: SendMediaParams): Promise<string>` | Sends media bytes; returns file ID. `params`: `recipient`, `fileData` (base64), `fileName`, `contentType`, `mediaMetadata?`, plus sealed-only rich params `caption?`, `replyToMsg?`, `replyContext?`, `forwardInfo?`, `fileId?` (for answering `media_resend_required`), and the unsealed `appId?`. `appId` stamps every chunk of the transfer in place of the configured id and arrives as `app_id` on `file_received`, in cleartext and unsigned; it also routes to `sendMediaRich`. Rich params, including the cloud/sticker `mediaMetadata` fields (`mediaId`, `downloadUrl`, `encryptionKey`, …) even with no other rich param, route to the native `sendMediaRich` method (same over-the-air-update caveat as `sendMessageRich`) and travel sealed with chunk 0: dropped, never cleartext, toward non-rich recipients. A transfer the recipient asks to be resent reports its `appId` as `app_id` on `media_resend_required`, so the right application answers. |
 | **getFileProgress** | `getFileProgress(fileId): Promise<FileProgress \| null>` | Progress for a file transfer. |
 | **cancelFileTransfer** | `cancelFileTransfer(fileId): Promise<boolean>` | Cancels a transfer. |

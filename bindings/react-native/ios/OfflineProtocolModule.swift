@@ -471,256 +471,15 @@ class OfflineProtocolModule: RCTEventEmitter {
     
     // MARK: - Configuration Parsing
     
-    private func parseConfig(_ configJson: String) throws -> (config: ProtocolConfig, raw: [String: Any]) {
-        guard let jsonData = configJson.data(using: .utf8),
-              let raw = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
-            throw NSError(domain: "OfflineProtocol", code: -1, 
-                         userInfo: [NSLocalizedDescriptionKey: "Invalid JSON"])
-        }
-        
-        // Encryption section (four flags, compact-envelope kill switch,
-        // pending queue): read by EncryptionConfigReader — Foundation-only so
-        // the SwiftPM suite covers it; mirrors ProtocolConfigParser.kt on
-        // Android, keep the read order and precedence in sync.
-        let encryption = EncryptionConfigReader.read(raw)
-        let overflowPolicy: OverflowPolicy
-        switch encryption.overflowPolicyRaw.lowercased() {
-        case "drop_newest":
-            overflowPolicy = .dropNewest
-        default:
-            overflowPolicy = .dropOldest
-        }
-        // binaryWireEnabled (kill switch, default on): top level only — that
-        // IS its home in both the JS config and the flat UniFFI dictionary.
-        // camelCase or snake_case.
-        let binaryWireEnabled = raw["binaryWireEnabled"] as? Bool
-            ?? raw["binary_wire_enabled"] as? Bool ?? true
-
-        // Nostr sealing (kill switch, default on). Nested home under
-        // `transports.nostr.sealingEnabled` — where the rest of the Nostr
-        // transport settings live — then the flat key, both cases. Same
-        // nested-wins-over-flat rule as `encryption` and `group`; mirrors
-        // ProtocolConfigParser.kt, keep in sync.
-        let nostrRaw = (raw["transports"] as? [String: Any])?["nostr"] as? [String: Any]
-        let nostrSealingEnabled = nostrRaw?["sealingEnabled"] as? Bool
-            ?? nostrRaw?["sealing_enabled"] as? Bool
-            ?? raw["nostrSealingEnabled"] as? Bool
-            ?? raw["nostr_sealing_enabled"] as? Bool
-            ?? true
-
-        // Nostr cold contact (key-package publication + peer resolution, kill
-        // switch, default on). Same nested-then-flat shape as sealing above.
-        let nostrColdContactEnabled = nostrRaw?["coldContactEnabled"] as? Bool
-            ?? nostrRaw?["cold_contact_enabled"] as? Bool
-            ?? raw["nostrColdContactEnabled"] as? Bool
-            ?? raw["nostr_cold_contact_enabled"] as? Bool
-            ?? true
-
-        // Nostr username discovery (claim publication + username resolution).
-        // Same nested-then-flat shape, but the default is FALSE: publishing
-        // binds a human-readable name to an address in a public place, which
-        // an app must opt into rather than inherit.
-        let nostrUsernameDiscoveryEnabled = nostrRaw?["usernameDiscoveryEnabled"] as? Bool
-            ?? nostrRaw?["username_discovery_enabled"] as? Bool
-            ?? raw["nostrUsernameDiscoveryEnabled"] as? Bool
-            ?? raw["nostr_username_discovery_enabled"] as? Bool
-            ?? false
-
-        // Group section (nested home under `group`, then top level, both
-        // cases — same shape rules as `encryption`; mirrors
-        // ProtocolConfigParser.kt, keep in sync). These were UniFFI-only
-        // until the broadcast default flipped on: with no JS-reachable
-        // opt-out, an RN app could not force per-member fan-out.
-        let groupRaw = raw["group"] as? [String: Any]
-        let maxGroupMembers = groupRaw?["maxGroupMembers"] as? Int
-            ?? groupRaw?["max_group_members"] as? Int
-            ?? raw["maxGroupMembers"] as? Int
-            ?? raw["max_group_members"] as? Int
-            ?? 256
-        let groupRelayEnabled = groupRaw?["relayEnabled"] as? Bool
-            ?? groupRaw?["relay_enabled"] as? Bool
-            ?? raw["groupRelayEnabled"] as? Bool
-            ?? raw["group_relay_enabled"] as? Bool
-            ?? true
-        let groupRelayBroadcastEnabled = groupRaw?["relayBroadcastEnabled"] as? Bool
-            ?? groupRaw?["relay_broadcast_enabled"] as? Bool
-            ?? raw["groupRelayBroadcastEnabled"] as? Bool
-            ?? raw["group_relay_broadcast_enabled"] as? Bool
-            ?? true
-        // Default false — see GroupConfig::enforce_admin_commits. Enabling it
-        // makes this device refuse membership commits it cannot authorize,
-        // which forks it from every member that accepted them.
-        let groupEnforceAdminCommits = groupRaw?["enforceAdminCommits"] as? Bool
-            ?? groupRaw?["enforce_admin_commits"] as? Bool
-            ?? raw["groupEnforceAdminCommits"] as? Bool
-            ?? raw["group_enforce_admin_commits"] as? Bool
-            ?? false
-
-        // Mesh forwarding section: read by MeshRelayConfigReader — Foundation-only
-        // so the SwiftPM suite covers it; mirrors ProtocolConfigParser.kt, keep
-        // the read order and precedence in sync. Every field stays optional all
-        // the way to the core, which owns the defaults.
-        let meshRelay = MeshRelayConfigReader.read(raw).map { values in
-            MeshRelayConfig(
-                maxTtl: values.maxTtl,
-                denseMaxTtl: values.denseMaxTtl,
-                denseDegree: values.denseDegree,
-                fanout: values.fanout,
-                jitterMinMs: values.jitterMinMs,
-                jitterMaxMs: values.jitterMaxMs,
-                ratePerSec: values.ratePerSec,
-                burst: values.burst,
-                peerRatePerSec: values.peerRatePerSec,
-                peerBurst: values.peerBurst,
-                queueCapacity: values.queueCapacity,
-                biasMinScale: values.biasMinScale,
-                biasMaxHandicapMs: values.biasMaxHandicapMs,
-                activityWindowMs: values.activityWindowMs,
-                activityMinForwards: values.activityMinForwards,
-                activityIdleWindows: values.activityIdleWindows
-            )
-        }
-
-        // Custody section: read by CustodyConfigReader, Foundation-only like
-        // the mesh forwarding reader and for the same reason; mirrors
-        // ProtocolConfigParser.kt, keep the read order in sync. Absent stays
-        // absent all the way to the core, whose default is off; the reader
-        // carries the overflow policy as the app spelled it, and an unknown
-        // spelling stays absent rather than becoming a default written here.
-        let custody = CustodyConfigReader.read(raw).map { values in
-            CustodyConfig(
-                enabled: values.enabled,
-                holdMs: values.holdMs,
-                maxEntriesPerDepositor: values.maxEntriesPerDepositor,
-                maxBytesPerDepositor: values.maxBytesPerDepositor,
-                maxEntries: values.maxEntries,
-                maxBytes: values.maxBytes,
-                strangerMaxEntries: values.strangerMaxEntries,
-                strangerMaxBytes: values.strangerMaxBytes,
-                overflowPolicy: values.overflowPolicy.flatMap(custodyOverflowPolicy)
-            )
-        }
-
-        // Data layer section (nested home under `data`, both cases). Same
-        // rule as meshRelay: absent stays absent, so the Rust default is the
-        // only default. Kept in step with android/ ProtocolConfigParser —
-        // read order and precedence must match.
-        let dataSection = raw["data"] as? [String: Any]
-        let dataEnabled = dataSection?["enabled"] as? Bool
-
-        // Security section, with a top-level spelling accepted too. Absent
-        // stays absent, so the Rust default is the only default — see the
-        // assignment below for why a literal here would be the bug.
-        //
-        // Unlike `data`, a flat spelling is honoured: this flag is the lever an
-        // app reaches for when its fleet's clocks are wrong and its control
-        // plane has gone quiet, and a lever that silently does nothing because
-        // it was written one level too high is worse than no lever.
-        let securitySection = raw["security"] as? [String: Any]
-        let controlFreshnessEnforced =
-            securitySection?["controlFreshnessEnforced"] as? Bool
-            ?? securitySection?["control_freshness_enforced"] as? Bool
-            ?? raw["controlFreshnessEnforced"] as? Bool
-            ?? raw["control_freshness_enforced"] as? Bool
-
-        var config = ProtocolConfig(
-            appId: raw["appId"] as? String ?? raw["app_id"] as? String ?? "",
-            profile: raw["profile"] as? String ?? "",
-            bleEnabled: raw["bleEnabled"] as? Bool ?? raw["ble_enabled"] as? Bool ?? true,
-            wifiDirectEnabled: raw["wifiDirectEnabled"] as? Bool ?? raw["wifi_direct_enabled"] as? Bool ?? true,
-            internetEnabled: raw["internetEnabled"] as? Bool ?? raw["internet_enabled"] as? Bool ?? true,
-            reticulumEnabled: raw["reticulumEnabled"] as? Bool ?? raw["reticulum_enabled"] as? Bool ?? false,
-            nostrEnabled: raw["nostrEnabled"] as? Bool ?? raw["nostr_enabled"] as? Bool ?? false,
-            preferOnline: raw["preferOnline"] as? Bool ?? raw["prefer_online"] as? Bool ?? false,
-            // Clamped, not converted: `initialTtl` is a public config field
-            // of unbounded `number` type in TypeScript, so an application
-            // passing 300 would trap here and abort inside `create()`.
-            // Android truncates the same value through `toUByte()`.
-            initialTtl: UInt8(min(255, max(0, raw["initialTtl"] as? Int ?? raw["initial_ttl"] as? Int ?? 8))),
-            encryptionEnabled: encryption.enabled,
-            autoKeyExchange: encryption.autoKeyExchange,
-            storePending: encryption.storePending,
-            requireEncryption: encryption.requireEncryption,
-            maxPendingPerPeer: encryption.maxPendingPerPeer,
-            maxPendingGlobal: encryption.maxPendingGlobal,
-            pendingTtlMs: encryption.pendingTtlMs,
-            overflowPolicy: overflowPolicy,
-            // `clamping:` and not `UInt32(_:)` — the value is app-supplied JS,
-            // and a negative or oversized number traps the initializer.
-            maxGroupMembers: UInt32(clamping: maxGroupMembers),
-            groupRelayEnabled: groupRelayEnabled,
-            groupRelayBroadcastEnabled: groupRelayBroadcastEnabled,
-            groupEnforceAdminCommits: groupEnforceAdminCommits,
-            binaryWireEnabled: binaryWireEnabled,
-            nostrSealingEnabled: nostrSealingEnabled,
-            nostrColdContactEnabled: nostrColdContactEnabled,
-            nostrUsernameDiscoveryEnabled: nostrUsernameDiscoveryEnabled,
-            compactEnvelopeEnabled: encryption.compactEnvelopeEnabled,
-            richPayloadEnabled: encryption.richPayloadEnabled,
-            cryptoRecoveryEnabled: encryption.cryptoRecoveryEnabled,
-            meshRelay: meshRelay,
-            custody: custody
-        )
-
-        // Assigned only when the app actually sent it. Writing `?? false`
-        // above would restate the default as a literal here, and the literal
-        // is what survives a change to the real default: the release that
-        // flips it on would keep forcing `false` for every app that omits the
-        // section, exactly as `config.relay` sat at its defaults for several
-        // releases.
-        // Always assigned: the reader resolves it with the same default the
-        // UDL declares, so there is no literal here to outlive a change to it.
-        config.encryptServiceMessages = encryption.encryptServiceMessages
-        if let dataEnabled {
-            config.dataEnabled = dataEnabled
-        }
-        if let controlFreshnessEnforced {
-            config.controlFreshnessEnforced = controlFreshnessEnforced
-        }
-
-        return (config, raw)
-    }
-
-    /// The custody overflow policy as the app spelled it, or nil for a
-    /// spelling this build does not know: nil reaches the core as "keep the
-    /// default", never as a default chosen here.
-    private func custodyOverflowPolicy(_ raw: String) -> OverflowPolicy? {
-        switch raw.lowercased() {
-        case "drop_newest", "dropnewest":
-            return .dropNewest
-        case "drop_oldest", "dropoldest":
-            return .dropOldest
-        default:
-            return nil
-        }
-    }
-
     /// Accepts both the current vocabulary and the pre-0.22 `low`/`medium`/`high`
     /// spelling of the same three values, so an app that has not migrated its
     /// config keeps working.
     private func normalizeRelayPriority(_ priority: String?) -> RelayPriority? {
-        guard let value = priority?.lowercased(), !value.isEmpty else {
-            return nil
-        }
-        switch value {
-        case "never", "low":
-            return .never
-        case "auto", "medium":
-            return .auto
-        case "always", "high":
-            return .always
-        default:
-            return nil
-        }
+        InitialRuntimeConfigApplier.normalizeRelayPriority(priority)
     }
 
     private func relayPriorityName(_ priority: RelayPriority) -> String {
-        switch priority {
-        case .never: return "never"
-        case .auto: return "auto"
-        case .always: return "always"
-        @unknown default: return "auto"
-        }
+        InitialRuntimeConfigApplier.relayPriorityName(priority)
     }
 
     /// Rejects with the stable typed code when the error maps (see
@@ -765,113 +524,10 @@ class OfflineProtocolModule: RCTEventEmitter {
     }
 
     private func applyInitialRuntimeConfig(_ proto: OfflineProtocol, rawConfig: [String: Any]) {
-        if let dorsDict = rawConfig["dors"] as? [String: Any] {
-            let preferOnline = dorsDict["preferOnline"] as? Bool ?? dorsDict["prefer_online"] as? Bool ?? false
-            let switchHysteresis = Float((dorsDict["switchHysteresis"] as? NSNumber)?.doubleValue
-                                         ?? (dorsDict["switch_hysteresis"] as? NSNumber)?.doubleValue
-                                         ?? 15.0)
-            let switchCooldown = UInt64((dorsDict["switchCooldownSecs"] as? NSNumber)?.uint64Value
-                                        ?? (dorsDict["switch_cooldown_secs"] as? NSNumber)?.uint64Value
-                                        ?? 20)
-            let bleRetry = UInt32((dorsDict["bleToWifiRetryThreshold"] as? NSNumber)?.uint32Value
-                                  ?? (dorsDict["ble_to_wifi_retry_threshold"] as? NSNumber)?.uint32Value
-                                  ?? 2)
-            let minSuccessRate = Float((dorsDict["minSuccessRateBeforeEscalation"] as? NSNumber)?.floatValue
-                                   ?? (dorsDict["min_success_rate_before_escalation"] as? NSNumber)?.floatValue
-                                   ?? 0.3)
-            let minSuccessRateClamped = min(max(minSuccessRate, 0.0), 1.0)
-            let minBleSamples = UInt64((dorsDict["minBleSamplesBeforeSuccessRateEscalation"] as? NSNumber)?.uint64Value
-                                      ?? (dorsDict["min_ble_samples_before_success_rate_escalation"] as? NSNumber)?.uint64Value
-                                      ?? 5)
-            let rssiThreshold = Int16((dorsDict["rssiSwitchThreshold"] as? NSNumber)?.int16Value
-                                      ?? (dorsDict["rssi_switch_threshold"] as? NSNumber)?.int16Value
-                                      ?? -85)
-            let congestionThreshold = UInt64((dorsDict["congestionQueueThreshold"] as? NSNumber)?.uint64Value
-                                             ?? (dorsDict["congestion_queue_threshold"] as? NSNumber)?.uint64Value
-                                             ?? 50)
-            let stabilityWindow = UInt64((dorsDict["stabilityWindowSecs"] as? NSNumber)?.uint64Value
-                                         ?? (dorsDict["stability_window_secs"] as? NSNumber)?.uint64Value
-                                         ?? 8)
-            let poorSignalDuration = UInt64((dorsDict["poorSignalDurationSecs"] as? NSNumber)?.uint64Value
-                                            ?? (dorsDict["poor_signal_duration_secs"] as? NSNumber)?.uint64Value
-                                            ?? 10)
-            let ttlThreshold = UInt8((dorsDict["ttlEscalationThreshold"] as? NSNumber)?.uint8Value
-                                     ?? (dorsDict["ttl_escalation_threshold"] as? NSNumber)?.uint8Value
-                                     ?? 2)
-        let congestionDuration = UInt64((dorsDict["congestionDurationSecs"] as? NSNumber)?.uint64Value
-                                        ?? (dorsDict["congestion_duration_secs"] as? NSNumber)?.uint64Value
-                                        ?? 10)
-        let ttlHold = UInt64((dorsDict["ttlEscalationHoldSecs"] as? NSNumber)?.uint64Value
-                             ?? (dorsDict["ttl_escalation_hold_secs"] as? NSNumber)?.uint64Value
-                             ?? 20)
-        let historyWindowRaw = UInt64((dorsDict["historyWindowSize"] as? NSNumber)?.uint64Value
-                                      ?? (dorsDict["history_window_size"] as? NSNumber)?.uint64Value
-                                      ?? 10)
-        // Clamped in the unsigned domain, never through `Int`: a negative
-        // `historyWindowSize` from JavaScript reaches `uint64Value` as
-        // `UInt64.max`, and narrowing that to `Int` traps and aborts the
-        // application before the clamp around it can run.
-        let historyWindow = max(1, min(100, historyWindowRaw))
-        let rawQueueRecovery = Float((dorsDict["queueRecoveryRatio"] as? NSNumber)?.floatValue
-                                     ?? (dorsDict["queue_recovery_ratio"] as? NSNumber)?.floatValue
-                                     ?? 0.5)
-        let queueRecovery = min(max(rawQueueRecovery, 0.0), 1.0)
-        let lowBattery = UInt8(min(100, max(0, Int((dorsDict["lowBatteryThreshold"] as? NSNumber)?.intValue
-                                                   ?? (dorsDict["low_battery_threshold"] as? NSNumber)?.intValue
-                                                   ?? 20))))
-        let relayMinBattery = UInt8(min(100, max(0, Int((dorsDict["relayMinBatteryLevel"] as? NSNumber)?.intValue
-                                                        ?? (dorsDict["relay_min_battery_level"] as? NSNumber)?.intValue
-                                                        ?? 30))))
-        let relayOptimalConnections = UInt8(min(255, max(0, Int((dorsDict["relayOptimalConnectionCount"] as? NSNumber)?.intValue
-                                                                ?? (dorsDict["relay_optimal_connection_count"] as? NSNumber)?.intValue
-                                                                ?? 4))))
-
-            let dorsConfig = DorsConfig(
-                preferOnline: preferOnline,
-                switchHysteresis: switchHysteresis,
-                switchCooldownSecs: switchCooldown,
-                bleToWifiRetryThreshold: bleRetry,
-                minSuccessRateBeforeEscalation: minSuccessRateClamped,
-                minBleSamplesBeforeSuccessRateEscalation: minBleSamples,
-                rssiSwitchThreshold: rssiThreshold,
-                congestionQueueThreshold: congestionThreshold,
-                stabilityWindowSecs: stabilityWindow,
-                poorSignalDurationSecs: poorSignalDuration,
-            ttlEscalationThreshold: ttlThreshold,
-            congestionDurationSecs: congestionDuration,
-            ttlEscalationHoldSecs: ttlHold,
-            historyWindowSize: historyWindow,
-            queueRecoveryRatio: queueRecovery,
-            lowBatteryThreshold: lowBattery,
-            relayMinBatteryLevel: relayMinBattery,
-            relayOptimalConnectionCount: relayOptimalConnections
-            )
-
-            do {
-                try proto.updateDorsConfig(config: dorsConfig)
-                emitDiagnostic(level: "info", message: "Applied initial DORS config")
-            } catch {
-                emitDiagnostic(level: "warning", message: "Failed to apply initial DORS config", context: [
-                    "error": error.localizedDescription
-                ])
-            }
-        }
-
-        // The whole relay section, not just the priority: allowRelay and
-        // minBatteryForRelay used to be parsed by nothing, leaving
-        // `config.relay` on mobile permanently at its defaults.
-        if let relayDict = rawConfig["relay"] as? [String: Any] {
-            do {
-                let updated = mergedRelayConfig(current: proto.getRelayConfig(), from: relayDict)
-                try proto.updateRelayConfig(config: updated)
-                emitDiagnostic(level: "info", message: "Applied initial relay config", context: [
-                    "priority": relayPriorityName(updated.relayPriority)
-                ])
-            } catch {
-                emitDiagnostic(level: "warning", message: "Failed to apply initial relay config", context: [
-                    "error": error.localizedDescription
-                ])
-            }
+        InitialRuntimeConfigApplier.apply(proto: proto, rawConfig: rawConfig) { [weak self] level, message, context in
+            // Passed through as optional: emitDiagnostic omits the key for nil,
+            // and an empty object would change what React Native apps receive.
+            self?.emitDiagnostic(level: level, message: message, context: context)
         }
     }
     
@@ -883,7 +539,7 @@ class OfflineProtocolModule: RCTEventEmitter {
         print("[OfflineProtocolModule] create() called with config: \(configJson)")
         do {
             print("[OfflineProtocolModule] Parsing config...")
-            let parsed = try parseConfig(configJson)
+            let parsed = try ProtocolConfigParser.parse(configJson)
             let config = parsed.config
             print("[OfflineProtocolModule] Config parsed successfully: \(config)")
             print("[OfflineProtocolModule] Creating OfflineProtocol instance...")
@@ -1109,6 +765,9 @@ class OfflineProtocolModule: RCTEventEmitter {
         defer { eventSeqLock.unlock() }
         if eventName == Events.onEvent, var numbered = body as? [String: Any] {
             numbered[Self.eventSeqField] = eventSeq
+            if let eventJson = numbered["eventJson"] as? String {
+                eventReplay.record(seq: eventSeq, eventJson: eventJson)
+            }
             eventSeq += 1
             sendEvent(withName: eventName, body: numbered)
         } else {
@@ -1124,6 +783,23 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// React Native, and nothing is refetched.
     private var eventSeq = 0
     private let eventSeqLock = NSLock()
+    /// Every event recently handed over on `Events.onEvent`, by its
+    /// `eventSeq`, so the TypeScript layer can fetch one React Native lost
+    /// instead of only reporting it. Recorded under `eventSeqLock`, in the
+    /// same block that spends the number. See `EventReplayRing`.
+    private let eventReplay = EventReplayRing()
+
+    /// Hands back the events numbered `fromSeq` to `toSeq` that are still
+    /// kept, as `{seq, eventJson}` in order (#514). The TypeScript layer calls
+    /// this when a number it expected never arrived, and reports as lost only
+    /// what this cannot serve. A pull, so not gated on `canEmitToJs`.
+    @objc func replayEvents(_ fromSeq: NSNumber,
+                            toSeq: NSNumber,
+                            resolver: @escaping RCTPromiseResolveBlock,
+                            rejecter: @escaping RCTPromiseRejectBlock) {
+        let replayed = eventReplay.replay(fromSeq: fromSeq.intValue, toSeq: toSeq.intValue)
+        resolver(replayed.map { [Self.eventSeqField: $0.seq, "eventJson": $0.eventJson] as [String: Any] })
+    }
     /// Field on every `Events.onEvent` payload carrying `eventSeq`.
     static let eventSeqField = "seq"
     
@@ -3116,6 +2792,27 @@ class OfflineProtocolModule: RCTEventEmitter {
             rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SEND_FILE", fallbackMessage: "Failed to send file")
         }
     }
+
+    // The path twin of sendFile: hands the Rust core a filesystem path so the
+    // payload never crosses the RN bridge as a base64 string. The base64
+    // crossing is what runs constrained Android devices out of memory; iOS
+    // carries the same shape for API parity.
+    @objc func sendFileFromPath(_ recipient: String,
+                                filePath: String,
+                                fileName: String,
+                                resolver: @escaping RCTPromiseResolveBlock,
+                                rejecter: @escaping RCTPromiseRejectBlock) {
+        guard let proto = protocolInstance else {
+            rejecter("ERROR_SEND_FILE", "Protocol not initialized", nil)
+            return
+        }
+        do {
+            let fileId = try proto.sendFileFromPath(recipient: recipient, filePath: filePath, fileName: fileName)
+            resolver(fileId)
+        } catch {
+            rejectWithProtocolError(error, rejecter, fallbackCode: "ERROR_SEND_FILE", fallbackMessage: "Failed to send file from path")
+        }
+    }
     
     @objc func sendMedia(_ recipient: String,
                          fileData: String,
@@ -3532,26 +3229,7 @@ class OfflineProtocolModule: RCTEventEmitter {
     /// camelCase and snake_case spellings are accepted, matching every other
     /// config parser on this bridge.
     private func mergedRelayConfig(current: RelayConfig, from dict: [String: Any]) -> RelayConfig {
-        func number(_ keys: String...) -> NSNumber? {
-            for key in keys {
-                if let value = dict[key] as? NSNumber { return value }
-            }
-            return nil
-        }
-        func flag(_ keys: String...) -> Bool? {
-            for key in keys {
-                if let value = dict[key] as? Bool { return value }
-                if let value = dict[key] as? NSNumber { return value.boolValue }
-            }
-            return nil
-        }
-        let priorityRaw = (dict["relayPriority"] as? String) ?? (dict["relay_priority"] as? String)
-        return RelayConfig(
-            minBatteryForRelay: number("minBatteryForRelay", "min_battery_for_relay")
-                .map { UInt8(min(100, max(0, $0.intValue))) } ?? current.minBatteryForRelay,
-            allowRelay: flag("allowRelay", "allow_relay") ?? current.allowRelay,
-            relayPriority: normalizeRelayPriority(priorityRaw) ?? current.relayPriority
-        )
+        InitialRuntimeConfigApplier.mergedRelayConfig(current: current, from: dict)
     }
 
     @objc func isRelay(_ resolver: @escaping RCTPromiseResolveBlock,

@@ -117,10 +117,10 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     )
 
     /**
-     * Redelivers *inbound message* events that could not be handed to JS —
-     * `message_received`, `file_received`, `message_decryption_failed` — on
-     * the next subscribe or foreground. See [BUFFERED_INBOUND_EVENT_TYPES] for
-     * why these three qualify and [holdInboundEventIfBuffered] for the gate.
+     * Redelivers per-message events that could not be handed to JS (see
+     * [BUFFERED_INBOUND_EVENT_TYPES] for the set and why each qualifies) on
+     * the next subscribe or foreground. [holdInboundEventIfBuffered] is the
+     * gate.
      *
      * A second [StickyEventDispatcher] rather than more keys in [stickyEvents]
      * because the two hold different things. A one-shot event collapses per
@@ -240,7 +240,14 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
          * resend and nothing will restate it — so a drop here is a lost
          * message, and the drop is ordinary: the React instance is down while
          * the app is backgrounded, or a push injection lands before JS has
-         * subscribed. Must match `BUFFERED_INBOUND_EVENT_TYPES` in
+         * subscribed.
+         *
+         * `message_delivered` and `message_failed` are the sender's half of
+         * the same fact (#514): each settles one message for good, after the
+         * core has already removed its pending acknowledgement, retry and
+         * outbox entry, so nothing will restate it either, and a dropped one
+         * leaves the app showing a message as in flight forever. Must match
+         * `BUFFERED_INBOUND_EVENT_TYPES` in
          * `src/constants.ts` and `InboundEventBuffer.bufferedEventTypes` on
          * iOS; pinned by `react_native_buffered_inbound_event_set_matches_native`.
          */
@@ -248,6 +255,8 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             "message_received",
             "file_received",
             "message_decryption_failed",
+            "message_delivered",
+            "message_failed",
         )
 
         /** Inbound events held at most; the oldest is dropped past it. */
@@ -255,10 +264,11 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
     }
     
     private object Constants {
-        const val MIN_BATTERY_LEVEL = 0
-        const val MAX_BATTERY_LEVEL = 100
-        const val MIN_HISTORY_WINDOW = 1L
-        const val MAX_HISTORY_WINDOW = 100L
+        // One definition, in the applier both bridges share.
+        const val MIN_BATTERY_LEVEL = InitialRuntimeConfigApplier.Limits.MIN_BATTERY_LEVEL
+        const val MAX_BATTERY_LEVEL = InitialRuntimeConfigApplier.Limits.MAX_BATTERY_LEVEL
+        const val MIN_HISTORY_WINDOW = InitialRuntimeConfigApplier.Limits.MIN_HISTORY_WINDOW
+        const val MAX_HISTORY_WINDOW = InitialRuntimeConfigApplier.Limits.MAX_HISTORY_WINDOW
         const val BLE_RESTART_DELAY_MS = 1000L
         // Matches iOS 100ms tick. Handles retries, ACK timeouts, welcome
         // processing, and DORS. Latency-sensitive work is also event-driven.
@@ -572,133 +582,15 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      * spelling of the same three values, so an app that has not migrated its
      * config keeps working.
      */
-    private fun normalizeRelayPriority(priority: String?): RelayPriority? {
-        if (priority.isNullOrBlank()) {
-            return null
-        }
-        return when (priority.lowercase()) {
-            "never", "low" -> RelayPriority.NEVER
-            "auto", "medium" -> RelayPriority.AUTO
-            "always", "high" -> RelayPriority.ALWAYS
-            else -> null
-        }
-    }
+    private fun normalizeRelayPriority(priority: String?): RelayPriority? =
+        InitialRuntimeConfigApplier.normalizeRelayPriority(priority)
 
-    private fun relayPriorityName(priority: RelayPriority?): String = when (priority) {
-        RelayPriority.NEVER -> "never"
-        RelayPriority.ALWAYS -> "always"
-        else -> "auto"
-    }
+    private fun relayPriorityName(priority: RelayPriority?): String =
+        InitialRuntimeConfigApplier.relayPriorityName(priority)
 
     private fun applyInitialRuntimeConfig(proto: OfflineProtocol, json: JSONObject) {
-        json.optJSONObject("dors")?.let { dorsJson ->
-            try {
-                val baseConfig = proto.getDorsConfig()
-                val updatedConfig = baseConfig.copy(
-                    preferOnline = dorsJson.optBooleanCompat("preferOnline", "prefer_online")
-                        ?: baseConfig.preferOnline,
-                    switchHysteresis = dorsJson.optDoubleCompat("switchHysteresis", "switch_hysteresis")
-                        ?.toFloat()
-                        ?.coerceAtLeast(0f)
-                        ?: baseConfig.switchHysteresis,
-                    switchCooldownSecs = dorsJson.optLongCompat("switchCooldownSecs", "switch_cooldown_secs")
-                        ?.coerceAtLeast(0)
-                        ?.toULong()
-                        ?: baseConfig.switchCooldownSecs,
-                    bleToWifiRetryThreshold = dorsJson.optIntCompat("bleToWifiRetryThreshold", "ble_to_wifi_retry_threshold")
-                        ?.coerceAtLeast(0)
-                        ?.toUInt()
-                        ?: baseConfig.bleToWifiRetryThreshold,
-                    minSuccessRateBeforeEscalation = dorsJson.optDoubleCompat("minSuccessRateBeforeEscalation", "min_success_rate_before_escalation")
-                        ?.toFloat()
-                        ?.coerceIn(0f, 1f)
-                        ?: baseConfig.minSuccessRateBeforeEscalation,
-                    minBleSamplesBeforeSuccessRateEscalation = dorsJson.optLongCompat("minBleSamplesBeforeSuccessRateEscalation", "min_ble_samples_before_success_rate_escalation")
-                        ?.coerceAtLeast(0)
-                        ?.toULong()
-                        ?: baseConfig.minBleSamplesBeforeSuccessRateEscalation,
-                    rssiSwitchThreshold = dorsJson.optIntCompat("rssiSwitchThreshold", "rssi_switch_threshold")
-                        ?.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
-                        ?.toShort()
-                        ?: baseConfig.rssiSwitchThreshold,
-                    congestionQueueThreshold = dorsJson.optLongCompat("congestionQueueThreshold", "congestion_queue_threshold")
-                        ?.coerceAtLeast(0)
-                        ?.toULong()
-                        ?: baseConfig.congestionQueueThreshold,
-                    stabilityWindowSecs = dorsJson.optLongCompat("stabilityWindowSecs", "stability_window_secs")
-                        ?.coerceAtLeast(0)
-                        ?.toULong()
-                        ?: baseConfig.stabilityWindowSecs,
-                    poorSignalDurationSecs = dorsJson.optLongCompat("poorSignalDurationSecs", "poor_signal_duration_secs")
-                        ?.coerceAtLeast(0)
-                        ?.toULong()
-                        ?: baseConfig.poorSignalDurationSecs,
-                    ttlEscalationThreshold = dorsJson.optIntCompat("ttlEscalationThreshold", "ttl_escalation_threshold")
-                        ?.coerceIn(0, UByte.MAX_VALUE.toInt())
-                        ?.toUByte()
-                        ?: baseConfig.ttlEscalationThreshold,
-                    congestionDurationSecs = dorsJson.optLongCompat("congestionDurationSecs", "congestion_duration_secs")
-                        ?.coerceAtLeast(0)
-                        ?.toULong()
-                        ?: baseConfig.congestionDurationSecs,
-                    ttlEscalationHoldSecs = dorsJson.optLongCompat("ttlEscalationHoldSecs", "ttl_escalation_hold_secs")
-                        ?.coerceAtLeast(1)
-                        ?.toULong()
-                        ?: baseConfig.ttlEscalationHoldSecs,
-                    historyWindowSize = dorsJson.optLongCompat("historyWindowSize", "history_window_size")
-                        ?.let { max(Constants.MIN_HISTORY_WINDOW, min(Constants.MAX_HISTORY_WINDOW, it)) }
-                        ?.toULong()
-                        ?: baseConfig.historyWindowSize,
-                    queueRecoveryRatio = dorsJson.optDoubleCompat("queueRecoveryRatio", "queue_recovery_ratio")
-                        ?.toFloat()
-                        ?.coerceIn(0f, 1f)
-                        ?: baseConfig.queueRecoveryRatio,
-                    lowBatteryThreshold = dorsJson.optIntCompat("lowBatteryThreshold", "low_battery_threshold")
-                        ?.coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL)
-                        ?.toUByte()
-                        ?: baseConfig.lowBatteryThreshold,
-                    relayMinBatteryLevel = dorsJson.optIntCompat("relayMinBatteryLevel", "relay_min_battery_level")
-                        ?.coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL)
-                        ?.toUByte()
-                        ?: baseConfig.relayMinBatteryLevel,
-                    relayOptimalConnectionCount = dorsJson.optIntCompat("relayOptimalConnectionCount", "relay_optimal_connection_count")
-                        ?.coerceIn(0, UByte.MAX_VALUE.toInt())
-                        ?.toUByte()
-                        ?: baseConfig.relayOptimalConnectionCount
-                )
-                proto.updateDorsConfig(updatedConfig)
-                emitDiagnostic("info", "Applied initial DORS config")
-            } catch (e: Exception) {
-                emitDiagnostic("warning", "Failed to apply initial DORS config", mapOf(
-                    "message" to (e.message ?: "unknown")
-                ))
-            }
-        }
-
-        // The whole relay section, not just the priority: allowRelay and
-        // minBatteryForRelay used to be parsed by nothing, leaving
-        // `config.relay` on mobile permanently at its defaults.
-        json.optJSONObject("relay")?.let { relayJson ->
-            try {
-                val current = proto.getRelayConfig()
-                val priorityRaw = relayJson.safeOptString("relayPriority", relayJson.safeOptString("relay_priority"))
-                val priority = normalizeRelayPriority(priorityRaw) ?: current.relayPriority
-                val updated = RelayConfig(
-                    minBatteryForRelay = relayJson.optIntCompat("minBatteryForRelay", "min_battery_for_relay")
-                        ?.coerceIn(Constants.MIN_BATTERY_LEVEL, Constants.MAX_BATTERY_LEVEL)?.toUByte()
-                        ?: current.minBatteryForRelay,
-                    allowRelay = relayJson.optBooleanCompat("allowRelay", "allow_relay") ?: current.allowRelay,
-                    relayPriority = priority
-                )
-                proto.updateRelayConfig(updated)
-                emitDiagnostic("info", "Applied initial relay config", mapOf(
-                    "priority" to relayPriorityName(updated.relayPriority)
-                ))
-            } catch (e: Exception) {
-                emitDiagnostic("warning", "Failed to apply initial relay config", mapOf(
-                    "message" to (e.message ?: "unknown")
-                ))
-            }
+        InitialRuntimeConfigApplier.apply(proto, json) { level, message, context ->
+            emitDiagnostic(level, message, context ?: emptyMap())
         }
     }
 
@@ -744,8 +636,24 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
                     // taken before it, so an emit that fails with the gate open
                     // is held too, as on iOS. The type/id parse that decides
                     // whether to hold still runs only after a refusal.
-                    if (!sendEvent(EVENT_NAME, eventParams(eventJson))) {
-                        holdInboundEventIfBuffered(eventJson)
+                    //
+                    // Nothing may escape this method. UniFFI turns an
+                    // exception thrown here into a panic in the core, which
+                    // isolates it and logs it where no device log shows it,
+                    // after the core has already acted on what the event
+                    // reports (#514). Caught here it is logged by type, never
+                    // by content, and a per-message event is still held.
+                    try {
+                        if (!sendEvent(EVENT_NAME, eventParams(eventJson))) {
+                            holdInboundEventIfBuffered(eventJson)
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e(NAME, "Core event not handed to JS: ${eventTypeOf(eventJson)}", e)
+                        try {
+                            holdInboundEventIfBuffered(eventJson)
+                        } catch (held: Exception) {
+                            android.util.Log.e(NAME, "Core event could not be held either", held)
+                        }
                     }
                 }
             })
@@ -956,14 +864,22 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
         // consuming its number would report a gap for an event never lost.
         return synchronized(eventSeqLock) {
             val numbered = eventName == EVENT_NAME && params is WritableMap
+            // Read before the emit: the map is handed over by transfer, and a
+            // consumed native map cannot be read back afterwards.
+            var replayJson: String? = null
             if (numbered) {
-                (params as WritableMap).putInt(EVENT_SEQ_FIELD, eventSeq)
+                val map = params as WritableMap
+                replayJson = if (map.hasKey("eventJson")) map.getString("eventJson") else null
+                map.putInt(EVENT_SEQ_FIELD, eventSeq)
             }
             try {
                 reactApplicationContext
                     .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
                     .emit(eventName, params)
-                if (numbered) eventSeq += 1
+                if (numbered) {
+                    replayJson?.let { eventReplay.record(eventSeq, it) }
+                    eventSeq += 1
+                }
                 true
             } catch (e: Exception) {
                 android.util.Log.w(NAME, "Event emit failed for $eventName", e)
@@ -988,6 +904,37 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
      */
     private var eventSeq = 0
     private val eventSeqLock = Any()
+
+    /**
+     * Every event recently handed over on [EVENT_NAME], by its [eventSeq], so
+     * the TypeScript layer can fetch one React Native lost instead of only
+     * reporting it. Recorded under [eventSeqLock], in the same block that
+     * spends the number. See [EventReplayRing] and [replayEvents].
+     */
+    private val eventReplay = EventReplayRing()
+
+    /**
+     * Hands back the events numbered [fromSeq] to [toSeq] that are still kept,
+     * as `{seq, eventJson}` in order (#514). The TypeScript layer calls this
+     * when a number it expected never arrived, and reports as lost only what
+     * this cannot serve. A pull, so not gated on [canEmitToJs]: whoever asks
+     * is JavaScript, and it is live.
+     */
+    @ReactMethod
+    fun replayEvents(fromSeq: Double, toSeq: Double, promise: Promise) {
+        try {
+            val replayed = Arguments.createArray()
+            eventReplay.replay(fromSeq.toInt(), toSeq.toInt()).forEach { entry ->
+                replayed.pushMap(Arguments.createMap().apply {
+                    putInt(EVENT_SEQ_FIELD, entry.seq)
+                    putString("eventJson", entry.eventJson)
+                })
+            }
+            promise.resolve(replayed)
+        } catch (e: Exception) {
+            promise.reject("ERROR_EVENT_REPLAY", "Failed to replay events", e)
+        }
+    }
 
     /**
      * Emits a *one-shot* event, holding it for redelivery if JS could not take
@@ -1054,6 +1001,13 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             .ifEmpty { "seq-${inboundEventSequence.incrementAndGet()}" }
         inboundEvents.send("$type:$id", eventJson)
         return true
+    }
+
+    /** The event's `type` tag, for a log line that must not carry its fields. */
+    private fun eventTypeOf(eventJson: String): String = try {
+        JSONObject(eventJson).optString("type", "unknown")
+    } catch (e: Exception) {
+        "unparseable"
     }
 
     /** Fallback key source for a buffered inbound event that carries no id. */
@@ -3050,6 +3004,23 @@ class OfflineProtocolModule(reactContext: ReactApplicationContext) :
             promise.resolve(id)
         } catch (e: Exception) {
             rejectWithProtocolError(promise, e, "ERROR_SEND_FILE", "Failed to send file")
+        }
+    }
+
+    // The path twin of sendFile: hands the Rust core a filesystem path so the
+    // payload never crosses the RN bridge. sendFile stages a 25 MB file as a
+    // ~34 MB base64 JS string, a decoded ByteArray, and a List<UByte> with one
+    // boxed object per byte before Rust sees it; that is the out-of-memory
+    // failure on constrained devices. Here Kotlin holds only the path, and
+    // Rust reads and chunks the file on its own heap.
+    @ReactMethod
+    fun sendFileFromPath(recipient: String, filePath: String, fileName: String, promise: Promise) {
+        try {
+            val proto = protocol ?: throw IllegalStateException("Protocol not initialized")
+            val id = proto.sendFileFromPath(recipient, filePath, fileName)
+            promise.resolve(id)
+        } catch (e: Exception) {
+            rejectWithProtocolError(promise, e, "ERROR_SEND_FILE", "Failed to send file from path")
         }
     }
 

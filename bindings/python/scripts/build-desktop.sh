@@ -84,7 +84,14 @@ if ! command -v uniffi-bindgen &>/dev/null; then
     echo "Error: uniffi-bindgen not found — the build would compile the library" >&2
     echo "and then fail at binding generation. Install it first:" >&2
     echo "" >&2
-    echo "  cargo install uniffi --version 0.30.0 --features cli --locked" >&2
+    echo "  cargo install uniffi --version 0.32.2 --features cli --locked" >&2
+    exit 1
+fi
+if ! command -v uniffi-bindgen-java &>/dev/null; then
+    echo "Error: uniffi-bindgen-java not found — the generator writes the Java" >&2
+    echo "binding in the same run, and would fail after the library is built:" >&2
+    echo "" >&2
+    echo "  cargo install uniffi-bindgen-java --version 0.5.2 --locked" >&2
     exit 1
 fi
 
@@ -170,8 +177,8 @@ case "$TARGET" in
         ;;
 esac
 
-# Generate the bindings. This regenerates Swift and Kotlin alongside Python:
-# the three are one artifact set off one UDL, and the whole point of the shared
+# Generate the bindings. This regenerates the other four alongside Python:
+# the five are one artifact set off one UDL, and the whole point of the shared
 # script is that no entry point can refresh a subset. See its header.
 echo ""
 bash "$PROJECT_ROOT/scripts/generate-bindings.sh"

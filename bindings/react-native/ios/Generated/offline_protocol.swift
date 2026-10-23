@@ -39,6 +39,52 @@ fileprivate extension ForeignBytes {
     init(bufferPointer: UnsafeBufferPointer<UInt8>) {
         self.init(len: Int32(bufferPointer.count), data: bufferPointer.baseAddress)
     }
+
+    init(rawBufferPointer: UnsafeRawBufferPointer) {
+        self.init(
+            len: Int32(rawBufferPointer.count),
+            data: rawBufferPointer.baseAddress?.assumingMemoryBound(to: UInt8.self)
+        )
+    }
+}
+
+// Converter for `&[u8]` / `[ByRef] bytes` arguments.
+//
+// Conforms to `FfiConverter` so the compiler enforces the full converter
+// method set. Only the scope-bound `lower(_:_body:)` overload is sound —
+// zero-copy byte buffers only flow foreign -> Rust, and only in argument
+// position. The four protocol-witness methods (`lift`, `lower`, `read`,
+// `write`) `fatalError` at runtime if anyone reaches them.
+//
+// The scope-bound `lower` takes a closure because the `ForeignBytes`
+// pointer is only guaranteed valid for the duration of
+// `Data.withUnsafeBytes`. Callers must run the full FFI call inside
+// the closure body.
+fileprivate enum FfiConverterByRefBytes: FfiConverter {
+    typealias SwiftType = Data
+    typealias FfiType = ForeignBytes
+
+    static func lower<R>(_ value: Data, _ body: (ForeignBytes) throws -> R) rethrows -> R {
+        return try value.withUnsafeBytes { rawBuf in
+            try body(ForeignBytes(rawBufferPointer: rawBuf))
+        }
+    }
+
+    static func lower(_ value: Data) -> ForeignBytes {
+        fatalError("ByRef bytes cannot use the plain lower: returning ForeignBytes escapes the Data.withUnsafeBytes scope. Use the scope-bound lower(_:_body:) overload instead.")
+    }
+
+    static func lift(_ value: ForeignBytes) throws -> Data {
+        fatalError("ByRef bytes cannot be lifted: zero-copy &[u8] only flows foreign->Rust")
+    }
+
+    static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
+        fatalError("ByRef bytes cannot be read from a buffer: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.")
+    }
+
+    static func write(_ value: Data, into buf: inout [UInt8]) {
+        fatalError("ByRef bytes cannot be written to a buffer: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.")
+    }
 }
 
 // For every type used in the interface, we provide helper methods for conveniently
@@ -589,7 +635,11 @@ fileprivate struct FfiConverterString: FfiConverter {
             return String()
         }
         let bytes = UnsafeBufferPointer<UInt8>(start: value.data!, count: Int(value.len))
-        return String(bytes: bytes, encoding: String.Encoding.utf8)!
+        // Use Swift's native UTF-8 decoder; `String(bytes:encoding:.utf8)` goes
+        // through Foundation's NSString and silently strips a leading U+FEFF BOM.
+        // Invalid UTF-8 substitutes U+FFFD instead of trapping (unreachable
+        // given Rust's `String` invariant).
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     public static func lower(_ value: String) -> RustBuffer {
@@ -605,7 +655,8 @@ fileprivate struct FfiConverterString: FfiConverter {
 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> String {
         let len: Int32 = try readInt(&buf)
-        return String(bytes: try readBytes(&buf, count: Int(len)), encoding: String.Encoding.utf8)!
+        // See `lift` above for why we avoid Foundation's NSString-backed decoder here.
+        return String(decoding: try readBytes(&buf, count: Int(len)), as: UTF8.self)
     }
 
     public static func write(_ value: String, into buf: inout [UInt8]) {
@@ -739,23 +790,30 @@ open class DataStore: DataStoreProtocol, @unchecked Sendable {
 public convenience init(`protocol`: OfflineProtocol)throws  {
     let handle =
         try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_constructor_datastore_new(
-        FfiConverterTypeOfflineProtocol_lower(`protocol`),$0
+        FfiConverterTypeOfflineProtocol_lower(`protocol`),uniffiCallStatus
     )
 }
     self.init(unsafeFromHandle: handle)
 }
 
     deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
         try! rustCall { uniffi_offline_protocol_uniffi_fn_free_datastore(handle, $0) }
     }
 
     
 public static func withStorage(`protocol`: OfflineProtocol, storage: ProtocolStateStorageProvider)throws  -> DataStore  {
     return try  FfiConverterTypeDataStore_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_constructor_datastore_with_storage(
         FfiConverterTypeOfflineProtocol_lower(`protocol`),
-        FfiConverterCallbackInterfaceProtocolStateStorageProvider_lower(storage),$0
+        FfiConverterCallbackInterfaceProtocolStateStorageProvider_lower(storage),uniffiCallStatus
     )
 })
 }
@@ -764,289 +822,318 @@ public static func withStorage(`protocol`: OfflineProtocol, storage: ProtocolSta
     
 open func attachmentHash(data: Data) -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_attachment_hash(
             self.uniffiCloneHandle(),
-        FfiConverterData.lower(data),$0
+        FfiConverterData.lower(data),uniffiCallStatus
     )
 })
 }
     
 open func counterIncrement(spaceId: String, docId: String, collection: String, amount: Double)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_counter_increment(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
         FfiConverterString.lower(docId),
         FfiConverterString.lower(collection),
-        FfiConverterDouble.lower(amount),$0
+        FfiConverterDouble.lower(amount),uniffiCallStatus
     )
 }
 }
     
 open func counterValue(spaceId: String, docId: String, collection: String)throws  -> Double  {
     return try  FfiConverterDouble.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_counter_value(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
         FfiConverterString.lower(docId),
-        FfiConverterString.lower(collection),$0
+        FfiConverterString.lower(collection),uniffiCallStatus
     )
 })
 }
     
 open func createDoc(spaceId: String, docId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_create_doc(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
-        FfiConverterString.lower(docId),$0
+        FfiConverterString.lower(docId),uniffiCallStatus
     )
 }
 }
     
 open func declineAttachment(spaceId: String, peerId: String, hash: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_decline_attachment(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
         FfiConverterString.lower(peerId),
-        FfiConverterString.lower(hash),$0
+        FfiConverterString.lower(hash),uniffiCallStatus
     )
 }
 }
     
 open func deleteDoc(spaceId: String, docId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_delete_doc(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
-        FfiConverterString.lower(docId),$0
+        FfiConverterString.lower(docId),uniffiCallStatus
     )
 }
 }
     
 open func docJson(spaceId: String, docId: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_doc_json(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
-        FfiConverterString.lower(docId),$0
+        FfiConverterString.lower(docId),uniffiCallStatus
     )
 })
 }
     
 open func docSize(spaceId: String, docId: String)throws  -> UInt64  {
     return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_doc_size(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
-        FfiConverterString.lower(docId),$0
+        FfiConverterString.lower(docId),uniffiCallStatus
     )
 })
 }
     
 open func exportRaw(spaceId: String, docId: String)throws  -> Data  {
     return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_export_raw(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
-        FfiConverterString.lower(docId),$0
+        FfiConverterString.lower(docId),uniffiCallStatus
     )
 })
 }
     
 open func fetchAttachment(spaceId: String, hash: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
-        FfiConverterString.lower(hash),$0
+        FfiConverterString.lower(hash),uniffiCallStatus
     )
 }
 }
     
 open func fetchAttachmentFrom(spaceId: String, peerId: String, hash: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_fetch_attachment_from(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
         FfiConverterString.lower(peerId),
-        FfiConverterString.lower(hash),$0
+        FfiConverterString.lower(hash),uniffiCallStatus
     )
 }
 }
     
 open func flush(spaceId: String, docId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_flush(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
-        FfiConverterString.lower(docId),$0
+        FfiConverterString.lower(docId),uniffiCallStatus
     )
 }
 }
     
 open func flushAll()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_flush_all(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
     
 open func listDelete(spaceId: String, docId: String, collection: String, index: UInt32, count: UInt32)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_list_delete(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
         FfiConverterString.lower(docId),
         FfiConverterString.lower(collection),
         FfiConverterUInt32.lower(index),
-        FfiConverterUInt32.lower(count),$0
+        FfiConverterUInt32.lower(count),uniffiCallStatus
     )
 }
 }
     
 open func listDocs(spaceId: String)throws  -> [String]  {
     return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_list_docs(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(spaceId),$0
+        FfiConverterString.lower(spaceId),uniffiCallStatus
     )
 })
 }
     
 open func listLen(spaceId: String, docId: String, collection: String)throws  -> UInt32  {
     return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_list_len(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
         FfiConverterString.lower(docId),
-        FfiConverterString.lower(collection),$0
+        FfiConverterString.lower(collection),uniffiCallStatus
     )
 })
 }
     
 open func listPush(spaceId: String, docId: String, collection: String, valueJson: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_list_push(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
         FfiConverterString.lower(docId),
         FfiConverterString.lower(collection),
-        FfiConverterString.lower(valueJson),$0
+        FfiConverterString.lower(valueJson),uniffiCallStatus
     )
 }
 }
     
 open func listSpaces()throws  -> [String]  {
     return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_list_spaces(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func mapDelete(spaceId: String, docId: String, collection: String, key: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_map_delete(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
         FfiConverterString.lower(docId),
         FfiConverterString.lower(collection),
-        FfiConverterString.lower(key),$0
+        FfiConverterString.lower(key),uniffiCallStatus
     )
 }
 }
     
 open func mapGetJson(spaceId: String, docId: String, collection: String, key: String)throws  -> String?  {
     return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_map_get_json(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
         FfiConverterString.lower(docId),
         FfiConverterString.lower(collection),
-        FfiConverterString.lower(key),$0
+        FfiConverterString.lower(key),uniffiCallStatus
     )
 })
 }
     
 open func mapSet(spaceId: String, docId: String, collection: String, key: String, valueJson: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_map_set(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
         FfiConverterString.lower(docId),
         FfiConverterString.lower(collection),
         FfiConverterString.lower(key),
-        FfiConverterString.lower(valueJson),$0
+        FfiConverterString.lower(valueJson),uniffiCallStatus
     )
 }
 }
     
 open func provideAttachment(spaceId: String, peerId: String, hash: String, data: Data)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_provide_attachment(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
         FfiConverterString.lower(peerId),
         FfiConverterString.lower(hash),
-        FfiConverterData.lower(data),$0
+        FfiConverterData.lower(data),uniffiCallStatus
     )
 }
 }
     
 open func removeDoc(spaceId: String, docId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_remove_doc(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
-        FfiConverterString.lower(docId),$0
+        FfiConverterString.lower(docId),uniffiCallStatus
     )
 }
 }
     
 open func removeSpace(spaceId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_remove_space(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(spaceId),$0
+        FfiConverterString.lower(spaceId),uniffiCallStatus
     )
 }
 }
     
 open func setInterest(spaceId: String, patterns: [String])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_set_interest(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
-        FfiConverterSequenceString.lower(patterns),$0
+        FfiConverterSequenceString.lower(patterns),uniffiCallStatus
     )
 }
 }
     
 open func textDelete(spaceId: String, docId: String, collection: String, position: UInt32, count: UInt32)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_text_delete(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
         FfiConverterString.lower(docId),
         FfiConverterString.lower(collection),
         FfiConverterUInt32.lower(position),
-        FfiConverterUInt32.lower(count),$0
+        FfiConverterUInt32.lower(count),uniffiCallStatus
     )
 }
 }
     
 open func textInsert(spaceId: String, docId: String, collection: String, position: UInt32, text: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_text_insert(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
         FfiConverterString.lower(docId),
         FfiConverterString.lower(collection),
         FfiConverterUInt32.lower(position),
-        FfiConverterString.lower(text),$0
+        FfiConverterString.lower(text),uniffiCallStatus
     )
 }
 }
     
 open func textValue(spaceId: String, docId: String, collection: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_text_value(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(spaceId),
         FfiConverterString.lower(docId),
-        FfiConverterString.lower(collection),$0
+        FfiConverterString.lower(collection),uniffiCallStatus
     )
 })
 }
     
 open func wipeAll()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_datastore_wipe_all(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
@@ -1156,14 +1243,20 @@ open class MeshServices: MeshServicesProtocol, @unchecked Sendable {
 public convenience init(`protocol`: OfflineProtocol)throws  {
     let handle =
         try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_constructor_meshservices_new(
-        FfiConverterTypeOfflineProtocol_lower(`protocol`),$0
+        FfiConverterTypeOfflineProtocol_lower(`protocol`),uniffiCallStatus
     )
 }
     self.init(unsafeFromHandle: handle)
 }
 
     deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
         try! rustCall { uniffi_offline_protocol_uniffi_fn_free_meshservices(handle, $0) }
     }
 
@@ -1172,53 +1265,58 @@ public convenience init(`protocol`: OfflineProtocol)throws  {
     
 open func discoverServices(serviceId: String?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_meshservices_discover_services(
             self.uniffiCloneHandle(),
-        FfiConverterOptionString.lower(serviceId),$0
+        FfiConverterOptionString.lower(serviceId),uniffiCallStatus
     )
 })
 }
     
 open func registerService(serviceId: String, version: String, capabilities: [String: String])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_meshservices_register_service(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(serviceId),
         FfiConverterString.lower(version),
-        FfiConverterDictionaryStringString.lower(capabilities),$0
+        FfiConverterDictionaryStringString.lower(capabilities),uniffiCallStatus
     )
 }
 }
     
 open func respondToServiceRequest(requestId: String, requester: String, serviceId: String, status: String, body: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_meshservices_respond_to_service_request(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(requestId),
         FfiConverterString.lower(requester),
         FfiConverterString.lower(serviceId),
         FfiConverterString.lower(status),
-        FfiConverterString.lower(body),$0
+        FfiConverterString.lower(body),uniffiCallStatus
     )
 })
 }
     
 open func sendServiceRequest(provider: String, serviceId: String, method: String, body: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_meshservices_send_service_request(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(provider),
         FfiConverterString.lower(serviceId),
         FfiConverterString.lower(method),
-        FfiConverterString.lower(body),$0
+        FfiConverterString.lower(body),uniffiCallStatus
     )
 })
 }
     
 open func unregisterService(serviceId: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(serviceId),$0
+        FfiConverterString.lower(serviceId),uniffiCallStatus
     )
 })
 }
@@ -1557,6 +1655,8 @@ public protocol OfflineProtocolProtocol: AnyObject, Sendable {
     
     func sendFile(recipient: String, fileData: [UInt8], fileName: String) throws  -> String
     
+    func sendFileFromPath(recipient: String, filePath: String, fileName: String) throws  -> String
+    
     func sendGroupMessage(groupId: String, content: String, priority: MessagePriority?, replyToMsg: String?) throws  -> [String]
     
     func sendMedia(recipient: String, fileData: [UInt8], fileName: String, contentType: ContentType, mediaMetadata: MediaMetadata?) throws  -> String
@@ -1678,14 +1778,20 @@ open class OfflineProtocol: OfflineProtocolProtocol, @unchecked Sendable {
 public convenience init(config: ProtocolConfig)throws  {
     let handle =
         try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_constructor_offlineprotocol_new(
-        FfiConverterTypeProtocolConfig_lower(config),$0
+        FfiConverterTypeProtocolConfig_lower(config),uniffiCallStatus
     )
 }
     self.init(unsafeFromHandle: handle)
 }
 
     deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
         try! rustCall { uniffi_offline_protocol_uniffi_fn_free_offlineprotocol(handle, $0) }
     }
 
@@ -1694,981 +1800,1098 @@ public convenience init(config: ProtocolConfig)throws  {
     
 open func acceptConnectionRequest(recipient: String, accepterName: String, keyPackage: [UInt8]?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_accept_connection_request(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(recipient),
         FfiConverterString.lower(accepterName),
-        FfiConverterOptionSequenceUInt8.lower(keyPackage),$0
+        FfiConverterOptionSequenceUInt8.lower(keyPackage),uniffiCallStatus
     )
 })
 }
     
 open func bleClearPeerMtu(peerId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_clear_peer_mtu(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(peerId),$0
+        FfiConverterString.lower(peerId),uniffiCallStatus
     )
 }
 }
     
 open func bleFragmentFallbackCount() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_fragment_fallback_count(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func bleFragmentReceived(senderId: String, fragment: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_fragment_received(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(senderId),
-        FfiConverterSequenceUInt8.lower(fragment),$0
+        FfiConverterSequenceUInt8.lower(fragment),uniffiCallStatus
     )
 }
 }
     
 open func bleGetNextFragment() -> BleFragment?  {
     return try!  FfiConverterOptionTypeBleFragment.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_get_next_fragment(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func bleGetPeerCount() -> UInt32  {
     return try!  FfiConverterUInt32.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_get_peer_count(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func blePeerDiscovered(peerId: String, rssi: Int16)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_discovered(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(peerId),
-        FfiConverterInt16.lower(rssi),$0
+        FfiConverterInt16.lower(rssi),uniffiCallStatus
     )
 }
 }
     
 open func blePeerLost(peerId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_lost(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(peerId),$0
+        FfiConverterString.lower(peerId),uniffiCallStatus
     )
 }
 }
     
 open func bleRecipientNotAmongPeersCount() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_recipient_not_among_peers_count(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func bleReturnFragment()  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_return_fragment(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
     
 open func bleSetPeerMtu(peerId: String, maxPayload: UInt32)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_set_peer_mtu(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(peerId),
-        FfiConverterUInt32.lower(maxPayload),$0
+        FfiConverterUInt32.lower(maxPayload),uniffiCallStatus
     )
 }
 }
     
 open func bleStatusChanged(isAvailable: Bool)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_status_changed(
             self.uniffiCloneHandle(),
-        FfiConverterBool.lower(isAvailable),$0
+        FfiConverterBool.lower(isAvailable),uniffiCallStatus
     )
 }
 }
     
 open func bleUndersizedMtuReports() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_undersized_mtu_reports(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func blockUser(userId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_block_user(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(userId),$0
+        FfiConverterString.lower(userId),uniffiCallStatus
     )
 }
 }
     
 open func cancelConnectionRequest(recipient: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_connection_request(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(recipient),$0
+        FfiConverterString.lower(recipient),uniffiCallStatus
     )
 })
 }
     
 open func cancelFileTransfer(fileId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_cancel_file_transfer(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(fileId),$0
+        FfiConverterString.lower(fileId),uniffiCallStatus
     )
 }
 }
     
 open func closeFileStores()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_close_file_stores(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
     
 open func createGroup(groupName: String)throws  -> MlsGroupInfo  {
     return try  FfiConverterTypeMlsGroupInfo_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_group(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupName),$0
+        FfiConverterString.lower(groupName),uniffiCallStatus
     )
 })
 }
     
 open func createInvite(petname: String?, sign: Bool)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_create_invite(
             self.uniffiCloneHandle(),
         FfiConverterOptionString.lower(petname),
-        FfiConverterBool.lower(sign),$0
+        FfiConverterBool.lower(sign),uniffiCallStatus
     )
 })
 }
     
 open func deriveUserIdFromPublicKey(publicKey: [UInt8]) -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_derive_user_id_from_public_key(
             self.uniffiCloneHandle(),
-        FfiConverterSequenceUInt8.lower(publicKey),$0
+        FfiConverterSequenceUInt8.lower(publicKey),uniffiCallStatus
     )
 })
 }
     
 open func disableTelemetry()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_disable_telemetry(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
     
 open func emitTestEvent()  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_emit_test_event(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
     
 open func enableTelemetry(config: TelemetryConfig, appState: AppState)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_enable_telemetry(
             self.uniffiCloneHandle(),
         FfiConverterTypeTelemetryConfig_lower(config),
-        FfiConverterTypeAppState_lower(appState),$0
+        FfiConverterTypeAppState_lower(appState),uniffiCallStatus
     )
 }
 }
     
 open func endTelemetrySession()  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_end_telemetry_session(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
     
 open func eraseCustody()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_erase_custody(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
     
 open func establishSecureSession(peerId: String)throws  -> MlsWelcomeMessage?  {
     return try  FfiConverterOptionTypeMlsWelcomeMessage.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_establish_secure_session(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(peerId),$0
+        FfiConverterString.lower(peerId),uniffiCallStatus
     )
 })
 }
     
 open func finalizeFile(fileId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_finalize_file(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(fileId),$0
+        FfiConverterString.lower(fileId),uniffiCallStatus
     )
 }
 }
     
 open func flushTelemetry()  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_flush_telemetry(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
     
 open func flushTelemetryBlocking(deadlineMs: UInt64) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_flush_telemetry_blocking(
             self.uniffiCloneHandle(),
-        FfiConverterUInt64.lower(deadlineMs),$0
+        FfiConverterUInt64.lower(deadlineMs),uniffiCallStatus
     )
 })
 }
     
 open func forceTransport(transportType: TransportType)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_force_transport(
             self.uniffiCloneHandle(),
-        FfiConverterTypeTransportType_lower(transportType),$0
+        FfiConverterTypeTransportType_lower(transportType),uniffiCallStatus
     )
 }
 }
     
 open func forwardMessage(originalMessageJson: String, newRecipient: String, priority: MessagePriority?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(originalMessageJson),
         FfiConverterString.lower(newRecipient),
-        FfiConverterOptionTypeMessagePriority.lower(priority),$0
+        FfiConverterOptionTypeMessagePriority.lower(priority),uniffiCallStatus
     )
 })
 }
     
 open func forwardMessageToGroup(originalMessageJson: String, groupId: String, priority: MessagePriority?)throws  -> [String]  {
     return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_forward_message_to_group(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(originalMessageJson),
         FfiConverterString.lower(groupId),
-        FfiConverterOptionTypeMessagePriority.lower(priority),$0
+        FfiConverterOptionTypeMessagePriority.lower(priority),uniffiCallStatus
     )
 })
 }
     
 open func gatewayAddressDeclaration(challenge: [UInt8])throws  -> GatewayAddressDeclaration  {
     return try  FfiConverterTypeGatewayAddressDeclaration_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_gateway_address_declaration(
             self.uniffiCloneHandle(),
-        FfiConverterSequenceUInt8.lower(challenge),$0
+        FfiConverterSequenceUInt8.lower(challenge),uniffiCallStatus
     )
 })
 }
     
 open func getActiveTransports() -> [String]  {
     return try!  FfiConverterSequenceString.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_active_transports(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getBatteryLevel() -> UInt8?  {
     return try!  FfiConverterOptionUInt8.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_battery_level(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getBlockedUsers()throws  -> [String]  {
     return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_blocked_users(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getCustodyStats() -> CustodyStats  {
     return try!  FfiConverterTypeCustodyStats_lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_custody_stats(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getDedupStats() -> DedupStats  {
     return try!  FfiConverterTypeDedupStats_lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_dedup_stats(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getDeliverySuccessRate() -> Float  {
     return try!  FfiConverterFloat.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_delivery_success_rate(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getDorsConfig() -> DorsConfig  {
     return try!  FfiConverterTypeDorsConfig_lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_dors_config(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getEstablishmentState(peerId: String)throws  -> EstablishmentState  {
     return try  FfiConverterTypeEstablishmentState_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_establishment_state(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(peerId),$0
+        FfiConverterString.lower(peerId),uniffiCallStatus
     )
 })
 }
     
 open func getFileProgress(fileId: String) -> FileProgress?  {
     return try!  FfiConverterOptionTypeFileProgress.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_file_progress(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(fileId),$0
+        FfiConverterString.lower(fileId),uniffiCallStatus
     )
 })
 }
     
 open func getGroupInfo(groupId: String)throws  -> MlsGroupInfo?  {
     return try  FfiConverterOptionTypeMlsGroupInfo.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_group_info(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),$0
+        FfiConverterString.lower(groupId),uniffiCallStatus
     )
 })
 }
     
 open func getGroupRoles(groupId: String)throws  -> [String: String]  {
     return try  FfiConverterDictionaryStringString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_group_roles(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),$0
+        FfiConverterString.lower(groupId),uniffiCallStatus
     )
 })
 }
     
 open func getIdentityPublicKey()throws  -> [UInt8]  {
     return try  FfiConverterSequenceUInt8.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_identity_public_key(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getIsCharging() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_is_charging(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getMedianHops() -> UInt8  {
     return try!  FfiConverterUInt8.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_hops(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getMedianLatency() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_median_latency(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getMemberRole(groupId: String, userId: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_member_role(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(groupId),
-        FfiConverterString.lower(userId),$0
+        FfiConverterString.lower(userId),uniffiCallStatus
     )
 })
 }
     
 open func getMeshRelayStats() -> MeshRelayStats  {
     return try!  FfiConverterTypeMeshRelayStats_lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_stats(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getMeshRelayTunables() -> MeshRelayTunables  {
     return try!  FfiConverterTypeMeshRelayTunables_lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_mesh_relay_tunables(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getMessageStats() -> [MessageStats]  {
     return try!  FfiConverterSequenceTypeMessageStats.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_message_stats(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getPendingAckCount() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_pending_ack_count(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getRelayConfig() -> RelayConfig  {
     return try!  FfiConverterTypeRelayConfig_lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_config(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getRelayPriority() -> RelayPriority  {
     return try!  FfiConverterTypeRelayPriority_lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_relay_priority(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getRetryQueueSize() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_retry_queue_size(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getState() -> ProtocolState  {
     return try!  FfiConverterTypeProtocolState_lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_state(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getTopology()throws  -> NetworkTopology  {
     return try  FfiConverterTypeNetworkTopology_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_topology(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func getTransportMetrics(transportType: TransportType) -> TransportMetrics?  {
     return try!  FfiConverterOptionTypeTransportMetrics.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_get_transport_metrics(
             self.uniffiCloneHandle(),
-        FfiConverterTypeTransportType_lower(transportType),$0
+        FfiConverterTypeTransportType_lower(transportType),uniffiCallStatus
     )
 })
 }
     
 open func groupRelaySyncState(groupId: String)throws  -> RelaySyncState  {
     return try  FfiConverterTypeRelaySyncState_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_relay_sync_state(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),$0
+        FfiConverterString.lower(groupId),uniffiCallStatus
     )
 })
 }
     
 open func groupRichReadiness(groupId: String)throws  -> GroupRichReadiness  {
     return try  FfiConverterTypeGroupRichReadiness_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_group_rich_readiness(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),$0
+        FfiConverterString.lower(groupId),uniffiCallStatus
     )
 })
 }
     
 open func hasPendingKeyPackage(peerId: String) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_has_pending_key_package(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(peerId),$0
+        FfiConverterString.lower(peerId),uniffiCallStatus
     )
 })
 }
     
 open func identityAssertion(signedData: [UInt8])throws  -> [UInt8]  {
     return try  FfiConverterSequenceUInt8.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_identity_assertion(
             self.uniffiCloneHandle(),
-        FfiConverterSequenceUInt8.lower(signedData),$0
+        FfiConverterSequenceUInt8.lower(signedData),uniffiCallStatus
     )
 })
 }
     
 open func initializeMls(secureStorage: MlsStorageProvider, protocolStateStorage: ProtocolStateStorageProvider)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls(
             self.uniffiCloneHandle(),
         FfiConverterCallbackInterfaceMlsStorageProvider_lower(secureStorage),
-        FfiConverterCallbackInterfaceProtocolStateStorageProvider_lower(protocolStateStorage),$0
+        FfiConverterCallbackInterfaceProtocolStateStorageProvider_lower(protocolStateStorage),uniffiCallStatus
     )
 }
 }
     
 open func initializeMlsWithFileStores(mlsRoot: String, stateRoot: String, storeKey: Data)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_initialize_mls_with_file_stores(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(mlsRoot),
         FfiConverterString.lower(stateRoot),
-        FfiConverterData.lower(storeKey),$0
+        FfiConverterData.lower(storeKey),uniffiCallStatus
     )
 }
 }
     
 open func internetAddressDeclarationRefused(reason: String)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declaration_refused(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(reason),$0
+        FfiConverterString.lower(reason),uniffiCallStatus
     )
 }
 }
     
 open func internetAddressDeclared(address: String)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_address_declared(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(address),$0
+        FfiConverterString.lower(address),uniffiCallStatus
     )
 }
 }
     
 open func internetConfirmSent(messageId: String)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_confirm_sent(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(messageId),$0
+        FfiConverterString.lower(messageId),uniffiCallStatus
     )
 }
 }
     
 open func internetGetNextMessage() -> InternetMessage?  {
     return try!  FfiConverterOptionTypeInternetMessage.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_get_next_message(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func internetGroupReportReceived(reportJson: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_group_report_received(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(reportJson),$0
+        FfiConverterString.lower(reportJson),uniffiCallStatus
     )
 }
 }
     
 open func internetMessageReceived(senderId: String, data: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_message_received(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(senderId),
-        FfiConverterSequenceUInt8.lower(data),$0
+        FfiConverterSequenceUInt8.lower(data),uniffiCallStatus
     )
 }
 }
     
 open func internetPeerPresence(peerId: String, online: Bool, lastSeenMs: Int64?)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_peer_presence(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(peerId),
         FfiConverterBool.lower(online),
-        FfiConverterOptionInt64.lower(lastSeenMs),$0
+        FfiConverterOptionInt64.lower(lastSeenMs),uniffiCallStatus
     )
 }
 }
     
 open func internetPresenceWatchlist() -> [String]  {
     return try!  FfiConverterSequenceString.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_presence_watchlist(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func internetRelayCapabilities(capabilities: [String])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_relay_capabilities(
             self.uniffiCloneHandle(),
-        FfiConverterSequenceString.lower(capabilities),$0
+        FfiConverterSequenceString.lower(capabilities),uniffiCallStatus
     )
 }
 }
     
 open func internetSendFailed(messageId: String)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(messageId),$0
+        FfiConverterString.lower(messageId),uniffiCallStatus
     )
 }
 }
     
 open func internetSendFailedWithReason(messageId: String, reason: String?)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_send_failed_with_reason(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(messageId),
-        FfiConverterOptionString.lower(reason),$0
+        FfiConverterOptionString.lower(reason),uniffiCallStatus
     )
 }
 }
     
 open func internetStatusChanged(isConnected: Bool)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_internet_status_changed(
             self.uniffiCloneHandle(),
-        FfiConverterBool.lower(isConnected),$0
+        FfiConverterBool.lower(isConnected),uniffiCallStatus
     )
 }
 }
     
 open func inviteToGroup(groupId: String, inviteeUserId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_invite_to_group(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(groupId),
-        FfiConverterString.lower(inviteeUserId),$0
+        FfiConverterString.lower(inviteeUserId),uniffiCallStatus
     )
 }
 }
     
 open func isMlsInitialized() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_mls_initialized(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func isRelay() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_relay(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func isUserBlocked(userId: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_is_user_blocked(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(userId),$0
+        FfiConverterString.lower(userId),uniffiCallStatus
     )
 })
 }
     
 open func leaveGroup(groupId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_leave_group(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),$0
+        FfiConverterString.lower(groupId),uniffiCallStatus
     )
 }
 }
     
 open func listGroups()throws  -> [String]  {
     return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_list_groups(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func localAddress() -> String?  {
     return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_local_address(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func mlsClearPendingWelcome(otherUserId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_clear_pending_welcome(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(otherUserId),$0
+        FfiConverterString.lower(otherUserId),uniffiCallStatus
     )
 }
 }
     
 open func mlsCreateSession(otherUserId: String)throws  -> MlsWelcomeMessage  {
     return try  FfiConverterTypeMlsWelcomeMessage_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_create_session(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(otherUserId),$0
+        FfiConverterString.lower(otherUserId),uniffiCallStatus
     )
 })
 }
     
 open func mlsDecrypt(encrypted: MlsEncryptedMessage)throws  -> [UInt8]?  {
     return try  FfiConverterOptionSequenceUInt8.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt(
             self.uniffiCloneHandle(),
-        FfiConverterTypeMlsEncryptedMessage_lower(encrypted),$0
+        FfiConverterTypeMlsEncryptedMessage_lower(encrypted),uniffiCallStatus
     )
 })
 }
     
 open func mlsDecryptFromUser(encrypted: MlsEncryptedMessage)throws  -> [UInt8]?  {
     return try  FfiConverterOptionSequenceUInt8.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_decrypt_from_user(
             self.uniffiCloneHandle(),
-        FfiConverterTypeMlsEncryptedMessage_lower(encrypted),$0
+        FfiConverterTypeMlsEncryptedMessage_lower(encrypted),uniffiCallStatus
     )
 })
 }
     
 open func mlsDeleteSession(otherUserId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_delete_session(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(otherUserId),$0
+        FfiConverterString.lower(otherUserId),uniffiCallStatus
     )
 }
 }
     
 open func mlsEncryptForUser(otherUserId: String, plaintext: [UInt8])throws  -> MlsEncryptedMessage  {
     return try  FfiConverterTypeMlsEncryptedMessage_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_encrypt_for_user(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(otherUserId),
-        FfiConverterSequenceUInt8.lower(plaintext),$0
+        FfiConverterSequenceUInt8.lower(plaintext),uniffiCallStatus
     )
 })
 }
     
 open func mlsGenerateKeyPackage()throws  -> MlsKeyPackageBundle  {
     return try  FfiConverterTypeMlsKeyPackageBundle_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_generate_key_package(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func mlsGetOrCreateKeyPackage()throws  -> MlsKeyPackageBundle  {
     return try  FfiConverterTypeMlsKeyPackageBundle_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_or_create_key_package(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func mlsGetPendingKeyPackages() -> [MlsKeyPackageBundle]  {
     return try!  FfiConverterSequenceTypeMlsKeyPackageBundle.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_pending_key_packages(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func mlsGetPendingWelcome(otherUserId: String) -> MlsWelcomeMessage?  {
     return try!  FfiConverterOptionTypeMlsWelcomeMessage.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_get_pending_welcome(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(otherUserId),$0
+        FfiConverterString.lower(otherUserId),uniffiCallStatus
     )
 })
 }
     
 open func mlsHasSession(otherUserId: String) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_has_session(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(otherUserId),$0
+        FfiConverterString.lower(otherUserId),uniffiCallStatus
     )
 })
 }
     
 open func mlsImportKeyPackage(userId: String, keyPackageData: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_import_key_package(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(userId),
-        FfiConverterSequenceUInt8.lower(keyPackageData),$0
+        FfiConverterSequenceUInt8.lower(keyPackageData),uniffiCallStatus
     )
 }
 }
     
 open func mlsJoinSession(welcome: MlsWelcomeMessage)throws  -> MlsGroupInfo  {
     return try  FfiConverterTypeMlsGroupInfo_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_join_session(
             self.uniffiCloneHandle(),
-        FfiConverterTypeMlsWelcomeMessage_lower(welcome),$0
+        FfiConverterTypeMlsWelcomeMessage_lower(welcome),uniffiCallStatus
     )
 })
 }
     
 open func mlsListSessions() -> [String]  {
     return try!  FfiConverterSequenceString.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_list_sessions(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func mlsMarkKeyPackageSynced(packageId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_mark_key_package_synced(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(packageId),$0
+        FfiConverterString.lower(packageId),uniffiCallStatus
     )
 }
 }
     
 open func mlsProcessWelcome(welcome: MlsWelcomeMessage)throws  -> MlsGroupInfo  {
     return try  FfiConverterTypeMlsGroupInfo_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_mls_process_welcome(
             self.uniffiCloneHandle(),
-        FfiConverterTypeMlsWelcomeMessage_lower(welcome),$0
+        FfiConverterTypeMlsWelcomeMessage_lower(welcome),uniffiCallStatus
     )
 })
 }
     
 open func nostrConfirmSent(messageId: String)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_confirm_sent(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(messageId),$0
+        FfiConverterString.lower(messageId),uniffiCallStatus
     )
 }
 }
     
 open func nostrGetNextMessage() -> NostrMessage?  {
     return try!  FfiConverterOptionTypeNostrMessage.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_message(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func nostrGetNextQuery() -> NostrQuery?  {
     return try!  FfiConverterOptionTypeNostrQuery.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_next_query(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func nostrGetPublicKey() -> String?  {
     return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_public_key(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func nostrGetSubscriptionFilter(subscriptionId: String) -> String?  {
     return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_get_subscription_filter(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(subscriptionId),$0
+        FfiConverterString.lower(subscriptionId),uniffiCallStatus
     )
 })
 }
     
 open func nostrMessageReceived(senderId: String, data: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(senderId),
-        FfiConverterSequenceUInt8.lower(data),$0
+        FfiConverterSequenceUInt8.lower(data),uniffiCallStatus
     )
 }
 }
     
 open func nostrMessageReceivedAt(senderId: String, data: [UInt8], createdAt: Int64)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_message_received_at(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(senderId),
         FfiConverterSequenceUInt8.lower(data),
-        FfiConverterInt64.lower(createdAt),$0
+        FfiConverterInt64.lower(createdAt),uniffiCallStatus
     )
 }
 }
     
 open func nostrQueryCompleted(queryId: String)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_completed(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(queryId),$0
+        FfiConverterString.lower(queryId),uniffiCallStatus
     )
 }
 }
     
 open func nostrQueryEventReceived(queryId: String, eventJson: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_query_event_received(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(queryId),
-        FfiConverterString.lower(eventJson),$0
+        FfiConverterString.lower(eventJson),uniffiCallStatus
     )
 }
 }
     
 open func nostrSendFailed(messageId: String)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(messageId),$0
+        FfiConverterString.lower(messageId),uniffiCallStatus
     )
 }
 }
     
 open func nostrSendFailedWithReason(messageId: String, reason: String?)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_send_failed_with_reason(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(messageId),
-        FfiConverterOptionString.lower(reason),$0
+        FfiConverterOptionString.lower(reason),uniffiCallStatus
     )
 }
 }
     
 open func nostrStatusChanged(isConnected: Bool)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_nostr_status_changed(
             self.uniffiCloneHandle(),
-        FfiConverterBool.lower(isConnected),$0
+        FfiConverterBool.lower(isConnected),uniffiCallStatus
     )
 }
 }
     
 open func notifyAppState(state: AppState)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_notify_app_state(
             self.uniffiCloneHandle(),
-        FfiConverterTypeAppState_lower(state),$0
+        FfiConverterTypeAppState_lower(state),uniffiCallStatus
     )
 }
 }
     
 open func pause()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_pause(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
     
 open func pollEvent() -> String?  {
     return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_poll_event(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func process()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
     
 open func processFileChunk(fileId: String, chunkIndex: UInt32, totalChunks: UInt32, fileSize: UInt64, fileName: String, fileChecksum: String, data: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_process_file_chunk(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(fileId),
@@ -2677,565 +2900,640 @@ open func processFileChunk(fileId: String, chunkIndex: UInt32, totalChunks: UInt
         FfiConverterUInt64.lower(fileSize),
         FfiConverterString.lower(fileName),
         FfiConverterString.lower(fileChecksum),
-        FfiConverterSequenceUInt8.lower(data),$0
+        FfiConverterSequenceUInt8.lower(data),uniffiCallStatus
     )
 }
 }
     
 open func protocolLockDiagnostics() -> ProtocolLockDiagnostics  {
     return try!  FfiConverterTypeProtocolLockDiagnostics_lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_protocol_lock_diagnostics(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func receiveMessage() -> String?  {
     return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_receive_message(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func rejectConnectionRequest(recipient: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reject_connection_request(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(recipient),$0
+        FfiConverterString.lower(recipient),uniffiCallStatus
     )
 })
 }
     
 open func rekeySession(peerId: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rekey_session(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(peerId),$0
+        FfiConverterString.lower(peerId),uniffiCallStatus
     )
 })
 }
     
 open func releaseTransportLock()  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_release_transport_lock(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
     
 open func removeFromGroup(groupId: String, memberId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_from_group(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(groupId),
-        FfiConverterString.lower(memberId),$0
+        FfiConverterString.lower(memberId),uniffiCallStatus
     )
 }
 }
     
 open func removeTransport(transportType: TransportType)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_remove_transport(
             self.uniffiCloneHandle(),
-        FfiConverterTypeTransportType_lower(transportType),$0
+        FfiConverterTypeTransportType_lower(transportType),uniffiCallStatus
     )
 }
 }
     
 open func renameGroup(groupId: String, newName: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_rename_group(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(groupId),
-        FfiConverterString.lower(newName),$0
+        FfiConverterString.lower(newName),uniffiCallStatus
     )
 }
 }
     
 open func requestGroupRelayRegistration(groupId: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_request_group_relay_registration(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(groupId),$0
+        FfiConverterString.lower(groupId),uniffiCallStatus
     )
 })
 }
     
 open func resolveUsername(username: String)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resolve_username(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(username),$0
+        FfiConverterString.lower(username),uniffiCallStatus
     )
 })
 }
     
 open func resume()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_resume(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
     
 open func reticulumAddressDeclarationRefused(reason: String)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declaration_refused(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(reason),$0
+        FfiConverterString.lower(reason),uniffiCallStatus
     )
 }
 }
     
 open func reticulumAddressDeclared(address: String)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_address_declared(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(address),$0
+        FfiConverterString.lower(address),uniffiCallStatus
     )
 }
 }
     
 open func reticulumConfirmSent(messageId: String)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_confirm_sent(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(messageId),$0
+        FfiConverterString.lower(messageId),uniffiCallStatus
     )
 }
 }
     
 open func reticulumGatewayCapabilities(capabilities: [String])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_gateway_capabilities(
             self.uniffiCloneHandle(),
-        FfiConverterSequenceString.lower(capabilities),$0
+        FfiConverterSequenceString.lower(capabilities),uniffiCallStatus
     )
 }
 }
     
 open func reticulumGetNextMessage() -> ReticulumMessage?  {
     return try!  FfiConverterOptionTypeReticulumMessage.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_get_next_message(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func reticulumMessageReceived(senderId: String, data: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_message_received(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(senderId),
-        FfiConverterSequenceUInt8.lower(data),$0
+        FfiConverterSequenceUInt8.lower(data),uniffiCallStatus
     )
 }
 }
     
 open func reticulumPeerPresence(peerId: String, online: Bool, lastSeenMs: Int64?)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_peer_presence(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(peerId),
         FfiConverterBool.lower(online),
-        FfiConverterOptionInt64.lower(lastSeenMs),$0
+        FfiConverterOptionInt64.lower(lastSeenMs),uniffiCallStatus
     )
 }
 }
     
 open func reticulumPresenceWatchlist() -> [String]  {
     return try!  FfiConverterSequenceString.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_presence_watchlist(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func reticulumSendFailed(messageId: String)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_send_failed(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(messageId),$0
+        FfiConverterString.lower(messageId),uniffiCallStatus
     )
 }
 }
     
 open func reticulumSendFailedWithReason(messageId: String, reason: String?)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_send_failed_with_reason(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(messageId),
-        FfiConverterOptionString.lower(reason),$0
+        FfiConverterOptionString.lower(reason),uniffiCallStatus
     )
 }
 }
     
 open func reticulumStatusChanged(isConnected: Bool)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_reticulum_status_changed(
             self.uniffiCloneHandle(),
-        FfiConverterBool.lower(isConnected),$0
+        FfiConverterBool.lower(isConnected),uniffiCallStatus
     )
 }
 }
     
 open func sendConnectionRequest(recipient: String, senderName: String, keyPackage: [UInt8]?, initialMessage: String?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_connection_request(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(recipient),
         FfiConverterString.lower(senderName),
         FfiConverterOptionSequenceUInt8.lower(keyPackage),
-        FfiConverterOptionString.lower(initialMessage),$0
+        FfiConverterOptionString.lower(initialMessage),uniffiCallStatus
     )
 })
 }
     
 open func sendFile(recipient: String, fileData: [UInt8], fileName: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(recipient),
         FfiConverterSequenceUInt8.lower(fileData),
-        FfiConverterString.lower(fileName),$0
+        FfiConverterString.lower(fileName),uniffiCallStatus
+    )
+})
+}
+    
+open func sendFileFromPath(recipient: String, filePath: String, fileName: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
+    uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file_from_path(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(recipient),
+        FfiConverterString.lower(filePath),
+        FfiConverterString.lower(fileName),uniffiCallStatus
     )
 })
 }
     
 open func sendGroupMessage(groupId: String, content: String, priority: MessagePriority?, replyToMsg: String?)throws  -> [String]  {
     return try  FfiConverterSequenceString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_group_message(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(groupId),
         FfiConverterString.lower(content),
         FfiConverterOptionTypeMessagePriority.lower(priority),
-        FfiConverterOptionString.lower(replyToMsg),$0
+        FfiConverterOptionString.lower(replyToMsg),uniffiCallStatus
     )
 })
 }
     
 open func sendMedia(recipient: String, fileData: [UInt8], fileName: String, contentType: ContentType, mediaMetadata: MediaMetadata?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(recipient),
         FfiConverterSequenceUInt8.lower(fileData),
         FfiConverterString.lower(fileName),
         FfiConverterTypeContentType_lower(contentType),
-        FfiConverterOptionTypeMediaMetadata.lower(mediaMetadata),$0
+        FfiConverterOptionTypeMediaMetadata.lower(mediaMetadata),uniffiCallStatus
     )
 })
 }
     
 open func sendMediaRich(recipient: String, fileData: [UInt8], fileName: String, contentType: ContentType, options: MediaSendOptions)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_media_rich(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(recipient),
         FfiConverterSequenceUInt8.lower(fileData),
         FfiConverterString.lower(fileName),
         FfiConverterTypeContentType_lower(contentType),
-        FfiConverterTypeMediaSendOptions_lower(options),$0
+        FfiConverterTypeMediaSendOptions_lower(options),uniffiCallStatus
     )
 })
 }
     
 open func sendMessage(recipient: String, content: String, priority: MessagePriority, replyToMsg: String?)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(recipient),
         FfiConverterString.lower(content),
         FfiConverterTypeMessagePriority_lower(priority),
-        FfiConverterOptionString.lower(replyToMsg),$0
+        FfiConverterOptionString.lower(replyToMsg),uniffiCallStatus
     )
 })
 }
     
 open func sendMessageRich(recipient: String, content: String, options: SendMessageOptions)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_message_rich(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(recipient),
         FfiConverterString.lower(content),
-        FfiConverterTypeSendMessageOptions_lower(options),$0
+        FfiConverterTypeSendMessageOptions_lower(options),uniffiCallStatus
     )
 })
 }
     
 open func sendPresenceUpdate(recipient: String, status: PresenceStatus)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_presence_update(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(recipient),
-        FfiConverterTypePresenceStatus_lower(status),$0
+        FfiConverterTypePresenceStatus_lower(status),uniffiCallStatus
     )
 })
 }
     
 open func sendReadReceipt(recipient: String, messageIds: [String])throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_read_receipt(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(recipient),
-        FfiConverterSequenceString.lower(messageIds),$0
+        FfiConverterSequenceString.lower(messageIds),uniffiCallStatus
     )
 })
 }
     
 open func sendTypingIndicator(recipient: String, conversationId: String, isTyping: Bool)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_typing_indicator(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(recipient),
         FfiConverterString.lower(conversationId),
-        FfiConverterBool.lower(isTyping),$0
+        FfiConverterBool.lower(isTyping),uniffiCallStatus
     )
 })
 }
     
 open func setBatteryLevel(level: UInt8)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_level(
             self.uniffiCloneHandle(),
-        FfiConverterUInt8.lower(level),$0
+        FfiConverterUInt8.lower(level),uniffiCallStatus
     )
 }
 }
     
 open func setBatteryState(level: UInt8, isCharging: Bool)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_battery_state(
             self.uniffiCloneHandle(),
         FfiConverterUInt8.lower(level),
-        FfiConverterBool.lower(isCharging),$0
+        FfiConverterBool.lower(isCharging),uniffiCallStatus
     )
 }
 }
     
 open func setBleTransportCallback(callback: BleTransportCallback)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_ble_transport_callback(
             self.uniffiCloneHandle(),
-        FfiConverterCallbackInterfaceBleTransportCallback_lower(callback),$0
+        FfiConverterCallbackInterfaceBleTransportCallback_lower(callback),uniffiCallStatus
     )
 }
 }
     
 open func setEventCallback(callback: EventCallback)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_event_callback(
             self.uniffiCloneHandle(),
-        FfiConverterCallbackInterfaceEventCallback_lower(callback),$0
+        FfiConverterCallbackInterfaceEventCallback_lower(callback),uniffiCallStatus
     )
 }
 }
     
 open func setMemberRole(groupId: String, userId: String, role: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_member_role(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(groupId),
         FfiConverterString.lower(userId),
-        FfiConverterString.lower(role),$0
+        FfiConverterString.lower(role),uniffiCallStatus
     )
 }
 }
     
 open func setNostrTransportCallback(callback: NostrTransportCallback)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_nostr_transport_callback(
             self.uniffiCloneHandle(),
-        FfiConverterCallbackInterfaceNostrTransportCallback_lower(callback),$0
+        FfiConverterCallbackInterfaceNostrTransportCallback_lower(callback),uniffiCallStatus
     )
 }
 }
     
 open func setRelayPriority(priority: RelayPriority)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_priority(
             self.uniffiCloneHandle(),
-        FfiConverterTypeRelayPriority_lower(priority),$0
+        FfiConverterTypeRelayPriority_lower(priority),uniffiCallStatus
     )
 }
 }
     
 open func setReticulumTransportCallback(callback: ReticulumTransportCallback)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_reticulum_transport_callback(
             self.uniffiCloneHandle(),
-        FfiConverterCallbackInterfaceReticulumTransportCallback_lower(callback),$0
+        FfiConverterCallbackInterfaceReticulumTransportCallback_lower(callback),uniffiCallStatus
     )
 }
 }
     
 open func setTelemetryEnabled(enabled: Bool)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_telemetry_enabled(
             self.uniffiCloneHandle(),
-        FfiConverterBool.lower(enabled),$0
+        FfiConverterBool.lower(enabled),uniffiCallStatus
     )
 }
 }
     
 open func setWifiDirectTransportCallback(callback: WifiDirectTransportCallback)  {try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_wifi_direct_transport_callback(
             self.uniffiCloneHandle(),
-        FfiConverterCallbackInterfaceWifiDirectTransportCallback_lower(callback),$0
+        FfiConverterCallbackInterfaceWifiDirectTransportCallback_lower(callback),uniffiCallStatus
     )
 }
 }
     
 open func shouldEscalateToWifi() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_should_escalate_to_wifi(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func signData(data: [UInt8])throws  -> [UInt8]  {
     return try  FfiConverterSequenceUInt8.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data(
             self.uniffiCloneHandle(),
-        FfiConverterSequenceUInt8.lower(data),$0
+        FfiConverterSequenceUInt8.lower(data),uniffiCallStatus
     )
 })
 }
     
 open func signDataBytes(data: Data)throws  -> Data  {
     return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_sign_data_bytes(
             self.uniffiCloneHandle(),
-        FfiConverterData.lower(data),$0
+        FfiConverterData.lower(data),uniffiCallStatus
     )
 })
 }
     
 open func start()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_start(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
     
 open func stop()throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_stop(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
 }
     
 open func telemetryInstallId() -> String?  {
     return try!  FfiConverterOptionString.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_install_id(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func telemetryStats() -> TelemetryStats?  {
     return try!  FfiConverterOptionTypeTelemetryStats.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_telemetry_stats(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func unblockUser(userId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_unblock_user(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(userId),$0
+        FfiConverterString.lower(userId),uniffiCallStatus
     )
 }
 }
     
 open func updateAckConfig(config: AckConfig)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_ack_config(
             self.uniffiCloneHandle(),
-        FfiConverterTypeAckConfig_lower(config),$0
+        FfiConverterTypeAckConfig_lower(config),uniffiCallStatus
     )
 }
 }
     
 open func updateDedupConfig(config: DedupConfig)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dedup_config(
             self.uniffiCloneHandle(),
-        FfiConverterTypeDedupConfig_lower(config),$0
+        FfiConverterTypeDedupConfig_lower(config),uniffiCallStatus
     )
 }
 }
     
 open func updateDorsConfig(config: DorsConfig)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_dors_config(
             self.uniffiCloneHandle(),
-        FfiConverterTypeDorsConfig_lower(config),$0
+        FfiConverterTypeDorsConfig_lower(config),uniffiCallStatus
     )
 }
 }
     
 open func updateRelayConfig(config: RelayConfig)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_relay_config(
             self.uniffiCloneHandle(),
-        FfiConverterTypeRelayConfig_lower(config),$0
+        FfiConverterTypeRelayConfig_lower(config),uniffiCallStatus
     )
 }
 }
     
 open func updateRetryConfig(config: RetryConfig)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_retry_config(
             self.uniffiCloneHandle(),
-        FfiConverterTypeRetryConfig_lower(config),$0
+        FfiConverterTypeRetryConfig_lower(config),uniffiCallStatus
     )
 }
 }
     
 open func updateTransportMetrics(transportType: TransportType, metrics: TransportMetrics)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_update_transport_metrics(
             self.uniffiCloneHandle(),
         FfiConverterTypeTransportType_lower(transportType),
-        FfiConverterTypeTransportMetrics_lower(metrics),$0
+        FfiConverterTypeTransportMetrics_lower(metrics),uniffiCallStatus
     )
 }
 }
     
 open func verifySignature(publicKey: [UInt8], data: [UInt8], signature: [UInt8])throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature(
             self.uniffiCloneHandle(),
         FfiConverterSequenceUInt8.lower(publicKey),
         FfiConverterSequenceUInt8.lower(data),
-        FfiConverterSequenceUInt8.lower(signature),$0
+        FfiConverterSequenceUInt8.lower(signature),uniffiCallStatus
     )
 })
 }
     
 open func verifySignatureBytes(publicKey: Data, data: Data, signature: Data)throws  -> Bool  {
     return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_verify_signature_bytes(
             self.uniffiCloneHandle(),
         FfiConverterData.lower(publicKey),
         FfiConverterData.lower(data),
-        FfiConverterData.lower(signature),$0
+        FfiConverterData.lower(signature),uniffiCallStatus
     )
 })
 }
     
 open func wifiDirectGetNextMessage() -> WifiDirectMessage?  {
     return try!  FfiConverterOptionTypeWifiDirectMessage.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_get_next_message(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
 }
     
 open func wifiDirectMessageReceived(senderId: String, data: [UInt8])throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_message_received(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(senderId),
-        FfiConverterSequenceUInt8.lower(data),$0
+        FfiConverterSequenceUInt8.lower(data),uniffiCallStatus
     )
 }
 }
     
 open func wifiDirectPeerConnected(peerId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_connected(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(peerId),$0
+        FfiConverterString.lower(peerId),uniffiCallStatus
     )
 }
 }
     
 open func wifiDirectPeerDisconnected(peerId: String)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_peer_disconnected(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(peerId),$0
+        FfiConverterString.lower(peerId),uniffiCallStatus
     )
 }
 }
     
 open func wifiDirectStatusChanged(isConnected: Bool)throws   {try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_status_changed(
             self.uniffiCloneHandle(),
-        FfiConverterBool.lower(isConnected),$0
+        FfiConverterBool.lower(isConnected),uniffiCallStatus
     )
 }
 }
@@ -3300,6 +3598,8 @@ public struct AckConfig: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -3350,6 +3650,8 @@ public struct BleFragment: Equatable, Hashable {
         self.recipientId = recipientId
         self.data = data
     }
+
+    
 
     
 }
@@ -3416,6 +3718,8 @@ public struct CustodyConfig: Equatable, Hashable {
         self.strangerMaxBytes = strangerMaxBytes
         self.overflowPolicy = overflowPolicy
     }
+
+    
 
     
 }
@@ -3524,6 +3828,8 @@ public struct CustodyStats: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -3616,6 +3922,8 @@ public struct DedupConfig: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -3670,6 +3978,8 @@ public struct DedupStats: Equatable, Hashable {
         self.capacityUsedPercent = capacityUsedPercent
         self.mode = mode
     }
+
+    
 
     
 }
@@ -3758,6 +4068,8 @@ public struct DorsConfig: Equatable, Hashable {
         self.relayMinBatteryLevel = relayMinBatteryLevel
         self.relayOptimalConnectionCount = relayOptimalConnectionCount
     }
+
+    
 
     
 }
@@ -3850,6 +4162,8 @@ public struct EncryptionConfig: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -3912,6 +4226,8 @@ public struct FileProgress: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -3972,6 +4288,8 @@ public struct ForwardInfo: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -4030,6 +4348,8 @@ public struct GatewayAddressDeclaration: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -4082,6 +4402,8 @@ public struct GroupRichReadiness: Equatable, Hashable {
         self.ready = ready
         self.unknownMembers = unknownMembers
     }
+
+    
 
     
 }
@@ -4142,6 +4464,8 @@ public struct InternetMessage: Equatable, Hashable {
         self.controlOp = controlOp
         self.controlPayload = controlPayload
     }
+
+    
 
     
 }
@@ -4206,6 +4530,8 @@ public struct InviteInfo: Equatable, Hashable {
         self.petname = petname
         self.signed = signed
     }
+
+    
 
     
 }
@@ -4290,6 +4616,8 @@ public struct MediaMetadata: Equatable, Hashable {
         self.stickerRemoteId = stickerRemoteId
         self.stickerKind = stickerKind
     }
+
+    
 
     
 }
@@ -4382,6 +4710,8 @@ public struct MediaSendOptions: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -4470,6 +4800,8 @@ public struct MeshRelayConfig: Equatable, Hashable {
         self.activityMinForwards = activityMinForwards
         self.activityIdleWindows = activityIdleWindows
     }
+
+    
 
     
 }
@@ -4574,6 +4906,8 @@ public struct MeshRelayStats: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -4676,6 +5010,8 @@ public struct MeshRelayTunables: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -4762,6 +5098,8 @@ public struct MessageStats: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -4818,6 +5156,8 @@ public struct MlsAddMemberResult: Equatable, Hashable {
         self.welcome = welcome
         self.commit = commit
     }
+
+    
 
     
 }
@@ -4878,6 +5218,8 @@ public struct MlsEncryptedMessage: Equatable, Hashable {
         self.senderId = senderId
         self.timestampMs = timestampMs
     }
+
+    
 
     
 }
@@ -4950,6 +5292,8 @@ public struct MlsGroupInfo: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -5020,6 +5364,8 @@ public struct MlsKeyPackageBundle: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -5086,6 +5432,8 @@ public struct MlsWelcomeMessage: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -5146,6 +5494,8 @@ public struct NetworkLink: Equatable, Hashable {
         self.transport = transport
         self.quality = quality
     }
+
+    
 
     
 }
@@ -5212,6 +5562,8 @@ public struct NetworkNode: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -5274,6 +5626,8 @@ public struct NetworkTopology: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -5330,6 +5684,8 @@ public struct NostrMessage: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -5384,6 +5740,8 @@ public struct NostrQuery: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -5436,6 +5794,8 @@ public struct PeerDevice: Equatable, Hashable {
         self.rssi = rssi
         self.lastSeenMs = lastSeenMs
     }
+
+    
 
     
 }
@@ -5494,6 +5854,8 @@ public struct PendingQueueConfig: Equatable, Hashable {
         self.pendingTtlMs = pendingTtlMs
         self.overflowPolicy = overflowPolicy
     }
+
+    
 
     
 }
@@ -5618,6 +5980,8 @@ public struct ProtocolConfig: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -5740,6 +6104,8 @@ public struct ProtocolLockDiagnostics: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -5798,6 +6164,8 @@ public struct RelayConfig: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -5852,6 +6220,8 @@ public struct ReliabilityConfig: Equatable, Hashable {
         self.retry = retry
         self.dedup = dedup
     }
+
+    
 
     
 }
@@ -5914,6 +6284,8 @@ public struct ReplyContext: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -5974,6 +6346,8 @@ public struct ReticulumMessage: Equatable, Hashable {
         self.data = data
         self.replyToMsg = replyToMsg
     }
+
+    
 
     
 }
@@ -6040,6 +6414,8 @@ public struct RetryConfig: Equatable, Hashable {
         self.pendingMessageMaxLifetimeMs = pendingMessageMaxLifetimeMs
         self.edgeDrivenUnreachableDm = edgeDrivenUnreachableDm
     }
+
+    
 
     
 }
@@ -6112,6 +6488,8 @@ public struct SendMessageOptions: Equatable, Hashable {
         self.forwardInfo = forwardInfo
         self.appId = appId
     }
+
+    
 
     
 }
@@ -6202,6 +6580,8 @@ public struct TelemetryConfig: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -6290,6 +6670,8 @@ public struct TelemetryStats: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -6362,6 +6744,8 @@ public struct TransportConfig: Equatable, Hashable {
         self.nostrColdContactEnabled = nostrColdContactEnabled
         self.nostrUsernameDiscoveryEnabled = nostrUsernameDiscoveryEnabled
     }
+
+    
 
     
 }
@@ -6460,6 +6844,8 @@ public struct TransportMetrics: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -6544,6 +6930,8 @@ public struct WifiDirectMessage: Equatable, Hashable {
     }
 
     
+
+    
 }
 
 #if compiler(>=6)
@@ -6583,14 +6971,15 @@ public func FfiConverterTypeWifiDirectMessage_lower(_ value: WifiDirectMessage) 
     return FfiConverterTypeWifiDirectMessage.lower(value)
 }
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 
 public enum AppState: Equatable, Hashable {
     
     case active
     case background
     case inactive
+
+
 
 
 
@@ -6655,8 +7044,7 @@ public func FfiConverterTypeAppState_lower(_ value: AppState) -> RustBuffer {
 }
 
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 
 public enum ContentType: Equatable, Hashable {
     
@@ -6669,6 +7057,8 @@ public enum ContentType: Equatable, Hashable {
     case file
     case fileChunk
     case poll
+
+
 
 
 
@@ -6769,8 +7159,7 @@ public func FfiConverterTypeContentType_lower(_ value: ContentType) -> RustBuffe
 }
 
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 
 public enum EstablishmentState: Equatable, Hashable {
     
@@ -6778,6 +7167,8 @@ public enum EstablishmentState: Equatable, Hashable {
     case haveKeyPackage
     case sessionPending
     case sessionConfirmed
+
+
 
 
 
@@ -6848,8 +7239,7 @@ public func FfiConverterTypeEstablishmentState_lower(_ value: EstablishmentState
 }
 
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 
 public enum MessagePriority: Equatable, Hashable {
     
@@ -6857,6 +7247,8 @@ public enum MessagePriority: Equatable, Hashable {
     case medium
     case high
     case critical
+
+
 
 
 
@@ -6928,7 +7320,8 @@ public func FfiConverterTypeMessagePriority_lower(_ value: MessagePriority) -> R
 
 
 
-public enum MlsStorageError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+public 
+enum MlsStorageError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
     
     
@@ -6941,6 +7334,8 @@ public enum MlsStorageError: Swift.Error, Equatable, Hashable, Foundation.Locali
     case KeyNotFound(message: String)
     
     case CorruptedData(message: String)
+    
+
     
 
     
@@ -7031,14 +7426,15 @@ public func FfiConverterTypeMlsStorageError_lower(_ value: MlsStorageError) -> R
     return FfiConverterTypeMlsStorageError.lower(value)
 }
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 
 public enum MlsVerbosity: Equatable, Hashable {
     
     case off
     case lifecycle
     case diagnostic
+
+
 
 
 
@@ -7103,13 +7499,14 @@ public func FfiConverterTypeMlsVerbosity_lower(_ value: MlsVerbosity) -> RustBuf
 }
 
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 
 public enum OverflowPolicy: Equatable, Hashable {
     
     case dropOldest
     case dropNewest
+
+
 
 
 
@@ -7168,14 +7565,15 @@ public func FfiConverterTypeOverflowPolicy_lower(_ value: OverflowPolicy) -> Rus
 }
 
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 
 public enum PresenceStatus: Equatable, Hashable {
     
     case online
     case away
     case offline
+
+
 
 
 
@@ -7241,7 +7639,8 @@ public func FfiConverterTypePresenceStatus_lower(_ value: PresenceStatus) -> Rus
 
 
 
-public enum ProtocolError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+public 
+enum ProtocolError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
     
     
@@ -7294,6 +7693,8 @@ public enum ProtocolError: Swift.Error, Equatable, Hashable, Foundation.Localize
     case DataCorrupted(message: String)
     
     case TelemetryConfigInvalid(message: String)
+    
+
     
 
     
@@ -7504,14 +7905,15 @@ public func FfiConverterTypeProtocolError_lower(_ value: ProtocolError) -> RustB
     return FfiConverterTypeProtocolError.lower(value)
 }
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 
 public enum ProtocolState: Equatable, Hashable {
     
     case stopped
     case running
     case paused
+
+
 
 
 
@@ -7576,14 +7978,15 @@ public func FfiConverterTypeProtocolState_lower(_ value: ProtocolState) -> RustB
 }
 
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 
 public enum RelayPriority: Equatable, Hashable {
     
     case never
     case auto
     case always
+
+
 
 
 
@@ -7648,14 +8051,15 @@ public func FfiConverterTypeRelayPriority_lower(_ value: RelayPriority) -> RustB
 }
 
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 
 public enum RelaySyncState: Equatable, Hashable {
     
     case synced
     case pending
     case unsynced
+
+
 
 
 
@@ -7720,8 +8124,7 @@ public func FfiConverterTypeRelaySyncState_lower(_ value: RelaySyncState) -> Rus
 }
 
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 
 public enum TelemetryOs: Equatable, Hashable {
     
@@ -7731,6 +8134,8 @@ public enum TelemetryOs: Equatable, Hashable {
     case macos
     case windows
     case other
+
+
 
 
 
@@ -7813,8 +8218,7 @@ public func FfiConverterTypeTelemetryOs_lower(_ value: TelemetryOs) -> RustBuffe
 }
 
 
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 
 public enum TransportType: Equatable, Hashable {
     
@@ -7823,6 +8227,8 @@ public enum TransportType: Equatable, Hashable {
     case wiFiDirect
     case reticulum
     case nostr
+
+
 
 
 
@@ -7915,9 +8321,8 @@ fileprivate struct UniffiCallbackInterfaceBleTransportCallback {
     // Create the VTable using a series of closures.
     // Swift automatically converts these into C callback functions.
     //
-    // This creates 1-element array, since this seems to be the only way to construct a const
-    // pointer that we can pass to the Rust code.
-    static let vtable: [UniffiVTableCallbackInterfaceBleTransportCallback] = [UniffiVTableCallbackInterfaceBleTransportCallback(
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceBleTransportCallback = UniffiVTableCallbackInterfaceBleTransportCallback(
         uniffiFree: { (uniffiHandle: UInt64) -> () in
             do {
                 try FfiConverterCallbackInterfaceBleTransportCallback.handleMap.remove(handle: uniffiHandle)
@@ -7954,11 +8359,23 @@ fileprivate struct UniffiCallbackInterfaceBleTransportCallback {
                 writeReturn: writeReturn
             )
         }
-    )]
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceBleTransportCallback> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceBleTransportCallback>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
 }
 
 private func uniffiCallbackInitBleTransportCallback() {
-    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_bletransportcallback(UniffiCallbackInterfaceBleTransportCallback.vtable)
+    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_bletransportcallback(UniffiCallbackInterfaceBleTransportCallback.vtablePtr)
 }
 
 // FfiConverter protocol for callback interfaces
@@ -8037,9 +8454,8 @@ fileprivate struct UniffiCallbackInterfaceEventCallback {
     // Create the VTable using a series of closures.
     // Swift automatically converts these into C callback functions.
     //
-    // This creates 1-element array, since this seems to be the only way to construct a const
-    // pointer that we can pass to the Rust code.
-    static let vtable: [UniffiVTableCallbackInterfaceEventCallback] = [UniffiVTableCallbackInterfaceEventCallback(
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceEventCallback = UniffiVTableCallbackInterfaceEventCallback(
         uniffiFree: { (uniffiHandle: UInt64) -> () in
             do {
                 try FfiConverterCallbackInterfaceEventCallback.handleMap.remove(handle: uniffiHandle)
@@ -8078,11 +8494,23 @@ fileprivate struct UniffiCallbackInterfaceEventCallback {
                 writeReturn: writeReturn
             )
         }
-    )]
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceEventCallback> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceEventCallback>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
 }
 
 private func uniffiCallbackInitEventCallback() {
-    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_eventcallback(UniffiCallbackInterfaceEventCallback.vtable)
+    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_eventcallback(UniffiCallbackInterfaceEventCallback.vtablePtr)
 }
 
 // FfiConverter protocol for callback interfaces
@@ -8167,9 +8595,8 @@ fileprivate struct UniffiCallbackInterfaceMlsStorageProvider {
     // Create the VTable using a series of closures.
     // Swift automatically converts these into C callback functions.
     //
-    // This creates 1-element array, since this seems to be the only way to construct a const
-    // pointer that we can pass to the Rust code.
-    static let vtable: [UniffiVTableCallbackInterfaceMlsStorageProvider] = [UniffiVTableCallbackInterfaceMlsStorageProvider(
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceMlsStorageProvider = UniffiVTableCallbackInterfaceMlsStorageProvider(
         uniffiFree: { (uniffiHandle: UInt64) -> () in
             do {
                 try FfiConverterCallbackInterfaceMlsStorageProvider.handleMap.remove(handle: uniffiHandle)
@@ -8292,11 +8719,23 @@ fileprivate struct UniffiCallbackInterfaceMlsStorageProvider {
                 lowerError: FfiConverterTypeMlsStorageError_lower
             )
         }
-    )]
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceMlsStorageProvider> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceMlsStorageProvider>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
 }
 
 private func uniffiCallbackInitMlsStorageProvider() {
-    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_mlsstorageprovider(UniffiCallbackInterfaceMlsStorageProvider.vtable)
+    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_mlsstorageprovider(UniffiCallbackInterfaceMlsStorageProvider.vtablePtr)
 }
 
 // FfiConverter protocol for callback interfaces
@@ -8375,9 +8814,8 @@ fileprivate struct UniffiCallbackInterfaceNostrTransportCallback {
     // Create the VTable using a series of closures.
     // Swift automatically converts these into C callback functions.
     //
-    // This creates 1-element array, since this seems to be the only way to construct a const
-    // pointer that we can pass to the Rust code.
-    static let vtable: [UniffiVTableCallbackInterfaceNostrTransportCallback] = [UniffiVTableCallbackInterfaceNostrTransportCallback(
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceNostrTransportCallback = UniffiVTableCallbackInterfaceNostrTransportCallback(
         uniffiFree: { (uniffiHandle: UInt64) -> () in
             do {
                 try FfiConverterCallbackInterfaceNostrTransportCallback.handleMap.remove(handle: uniffiHandle)
@@ -8414,11 +8852,23 @@ fileprivate struct UniffiCallbackInterfaceNostrTransportCallback {
                 writeReturn: writeReturn
             )
         }
-    )]
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceNostrTransportCallback> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceNostrTransportCallback>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
 }
 
 private func uniffiCallbackInitNostrTransportCallback() {
-    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_nostrtransportcallback(UniffiCallbackInterfaceNostrTransportCallback.vtable)
+    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_nostrtransportcallback(UniffiCallbackInterfaceNostrTransportCallback.vtablePtr)
 }
 
 // FfiConverter protocol for callback interfaces
@@ -8503,9 +8953,8 @@ fileprivate struct UniffiCallbackInterfaceProtocolStateStorageProvider {
     // Create the VTable using a series of closures.
     // Swift automatically converts these into C callback functions.
     //
-    // This creates 1-element array, since this seems to be the only way to construct a const
-    // pointer that we can pass to the Rust code.
-    static let vtable: [UniffiVTableCallbackInterfaceProtocolStateStorageProvider] = [UniffiVTableCallbackInterfaceProtocolStateStorageProvider(
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceProtocolStateStorageProvider = UniffiVTableCallbackInterfaceProtocolStateStorageProvider(
         uniffiFree: { (uniffiHandle: UInt64) -> () in
             do {
                 try FfiConverterCallbackInterfaceProtocolStateStorageProvider.handleMap.remove(handle: uniffiHandle)
@@ -8628,11 +9077,23 @@ fileprivate struct UniffiCallbackInterfaceProtocolStateStorageProvider {
                 lowerError: FfiConverterTypeMlsStorageError_lower
             )
         }
-    )]
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceProtocolStateStorageProvider> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceProtocolStateStorageProvider>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
 }
 
 private func uniffiCallbackInitProtocolStateStorageProvider() {
-    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_protocolstatestorageprovider(UniffiCallbackInterfaceProtocolStateStorageProvider.vtable)
+    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_protocolstatestorageprovider(UniffiCallbackInterfaceProtocolStateStorageProvider.vtablePtr)
 }
 
 // FfiConverter protocol for callback interfaces
@@ -8711,9 +9172,8 @@ fileprivate struct UniffiCallbackInterfaceReticulumTransportCallback {
     // Create the VTable using a series of closures.
     // Swift automatically converts these into C callback functions.
     //
-    // This creates 1-element array, since this seems to be the only way to construct a const
-    // pointer that we can pass to the Rust code.
-    static let vtable: [UniffiVTableCallbackInterfaceReticulumTransportCallback] = [UniffiVTableCallbackInterfaceReticulumTransportCallback(
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceReticulumTransportCallback = UniffiVTableCallbackInterfaceReticulumTransportCallback(
         uniffiFree: { (uniffiHandle: UInt64) -> () in
             do {
                 try FfiConverterCallbackInterfaceReticulumTransportCallback.handleMap.remove(handle: uniffiHandle)
@@ -8750,11 +9210,23 @@ fileprivate struct UniffiCallbackInterfaceReticulumTransportCallback {
                 writeReturn: writeReturn
             )
         }
-    )]
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceReticulumTransportCallback> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceReticulumTransportCallback>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
 }
 
 private func uniffiCallbackInitReticulumTransportCallback() {
-    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_reticulumtransportcallback(UniffiCallbackInterfaceReticulumTransportCallback.vtable)
+    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_reticulumtransportcallback(UniffiCallbackInterfaceReticulumTransportCallback.vtablePtr)
 }
 
 // FfiConverter protocol for callback interfaces
@@ -8833,9 +9305,8 @@ fileprivate struct UniffiCallbackInterfaceWifiDirectTransportCallback {
     // Create the VTable using a series of closures.
     // Swift automatically converts these into C callback functions.
     //
-    // This creates 1-element array, since this seems to be the only way to construct a const
-    // pointer that we can pass to the Rust code.
-    static let vtable: [UniffiVTableCallbackInterfaceWifiDirectTransportCallback] = [UniffiVTableCallbackInterfaceWifiDirectTransportCallback(
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceWifiDirectTransportCallback = UniffiVTableCallbackInterfaceWifiDirectTransportCallback(
         uniffiFree: { (uniffiHandle: UInt64) -> () in
             do {
                 try FfiConverterCallbackInterfaceWifiDirectTransportCallback.handleMap.remove(handle: uniffiHandle)
@@ -8872,11 +9343,23 @@ fileprivate struct UniffiCallbackInterfaceWifiDirectTransportCallback {
                 writeReturn: writeReturn
             )
         }
-    )]
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceWifiDirectTransportCallback> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceWifiDirectTransportCallback>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
 }
 
 private func uniffiCallbackInitWifiDirectTransportCallback() {
-    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_wifidirecttransportcallback(UniffiCallbackInterfaceWifiDirectTransportCallback.vtable)
+    uniffi_offline_protocol_uniffi_fn_init_callback_vtable_wifidirecttransportcallback(UniffiCallbackInterfaceWifiDirectTransportCallback.vtablePtr)
 }
 
 // FfiConverter protocol for callback interfaces
@@ -9836,29 +10319,33 @@ fileprivate struct FfiConverterDictionaryStringString: FfiConverterRustBuffer {
 }
 public func deriveAddress(publicKey: [UInt8])throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_func_derive_address(
-        FfiConverterSequenceUInt8.lower(publicKey),$0
+        FfiConverterSequenceUInt8.lower(publicKey),uniffiCallStatus
     )
 })
 }
 public func parseInvite(blob: String)throws  -> InviteInfo  {
     return try  FfiConverterTypeInviteInfo_lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_func_parse_invite(
-        FfiConverterString.lower(blob),$0
+        FfiConverterString.lower(blob),uniffiCallStatus
     )
 })
 }
 public func runStorageConformance(storage: ProtocolStateStorageProvider) -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_func_run_storage_conformance(
-        FfiConverterCallbackInterfaceProtocolStateStorageProvider_lower(storage),$0
+        FfiConverterCallbackInterfaceProtocolStateStorageProvider_lower(storage),uniffiCallStatus
     )
 })
 }
 public func verifyIdentityAssertion(assertion: [UInt8])throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeProtocolError_lift) {
+        uniffiCallStatus in
     uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion(
-        FfiConverterSequenceUInt8.lower(assertion),$0
+        FfiConverterSequenceUInt8.lower(assertion),uniffiCallStatus
     )
 })
 }
@@ -9878,7 +10365,7 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_func_derive_address() != 55050) {
+    if (uniffi_offline_protocol_uniffi_checksum_func_derive_address() != 64789) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_func_parse_invite() != 15865) {
@@ -9887,649 +10374,652 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() != 20699) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion() != 63230) {
+    if (uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion() != 61480) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash() != 20923) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash() != 10852) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment() != 55977) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment() != 50001) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_value() != 24087) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_value() != 19947) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc() != 55339) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc() != 43277) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_decline_attachment() != 36653) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_decline_attachment() != 53249) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc() != 39527) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc() != 23496) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_json() != 47882) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_json() != 62388) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_size() != 43106) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_size() != 1306) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw() != 29802) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw() != 30993) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment() != 64859) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment() != 2774) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from() != 5000) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from() != 44676) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_flush() != 53125) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_flush() != 4911) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all() != 40738) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all() != 58838) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_list_delete() != 9370) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_list_delete() != 46614) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_list_docs() != 22411) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_list_docs() != 43688) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_list_len() != 15956) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_list_len() != 53366) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_list_push() != 38678) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_list_push() != 58133) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_list_spaces() != 55668) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_list_spaces() != 25003) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_map_delete() != 33661) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_map_delete() != 61779) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_map_get_json() != 4286) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_map_get_json() != 7048) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set() != 53094) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set() != 60305) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment() != 58573) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment() != 57819) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_doc() != 62307) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_doc() != 58710) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space() != 3889) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space() != 242) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_set_interest() != 22009) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_set_interest() != 5786) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete() != 35552) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete() != 12470) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert() != 11172) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert() != 42508) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_text_value() != 15927) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_text_value() != 6495) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all() != 49136) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all() != 58624) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() != 866) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() != 43941) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service() != 60914) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service() != 46597) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request() != 44115) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request() != 20926) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request() != 22898) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request() != 34689) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service() != 2487) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service() != 4997) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() != 34655) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() != 50880) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu() != 60227) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu() != 19884) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_fallback_count() != 52135) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_fallback_count() != 60784) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received() != 44733) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received() != 9764) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_next_fragment() != 27429) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_next_fragment() != 30344) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count() != 32781) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count() != 11879) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered() != 53124) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered() != 26789) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost() != 38687) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost() != 22804) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count() != 46559) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count() != 42065) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment() != 4155) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment() != 51260) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_set_peer_mtu() != 19690) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_set_peer_mtu() != 7996) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_status_changed() != 19618) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_status_changed() != 63523) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_undersized_mtu_reports() != 62201) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_undersized_mtu_reports() != 53668) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_block_user() != 26742) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_block_user() != 27957) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_connection_request() != 4233) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_connection_request() != 17522) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 6632) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 44634) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores() != 28531) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores() != 57369) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 8723) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 13199) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite() != 26172) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite() != 21745) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() != 23152) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() != 46701) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_disable_telemetry() != 40509) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_disable_telemetry() != 12013) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 6796) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 29503) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry() != 23696) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry() != 52940) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session() != 51941) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session() != 55610) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody() != 5086) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody() != 39575) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session() != 25919) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session() != 52793) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file() != 55328) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file() != 48884) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry() != 21794) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry() != 52440) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry_blocking() != 20024) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry_blocking() != 60745) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport() != 28940) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport() != 65079) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message() != 46590) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message() != 4746) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group() != 44359) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group() != 43987) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration() != 2743) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration() != 21061) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports() != 5327) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports() != 23761) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level() != 12938) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level() != 56170) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users() != 24603) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users() != 28218) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats() != 42535) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats() != 29466) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats() != 43759) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats() != 51917) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_delivery_success_rate() != 62412) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_delivery_success_rate() != 23445) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config() != 28708) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config() != 10752) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_establishment_state() != 26411) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_establishment_state() != 61148) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress() != 37575) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress() != 25115) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_info() != 40065) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_info() != 11773) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_roles() != 44654) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_roles() != 19243) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key() != 21794) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key() != 48103) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging() != 59743) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging() != 42857) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops() != 22077) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops() != 54486) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_latency() != 9158) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_latency() != 20827) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role() != 61568) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role() != 5518) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats() != 43508) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats() != 29444) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables() != 2956) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables() != 34919) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats() != 30825) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats() != 26794) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count() != 9023) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count() != 14526) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config() != 18410) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config() != 41352) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority() != 38001) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority() != 56317) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size() != 53188) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size() != 11855) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state() != 51778) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state() != 56454) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_topology() != 3250) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_topology() != 14852) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 62682) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 47103) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state() != 42204) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state() != 2982) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness() != 760) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness() != 33044) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 30881) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 50833) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion() != 46988) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion() != 12802) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 43685) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 28255) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores() != 58803) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores() != 54918) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused() != 30965) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused() != 52855) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declared() != 11812) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declared() != 5462) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent() != 10435) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent() != 22824) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message() != 48075) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message() != 42018) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_group_report_received() != 31734) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_group_report_received() != 12840) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received() != 62143) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received() != 4763) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence() != 1618) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence() != 6161) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist() != 10876) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist() != 9479) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_relay_capabilities() != 4047) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_relay_capabilities() != 379) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed() != 56204) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed() != 12455) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason() != 21563) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason() != 50456) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed() != 25243) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed() != 58507) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_invite_to_group() != 35932) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_invite_to_group() != 38704) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_mls_initialized() != 21230) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_mls_initialized() != 58599) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay() != 34892) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay() != 22217) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked() != 39343) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked() != 9262) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group() != 2480) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group() != 13144) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups() != 60142) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups() != 26113) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_local_address() != 44586) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_local_address() != 54626) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome() != 30627) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome() != 33145) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_session() != 13910) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_session() != 13710) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt() != 52691) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt() != 22215) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_user() != 30590) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_user() != 29387) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_delete_session() != 59813) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_delete_session() != 11647) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_user() != 4753) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_user() != 1970) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_generate_key_package() != 29747) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_generate_key_package() != 34344) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_or_create_key_package() != 16795) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_or_create_key_package() != 26823) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_key_packages() != 4278) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_key_packages() != 3234) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_welcome() != 26978) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_welcome() != 39261) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_has_session() != 39479) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_has_session() != 56067) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_import_key_package() != 47052) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_import_key_package() != 44533) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_session() != 32375) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_session() != 14485) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_sessions() != 9128) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_sessions() != 23429) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_mark_key_package_synced() != 49511) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_mark_key_package_synced() != 6355) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome() != 44299) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome() != 12812) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_confirm_sent() != 5599) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_confirm_sent() != 9310) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message() != 15697) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message() != 20908) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query() != 45315) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query() != 23327) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key() != 55139) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key() != 59792) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter() != 62102) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter() != 35803) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received() != 46056) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received() != 32701) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at() != 56173) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at() != 4372) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed() != 2867) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed() != 45714) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received() != 9552) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received() != 35705) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed() != 14770) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed() != 34587) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed_with_reason() != 43745) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed_with_reason() != 46967) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed() != 10118) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed() != 10042) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_notify_app_state() != 37727) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_notify_app_state() != 64828) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause() != 51362) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause() != 2754) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event() != 28496) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event() != 2150) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process() != 16160) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process() != 28590) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk() != 46065) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk() != 38467) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics() != 26003) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics() != 63421) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() != 33217) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() != 24572) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request() != 27126) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request() != 17619) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rekey_session() != 20206) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rekey_session() != 49857) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock() != 4494) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock() != 9066) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group() != 64736) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group() != 50435) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport() != 16891) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport() != 37995) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group() != 32723) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group() != 36114) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration() != 5596) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration() != 3982) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolve_username() != 5393) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolve_username() != 56081) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 39596) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 23596) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused() != 26875) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused() != 6207) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared() != 60480) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared() != 14810) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent() != 38323) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent() != 49416) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities() != 42139) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities() != 38346) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message() != 41914) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message() != 43573) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received() != 11523) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received() != 6557) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence() != 61011) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence() != 9523) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist() != 33963) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist() != 26815) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed() != 40553) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed() != 54693) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed_with_reason() != 13863) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed_with_reason() != 59249) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed() != 32395) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed() != 14680) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() != 18268) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() != 32445) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 11824) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 51826) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message() != 54773) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file_from_path() != 60049) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media() != 42952) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message() != 11928) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich() != 59880) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media() != 26391) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 52559) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich() != 17024) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich() != 55139) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 58608) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update() != 20289) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich() != 3404) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_read_receipt() != 8350) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update() != 56108) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator() != 47532) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_read_receipt() != 4730) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 45763) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator() != 7836) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state() != 62177) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 44179) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback() != 28420) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state() != 59397) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback() != 14659) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback() != 15468) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_member_role() != 56849) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback() != 57350) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback() != 56341) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_member_role() != 9132) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority() != 33715) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback() != 36253) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback() != 27956) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority() != 26597) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_telemetry_enabled() != 61336) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback() != 53618) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback() != 39894) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_telemetry_enabled() != 65413) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi() != 40161) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback() != 33195) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data() != 3647) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi() != 36523) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data_bytes() != 45196) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data() != 58338) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start() != 10699) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data_bytes() != 21454) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop() != 37179) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start() != 63301) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id() != 11199) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop() != 30235) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_stats() != 7562) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id() != 43250) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user() != 7771) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_stats() != 57652) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 52736) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user() != 52650) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config() != 33135) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 50568) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config() != 2649) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config() != 37188) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config() != 19698) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config() != 42995) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config() != 27543) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config() != 33211) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics() != 51165) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config() != 3523) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature() != 13732) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics() != 15902) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes() != 56211) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature() != 16718) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() != 1936) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes() != 24438) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received() != 62211) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() != 50868) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected() != 3197) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received() != 59107) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected() != 17734) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected() != 38596) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() != 35006) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected() != 15986) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() != 12337) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new() != 36671) {
@@ -10544,43 +11034,43 @@ private let initializationResult: InitializationResult = {
     if (uniffi_offline_protocol_uniffi_checksum_constructor_offlineprotocol_new() != 30125) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_bletransportcallback_on_fragments_available() != 11079) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_bletransportcallback_on_fragments_available() != 43182) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_eventcallback_on_event() != 4769) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_eventcallback_on_event() != 15485) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_store() != 4704) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_store() != 9534) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_load() != 41626) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_load() != 33472) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_delete() != 64734) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_delete() != 40050) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_list_keys() != 24837) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_mlsstorageprovider_list_keys() != 29193) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_nostrtransportcallback_on_messages_available() != 5919) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_nostrtransportcallback_on_messages_available() != 6903) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_store() != 46080) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_store() != 40025) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_load() != 11563) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_load() != 12081) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_delete() != 43686) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_delete() != 51503) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_list_keys() != 44296) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_protocolstatestorageprovider_list_keys() != 5874) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_reticulumtransportcallback_on_messages_available() != 48810) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_reticulumtransportcallback_on_messages_available() != 26982) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_offline_protocol_uniffi_checksum_method_wifidirecttransportcallback_on_messages_available() != 4635) {
+    if (uniffi_offline_protocol_uniffi_checksum_method_wifidirecttransportcallback_on_messages_available() != 16192) {
         return InitializationResult.apiChecksumMismatch
     }
 

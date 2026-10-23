@@ -23,7 +23,15 @@ if ! command -v uniffi-bindgen &> /dev/null; then
   echo "❌ Error: uniffi-bindgen not found — the platform builds below would" >&2
   echo "   compile the native libraries and then fail at binding generation." >&2
   echo "" >&2
-  echo "   cargo install uniffi --version 0.30.0 --features cli --locked" >&2
+  echo "   cargo install uniffi --version 0.32.2 --features cli --locked" >&2
+  echo "" >&2
+  exit 1
+fi
+if ! command -v uniffi-bindgen-java &> /dev/null; then
+  echo "❌ Error: uniffi-bindgen-java not found — the generator writes the Java" >&2
+  echo "   binding in the same run as Swift, Kotlin and Python." >&2
+  echo "" >&2
+  echo "   cargo install uniffi-bindgen-java --version 0.5.2 --locked" >&2
   echo "" >&2
   exit 1
 fi
@@ -52,17 +60,19 @@ echo ""
 
 # Unconditional: the bindgen check at the top exits rather than continuing, and
 # both platform scripts fail if generation does not happen, so reaching here
-# means all three were written. The iOS and Android scripts each delegate to the
+# means all five were written. The iOS and Android scripts each delegate to the
 # shared generator, so the full set is written twice — deliberate, since both
 # are also run on their own and idempotent regeneration is cheaper than letting
 # either emit only its own language.
-echo "Generated bindings (all three — one artifact set off one UDL):"
+echo "Generated bindings (all five — one artifact set off one UDL):"
 echo "  Swift:   bindings/react-native/ios/Generated/"
 echo "  Kotlin:  bindings/react-native/android/src/main/java/uniffi/"
 echo "  Python:  bindings/python/offline_protocol_sdk/"
+echo "  Ruby:    bindings/ruby/lib/"
+echo "  Java:    bindings/java/src/main/java/"
 echo ""
 echo "Next steps:"
-echo "  1. Commit all three together — a partial commit is drift"
+echo "  1. Commit all five together — a partial commit is drift"
 echo "  2. Test on iOS and Android"
 echo "  3. Run 'npm publish' to distribute the package"
 

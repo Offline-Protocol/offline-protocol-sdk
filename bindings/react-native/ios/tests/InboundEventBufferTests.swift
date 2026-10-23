@@ -99,7 +99,8 @@ final class InboundEventBufferTests: XCTestCase {
     func testBufferedTypesMatchTheContract() {
         XCTAssertEqual(
             InboundEventBuffer.bufferedEventTypes,
-            ["message_received", "file_received", "message_decryption_failed"]
+            ["message_received", "file_received", "message_decryption_failed",
+             "message_delivered", "message_failed"]
         )
         XCTAssertEqual(InboundEventBuffer.defaultMaxEntries, 256)
     }

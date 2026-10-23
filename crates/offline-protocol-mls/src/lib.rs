@@ -52,6 +52,7 @@ pub mod types;
 pub use error::{LeafSource, MlsError, Result};
 pub use identity_assertion::verify_identity_assertion;
 pub use manager::{is_mls_framed, MlsManager, PushKeyPackage, MAX_PUSH_KEY_PACKAGES};
+pub use session::SealMark;
 pub use storage::{MlsStorage, StorageError};
 pub use types::{
     EncryptedMessage, GroupId, GroupInfo, GroupMetadata, GroupRole, KeyPackageBundle,

@@ -75,13 +75,58 @@ final class MeshConnectionRegistry: @unchecked Sendable {
         return removed
     }
 
+    /// The identifier to send `deviceId`'s fragments on. A peer that rotated
+    /// its address maps from more than one, and the connected one must win:
+    /// see `PeerLinkResolution`.
     func peripheralIdentifier(for deviceId: String) -> UUID? {
         lock.lock()
-        let match =
-            peripheralDeviceIds.first(where: { $0.value == deviceId })?.key
-            ?? centralDeviceIds.first(where: { $0.value == deviceId })?.key
+        let connected = connectedPeripherals
+        let match = PeerLinkResolution.preferredIdentifier(
+            for: deviceId,
+            peripheralDeviceIds: peripheralDeviceIds,
+            centralDeviceIds: centralDeviceIds,
+            isConnected: { connected[$0] != nil }
+        )
         lock.unlock()
         return match
+    }
+
+    /// Unmaps every other disconnected peripheral identifier of `deviceId`,
+    /// now verified on `verified`, and returns them so the caller can stop
+    /// dialling them. Central-role mappings are left alone: they key inbound
+    /// fragments from a link the peer opened, which this says nothing about.
+    func retirePeripheralIdentifiers(supersededBy verified: UUID, deviceId: String) -> [UUID] {
+        lock.lock()
+        let connected = connectedPeripherals
+        let retired = PeerLinkResolution.superseded(
+            by: verified,
+            deviceId: deviceId,
+            peripheralDeviceIds: peripheralDeviceIds,
+            isConnected: { connected[$0] != nil }
+        )
+        for identifier in retired {
+            peripheralDeviceIds.removeValue(forKey: identifier)
+        }
+        lock.unlock()
+        return retired
+    }
+
+    /// The other identifiers `deviceId` holds a usable link on: see
+    /// `PeerLinkResolution.otherLiveLinks`. `isSubscribed` answers for the
+    /// centrals subscribed to our server, which this registry does not track.
+    func otherLiveLinks(of deviceId: String, excluding: UUID, isSubscribed: (UUID) -> Bool) -> [UUID] {
+        lock.lock()
+        let connected = connectedPeripherals
+        let links = PeerLinkResolution.otherLiveLinks(
+            of: deviceId,
+            excluding: excluding,
+            peripheralDeviceIds: peripheralDeviceIds,
+            centralDeviceIds: centralDeviceIds,
+            isConnected: { connected[$0] != nil },
+            isSubscribed: isSubscribed
+        )
+        lock.unlock()
+        return links
     }
 
     func setCentralDeviceId(_ deviceId: String, for identifier: UUID) {

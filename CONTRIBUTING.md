@@ -6,9 +6,9 @@ Thank you for your interest in contributing! This document provides guidelines f
 
 ### Prerequisites
 
-- Rust 1.87+ (`rustup default stable`)
+- Rust 1.87+ for the library crates, and Rust 1.91+ to build `offline-protocol-uniffi` (every binding, and the C library from source) or to install `uniffi-bindgen`, whose build dependencies need it (`rustup default stable` covers both)
 - For mobile bindings: Android NDK, Xcode
-- For regenerating UniFFI bindings: `cargo install uniffi --version 0.30.0 --features cli --locked` (the CLI version must match the workspace `uniffi = "0.30"` pin; CI uses this exact command)
+- For regenerating UniFFI bindings: `cargo install uniffi --version 0.32.2 --features cli --locked` (the CLI version must match the workspace `uniffi = "0.32"` pin; CI runs this command with `--force`, and so should you when replacing an older install), and `cargo install uniffi-bindgen-java --version 0.5.2 --locked` for the Java binding
 
 ### Clone and Build
 
@@ -103,7 +103,7 @@ test(dors): add tests for transport switching
 2. **Tests**: Add comprehensive unit tests
 3. **UniFFI**: Expose via UDL if needed for mobile platforms
 4. **Regenerate**: After any UDL change run `./scripts/generate-bindings.sh` and commit
-   **all three** generated files (Swift, Kotlin, Python). They are one artifact set off one
+   **all five** generated sets (Swift, Kotlin, Python, Ruby, Java). They are one artifact set off one
    UDL and carry the FFI checksums of the library they were generated against — committing a
    subset leaves the rest describing a different ABI, which no build catches; the app fails
    at its first FFI call instead.
@@ -269,7 +269,8 @@ Version files to bump together:
 | `Cargo.lock` | any `cargo` command refreshes it once the manifests change |
 | `tools/embedded-footprint/Cargo.lock`, `tools/mls-interop/Cargo.lock` | Separate workspaces that depend on the SDK crates by path, so their lockfiles pin the versions too. CI builds both with `--locked`, so a stale one fails the run. `cargo metadata --manifest-path <tool>/Cargo.toml` refreshes each |
 | `bindings/python/pyproject.toml` | `version` — release.yml gates this one against the tag too |
-| `bindings/react-native/package.json` + `package-lock.json` | `npm version X.Y.Z --no-git-tag-version --allow-same-version` from `bindings/react-native/` |
+| `bindings/react-native/package.json` + `package-lock.json` | `npm version X.Y.Z --no-git-tag-version --allow-same-version` from `bindings/react-native/`. The Flutter plugin's podspec and Gradle build read their version from this file |
+| `bindings/flutter/offline_protocol/pubspec.yaml` | `version`. Pub cannot read another file, so this one carries the number itself, and release.yml gates it against the tag |
 | `THIRD-PARTY-NOTICES.md` (×3) | `scripts/generate-third-party-notices.sh` — the notices list our own crates by version, and the CI drift gate fails on a stale copy |
 
 Then the prose: `CHANGELOG.md` (replace `## [Unreleased]` with
@@ -358,7 +359,7 @@ all four ABIs and a minified application, and each wheel installed by pip and
 run through the whole suite on the system it is tagged for. All of that runs on
 every release and every dry run, and a failure stops npm and crates.io too.
 
-Maven Central and PyPI then publish after the `release` job, only from a
+Maven Central, PyPI and RubyGems then publish after the `release` job, only from a
 `v*` tag that is not a dry run, and only when the channel's repository
 variable is `true`. A channel switched on with its secret missing fails the
 run rather than skipping, because a skipped channel is a release that looks
@@ -374,7 +375,24 @@ release.
 | --- | --- | --- | --- |
 | Maven Central | `MAVEN_CENTRAL_PUBLISH` | `MAVEN_CENTRAL_USERNAME` and `MAVEN_CENTRAL_PASSWORD` (a Central Portal user token), `MAVEN_SIGNING_KEY` (armored private key) and `MAVEN_SIGNING_KEY_PASSWORD` | uploads a deployment Central validates, then drops it |
 | PyPI | `PYPI_PUBLISH` | none: trusted publishing from `release.yml` in the `pypi` environment | checks the wheels' metadata only: PyPI has no rehearsal |
+| RubyGems | `RUBYGEMS_PUBLISH` | none: trusted publishing from `release.yml` in the `rubygems` environment | builds and tests the gem only: RubyGems has no rehearsal |
 | Service image (ghcr.io) | `PYPI_PUBLISH`, since it installs what PyPI published | none: the workflow's own `GITHUB_TOKEN` with `packages: write` | not built: it needs the release on PyPI |
+
+**RubyGems needs its trusted publisher before the first release.** The gem
+`offline_protocol` does not exist until the first push creates it, so register
+a pending trusted publisher on rubygems.org (your profile, Trusted Publishers,
+Create): gem name `offline_protocol`, repository
+`Offline-Protocol/offline-protocol-sdk`, workflow `release.yml`, environment
+`rubygems`. Create the `rubygems` environment on this repository, then set the
+switch:
+
+```bash
+gh variable set RUBYGEMS_PUBLISH --body true -R Offline-Protocol/offline-protocol-sdk
+```
+
+The first push turns the pending publisher into the gem's own. A release
+candidate is the safe first exercise: it publishes a prerelease
+(`0.31.0.pre.rc.1`), which `gem install` skips unless asked with `--pre`.
 
 **The Swift package is pulled, not pushed.** Nothing in this repository can
 write to `Offline-Protocol/offline-protocol-swift`, and no credential for it

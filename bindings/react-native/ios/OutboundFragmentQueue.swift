@@ -57,8 +57,33 @@ import Foundation
 /// the sender's higher layer (ack-driven retry, data-sync anti-entropy)
 /// re-drives them.
 ///
-/// Overflow should be rare: `isBackedUp` is the drain loop's signal to stop
-/// pulling from the Rust core well before the cap is reached.
+/// The cap is a memory backstop and must stay unreachable in normal
+/// operation, because the discard is still a loss and it tears the message
+/// whose first slices already went out. The drain stops pulling from the Rust
+/// core while any recipient of either queue with a link to drain into is past
+/// the `isBackedUp` mark (`anyBackedUp`), checked **before** each pop, since
+/// the pop is destructive and nothing can hand a fragment back. Every fragment
+/// here arrived through one such pop, so a linked recipient never holds more
+/// than the mark, and the mark sits below the cap. A recipient with no link is
+/// left out of the stop (see `anyBackedUp`), so only its undeliverable queue
+/// can reach the cap. The cap also sits above the largest message the core
+/// will fragment (512 fragments). With the old cap of 100, one sealed 16 KB
+/// message was more than the queue could hold.
+///
+/// ### The mark is small on purpose
+///
+/// `defaultBackpressureMark` is a few seconds of link time, not a fraction of
+/// the cap, because the Rust core can see only what it still holds. A message
+/// counts as queued, and its acknowledgement timer is extended instead of
+/// retried, until its first fragment is pulled. With the mark at 3/4 of the
+/// cap a drain could pull 576 fragments ahead of a slow link, the core saw
+/// nothing queued, and everything behind the first few seconds was resent:
+/// Android's mirror held exactly 576 in the third volume run, and resent
+/// 19,404 times. A fragment left in
+/// Rust costs nothing; one pulled early only waits here, expires after
+/// `timeout`, and tears its message.
+///
+/// Rust guards pin the cap and the mark equal to Android's.
 final class OutboundFragmentQueue: @unchecked Sendable {
 
     enum DropReason {
@@ -81,6 +106,7 @@ final class OutboundFragmentQueue: @unchecked Sendable {
 
     private let queueCheck: () -> Void
     private let maxPerPeer: Int
+    private let backpressureMark: Int
     private let timeout: TimeInterval
     private let clock: () -> Date
     private let onDropped: (String, DropReason, Int) -> Void
@@ -88,12 +114,18 @@ final class OutboundFragmentQueue: @unchecked Sendable {
     init(
         queueCheck: @escaping () -> Void = {},
         maxPerPeer: Int = OutboundFragmentQueue.defaultMaxPerPeer,
+        // Below `maxPerPeer`; see the class note. Smaller caps keep the old 3/4.
+        backpressureMark: Int? = nil,
         timeout: TimeInterval = OutboundFragmentQueue.defaultTimeout,
         clock: @escaping () -> Date = Date.init,
         onDropped: @escaping (String, DropReason, Int) -> Void = { _, _, _ in }
     ) {
         self.queueCheck = queueCheck
         self.maxPerPeer = maxPerPeer
+        // At least one: a mark of zero (a cap of 1) reads every created queue,
+        // even an empty one, as backed up.
+        self.backpressureMark = max(1, backpressureMark
+            ?? min(OutboundFragmentQueue.defaultBackpressureMark, maxPerPeer * 3 / 4))
         self.timeout = timeout
         self.clock = clock
         self.onDropped = onDropped
@@ -123,8 +155,8 @@ final class OutboundFragmentQueue: @unchecked Sendable {
         return !(queues[recipientId]?.isEmpty ?? true)
     }
 
-    /// True once `recipientId`'s queue has filled past a high-water mark
-    /// (3/4 of `maxPerPeer`). The drain loop uses this as a backpressure
+    /// True once `recipientId`'s queue has filled to `backpressureMark`. The
+    /// drain loop uses this as a backpressure
     /// signal to STOP pulling more fragments out of the Rust core — which is
     /// a destructive pop — into this bounded queue. Without it, when
     /// CoreBluetooth's write buffer paces sends slower than the loop can pull,
@@ -137,7 +169,29 @@ final class OutboundFragmentQueue: @unchecked Sendable {
     func isBackedUp(_ recipientId: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return (queues[recipientId]?.count ?? 0) >= maxPerPeer * 3 / 4
+        return (queues[recipientId]?.count ?? 0) >= backpressureMark
+    }
+
+    /// True if any recipient that `deliverable` accepts is past the
+    /// `isBackedUp` mark. The drain checks it before every pop from the Rust
+    /// core: the pop is one FIFO across all peers and cannot be undone, so
+    /// the only lossless moment to stop is before it. Mirrors Android's
+    /// `anyBackedUp`. Safe from any thread.
+    ///
+    /// Only a recipient with a link to drain into may stop the pull. One with
+    /// none (a peer whose link closed, in the grace before it is reported
+    /// lost) keeps the fragments the core still hands out for it until they
+    /// expire, and counting it stopped every other peer's egress until then,
+    /// in 30-second rounds, for as long as the core held its backlog. Such a
+    /// recipient's queue can pass the mark and, at worst, reach the cap: its
+    /// fragments cannot be delivered either way, and the core's acknowledgement
+    /// timeout resends them once a link returns. `deliverable` is called
+    /// outside this queue's lock.
+    func anyBackedUp(deliverable: (String) -> Bool = { _ in true }) -> Bool {
+        lock.lock()
+        let full = queues.compactMap { $0.value.count >= backpressureMark ? $0.key : nil }
+        lock.unlock()
+        return full.contains(where: deliverable)
     }
 
     // MARK: - Owning-queue mutations
@@ -258,6 +312,9 @@ final class OutboundFragmentQueue: @unchecked Sendable {
         return hasUnsent
     }
 
-    static let defaultMaxPerPeer = 100
+    /// Above 4/3 of the core's 512-fragment message ceiling; see the class note.
+    static let defaultMaxPerPeer = 768
+    /// About 2.5 s of an indication-paced link; see the class note.
+    static let defaultBackpressureMark = 32
     static let defaultTimeout: TimeInterval = 30.0
 }

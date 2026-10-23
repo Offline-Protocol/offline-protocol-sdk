@@ -12,7 +12,11 @@ license.workspace = true
 # it lands in the .crate archive. scripts/check-license-consistency.sh asserts
 # the copies never drift.
 repository.workspace = true
-rust-version.workspace = true
+# Not the workspace's 1.87: UniFFI 0.32's bindgen (a build dependency, through
+# uniffi_build) needs askama 0.16, which requires 1.88, and cargo-platform 0.3,
+# which requires 1.91. Nothing else depends on this crate, so the library
+# crates keep the workspace promise and the MSRV job checks them without it.
+rust-version = "1.91"
 description = "UniFFI bindings for the Offline Protocol SDK"
 
 [lints]
@@ -24,6 +28,8 @@ offline-protocol-core = { workspace = true }
 offline-protocol-router = { workspace = true }
 offline-protocol-transport = { workspace = true }
 offline-protocol-mls = { workspace = true }
+# The C binding's byte strings, which cross as base64 as on the local API.
+base64 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -35,7 +41,7 @@ zeroize = { workspace = true }
 # logger in `host_log.rs`; see that module for why.
 tracing = { workspace = true, features = ["log"] }
 log = "0.4"
-uniffi = "0.30"
+uniffi = "0.32"
 
 # The platform loggers the host logger writes to. Only the one for the
 # target being built is compiled; a desktop build writes to stderr instead.
@@ -58,11 +64,27 @@ offline-protocol-telemetry-wire = { workspace = true }
 offline-protocol-sealed = { workspace = true }
 
 [build-dependencies]
-uniffi = { version = "0.30", features = ["build"] }
+uniffi = { version = "0.32", features = ["build"] }
 
 [lib]
-crate-type = ["cdylib", "staticlib", "lib"]
+# No `lib` (rlib) here, on purpose. Cargo runs link-time optimisation on a
+# library only when every crate type in its list can take it, and an rlib
+# cannot, so with `lib` in this list `lto = true` in the release profile
+# never reached the libraries the release ships, and nothing said so: every
+# release from the UniFFI migration to 0.29.0 was built that way. Nothing
+# links this crate as Rust. The fuzzer compiles its source under its own
+# package (`tools/capi-fuzz`). `the_ffi_crate_builds_no_rust_library` holds
+# the list.
+crate-type = ["cdylib", "staticlib"]
 name = "offline_protocol_uniffi"
 
 [features]
-default = []
+default = ["capi"]
+# The C binding (docs/bridges/c.md): the JSON dispatcher and its `extern "C"`
+# functions. On by default, because the desktop libraries the release ships
+# are what a C host links. The Android builds turn it off: a cdylib exports
+# every `#[no_mangle]` symbol, so nothing can strip the dispatcher behind
+# them, and an Android application has no C host to call it. An iOS
+# application links the static library with dead stripping, which drops the
+# unreferenced exports, so the iOS builds keep the default.
+capi = []

@@ -61,6 +61,7 @@ impl OfflineProtocol {
                     content_type: ContentType::Text,
                     media_metadata: None,
                     rich: None,
+                    seal_mark: None,
                 };
                 self.send_sealed_internal_message(recipient, sealed, priority, Some(reseal))
             }

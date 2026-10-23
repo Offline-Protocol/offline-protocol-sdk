@@ -1,6 +1,6 @@
 # offline-protocol-uniffi
 
-[UniFFI](https://mozilla.github.io/uniffi-rs/) bindings crate for the [Offline Protocol SDK](https://github.com/Offline-Protocol/offline-protocol-sdk). Builds the `cdylib`/`staticlib` and FFI scaffolding from which the SDK's Swift, Kotlin, and Python bindings are generated.
+[UniFFI](https://mozilla.github.io/uniffi-rs/) bindings crate for the [Offline Protocol SDK](https://github.com/Offline-Protocol/offline-protocol-sdk). Builds the `cdylib`/`staticlib` and FFI scaffolding from which the SDK's Swift, Kotlin, Python, and Java bindings are generated.
 
 This crate is not meant to be consumed directly:
 
@@ -8,7 +8,7 @@ This crate is not meant to be consumed directly:
 - **React Native** (iOS/Android) apps want [`@offline-protocol/mesh-sdk`](https://www.npmjs.com/package/@offline-protocol/mesh-sdk)
 - **Python** (macOS/Linux/Windows) apps want the [Python binding](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/main/bindings/python/README.md)
 
-The generated bindings carry FFI checksums of the exact library they were generated against, so the library and all three language bindings are regenerated together from one script — see [the repository](https://github.com/Offline-Protocol/offline-protocol-sdk#regenerate-bindings-after-a-udl-change) for the build workflow.
+The generated bindings carry FFI checksums of the exact library they were generated against, so the library and all five language bindings are regenerated together from one script — see [the repository](https://github.com/Offline-Protocol/offline-protocol-sdk#regenerate-bindings-after-a-udl-change) for the build workflow.
 
 ## License
 

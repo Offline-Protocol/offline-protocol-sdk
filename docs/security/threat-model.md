@@ -230,6 +230,14 @@ sealed to an epoch the recipient has left is withheld like any other desync.
 Custody widens nobody's view of the acknowledgement channel in this version,
 because acknowledgements are not carried.
 
+A coalesced acknowledgement (`ack_more`, see
+[Delivery and acknowledgements](../state-machines/delivery-and-acks.md#acknowledgements-on-a-mesh-link))
+does not widen this. Each id it names is settled as a single acknowledgement,
+including the check that it comes from the frame's recipient, and a receiver
+settles at most five, so a forged one does what five forged single
+acknowledgements could already do. Acknowledgements are unauthenticated either
+way; binding one to its sender needs signed acknowledgements.
+
 ## Known residual risks
 
 Stated plainly, because a threat model that lists only what it defeats is
@@ -276,6 +284,13 @@ framing header (group identifier, then epoch) **before** any AEAD, sender-data,
 or signature check; and a 1:1 slot identifier is a public function of two public
 addresses. The MLS credential that would authenticate the sender exists only
 once decryption **succeeds**.
+
+The desync class has one member this does not apply to: a frame more than the
+forward window ahead of the receiver's ratchet. MLS decrypts the sender data
+under AEAD before it reads the generation from it, so reaching that check takes
+the epoch's sender-data secret, which only a group member holds. It was added
+so a receiver that fell that far behind re-keys instead of failing every later
+frame, and it leaves the unauthenticated surface exactly as described.
 
 **Why it is tolerable:** the mitigation is that acting on the trigger is
 **harmless**, not that the trigger is trusted.
@@ -575,18 +590,29 @@ provides; it is the same open problem as relay-side metadata.
 Replicated documents merge changes that arrive from peers, and merging means
 handing bytes to a CRDT engine. The engine has open defects where a malformed
 or causally impossible change panics rather than returning an error, and one of
-them poisons the document's lock so the retry panics too. The mobile artifact
-ships with `panic = "abort"`, so there is no unwinding to catch.
+them poisons the document's lock so the retry panics too. The shipped
+libraries unwind, and what a panic does depends on where it happens. The
+engine decodes a peer's blob before applying it, to judge it, and that
+decode runs outside any catch: a panic there unwinds out of the frame's
+handling, the document is untouched, and the in-flight marker left behind
+quarantines the blob, so the next frame for the space or the next launch
+refuses it. A panic in the apply step is caught by the import's
+`catch_unwind`, which turns it into an error and marks the document unusable
+for the process. A host built with `panic = "abort"` loses the process in
+either case.
 
 MLS does not help here, and the reason is worth being precise about:
 authentication establishes who sent the bytes, and the question the engine is
 about to ask is what shape they are. A peer can be exactly who they claim and
 still send a blob that ends the process.
 
-**Impact:** a member of a space can abort the application on a device it
-replicates with. Not silent, not remote-code-execution, and not available to
-anyone outside the space: it requires someone the user has already accepted
-into a shared document, and it is attributable to them.
+**Impact:** a member of a space can, on a device it replicates with, make a
+shared document unusable for the rest of the process, or raise a panic out
+of the handling of its frame, once per unique blob; and abort the
+application where the host is built with `panic = "abort"`. Not silent, not
+remote-code-execution, and not available to anyone outside the space: it
+requires someone the user has already accepted into a shared document, and
+it is attributable to them.
 
 **Group spaces widen who this is, not what it does.** A 1:1 space has exactly
 one other member; a group space has as many as the roster, and every one of
@@ -714,21 +740,30 @@ avoids.
 from the portal, which is the response to a leaked one. Rotation is a portal
 feature; the SDK carries whatever key the application passes.
 
-### R14. The bundled root set ages with the SDK
+### R14. The pinned root set ages with the SDK
 
-The pipe trusts the Mozilla root set compiled into the SDK release, never the
-device's trust store. If the ingest's certificate chain ever moves to a root
-absent from a shipped SDK, that SDK's telemetry stops: a network error,
-backoff, and `last_error` in the stats.
+The pipe trusts only the roots that can issue the ingest's certificate,
+compiled into the SDK release: the server roots of the four authorities the
+ingest's edge (Cloudflare) issues from, never the device's trust store and
+never the rest of the Mozilla set. If the ingest's certificate chain ever
+moves to a root absent from a shipped SDK, that SDK's telemetry stops: a
+network error, backoff, and `last_error` in the stats.
 
 **Why it stands:** consulting the device store would make an interception
 certificate installed on the device a trusted one, and redirection by a
-compromised device is exactly what the fixed endpoint and bundled roots exist
-to close.
+compromised device is exactly what the fixed endpoint and pinned roots exist
+to close. Trusting the whole Mozilla set instead would let any of its roots
+vouch for the ingest, so a compromise of one authority the ingest never uses
+(the eMudhra intermediates in October 2026) would reach every shipped SDK
+until it was rebuilt ([ADR 0031](../adr/0031-telemetry-trusts-only-the-ingests-issuers.md)).
 
-**What bounds it:** the ingest stays on a mainstream authority, a change of
-authority is treated as an SDK release event, and the failure is loud in the
-stats rather than silent.
+**What bounds it:** the set covers every authority the edge issues from,
+including the one its backup certificate uses, and each authority's current
+roots rather than only those in root programs (Let's Encrypt's Generation Y
+roots are pinned although no store carries them yet), so a rotation the edge
+or an authority makes on its own stays inside it; a move outside the set is
+treated as an SDK release event, and the failure is loud in the stats rather
+than silent.
 
 ### R15. The Bluetooth LE app tag is unsigned and readable
 
@@ -1129,6 +1164,87 @@ It goes only to a sender whose key package advertised `ack_versions` entry 1,
 and the sender reacts with one resend of a message it already holds, never a
 delivery.
 
+### R26. A browser node's store key is reachable from its origin
+
+A browser node keeps its identity keys, group state and delivery state in
+origin-private files, sealed under a store key that is itself sealed by a
+non-extractable WebCrypto key in the origin's IndexedDB
+([web bridge W8](../bridges/web.md#w8-storage-is-a-sealed-log-one-node-per-account)).
+Any script that runs on the origin can ask the browser to unseal that key, or
+simply drive the node's worker: a cross-site scripting flaw, a compromised
+dependency the page loads, or an extension granted access to the site.
+
+**Why it stands:** a page has no keystore it can reach without the origin. The
+engine's storage traits are synchronous and the WebCrypto calls are not, so
+the key must be in the worker's memory while the engine runs, and an
+authenticator prompt per launch would turn a game lobby into a login.
+
+**What bounds it:** the sealing keeps the records from anything that reads the
+files alone: a copied browser profile, a backup, another origin. The key never
+leaves the browser in the clear, and the sealed copy beside the logs does not
+open without the wrapping key, which the browser will not export. An origin
+that runs third-party script it does not control should not host a node whose
+identity matters. Clearing the site's data destroys the identity, and so can
+eviction under storage pressure, which the binding asks the browser not to do
+(`navigator.storage.persist()`) but cannot forbid. A node that finds its logs
+without its key, or its key without its wrapping key, refuses to start and
+changes nothing rather than minting a new identity over the old one.
+
+### R27. A WebRTC connection code is unauthenticated and names local addresses
+
+The two codes that set up a WebRTC link carry each side's session description,
+which lists its local network addresses as candidates. Whoever sees a code
+learns those addresses, and whoever can replace one in transit (a shared
+screen, a chat the codes cross) can put themselves on the other end of the
+connection.
+
+**Why it stands:** the codes exist so that two devices can connect with no
+server and no network beyond the one they share, and there is nothing to
+authenticate them against until a connection exists.
+
+**What bounds it:** a connection only carries bytes, and the engine's identity
+preamble decides who is on the other end
+([web bridge W3](../bridges/web.md#w3-the-page-moves-bytes-the-engine-decides-what-they-mean)).
+An attacker who swaps a code gets a link announced under the attacker's own
+address, never the intended peer's, and MLS keeps every session and group
+message from them. An application that admits members to a group should show
+the joining address to the people involved, as the lobby example does: it
+lists every address it admits, and a player sees the host's. By default no
+ICE server is configured, so the codes never reach a third party unless
+people send them through one, and a connection is made on the local network
+or not at all. An application that names STUN or TURN servers adds its
+public addresses to the codes and tells those servers who is connecting; one
+that signals through a Nostr room is R28.
+
+### R28. A signalling room code admits whoever holds it
+
+`NostrSignaller` derives a room's topic and sealing key from its code
+([web bridge W11](../bridges/web.md#w11-signalling-can-ride-a-nostr-room)).
+Anyone who holds the code reads the connection codes published in the room,
+and with them the addresses R27 describes, and can join: the host answers
+every session that offers. The relays the application names see the topic,
+the times and sizes of the events, and the network address of every client
+that publishes or subscribes.
+
+**Why it stands:** a room code is the thing a person reads out across a
+table, so it must be short enough to say, and anything that can be said can
+be overheard.
+
+**What bounds it:** the code admits a carrier, not an identity. A joiner is
+announced under the address its preamble proves, and MLS admits it to
+nothing until the host invites it (R27). The topic is public, so the code
+must not be findable from it: generated codes carry eighty bits, and the
+binding refuses one under ten characters. Ten characters is fifty bits only
+for a generated code; a code a person chose is as strong as its entropy, so
+an application should show the generated one rather than ask for a name. Content is sealed with
+the topic and the role bound in, and each event is signed by a key used once,
+so a relay cannot read the codes or link a room's events by author, and an
+event more than two minutes from the reader's clock is refused, so a relay
+that holds one back cannot replay it later. A leaked code costs the host at
+most sixteen answered sessions every two minutes, which equals the engine's
+link ceiling: a leaked code can occupy every link the host has, though MLS
+admits none of those joiners to anything until the host invites them.
+
 ## Network egress
 
 Until 0.26 the Rust crates opened no socket: every byte that left a device
@@ -1139,13 +1255,14 @@ is the one exception, and its egress is bounded as follows.
   no host callback that could repoint the stream, and no redirect the uploader
   follows. A build for a different ingest says so in its environment, and only
   `https://` is accepted.
-- **TLS 1.2 or 1.3 through rustls**, with the Mozilla root set compiled in.
-  The device's trust store is not consulted (R14).
+- **TLS 1.2 or 1.3 through rustls**, trusting only the ingest's issuers'
+  roots, compiled in. Neither the device's trust store nor the rest of the
+  Mozilla set is consulted (R14).
 - **An HTTP CONNECT proxy, when the environment names one.** The telemetry
   uploader can use an HTTP CONNECT proxy selected through the HTTP client's
   supported environment configuration, read when telemetry is enabled. TLS
   remains between the SDK and the destination server and is validated against
-  the bundled Mozilla root certificates. Installing an interception
+  the pinned ingest roots. Installing an interception
   certificate only in the device trust store does not make that certificate
   trusted by the SDK. Such an interception attempt fails certificate
   validation; queued telemetry remains subject to retry, capacity, and expiry
@@ -1179,6 +1296,12 @@ and peers, never reaches logcat or the unified log whatever its level. A
 device log is readable by anything on the device that can run `logcat`, which
 is why the filter is on the target and not on a level. See
 [the debug tap](../telemetry.md#the-debug-tap).
+
+The browser binding's page code opens connections only where the application
+says: WebSockets to the Nostr relays it names for `NostrSignaller` (R28), and
+ICE traffic to the STUN or TURN servers it names for `WebRtcCarrier` (R27).
+With neither, a browser node opens nothing beyond its own origin and the
+devices it links to.
 
 The bound is on the core, not on the whole SDK. The React Native bridge
 sources log through `android.util.Log` and `print` on their own account, and

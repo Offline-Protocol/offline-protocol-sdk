@@ -17,6 +17,12 @@ server written against it serves any conforming client. The reference server
 ships in the Python package; it is one implementation of this contract, not
 the contract.
 
+The same method table, encoding and error positions are also the C API
+([the C binding](../bridges/c.md)), called in process rather than over a
+socket: a method named here is callable from C by the same name with the
+same parameters. The session, the routing and the per-application rules of
+this chapter are the server's and have no counterpart there.
+
 Three things this chapter deliberately does not do. It does not invent a
 second API: every method is one of the interface definition's own methods
 under its own name, with its own parameters, returning its own result, and
@@ -548,6 +554,7 @@ this chapter asserts it.
 | `erase_custody` | Drops every frame this device holds for its neighbours, whichever client's traffic brought them, and resets the counters. The operator's erase, like `data.wipe_all`, never one application's call |
 | `run_storage_conformance` | Takes a callback interface; a storage backend is verified by the host that supplies it |
 | `sign_data_bytes`, `verify_signature_bytes` | The `bytes` twins of `sign_data` and `verify_signature`, which exist so a mobile bridge can hand a large payload to the core without one boxed object per byte. The wire already carries base64, and a signing twin on the wire would reach the shared identity key past the `sign_data` deny group |
+| `send_file_from_path` | The path twin of `send_file`, which exists so a mobile bridge can hand a large file to the core without staging it as base64 in the JavaScript heap. The wire already carries base64, and on the wire a path would be a read of any file the server process can open (its token file, its store key), sent to any peer, past the frame-size limit that bounds an in-band file |
 
 ## Event catalogue
 

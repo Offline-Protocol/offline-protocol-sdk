@@ -182,7 +182,17 @@ pub(crate) fn classify(record: &TelemetryRecord, ctx: &ClassifyCtx) -> Dispositi
 /// `reason`; a dropped event costs one match and nothing else.
 pub(crate) fn classify_protocol(event: &Event, now_ms: i64) -> Disposition {
     let data = match event {
-        Event::MessageSent { .. } => return Disposition::CountSent,
+        // The sent count is the denominator of the delivery ratio, so it
+        // counts only messages that end in `MessageDelivered` or
+        // `MessageFailed`. An ephemeral message (ADR 0032) asks for no
+        // acknowledgement and ends in neither.
+        Event::MessageSent {
+            requires_ack: true, ..
+        } => return Disposition::CountSent,
+        Event::MessageSent {
+            requires_ack: false,
+            ..
+        } => return Disposition::Drop,
         Event::MessageDelivered {
             latency_ms,
             hop_count,
@@ -507,18 +517,21 @@ mod tests {
 
     #[test]
     fn message_sent_is_counted_and_its_content_never_projected() {
-        let event = Event::MessageSent {
+        let sent = |requires_ack| Event::MessageSent {
             message_id: "m".into(),
             sender: "a".into(),
             recipient: "b".into(),
             content: "secret".into(),
             priority: "medium".into(),
-            requires_ack: false,
+            requires_ack,
             timestamp: 0,
             lamport_clock: 0,
             forward_info: None,
         };
-        assert_eq!(classify_protocol(&event, 0), Disposition::CountSent);
+        assert_eq!(classify_protocol(&sent(true), 0), Disposition::CountSent);
+        // An ephemeral message is never delivered or failed, so counting it
+        // would lower the delivery ratio by every game update sent.
+        assert_eq!(classify_protocol(&sent(false), 0), Disposition::Drop);
     }
 
     #[test]

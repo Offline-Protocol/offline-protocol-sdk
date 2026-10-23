@@ -98,6 +98,10 @@ build_fixture() {
   echo "fixture so x86_64" >"$root/desktop-libs/linux-x86_64/liboffline_protocol_uniffi.so"
   echo "fixture so aarch64" >"$root/desktop-libs/linux-aarch64/liboffline_protocol_uniffi.so"
   echo "fixture dll" >"$root/desktop-libs/windows-x86_64/offline_protocol_uniffi.dll"
+  echo "fixture import library" >"$root/desktop-libs/windows-x86_64/offline_protocol_uniffi.dll.lib"
+
+  mkdir -p "$root/bindings/c/include"
+  echo "fixture c header" >"$root/bindings/c/include/offline_protocol.h"
 
   # The archive as build-ios zips it, and the package assembled against it.
   local swiftpm="$root/swiftpm/offline_protocolFFI.xcframework"
@@ -240,6 +244,7 @@ check_desktop() {
   assert_entry "$archive" "$loader_name"
   assert_entry "$archive" "offline_protocol.py"
   assert_entry "$archive" "offline_protocolFFI.h"
+  assert_entry "$archive" "offline_protocol.h"
   assert_entry "$archive" "VERSION"
   assert_entry "$archive" "README.md"
   assert_entry "$archive" "LICENSE"
@@ -254,6 +259,59 @@ check_desktop "$ASSETS/offline-protocol-$TEST_VERSION-linux-aarch64.tar.gz" \
   liboffline_protocol_uniffi.so libuniffi.so
 check_desktop "$ASSETS/offline-protocol-$TEST_VERSION-windows-x86_64.zip" \
   offline_protocol_uniffi.dll uniffi.dll
+assert_entry "$ASSETS/offline-protocol-$TEST_VERSION-windows-x86_64.zip" offline_protocol_uniffi.dll.lib
+
+# The README is generated per platform, so its C section is checked line for
+# line: a wrong link line ships a binary that links and then cannot load.
+readme_of() {
+  local archive="$1"
+  case "$archive" in
+    *.tar.gz) tar -xOzf "$archive" ./README.md 2>/dev/null || tar -xOzf "$archive" README.md ;;
+    *.zip) unzip -p "$archive" README.md ;;
+  esac
+}
+assert_readme_line() {
+  local archive="$1" line="$2"
+  if readme_of "$archive" | grep -qxF -- "$line"; then
+    pass "$(basename "$archive") README has: $line"
+  else
+    fail "$(basename "$archive") README is missing the line: $line"
+  fi
+}
+assert_readme_lacks() {
+  local archive="$1" text="$2"
+  if readme_of "$archive" | grep -qF -- "$text"; then
+    fail "$(basename "$archive") README should not mention: $text"
+  else
+    pass "$(basename "$archive") README does not mention: $text"
+  fi
+}
+# shellcheck disable=SC2016 # the dollar sign is literal README text
+ORIGIN_LINE='cc -I. app.c -L. -loffline_protocol_uniffi -Wl,-rpath,'"'"'$ORIGIN'"'"
+for plat in linux-x86_64 linux-aarch64; do
+  assert_readme_line "$ASSETS/offline-protocol-$TEST_VERSION-$plat.tar.gz" "$ORIGIN_LINE"
+  assert_readme_lacks "$ASSETS/offline-protocol-$TEST_VERSION-$plat.tar.gz" "dll.lib"
+done
+assert_readme_line "$ASSETS/offline-protocol-$TEST_VERSION-macos-arm64.tar.gz" \
+  'cc -I. app.c -L. -loffline_protocol_uniffi -Wl,-rpath,@loader_path'
+assert_readme_lacks "$ASSETS/offline-protocol-$TEST_VERSION-macos-arm64.tar.gz" "dll.lib"
+WIN_ZIP="$ASSETS/offline-protocol-$TEST_VERSION-windows-x86_64.zip"
+assert_readme_line "$WIN_ZIP" 'cl /I. app.c offline_protocol_uniffi.dll.lib'
+assert_readme_line "$WIN_ZIP" \
+  '| `offline_protocol_uniffi.dll.lib` | The import library an MSVC linker needs to link the DLL. |'
+for plat in macos-arm64 linux-x86_64 linux-aarch64 windows-x86_64; do
+  archive="$(ls "$ASSETS"/offline-protocol-"$TEST_VERSION"-"$plat".*)"
+  assert_readme_line "$archive" \
+    "[docs/bridges/c.md](https://github.com/Offline-Protocol/offline-protocol-sdk/blob/v$TEST_VERSION/docs/bridges/c.md)"
+  # The import row is empty on every platform but Windows; a stray blank line
+  # in its place would end the file table early, before the VERSION row.
+  last_row="$(readme_of "$archive" | sed -n '/^| File/,/^$/p' | sed '/^$/d' | tail -n 1)"
+  if [ "$last_row" = '| `VERSION` | Version and commit this archive was built from. |' ]; then
+    pass "$(basename "$archive") README file table runs unbroken to its VERSION row"
+  else
+    fail "$(basename "$archive") README file table ends early, at: $last_row"
+  fi
+done
 
 # Windows extractors do not create symlinks, so uniffi.dll has to be a real copy
 # of the DLL rather than a link that arrives broken.
@@ -349,6 +407,8 @@ drop_desktop_lib() { rm -rf "${1:?}/desktop-libs/linux-aarch64"; }
 drop_ios_generated() { rm -rf "${1:?}/bindings/react-native/ios/Generated"; }
 drop_python_module() { rm -f "${1:?}/bindings/python/offline_protocol_sdk/offline_protocol.py"; }
 drop_legal() { rm -f "${1:?}/EXPORT.md"; }
+drop_c_header() { rm -f "${1:?}/bindings/c/include/offline_protocol.h"; }
+drop_import_lib() { rm -f "${1:?}/desktop-libs/windows-x86_64/offline_protocol_uniffi.dll.lib"; }
 drop_android_abis() { rm -rf "${1:?}/bindings/react-native/android/src/main/jniLibs"; }
 drop_swiftpm() { rm -rf "${1:?}/swiftpm"; }
 drop_swift_package() { rm -rf "${1:?}/swift-package"; }
@@ -385,6 +445,8 @@ expect_failure "missing-desktop-lib" drop_desktop_lib
 expect_failure "missing-ios-generated" drop_ios_generated
 expect_failure "missing-python-module" drop_python_module
 expect_failure "missing-export-notice" drop_legal
+expect_failure "missing-c-header" drop_c_header
+expect_failure "missing-windows-import-library" drop_import_lib
 expect_failure "missing-android-abis" drop_android_abis
 expect_failure "missing-swiftpm-xcframework" drop_swiftpm
 expect_failure "missing-swift-package" drop_swift_package

@@ -32,6 +32,8 @@ import platform
 # Used for default argument values
 _DEFAULT = object() # type: typing.Any
 
+import ctypes
+import struct
 
 class _UniffiRustBuffer(ctypes.Structure):
     _fields_ = [
@@ -111,6 +113,49 @@ class _UniffiForeignBytes(ctypes.Structure):
 
     def __str__(self):
         return "_UniffiForeignBytes(len={}, data={})".format(self.len, self.data[0:self.len])
+
+
+class _UniffiFfiConverterByRefBytes:
+    """Zero-copy converter for `&[u8]` / `[ByRef] bytes` arguments.
+
+    Only `lower` and `check_lower` are valid — zero-copy byte buffers only
+    flow foreign -> Rust, and only in argument position. `lift`, `read`, and
+    `write` have no sound implementation here.
+
+    CPython `bytes` objects are immutable and their internal buffer doesn't
+    move for the lifetime of the object; the caller must keep the source
+    `bytes` alive for the duration of the FFI call.
+    """
+
+    @staticmethod
+    def check_lower(value):
+        # Tighter than `bytes-like`: `lower` uses `ctypes.c_char_p` which only
+        # accepts `bytes`/`None`, so fail fast with a matching check.
+        if not isinstance(value, bytes):
+            raise TypeError("a bytes object is required, not {!r}".format(type(value).__name__))
+
+    @staticmethod
+    def lower(value):
+        fb = _UniffiForeignBytes()
+        if len(value) == 0:
+            fb.len = 0
+            fb.data = None
+        else:
+            fb.len = len(value)
+            fb.data = ctypes.cast(ctypes.c_char_p(value), ctypes.POINTER(ctypes.c_char))
+        return fb
+
+    @staticmethod
+    def lift(value):
+        raise NotImplementedError("ByRef bytes cannot be lifted: zero-copy &[u8] only flows foreign->Rust")
+
+    @staticmethod
+    def read(buf):
+        raise NotImplementedError("ByRef bytes cannot be read from a buffer: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.")
+
+    @staticmethod
+    def write(value, buf):
+        raise NotImplementedError("ByRef bytes cannot be written to a buffer: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.")
 
 
 class _UniffiRustBufferStream:
@@ -203,14 +248,15 @@ class _UniffiRustBufferBuilder:
 
     def _pack_into(self, size, format, value):
         with self._reserve(size):
-            # XXX TODO: I feel like I should be able to use `struct.pack_into` here but can't figure it out.
-            for i, byte in enumerate(struct.pack(format, value)):
-                self.rbuf.data[self.rbuf.len + i] = byte
-
+            packed = struct.pack(format, value)
+            if size > 0:
+                ctypes.memmove(ctypes.addressof(self.rbuf.data.contents) + self.rbuf.len, packed, size)
+    
     def write(self, value):
-        with self._reserve(len(value)):
-            for i, byte in enumerate(value):
-                self.rbuf.data[self.rbuf.len + i] = byte
+        length = len(value)
+        with self._reserve(length):
+            if length > 0:
+                ctypes.memmove(ctypes.addressof(self.rbuf.data.contents) + self.rbuf.len, value, length)
 
     def write_i8(self, v):
         self._pack_into(1, ">b", v)
@@ -509,449 +555,451 @@ def _uniffi_check_contract_api_version(lib):
         raise InternalError("UniFFI contract version mismatch: try cleaning and rebuilding your project")
 
 def _uniffi_check_api_checksums(lib):
-    if lib.uniffi_offline_protocol_uniffi_checksum_func_derive_address() != 55050:
+    if lib.uniffi_offline_protocol_uniffi_checksum_func_derive_address() != 64789:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_func_parse_invite() != 15865:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance() != 20699:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion() != 63230:
+    if lib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion() != 61480:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash() != 10852:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment() != 50001:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_value() != 19947:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc() != 43277:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_decline_attachment() != 53249:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc() != 23496:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_json() != 62388:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_size() != 1306:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw() != 30993:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment() != 2774:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from() != 44676:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush() != 4911:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all() != 58838:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_delete() != 46614:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_docs() != 43688:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_len() != 53366:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_push() != 58133:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_spaces() != 25003:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_delete() != 61779:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_get_json() != 7048:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set() != 60305:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment() != 57819:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_doc() != 58710:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space() != 242:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_set_interest() != 5786:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete() != 12470:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert() != 42508:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_value() != 6495:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all() != 58624:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new() != 36671:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage() != 2283:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash() != 53518:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() != 43941:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment() != 25635:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service() != 46597:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_value() != 27166:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request() != 20926:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc() != 9947:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request() != 34689:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_decline_attachment() != 28466:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc() != 4629:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_json() != 13895:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_size() != 23121:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw() != 4590:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment() != 64484:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from() != 26988:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush() != 26356:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all() != 41167:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_delete() != 29548:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_docs() != 23259:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_len() != 51106:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_push() != 38926:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_spaces() != 37361:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_delete() != 10839:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_get_json() != 48657:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set() != 47637:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment() != 59967:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_doc() != 53929:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space() != 40558:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_set_interest() != 31191:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete() != 53749:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert() != 3896:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_value() != 468:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all() != 57059:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service() != 4997:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new() != 61363:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services() != 65338:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() != 50880:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service() != 29815:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu() != 19884:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request() != 37597:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_fallback_count() != 60784:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request() != 3183:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received() != 9764:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service() != 23763:
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_next_fragment() != 30344:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count() != 11879:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered() != 26789:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost() != 22804:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count() != 42065:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment() != 51260:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_set_peer_mtu() != 7996:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_status_changed() != 63523:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_undersized_mtu_reports() != 53668:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_block_user() != 27957:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_connection_request() != 17522:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 44634:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores() != 57369:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 13199:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite() != 21745:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() != 46701:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_disable_telemetry() != 12013:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 29503:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry() != 52940:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session() != 55610:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody() != 39575:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session() != 52793:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file() != 48884:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry() != 52440:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry_blocking() != 60745:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport() != 65079:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message() != 4746:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group() != 43987:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration() != 21061:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports() != 23761:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level() != 56170:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users() != 28218:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats() != 29466:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats() != 51917:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_delivery_success_rate() != 23445:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config() != 10752:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_establishment_state() != 61148:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress() != 25115:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_info() != 11773:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_roles() != 19243:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key() != 48103:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging() != 42857:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops() != 54486:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_latency() != 20827:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role() != 5518:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats() != 29444:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables() != 34919:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats() != 26794:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count() != 14526:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config() != 41352:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority() != 56317:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size() != 11855:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state() != 56454:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_topology() != 14852:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 47103:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state() != 2982:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness() != 33044:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 50833:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion() != 12802:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 28255:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores() != 54918:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused() != 52855:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declared() != 5462:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent() != 22824:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message() != 42018:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_group_report_received() != 12840:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received() != 4763:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence() != 6161:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist() != 9479:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_relay_capabilities() != 379:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed() != 12455:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason() != 50456:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed() != 58507:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_invite_to_group() != 38704:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_mls_initialized() != 58599:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay() != 22217:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked() != 9262:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group() != 13144:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups() != 26113:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_local_address() != 54626:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome() != 33145:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_session() != 13710:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt() != 22215:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_user() != 29387:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_delete_session() != 11647:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_user() != 1970:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_generate_key_package() != 34344:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_or_create_key_package() != 26823:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_key_packages() != 3234:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_welcome() != 39261:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_has_session() != 56067:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_import_key_package() != 44533:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_session() != 14485:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_sessions() != 23429:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_mark_key_package_synced() != 6355:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome() != 12812:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_confirm_sent() != 9310:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message() != 20908:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query() != 23327:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key() != 59792:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter() != 35803:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received() != 32701:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at() != 4372:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed() != 45714:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received() != 35705:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed() != 34587:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed_with_reason() != 46967:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed() != 10042:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_notify_app_state() != 64828:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause() != 2754:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event() != 2150:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process() != 28590:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk() != 38467:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics() != 63421:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() != 24572:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request() != 17619:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rekey_session() != 49857:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock() != 9066:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group() != 50435:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport() != 37995:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group() != 36114:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration() != 3982:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolve_username() != 56081:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 23596:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused() != 6207:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared() != 14810:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent() != 49416:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities() != 38346:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message() != 43573:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received() != 6557:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence() != 9523:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist() != 26815:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed() != 54693:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed_with_reason() != 59249:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed() != 14680:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() != 32445:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 51826:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file_from_path() != 60049:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message() != 11928:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media() != 26391:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich() != 17024:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 58608:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich() != 3404:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update() != 56108:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_read_receipt() != 4730:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator() != 7836:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 44179:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state() != 59397:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback() != 15468:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback() != 57350:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_member_role() != 9132:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback() != 36253:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority() != 26597:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback() != 53618:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_telemetry_enabled() != 65413:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback() != 33195:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi() != 36523:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data() != 58338:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data_bytes() != 21454:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start() != 63301:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop() != 30235:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id() != 43250:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_stats() != 57652:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user() != 52650:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 50568:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config() != 37188:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config() != 42995:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config() != 33211:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config() != 3523:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics() != 15902:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature() != 16718:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes() != 24438:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() != 50868:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received() != 59107:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected() != 38596:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected() != 15986:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() != 12337:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_constructor_offlineprotocol_new() != 30125:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request() != 7017:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu() != 46834:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_fallback_count() != 60774:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received() != 62597:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_next_fragment() != 44595:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count() != 62628:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered() != 11562:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost() != 17841:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count() != 35445:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment() != 16620:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_set_peer_mtu() != 3966:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_status_changed() != 52927:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_undersized_mtu_reports() != 524:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_block_user() != 11986:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_connection_request() != 56785:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer() != 40871:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores() != 10268:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group() != 15087:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite() != 60286:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key() != 2562:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_disable_telemetry() != 56580:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event() != 6362:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry() != 49121:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session() != 31162:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody() != 61003:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session() != 56452:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file() != 63518:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry() != 2273:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry_blocking() != 9280:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport() != 8362:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message() != 8085:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group() != 56646:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration() != 20226:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports() != 48673:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level() != 41959:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users() != 56869:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats() != 53054:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats() != 26483:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_delivery_success_rate() != 63625:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config() != 32109:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_establishment_state() != 64709:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress() != 51580:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_info() != 17329:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_roles() != 46610:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key() != 47713:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging() != 22403:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops() != 52969:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_latency() != 14890:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role() != 8513:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats() != 17873:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables() != 6222:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats() != 35293:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count() != 5451:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config() != 42805:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority() != 56391:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size() != 33113:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state() != 15724:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_topology() != 59022:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics() != 25216:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state() != 29095:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness() != 53848:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package() != 498:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion() != 8644:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls() != 23277:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores() != 33103:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused() != 829:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declared() != 18435:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent() != 5228:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message() != 8333:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_group_report_received() != 28573:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received() != 8068:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence() != 35090:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist() != 16210:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_relay_capabilities() != 31443:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed() != 58967:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason() != 43325:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed() != 36966:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_invite_to_group() != 64901:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_mls_initialized() != 61981:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay() != 32583:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked() != 33607:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group() != 42839:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups() != 32322:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_local_address() != 7017:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome() != 24100:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_session() != 14207:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt() != 45469:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_user() != 63823:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_delete_session() != 35997:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_user() != 17350:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_generate_key_package() != 9617:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_or_create_key_package() != 6480:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_key_packages() != 29945:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_welcome() != 55148:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_has_session() != 50017:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_import_key_package() != 2896:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_session() != 42323:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_sessions() != 7342:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_mark_key_package_synced() != 29294:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome() != 49769:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_confirm_sent() != 65289:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message() != 34137:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query() != 2487:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key() != 27701:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter() != 63513:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received() != 46003:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at() != 64166:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed() != 8316:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received() != 18677:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed() != 57598:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed_with_reason() != 57939:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed() != 47097:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_notify_app_state() != 39252:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause() != 43542:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event() != 21984:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process() != 45466:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk() != 40225:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics() != 1672:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message() != 1745:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request() != 496:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rekey_session() != 50324:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock() != 26544:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group() != 50629:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport() != 14605:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group() != 50903:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration() != 6912:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolve_username() != 29454:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume() != 16439:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused() != 25158:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared() != 58165:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent() != 25841:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities() != 3511:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message() != 23647:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received() != 3771:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence() != 15004:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist() != 44751:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed() != 62332:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed_with_reason() != 33601:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed() != 53848:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request() != 12846:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file() != 55106:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message() != 35655:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media() != 7230:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich() != 48847:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message() != 31925:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich() != 3565:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update() != 19098:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_read_receipt() != 62179:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator() != 21160:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level() != 16092:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state() != 16070:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback() != 61444:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback() != 53801:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_member_role() != 39916:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback() != 50633:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority() != 64149:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback() != 31048:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_telemetry_enabled() != 28422:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback() != 31962:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi() != 7907:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data() != 21607:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data_bytes() != 17945:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start() != 48145:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop() != 20607:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id() != 19313:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_stats() != 61949:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user() != 14209:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config() != 15033:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config() != 26270:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config() != 50236:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config() != 11465:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config() != 45701:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics() != 794:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature() != 30260:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes() != 1730:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message() != 48560:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received() != 57397:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected() != 21557:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected() != 8416:
-        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed() != 51035:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
 
 # A ctypes library to expose the extern-C FFI definitions.
@@ -979,416 +1027,678 @@ _UniffiLib.ffi_offline_protocol_uniffi_rustbuffer_reserve.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.ffi_offline_protocol_uniffi_rustbuffer_reserve.restype = _UniffiRustBuffer
-_UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK = ctypes.CFUNCTYPE(None,ctypes.c_uint64,ctypes.c_int8,
-)
-_UNIFFI_FOREIGN_FUTURE_DROPPED_CALLBACK = ctypes.CFUNCTYPE(None,ctypes.c_uint64,
-)
-class _UniffiForeignFutureDroppedCallbackStruct(ctypes.Structure):
-    _fields_ = [
-        ("handle", ctypes.c_uint64),
-        ("free", _UNIFFI_FOREIGN_FUTURE_DROPPED_CALLBACK),
-    ]
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_u8.argtypes = (
-    ctypes.c_uint64,
-    _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_u8.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_u8.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_u8.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_u8.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_u8.restype = ctypes.c_uint8
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_u8.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_u8.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_i8.argtypes = (
-    ctypes.c_uint64,
-    _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_i8.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_i8.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_i8.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_i8.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_i8.restype = ctypes.c_int8
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_i8.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_i8.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_u16.argtypes = (
-    ctypes.c_uint64,
-    _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_u16.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_u16.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_u16.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_u16.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_u16.restype = ctypes.c_uint16
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_u16.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_u16.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_i16.argtypes = (
-    ctypes.c_uint64,
-    _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_i16.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_i16.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_i16.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_i16.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_i16.restype = ctypes.c_int16
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_i16.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_i16.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_u32.argtypes = (
-    ctypes.c_uint64,
-    _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_u32.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_u32.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_u32.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_u32.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_u32.restype = ctypes.c_uint32
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_u32.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_u32.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_i32.argtypes = (
-    ctypes.c_uint64,
-    _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_i32.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_i32.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_i32.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_i32.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_i32.restype = ctypes.c_int32
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_i32.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_i32.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_u64.argtypes = (
-    ctypes.c_uint64,
-    _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_u64.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_u64.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_u64.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_u64.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_u64.restype = ctypes.c_uint64
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_u64.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_u64.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_i64.argtypes = (
-    ctypes.c_uint64,
-    _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_i64.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_i64.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_i64.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_i64.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_i64.restype = ctypes.c_int64
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_i64.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_i64.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_f32.argtypes = (
-    ctypes.c_uint64,
-    _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_f32.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_f32.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_f32.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_f32.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_f32.restype = ctypes.c_float
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_f32.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_f32.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_f64.argtypes = (
-    ctypes.c_uint64,
-    _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_f64.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_f64.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_f64.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_f64.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_f64.restype = ctypes.c_double
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_f64.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_f64.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_rust_buffer.argtypes = (
-    ctypes.c_uint64,
-    _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_rust_buffer.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_rust_buffer.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_rust_buffer.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_rust_buffer.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_rust_buffer.restype = _UniffiRustBuffer
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_rust_buffer.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_rust_buffer.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_void.argtypes = (
-    ctypes.c_uint64,
-    _UNIFFI_RUST_FUTURE_CONTINUATION_CALLBACK,
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_poll_void.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_void.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_cancel_void.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_void.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_complete_void.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_void.argtypes = (
-    ctypes.c_uint64,
-)
-_UniffiLib.ffi_offline_protocol_uniffi_rust_future_free_void.restype = None
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_clone_datastore.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_clone_datastore.restype = ctypes.c_uint64
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_free_datastore.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_free_datastore.restype = None
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_clone_meshservices.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_clone_meshservices.restype = ctypes.c_uint64
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_free_meshservices.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_free_meshservices.restype = None
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_clone_offlineprotocol.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_clone_offlineprotocol.restype = ctypes.c_uint64
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_free_offlineprotocol.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_free_offlineprotocol.restype = None
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_BLE_TRANSPORT_CALLBACK_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_BLE_TRANSPORT_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_uint64,ctypes.c_uint64,
-)
-_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_BLE_TRANSPORT_CALLBACK = ctypes.CFUNCTYPE(None,ctypes.c_uint64,
-)
-class _UniffiVTableCallbackInterfaceOfflineProtocolBleTransportCallback(ctypes.Structure):
-    _fields_ = [
-        ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_BLE_TRANSPORT_CALLBACK),
-        ("uniffi_clone", _UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_BLE_TRANSPORT_CALLBACK),
-        ("on_fragments_available", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_BLE_TRANSPORT_CALLBACK_METHOD0),
-    ]
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_bletransportcallback.argtypes = (
-    ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolBleTransportCallback),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_bletransportcallback.restype = None
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_EVENT_CALLBACK_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_EVENT_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_uint64,ctypes.c_uint64,
-)
-_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_EVENT_CALLBACK = ctypes.CFUNCTYPE(None,ctypes.c_uint64,
-)
-class _UniffiVTableCallbackInterfaceOfflineProtocolEventCallback(ctypes.Structure):
-    _fields_ = [
-        ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_EVENT_CALLBACK),
-        ("uniffi_clone", _UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_EVENT_CALLBACK),
-        ("on_event", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_EVENT_CALLBACK_METHOD0),
-    ]
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_eventcallback.argtypes = (
-    ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolEventCallback),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_eventcallback.restype = None
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,_UniffiRustBuffer,_UniffiRustBuffer,ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER_METHOD1 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,_UniffiRustBuffer,ctypes.POINTER(_UniffiRustBuffer),
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER_METHOD2 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,_UniffiRustBuffer,ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER_METHOD3 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,ctypes.POINTER(_UniffiRustBuffer),
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER = ctypes.CFUNCTYPE(ctypes.c_uint64,ctypes.c_uint64,
-)
-_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER = ctypes.CFUNCTYPE(None,ctypes.c_uint64,
-)
-class _UniffiVTableCallbackInterfaceOfflineProtocolMlsStorageProvider(ctypes.Structure):
-    _fields_ = [
-        ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER),
-        ("uniffi_clone", _UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER),
-        ("store", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER_METHOD0),
-        ("load", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER_METHOD1),
-        ("delete", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER_METHOD2),
-        ("list_keys", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER_METHOD3),
-    ]
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_mlsstorageprovider.argtypes = (
-    ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolMlsStorageProvider),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_mlsstorageprovider.restype = None
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_NOSTR_TRANSPORT_CALLBACK_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_NOSTR_TRANSPORT_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_uint64,ctypes.c_uint64,
-)
-_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_NOSTR_TRANSPORT_CALLBACK = ctypes.CFUNCTYPE(None,ctypes.c_uint64,
-)
-class _UniffiVTableCallbackInterfaceOfflineProtocolNostrTransportCallback(ctypes.Structure):
-    _fields_ = [
-        ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_NOSTR_TRANSPORT_CALLBACK),
-        ("uniffi_clone", _UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_NOSTR_TRANSPORT_CALLBACK),
-        ("on_messages_available", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_NOSTR_TRANSPORT_CALLBACK_METHOD0),
-    ]
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_nostrtransportcallback.argtypes = (
-    ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolNostrTransportCallback),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_nostrtransportcallback.restype = None
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,_UniffiRustBuffer,_UniffiRustBuffer,ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD1 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,_UniffiRustBuffer,ctypes.POINTER(_UniffiRustBuffer),
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD2 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,_UniffiRustBuffer,ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD3 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,ctypes.POINTER(_UniffiRustBuffer),
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER = ctypes.CFUNCTYPE(ctypes.c_uint64,ctypes.c_uint64,
-)
-_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER = ctypes.CFUNCTYPE(None,ctypes.c_uint64,
-)
-class _UniffiVTableCallbackInterfaceOfflineProtocolProtocolStateStorageProvider(ctypes.Structure):
-    _fields_ = [
-        ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER),
-        ("uniffi_clone", _UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER),
-        ("store", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD0),
-        ("load", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD1),
-        ("delete", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD2),
-        ("list_keys", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD3),
-    ]
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_protocolstatestorageprovider.argtypes = (
-    ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolProtocolStateStorageProvider),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_protocolstatestorageprovider.restype = None
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_RETICULUM_TRANSPORT_CALLBACK_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_RETICULUM_TRANSPORT_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_uint64,ctypes.c_uint64,
-)
-_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_RETICULUM_TRANSPORT_CALLBACK = ctypes.CFUNCTYPE(None,ctypes.c_uint64,
-)
-class _UniffiVTableCallbackInterfaceOfflineProtocolReticulumTransportCallback(ctypes.Structure):
-    _fields_ = [
-        ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_RETICULUM_TRANSPORT_CALLBACK),
-        ("uniffi_clone", _UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_RETICULUM_TRANSPORT_CALLBACK),
-        ("on_messages_available", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_RETICULUM_TRANSPORT_CALLBACK_METHOD0),
-    ]
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_reticulumtransportcallback.argtypes = (
-    ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolReticulumTransportCallback),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_reticulumtransportcallback.restype = None
-_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_WIFI_DIRECT_TRANSPORT_CALLBACK_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,ctypes.c_void_p,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_WIFI_DIRECT_TRANSPORT_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_uint64,ctypes.c_uint64,
-)
-_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_WIFI_DIRECT_TRANSPORT_CALLBACK = ctypes.CFUNCTYPE(None,ctypes.c_uint64,
-)
-class _UniffiVTableCallbackInterfaceOfflineProtocolWifiDirectTransportCallback(ctypes.Structure):
-    _fields_ = [
-        ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_WIFI_DIRECT_TRANSPORT_CALLBACK),
-        ("uniffi_clone", _UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_WIFI_DIRECT_TRANSPORT_CALLBACK),
-        ("on_messages_available", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_WIFI_DIRECT_TRANSPORT_CALLBACK_METHOD0),
-    ]
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_wifidirecttransportcallback.argtypes = (
-    ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolWifiDirectTransportCallback),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_wifidirecttransportcallback.restype = None
+_UniffiLib.ffi_offline_protocol_uniffi_uniffi_contract_version.argtypes = (
+)
+_UniffiLib.ffi_offline_protocol_uniffi_uniffi_contract_version.restype = ctypes.c_uint32
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_derive_address.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_derive_address.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_parse_invite.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_parse_invite.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_value.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_value.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_decline_attachment.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_decline_attachment.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_json.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_json.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_size.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_size.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_delete.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_delete.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_docs.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_docs.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_len.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_len.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_push.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_push.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_spaces.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_spaces.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_delete.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_delete.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_get_json.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_get_json.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_doc.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_doc.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_set_interest.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_set_interest.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_value.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_value.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_fallback_count.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_fallback_count.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_next_fragment.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_next_fragment.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_set_peer_mtu.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_set_peer_mtu.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_status_changed.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_status_changed.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_undersized_mtu_reports.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_undersized_mtu_reports.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_block_user.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_block_user.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_connection_request.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_connection_request.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_disable_telemetry.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_disable_telemetry.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry_blocking.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry_blocking.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_delivery_success_rate.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_delivery_success_rate.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_establishment_state.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_establishment_state.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_info.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_info.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_roles.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_roles.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_latency.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_latency.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_topology.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_topology.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declared.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declared.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_group_report_received.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_group_report_received.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_relay_capabilities.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_relay_capabilities.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_invite_to_group.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_invite_to_group.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_mls_initialized.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_mls_initialized.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_local_address.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_local_address.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_session.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_session.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_user.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_user.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_delete_session.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_delete_session.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_user.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_user.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_generate_key_package.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_generate_key_package.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_or_create_key_package.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_or_create_key_package.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_key_packages.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_key_packages.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_welcome.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_welcome.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_has_session.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_has_session.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_import_key_package.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_import_key_package.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_session.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_session.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_sessions.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_sessions.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_mark_key_package_synced.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_mark_key_package_synced.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_confirm_sent.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_confirm_sent.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed_with_reason.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed_with_reason.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_notify_app_state.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_notify_app_state.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rekey_session.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rekey_session.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolve_username.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolve_username.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed_with_reason.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed_with_reason.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file_from_path.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file_from_path.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_read_receipt.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_read_receipt.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_member_role.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_member_role.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_telemetry_enabled.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_telemetry_enabled.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data_bytes.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data_bytes.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_stats.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_stats.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_offlineprotocol_new.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_offlineprotocol_new.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_derive_address.argtypes = (
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -1409,17 +1719,6 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion.argt
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_func_verify_identity_assertion.restype = _UniffiRustBuffer
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_new.argtypes = (
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_new.restype = ctypes.c_uint64
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_with_storage.argtypes = (
-    ctypes.c_uint64,
-    ctypes.c_uint64,
-    ctypes.POINTER(_UniffiRustCallStatus),
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_with_storage.restype = ctypes.c_uint64
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_attachment_hash.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -1641,11 +1940,17 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_wipe_all.argtypes 
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_datastore_wipe_all.restype = None
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_meshservices_new.argtypes = (
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_new.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_meshservices_new.restype = ctypes.c_uint64
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_new.restype = ctypes.c_uint64
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_with_storage.argtypes = (
+    ctypes.c_uint64,
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_datastore_with_storage.restype = ctypes.c_uint64
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_discover_services.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -1685,11 +1990,11 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_serv
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_meshservices_unregister_service.restype = ctypes.c_int8
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_offlineprotocol_new.argtypes = (
-    _UniffiRustBuffer,
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_meshservices_new.argtypes = (
+    ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
 )
-_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_offlineprotocol_new.restype = ctypes.c_uint64
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_meshservices_new.restype = ctypes.c_uint64
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_accept_connection_request.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2526,6 +2831,14 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file.ar
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file_from_path.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file_from_path.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_group_message.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2783,675 +3096,184 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_wifi_direct_status_changed.restype = None
-_UniffiLib.ffi_offline_protocol_uniffi_uniffi_contract_version.argtypes = (
-)
-_UniffiLib.ffi_offline_protocol_uniffi_uniffi_contract_version.restype = ctypes.c_uint32
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_derive_address.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_derive_address.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_parse_invite.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_parse_invite.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_run_storage_conformance.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_func_verify_identity_assertion.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_new.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_datastore_with_storage.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_attachment_hash.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_increment.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_value.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_counter_value.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_create_doc.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_decline_attachment.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_decline_attachment.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_delete_doc.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_json.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_json.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_size.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_doc_size.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_export_raw.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_fetch_attachment_from.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_flush_all.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_delete.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_delete.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_docs.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_docs.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_len.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_len.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_push.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_push.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_spaces.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_list_spaces.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_delete.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_delete.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_get_json.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_get_json.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_map_set.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_provide_attachment.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_doc.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_doc.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_remove_space.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_set_interest.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_set_interest.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_delete.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_insert.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_value.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_text_value.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_datastore_wipe_all.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_meshservices_new.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_discover_services.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_register_service.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_respond_to_service_request.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_send_service_request.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_meshservices_unregister_service.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_offlineprotocol_new.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_constructor_offlineprotocol_new.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_accept_connection_request.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_clear_peer_mtu.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_fallback_count.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_fallback_count.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_fragment_received.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_next_fragment.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_next_fragment.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_return_fragment.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_set_peer_mtu.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_set_peer_mtu.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_status_changed.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_status_changed.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_undersized_mtu_reports.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_undersized_mtu_reports.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_block_user.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_block_user.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_connection_request.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_connection_request.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_cancel_file_transfer.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_close_file_stores.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_group.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_create_invite.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_derive_user_id_from_public_key.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_disable_telemetry.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_disable_telemetry.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_emit_test_event.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_enable_telemetry.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_end_telemetry_session.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_erase_custody.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_establish_secure_session.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_finalize_file.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry_blocking.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_flush_telemetry_blocking.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_force_transport.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_forward_message_to_group.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_gateway_address_declaration.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_active_transports.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_battery_level.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_blocked_users.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_custody_stats.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dedup_stats.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_delivery_success_rate.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_delivery_success_rate.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_dors_config.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_establishment_state.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_establishment_state.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_file_progress.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_info.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_info.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_roles.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_group_roles.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_identity_public_key.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_is_charging.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_hops.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_latency.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_median_latency.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_member_role.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_stats.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_mesh_relay_tunables.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_message_stats.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_pending_ack_count.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_config.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_relay_priority.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_retry_queue_size.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_state.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_topology.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_topology.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_get_transport_metrics.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_relay_sync_state.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_group_rich_readiness.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_has_pending_key_package.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_identity_assertion.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_initialize_mls_with_file_stores.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declaration_refused.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declared.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_address_declared.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_confirm_sent.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_get_next_message.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_group_report_received.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_group_report_received.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_message_received.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_peer_presence.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_presence_watchlist.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_relay_capabilities.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_relay_capabilities.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_send_failed_with_reason.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_internet_status_changed.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_invite_to_group.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_invite_to_group.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_mls_initialized.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_mls_initialized.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_relay.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_is_user_blocked.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_leave_group.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_list_groups.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_local_address.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_local_address.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_clear_pending_welcome.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_session.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_create_session.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_user.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_decrypt_from_user.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_delete_session.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_delete_session.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_user.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_encrypt_for_user.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_generate_key_package.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_generate_key_package.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_or_create_key_package.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_or_create_key_package.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_key_packages.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_key_packages.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_welcome.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_get_pending_welcome.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_has_session.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_has_session.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_import_key_package.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_import_key_package.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_session.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_join_session.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_sessions.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_list_sessions.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_mark_key_package_synced.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_mark_key_package_synced.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_mls_process_welcome.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_confirm_sent.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_confirm_sent.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_message.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_next_query.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_public_key.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_get_subscription_filter.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_message_received_at.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_completed.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_query_event_received.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed_with_reason.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_send_failed_with_reason.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_nostr_status_changed.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_notify_app_state.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_notify_app_state.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_pause.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_poll_event.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_process_file_chunk.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_protocol_lock_diagnostics.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_receive_message.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reject_connection_request.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rekey_session.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rekey_session.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_release_transport_lock.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_from_group.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_remove_transport.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_rename_group.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_request_group_relay_registration.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolve_username.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resolve_username.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_resume.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declaration_refused.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_address_declared.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_confirm_sent.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_gateway_capabilities.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_get_next_message.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_message_received.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_peer_presence.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_presence_watchlist.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed_with_reason.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_send_failed_with_reason.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_reticulum_status_changed.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_connection_request.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_file.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_group_message.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_media_rich.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_message_rich.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_presence_update.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_read_receipt.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_read_receipt.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_send_typing_indicator.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_level.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_battery_state.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_ble_transport_callback.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_event_callback.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_member_role.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_member_role.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_telemetry_enabled.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_telemetry_enabled.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_wifi_direct_transport_callback.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_should_escalate_to_wifi.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data_bytes.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_sign_data_bytes.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_start.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_stop.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_install_id.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_stats.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_telemetry_stats.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_unblock_user.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_ack_config.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dedup_config.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_dors_config.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_relay_config.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_retry_config.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_update_transport_metrics.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_verify_signature_bytes.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_get_next_message.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_message_received.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_connected.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_peer_disconnected.restype = ctypes.c_uint16
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed.argtypes = (
-)
-_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_wifi_direct_status_changed.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_offlineprotocol_new.argtypes = (
+    _UniffiRustBuffer,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_constructor_offlineprotocol_new.restype = ctypes.c_uint64
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_clone_datastore.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_clone_datastore.restype = ctypes.c_uint64
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_free_datastore.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_free_datastore.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_clone_meshservices.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_clone_meshservices.restype = ctypes.c_uint64
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_free_meshservices.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_free_meshservices.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_clone_offlineprotocol.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_clone_offlineprotocol.restype = ctypes.c_uint64
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_free_offlineprotocol.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_free_offlineprotocol.restype = None
+_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_BLE_TRANSPORT_CALLBACK_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_BLE_TRANSPORT_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_uint64,ctypes.c_uint64,
+)
+_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_BLE_TRANSPORT_CALLBACK = ctypes.CFUNCTYPE(None,ctypes.c_uint64,
+)
+class _UniffiVTableCallbackInterfaceOfflineProtocolBleTransportCallback(ctypes.Structure):
+    _fields_ = [
+        ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_BLE_TRANSPORT_CALLBACK),
+        ("uniffi_clone", _UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_BLE_TRANSPORT_CALLBACK),
+        ("on_fragments_available", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_BLE_TRANSPORT_CALLBACK_METHOD0),
+    ]
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_bletransportcallback.argtypes = (
+    ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolBleTransportCallback),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_bletransportcallback.restype = None
+_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_EVENT_CALLBACK_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_EVENT_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_uint64,ctypes.c_uint64,
+)
+_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_EVENT_CALLBACK = ctypes.CFUNCTYPE(None,ctypes.c_uint64,
+)
+class _UniffiVTableCallbackInterfaceOfflineProtocolEventCallback(ctypes.Structure):
+    _fields_ = [
+        ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_EVENT_CALLBACK),
+        ("uniffi_clone", _UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_EVENT_CALLBACK),
+        ("on_event", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_EVENT_CALLBACK_METHOD0),
+    ]
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_eventcallback.argtypes = (
+    ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolEventCallback),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_eventcallback.restype = None
+_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,_UniffiRustBuffer,_UniffiRustBuffer,ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER_METHOD1 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,_UniffiRustBuffer,ctypes.POINTER(_UniffiRustBuffer),
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER_METHOD2 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,_UniffiRustBuffer,ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER_METHOD3 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,ctypes.POINTER(_UniffiRustBuffer),
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER = ctypes.CFUNCTYPE(ctypes.c_uint64,ctypes.c_uint64,
+)
+_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER = ctypes.CFUNCTYPE(None,ctypes.c_uint64,
+)
+class _UniffiVTableCallbackInterfaceOfflineProtocolMlsStorageProvider(ctypes.Structure):
+    _fields_ = [
+        ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER),
+        ("uniffi_clone", _UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER),
+        ("store", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER_METHOD0),
+        ("load", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER_METHOD1),
+        ("delete", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER_METHOD2),
+        ("list_keys", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_MLS_STORAGE_PROVIDER_METHOD3),
+    ]
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_mlsstorageprovider.argtypes = (
+    ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolMlsStorageProvider),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_mlsstorageprovider.restype = None
+_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_NOSTR_TRANSPORT_CALLBACK_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_NOSTR_TRANSPORT_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_uint64,ctypes.c_uint64,
+)
+_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_NOSTR_TRANSPORT_CALLBACK = ctypes.CFUNCTYPE(None,ctypes.c_uint64,
+)
+class _UniffiVTableCallbackInterfaceOfflineProtocolNostrTransportCallback(ctypes.Structure):
+    _fields_ = [
+        ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_NOSTR_TRANSPORT_CALLBACK),
+        ("uniffi_clone", _UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_NOSTR_TRANSPORT_CALLBACK),
+        ("on_messages_available", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_NOSTR_TRANSPORT_CALLBACK_METHOD0),
+    ]
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_nostrtransportcallback.argtypes = (
+    ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolNostrTransportCallback),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_nostrtransportcallback.restype = None
+_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,_UniffiRustBuffer,_UniffiRustBuffer,ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD1 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,_UniffiRustBuffer,ctypes.POINTER(_UniffiRustBuffer),
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD2 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,_UniffiRustBuffer,ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD3 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,_UniffiRustBuffer,ctypes.POINTER(_UniffiRustBuffer),
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER = ctypes.CFUNCTYPE(ctypes.c_uint64,ctypes.c_uint64,
+)
+_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER = ctypes.CFUNCTYPE(None,ctypes.c_uint64,
+)
+class _UniffiVTableCallbackInterfaceOfflineProtocolProtocolStateStorageProvider(ctypes.Structure):
+    _fields_ = [
+        ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER),
+        ("uniffi_clone", _UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER),
+        ("store", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD0),
+        ("load", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD1),
+        ("delete", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD2),
+        ("list_keys", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_PROTOCOL_STATE_STORAGE_PROVIDER_METHOD3),
+    ]
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_protocolstatestorageprovider.argtypes = (
+    ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolProtocolStateStorageProvider),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_protocolstatestorageprovider.restype = None
+_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_RETICULUM_TRANSPORT_CALLBACK_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_RETICULUM_TRANSPORT_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_uint64,ctypes.c_uint64,
+)
+_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_RETICULUM_TRANSPORT_CALLBACK = ctypes.CFUNCTYPE(None,ctypes.c_uint64,
+)
+class _UniffiVTableCallbackInterfaceOfflineProtocolReticulumTransportCallback(ctypes.Structure):
+    _fields_ = [
+        ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_RETICULUM_TRANSPORT_CALLBACK),
+        ("uniffi_clone", _UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_RETICULUM_TRANSPORT_CALLBACK),
+        ("on_messages_available", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_RETICULUM_TRANSPORT_CALLBACK_METHOD0),
+    ]
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_reticulumtransportcallback.argtypes = (
+    ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolReticulumTransportCallback),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_reticulumtransportcallback.restype = None
+_UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_WIFI_DIRECT_TRANSPORT_CALLBACK_METHOD0 = ctypes.CFUNCTYPE(None,ctypes.c_uint64,ctypes.c_void_p,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_WIFI_DIRECT_TRANSPORT_CALLBACK = ctypes.CFUNCTYPE(ctypes.c_uint64,ctypes.c_uint64,
+)
+_UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_WIFI_DIRECT_TRANSPORT_CALLBACK = ctypes.CFUNCTYPE(None,ctypes.c_uint64,
+)
+class _UniffiVTableCallbackInterfaceOfflineProtocolWifiDirectTransportCallback(ctypes.Structure):
+    _fields_ = [
+        ("uniffi_free", _UNIFFI_CALLBACK_INTERFACE_FREE_OFFLINE_PROTOCOL_WIFI_DIRECT_TRANSPORT_CALLBACK),
+        ("uniffi_clone", _UNIFFI_CALLBACK_INTERFACE_CLONE_OFFLINE_PROTOCOL_WIFI_DIRECT_TRANSPORT_CALLBACK),
+        ("on_messages_available", _UNIFFI_CALLBACK_INTERFACE_OFFLINE_PROTOCOL_WIFI_DIRECT_TRANSPORT_CALLBACK_METHOD0),
+    ]
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_wifidirecttransportcallback.argtypes = (
+    ctypes.POINTER(_UniffiVTableCallbackInterfaceOfflineProtocolWifiDirectTransportCallback),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_init_callback_vtable_wifidirecttransportcallback.restype = None
 
 _uniffi_check_contract_api_version(_UniffiLib)
 # _uniffi_check_api_checksums(_UniffiLib)
@@ -8562,7 +8384,7 @@ class DataStore(DataStoreProtocol):
     def with_storage(cls, protocol: OfflineProtocol,storage: ProtocolStateStorageProvider) -> DataStore:
         
         _UniffiFfiConverterTypeOfflineProtocol.check_lower(protocol)
-        
+
         _UniffiFfiConverterTypeProtocolStateStorageProvider.check_lower(storage)
         _uniffi_lowered_args = (
             _UniffiFfiConverterTypeOfflineProtocol.lower(protocol),
@@ -8612,11 +8434,11 @@ class DataStore(DataStoreProtocol):
     def counter_increment(self, space_id: str,doc_id: str,collection: str,amount: float) -> None:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
-        
+
         _UniffiFfiConverterString.check_lower(collection)
-        
+
         _UniffiFfiConverterFloat64.check_lower(amount)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -8636,9 +8458,9 @@ class DataStore(DataStoreProtocol):
     def counter_value(self, space_id: str,doc_id: str,collection: str) -> float:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
-        
+
         _UniffiFfiConverterString.check_lower(collection)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -8657,7 +8479,7 @@ class DataStore(DataStoreProtocol):
     def create_doc(self, space_id: str,doc_id: str) -> None:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -8675,9 +8497,9 @@ class DataStore(DataStoreProtocol):
     def decline_attachment(self, space_id: str,peer_id: str,hash: str) -> None:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(peer_id)
-        
+
         _UniffiFfiConverterString.check_lower(hash)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -8696,7 +8518,7 @@ class DataStore(DataStoreProtocol):
     def delete_doc(self, space_id: str,doc_id: str) -> None:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -8714,7 +8536,7 @@ class DataStore(DataStoreProtocol):
     def doc_json(self, space_id: str,doc_id: str) -> str:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -8732,7 +8554,7 @@ class DataStore(DataStoreProtocol):
     def doc_size(self, space_id: str,doc_id: str) -> int:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -8750,7 +8572,7 @@ class DataStore(DataStoreProtocol):
     def export_raw(self, space_id: str,doc_id: str) -> bytes:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -8768,7 +8590,7 @@ class DataStore(DataStoreProtocol):
     def fetch_attachment(self, space_id: str,hash: str) -> None:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(hash)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -8786,9 +8608,9 @@ class DataStore(DataStoreProtocol):
     def fetch_attachment_from(self, space_id: str,peer_id: str,hash: str) -> None:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(peer_id)
-        
+
         _UniffiFfiConverterString.check_lower(hash)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -8807,7 +8629,7 @@ class DataStore(DataStoreProtocol):
     def flush(self, space_id: str,doc_id: str) -> None:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -8837,13 +8659,13 @@ class DataStore(DataStoreProtocol):
     def list_delete(self, space_id: str,doc_id: str,collection: str,index: int,count: int) -> None:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
-        
+
         _UniffiFfiConverterString.check_lower(collection)
-        
+
         _UniffiFfiConverterUInt32.check_lower(index)
-        
+
         _UniffiFfiConverterUInt32.check_lower(count)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -8879,9 +8701,9 @@ class DataStore(DataStoreProtocol):
     def list_len(self, space_id: str,doc_id: str,collection: str) -> int:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
-        
+
         _UniffiFfiConverterString.check_lower(collection)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -8900,11 +8722,11 @@ class DataStore(DataStoreProtocol):
     def list_push(self, space_id: str,doc_id: str,collection: str,value_json: str) -> None:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
-        
+
         _UniffiFfiConverterString.check_lower(collection)
-        
+
         _UniffiFfiConverterString.check_lower(value_json)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -8936,11 +8758,11 @@ class DataStore(DataStoreProtocol):
     def map_delete(self, space_id: str,doc_id: str,collection: str,key: str) -> None:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
-        
+
         _UniffiFfiConverterString.check_lower(collection)
-        
+
         _UniffiFfiConverterString.check_lower(key)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -8960,11 +8782,11 @@ class DataStore(DataStoreProtocol):
     def map_get_json(self, space_id: str,doc_id: str,collection: str,key: str) -> typing.Optional[str]:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
-        
+
         _UniffiFfiConverterString.check_lower(collection)
-        
+
         _UniffiFfiConverterString.check_lower(key)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -8984,13 +8806,13 @@ class DataStore(DataStoreProtocol):
     def map_set(self, space_id: str,doc_id: str,collection: str,key: str,value_json: str) -> None:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
-        
+
         _UniffiFfiConverterString.check_lower(collection)
-        
+
         _UniffiFfiConverterString.check_lower(key)
-        
+
         _UniffiFfiConverterString.check_lower(value_json)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -9011,11 +8833,11 @@ class DataStore(DataStoreProtocol):
     def provide_attachment(self, space_id: str,peer_id: str,hash: str,data: bytes) -> None:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(peer_id)
-        
+
         _UniffiFfiConverterString.check_lower(hash)
-        
+
         _UniffiFfiConverterBytes.check_lower(data)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -9035,7 +8857,7 @@ class DataStore(DataStoreProtocol):
     def remove_doc(self, space_id: str,doc_id: str) -> None:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -9068,7 +8890,7 @@ class DataStore(DataStoreProtocol):
     def set_interest(self, space_id: str,patterns: typing.List[str]) -> None:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterSequenceString.check_lower(patterns)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -9086,13 +8908,13 @@ class DataStore(DataStoreProtocol):
     def text_delete(self, space_id: str,doc_id: str,collection: str,position: int,count: int) -> None:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
-        
+
         _UniffiFfiConverterString.check_lower(collection)
-        
+
         _UniffiFfiConverterUInt32.check_lower(position)
-        
+
         _UniffiFfiConverterUInt32.check_lower(count)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -9113,13 +8935,13 @@ class DataStore(DataStoreProtocol):
     def text_insert(self, space_id: str,doc_id: str,collection: str,position: int,text: str) -> None:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
-        
+
         _UniffiFfiConverterString.check_lower(collection)
-        
+
         _UniffiFfiConverterUInt32.check_lower(position)
-        
+
         _UniffiFfiConverterString.check_lower(text)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -9140,9 +8962,9 @@ class DataStore(DataStoreProtocol):
     def text_value(self, space_id: str,doc_id: str,collection: str) -> str:
         
         _UniffiFfiConverterString.check_lower(space_id)
-        
+
         _UniffiFfiConverterString.check_lower(doc_id)
-        
+
         _UniffiFfiConverterString.check_lower(collection)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -9298,9 +9120,9 @@ class MeshServices(MeshServicesProtocol):
     def register_service(self, service_id: str,version: str,capabilities: dict[str, str]) -> None:
         
         _UniffiFfiConverterString.check_lower(service_id)
-        
+
         _UniffiFfiConverterString.check_lower(version)
-        
+
         _UniffiFfiConverterMapStringString.check_lower(capabilities)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -9319,13 +9141,13 @@ class MeshServices(MeshServicesProtocol):
     def respond_to_service_request(self, request_id: str,requester: str,service_id: str,status: str,body: str) -> str:
         
         _UniffiFfiConverterString.check_lower(request_id)
-        
+
         _UniffiFfiConverterString.check_lower(requester)
-        
+
         _UniffiFfiConverterString.check_lower(service_id)
-        
+
         _UniffiFfiConverterString.check_lower(status)
-        
+
         _UniffiFfiConverterString.check_lower(body)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -9346,11 +9168,11 @@ class MeshServices(MeshServicesProtocol):
     def send_service_request(self, provider: str,service_id: str,method: str,body: str) -> str:
         
         _UniffiFfiConverterString.check_lower(provider)
-        
+
         _UniffiFfiConverterString.check_lower(service_id)
-        
+
         _UniffiFfiConverterString.check_lower(method)
-        
+
         _UniffiFfiConverterString.check_lower(body)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -10558,6 +10380,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def send_file(self, recipient: str,file_data: typing.List[int],file_name: str) -> str:
         raise NotImplementedError
+    def send_file_from_path(self, recipient: str,file_path: str,file_name: str) -> str:
+        raise NotImplementedError
     def send_group_message(self, group_id: str,content: str,priority: typing.Optional[MessagePriority],reply_to_msg: typing.Optional[str]) -> typing.List[str]:
         raise NotImplementedError
     def send_media(self, recipient: str,file_data: typing.List[int],file_name: str,content_type: ContentType,media_metadata: typing.Optional[MediaMetadata]) -> str:
@@ -10675,9 +10499,9 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def accept_connection_request(self, recipient: str,accepter_name: str,key_package: typing.Optional[typing.List[int]]) -> str:
         
         _UniffiFfiConverterString.check_lower(recipient)
-        
+
         _UniffiFfiConverterString.check_lower(accepter_name)
-        
+
         _UniffiFfiConverterOptionalSequenceUInt8.check_lower(key_package)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -10723,7 +10547,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def ble_fragment_received(self, sender_id: str,fragment: typing.List[int]) -> None:
         
         _UniffiFfiConverterString.check_lower(sender_id)
-        
+
         _UniffiFfiConverterSequenceUInt8.check_lower(fragment)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -10765,7 +10589,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def ble_peer_discovered(self, peer_id: str,rssi: int) -> None:
         
         _UniffiFfiConverterString.check_lower(peer_id)
-        
+
         _UniffiFfiConverterInt16.check_lower(rssi)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -10822,7 +10646,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def ble_set_peer_mtu(self, peer_id: str,max_payload: int) -> None:
         
         _UniffiFfiConverterString.check_lower(peer_id)
-        
+
         _UniffiFfiConverterUInt32.check_lower(max_payload)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -10939,7 +10763,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def create_invite(self, petname: typing.Optional[str],sign: bool) -> str:
         
         _UniffiFfiConverterOptionalString.check_lower(petname)
-        
+
         _UniffiFfiConverterBoolean.check_lower(sign)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -10996,7 +10820,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def enable_telemetry(self, config: TelemetryConfig,app_state: AppState) -> None:
         
         _UniffiFfiConverterTypeTelemetryConfig.check_lower(config)
-        
+
         _UniffiFfiConverterTypeAppState.check_lower(app_state)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -11110,9 +10934,9 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def forward_message(self, original_message_json: str,new_recipient: str,priority: typing.Optional[MessagePriority]) -> str:
         
         _UniffiFfiConverterString.check_lower(original_message_json)
-        
+
         _UniffiFfiConverterString.check_lower(new_recipient)
-        
+
         _UniffiFfiConverterOptionalTypeMessagePriority.check_lower(priority)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -11131,9 +10955,9 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def forward_message_to_group(self, original_message_json: str,group_id: str,priority: typing.Optional[MessagePriority]) -> typing.List[str]:
         
         _UniffiFfiConverterString.check_lower(original_message_json)
-        
+
         _UniffiFfiConverterString.check_lower(group_id)
-        
+
         _UniffiFfiConverterOptionalTypeMessagePriority.check_lower(priority)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -11359,7 +11183,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def get_member_role(self, group_id: str,user_id: str) -> str:
         
         _UniffiFfiConverterString.check_lower(group_id)
-        
+
         _UniffiFfiConverterString.check_lower(user_id)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -11560,7 +11384,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def initialize_mls(self, secure_storage: MlsStorageProvider,protocol_state_storage: ProtocolStateStorageProvider) -> None:
         
         _UniffiFfiConverterTypeMlsStorageProvider.check_lower(secure_storage)
-        
+
         _UniffiFfiConverterTypeProtocolStateStorageProvider.check_lower(protocol_state_storage)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -11578,9 +11402,9 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def initialize_mls_with_file_stores(self, mls_root: str,state_root: str,store_key: bytes) -> None:
         
         _UniffiFfiConverterString.check_lower(mls_root)
-        
+
         _UniffiFfiConverterString.check_lower(state_root)
-        
+
         _UniffiFfiConverterBytes.check_lower(store_key)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -11671,7 +11495,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def internet_message_received(self, sender_id: str,data: typing.List[int]) -> None:
         
         _UniffiFfiConverterString.check_lower(sender_id)
-        
+
         _UniffiFfiConverterSequenceUInt8.check_lower(data)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -11689,9 +11513,9 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def internet_peer_presence(self, peer_id: str,online: bool,last_seen_ms: typing.Optional[int]) -> None:
         
         _UniffiFfiConverterString.check_lower(peer_id)
-        
+
         _UniffiFfiConverterBoolean.check_lower(online)
-        
+
         _UniffiFfiConverterOptionalInt64.check_lower(last_seen_ms)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -11752,7 +11576,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def internet_send_failed_with_reason(self, message_id: str,reason: typing.Optional[str]) -> None:
         
         _UniffiFfiConverterString.check_lower(message_id)
-        
+
         _UniffiFfiConverterOptionalString.check_lower(reason)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -11785,7 +11609,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def invite_to_group(self, group_id: str,invitee_user_id: str) -> None:
         
         _UniffiFfiConverterString.check_lower(group_id)
-        
+
         _UniffiFfiConverterString.check_lower(invitee_user_id)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -11956,7 +11780,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def mls_encrypt_for_user(self, other_user_id: str,plaintext: typing.List[int]) -> MlsEncryptedMessage:
         
         _UniffiFfiConverterString.check_lower(other_user_id)
-        
+
         _UniffiFfiConverterSequenceUInt8.check_lower(plaintext)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12040,7 +11864,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def mls_import_key_package(self, user_id: str,key_package_data: typing.List[int]) -> None:
         
         _UniffiFfiConverterString.check_lower(user_id)
-        
+
         _UniffiFfiConverterSequenceUInt8.check_lower(key_package_data)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12181,7 +12005,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def nostr_message_received(self, sender_id: str,data: typing.List[int]) -> None:
         
         _UniffiFfiConverterString.check_lower(sender_id)
-        
+
         _UniffiFfiConverterSequenceUInt8.check_lower(data)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12199,9 +12023,9 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def nostr_message_received_at(self, sender_id: str,data: typing.List[int],created_at: int) -> None:
         
         _UniffiFfiConverterString.check_lower(sender_id)
-        
+
         _UniffiFfiConverterSequenceUInt8.check_lower(data)
-        
+
         _UniffiFfiConverterInt64.check_lower(created_at)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12235,7 +12059,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def nostr_query_event_received(self, query_id: str,event_json: str) -> None:
         
         _UniffiFfiConverterString.check_lower(query_id)
-        
+
         _UniffiFfiConverterString.check_lower(event_json)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12268,7 +12092,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def nostr_send_failed_with_reason(self, message_id: str,reason: typing.Optional[str]) -> None:
         
         _UniffiFfiConverterString.check_lower(message_id)
-        
+
         _UniffiFfiConverterOptionalString.check_lower(reason)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12352,17 +12176,17 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def process_file_chunk(self, file_id: str,chunk_index: int,total_chunks: int,file_size: int,file_name: str,file_checksum: str,data: typing.List[int]) -> None:
         
         _UniffiFfiConverterString.check_lower(file_id)
-        
+
         _UniffiFfiConverterUInt32.check_lower(chunk_index)
-        
+
         _UniffiFfiConverterUInt32.check_lower(total_chunks)
-        
+
         _UniffiFfiConverterUInt64.check_lower(file_size)
-        
+
         _UniffiFfiConverterString.check_lower(file_name)
-        
+
         _UniffiFfiConverterString.check_lower(file_checksum)
-        
+
         _UniffiFfiConverterSequenceUInt8.check_lower(data)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12451,7 +12275,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def remove_from_group(self, group_id: str,member_id: str) -> None:
         
         _UniffiFfiConverterString.check_lower(group_id)
-        
+
         _UniffiFfiConverterString.check_lower(member_id)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12484,7 +12308,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def rename_group(self, group_id: str,new_name: str) -> None:
         
         _UniffiFfiConverterString.check_lower(group_id)
-        
+
         _UniffiFfiConverterString.check_lower(new_name)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12616,7 +12440,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def reticulum_message_received(self, sender_id: str,data: typing.List[int]) -> None:
         
         _UniffiFfiConverterString.check_lower(sender_id)
-        
+
         _UniffiFfiConverterSequenceUInt8.check_lower(data)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12634,9 +12458,9 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def reticulum_peer_presence(self, peer_id: str,online: bool,last_seen_ms: typing.Optional[int]) -> None:
         
         _UniffiFfiConverterString.check_lower(peer_id)
-        
+
         _UniffiFfiConverterBoolean.check_lower(online)
-        
+
         _UniffiFfiConverterOptionalInt64.check_lower(last_seen_ms)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12682,7 +12506,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def reticulum_send_failed_with_reason(self, message_id: str,reason: typing.Optional[str]) -> None:
         
         _UniffiFfiConverterString.check_lower(message_id)
-        
+
         _UniffiFfiConverterOptionalString.check_lower(reason)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12715,11 +12539,11 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def send_connection_request(self, recipient: str,sender_name: str,key_package: typing.Optional[typing.List[int]],initial_message: typing.Optional[str]) -> str:
         
         _UniffiFfiConverterString.check_lower(recipient)
-        
+
         _UniffiFfiConverterString.check_lower(sender_name)
-        
+
         _UniffiFfiConverterOptionalSequenceUInt8.check_lower(key_package)
-        
+
         _UniffiFfiConverterOptionalString.check_lower(initial_message)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12739,9 +12563,9 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def send_file(self, recipient: str,file_data: typing.List[int],file_name: str) -> str:
         
         _UniffiFfiConverterString.check_lower(recipient)
-        
+
         _UniffiFfiConverterSequenceUInt8.check_lower(file_data)
-        
+
         _UniffiFfiConverterString.check_lower(file_name)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12757,14 +12581,35 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def send_file_from_path(self, recipient: str,file_path: str,file_name: str) -> str:
+        
+        _UniffiFfiConverterString.check_lower(recipient)
+
+        _UniffiFfiConverterString.check_lower(file_path)
+
+        _UniffiFfiConverterString.check_lower(file_name)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterString.lower(recipient),
+            _UniffiFfiConverterString.lower(file_path),
+            _UniffiFfiConverterString.lower(file_name),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterString.lift
+        _uniffi_error_converter = _UniffiFfiConverterTypeProtocolError
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_send_file_from_path,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def send_group_message(self, group_id: str,content: str,priority: typing.Optional[MessagePriority],reply_to_msg: typing.Optional[str]) -> typing.List[str]:
         
         _UniffiFfiConverterString.check_lower(group_id)
-        
+
         _UniffiFfiConverterString.check_lower(content)
-        
+
         _UniffiFfiConverterOptionalTypeMessagePriority.check_lower(priority)
-        
+
         _UniffiFfiConverterOptionalString.check_lower(reply_to_msg)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12784,13 +12629,13 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def send_media(self, recipient: str,file_data: typing.List[int],file_name: str,content_type: ContentType,media_metadata: typing.Optional[MediaMetadata]) -> str:
         
         _UniffiFfiConverterString.check_lower(recipient)
-        
+
         _UniffiFfiConverterSequenceUInt8.check_lower(file_data)
-        
+
         _UniffiFfiConverterString.check_lower(file_name)
-        
+
         _UniffiFfiConverterTypeContentType.check_lower(content_type)
-        
+
         _UniffiFfiConverterOptionalTypeMediaMetadata.check_lower(media_metadata)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12811,13 +12656,13 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def send_media_rich(self, recipient: str,file_data: typing.List[int],file_name: str,content_type: ContentType,options: MediaSendOptions) -> str:
         
         _UniffiFfiConverterString.check_lower(recipient)
-        
+
         _UniffiFfiConverterSequenceUInt8.check_lower(file_data)
-        
+
         _UniffiFfiConverterString.check_lower(file_name)
-        
+
         _UniffiFfiConverterTypeContentType.check_lower(content_type)
-        
+
         _UniffiFfiConverterTypeMediaSendOptions.check_lower(options)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12838,11 +12683,11 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def send_message(self, recipient: str,content: str,priority: MessagePriority,reply_to_msg: typing.Optional[str]) -> str:
         
         _UniffiFfiConverterString.check_lower(recipient)
-        
+
         _UniffiFfiConverterString.check_lower(content)
-        
+
         _UniffiFfiConverterTypeMessagePriority.check_lower(priority)
-        
+
         _UniffiFfiConverterOptionalString.check_lower(reply_to_msg)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12862,9 +12707,9 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def send_message_rich(self, recipient: str,content: str,options: SendMessageOptions) -> str:
         
         _UniffiFfiConverterString.check_lower(recipient)
-        
+
         _UniffiFfiConverterString.check_lower(content)
-        
+
         _UniffiFfiConverterTypeSendMessageOptions.check_lower(options)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12883,7 +12728,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def send_presence_update(self, recipient: str,status: PresenceStatus) -> str:
         
         _UniffiFfiConverterString.check_lower(recipient)
-        
+
         _UniffiFfiConverterTypePresenceStatus.check_lower(status)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12901,7 +12746,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def send_read_receipt(self, recipient: str,message_ids: typing.List[str]) -> str:
         
         _UniffiFfiConverterString.check_lower(recipient)
-        
+
         _UniffiFfiConverterSequenceString.check_lower(message_ids)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12919,9 +12764,9 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def send_typing_indicator(self, recipient: str,conversation_id: str,is_typing: bool) -> str:
         
         _UniffiFfiConverterString.check_lower(recipient)
-        
+
         _UniffiFfiConverterString.check_lower(conversation_id)
-        
+
         _UniffiFfiConverterBoolean.check_lower(is_typing)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -12955,7 +12800,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def set_battery_state(self, level: int,is_charging: bool) -> None:
         
         _UniffiFfiConverterUInt8.check_lower(level)
-        
+
         _UniffiFfiConverterBoolean.check_lower(is_charging)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -13003,9 +12848,9 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def set_member_role(self, group_id: str,user_id: str,role: str) -> None:
         
         _UniffiFfiConverterString.check_lower(group_id)
-        
+
         _UniffiFfiConverterString.check_lower(user_id)
-        
+
         _UniffiFfiConverterString.check_lower(role)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -13279,7 +13124,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def update_transport_metrics(self, transport_type: TransportType,metrics: TransportMetrics) -> None:
         
         _UniffiFfiConverterTypeTransportType.check_lower(transport_type)
-        
+
         _UniffiFfiConverterTypeTransportMetrics.check_lower(metrics)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -13297,9 +13142,9 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def verify_signature(self, public_key: typing.List[int],data: typing.List[int],signature: typing.List[int]) -> bool:
         
         _UniffiFfiConverterSequenceUInt8.check_lower(public_key)
-        
+
         _UniffiFfiConverterSequenceUInt8.check_lower(data)
-        
+
         _UniffiFfiConverterSequenceUInt8.check_lower(signature)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -13318,9 +13163,9 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def verify_signature_bytes(self, public_key: bytes,data: bytes,signature: bytes) -> bool:
         
         _UniffiFfiConverterBytes.check_lower(public_key)
-        
+
         _UniffiFfiConverterBytes.check_lower(data)
-        
+
         _UniffiFfiConverterBytes.check_lower(signature)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),
@@ -13351,7 +13196,7 @@ class OfflineProtocol(OfflineProtocolProtocol):
     def wifi_direct_message_received(self, sender_id: str,data: typing.List[int]) -> None:
         
         _UniffiFfiConverterString.check_lower(sender_id)
-        
+
         _UniffiFfiConverterSequenceUInt8.check_lower(data)
         _uniffi_lowered_args = (
             self._uniffi_clone_handle(),

@@ -566,6 +566,19 @@ Invites are not a stopgap for discovery. The out-of-band confirmation a QR code
 represents is the directory's *only* trust anchor, so the invite path is what
 makes discovery safe rather than the other way round.
 
+## Browser Signalling
+
+The browser binding can also use Nostr relays for something other than
+messages: two pages that share a room code exchange their WebRTC connection
+codes as kind `25912` events, in NIP-01's ephemeral range, so a relay
+forwards them to whoever is subscribed and stores none. This is not the
+Nostr transport: it opens its own sockets to relays the application names,
+only while a room is being joined, and carries no protocol frame. Each event
+is tagged `["t", <room topic>]`, sealed under a key derived from the room
+code and signed by a key used once. See
+[the web bridge, W11](bridges/web.md#w11-signalling-can-ride-a-nostr-room)
+and [R28](security/threat-model.md#r28-a-signalling-room-code-admits-whoever-holds-it).
+
 ## Troubleshooting
 
 ### Nostr Not Connecting

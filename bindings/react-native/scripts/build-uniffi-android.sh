@@ -158,13 +158,16 @@ for i in "${!ABIS[@]}"; do
   target="${TARGETS[$i]}"
   echo "Building for $abi ($target)..."
   
-  cargo build --release --target "$target" --package offline-protocol-uniffi
+  # Without the C binding: a cdylib exports every C symbol, so the dispatcher
+  # behind them could not be stripped (the `capi` feature in the crate).
+  cargo build --profile mobile --target "$target" --package offline-protocol-uniffi \
+    --no-default-features
   
   # Create output directory for this ABI
   mkdir -p "$OUTPUT_DIR/$abi"
   
-  # Cargo may put the cdylib in release/ or release/deps/
-  so_root="$PROJECT_ROOT/target/$target/release"
+  # Cargo may put the cdylib in mobile/ or mobile/deps/
+  so_root="$PROJECT_ROOT/target/$target/mobile"
   if [ -f "$so_root/liboffline_protocol_uniffi.so" ]; then
     so_path="$so_root/liboffline_protocol_uniffi.so"
   else

@@ -6,6 +6,7 @@ use crate::telemetry::{
 };
 use crate::Error;
 use chrono::{DateTime, Utc};
+use offline_protocol_core::time::Instant;
 use offline_protocol_core::{
     AppId, ContentType, ForwardInfo, MediaMetadata, Message, MessageId, MessagePriority,
     ReplyContext,
@@ -14,7 +15,6 @@ use offline_protocol_transport::TransportType;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use tracing::warn;
 
 /// A carrier that speaks the gateway contract, and can therefore answer about
@@ -386,6 +386,100 @@ pub(crate) fn classify_transport_send_error(raw: &str) -> &'static str {
         _ => SEND_FAIL_REASON_TRANSPORT,
     }
 }
+
+/// The pending-ACK table was full, so the frame was held back instead of
+/// transmitted. Not a transport fault: the retry queue sends it as soon as an
+/// acknowledgement frees a slot. A link carrying less than the app offers
+/// produces this steadily, and it is the signal to slow down.
+pub(crate) const SEND_DEFER_REASON_ACK_CAPACITY: &str = "ack_capacity";
+
+/// The peer already had [`PEER_SEND_WINDOW`] frames over a mesh link awaiting
+/// its acknowledgement, so the frame waits in the outbox and goes out, oldest
+/// first, as acknowledgements come back. Not a fault: it is what a link
+/// carrying less than the app offers looks like.
+pub(crate) const SEND_DEFER_REASON_PEER_WINDOW: &str = "peer_window";
+
+/// How many frames this device keeps in flight to one peer over a mesh link
+/// (Bluetooth LE, Wi-Fi Direct) before it holds the next one back.
+///
+/// Without a window the sender handed the carrier every new frame, every
+/// resend and an acknowledgement per received frame, into one unbounded queue,
+/// on a timer that starts at enqueue. In the 2026-10-19 volume test (run 4)
+/// the Android side's indication path carried 12 to 16 frames a second against
+/// 15 offered: the acknowledgement round trip passed the timeout, every resend
+/// cost the receiver another acknowledgement on the saturated path, that
+/// path's rate halved, and both phones retried 50,000 times and evicted 6,000
+/// messages as "Outbox capacity exceeded". A window bounds the queue, and with
+/// it the round trip, the resends and the receiver's ratchet gap, at any link
+/// rate. It costs no throughput while it exceeds what the link carries in one
+/// unloaded round trip: about six messages on that link, counting the
+/// receiver's acknowledgement coalescing (`ACK_COALESCE_WINDOW`) and a
+/// processing tick on each side. Sixteen leaves margin, and keeps the
+/// round trip under about three seconds there, well inside the timeout.
+///
+/// Only the mesh carriers: a relay mailbox is store-and-forward, and holding
+/// a message back from it would strand it on a device the user may close.
+pub(crate) const PEER_SEND_WINDOW: usize = 16;
+
+// Every in-window frame can be re-sealed on each of its attempts, and the
+// re-seal budget must never trip under the window: past it resends go out
+// verbatim, and a verbatim copy more than the out-of-order tolerance behind
+// the receiver never decrypts (run 4: 3,308 such failures).
+const _: () = assert!(
+    (PEER_SEND_WINDOW as u64)
+        * (1 + offline_protocol_reliability::constants::DEFAULT_MAX_RETRIES as u64)
+        < RESEAL_GAP_BUDGET
+);
+
+/// The smallest forward window any receiver of a 1:1 session has: a phone's
+/// OpenMLS group (configured) or a leaf's mls-rs one (fixed by mls-rs, and
+/// smaller). The re-seal budget is a fraction of this, not of the phone's
+/// window: derived from the phone's 8192, it let a sender burn 2,048
+/// generations past a leaf that can fast-forward over 1,024.
+pub(crate) const RECEIVER_FORWARD_WINDOW_FLOOR: u64 = {
+    let phone = offline_protocol_mls::group::SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE as u64;
+    let leaf = offline_protocol_mls::group::LEAF_SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE as u64;
+    if phone < leaf {
+        phone
+    } else {
+        leaf
+    }
+};
+
+/// How many frames a sender may seal for one peer past the last one that peer
+/// acknowledged before resends stop being re-sealed and go out verbatim.
+///
+/// A receiver cannot decrypt a frame more than its forward window past the
+/// newest it has decrypted. A quarter of the smallest window any receiver has
+/// ([`RECEIVER_FORWARD_WINDOW_FLOOR`]) leaves the rest to new messages, which
+/// still seal. The per-peer window keeps unacknowledged seals growing only by
+/// resends of at most [`PEER_SEND_WINDOW`] frames, so the budget trips only on
+/// a link that has carried no acknowledgement for a whole retry ladder; the
+/// compile-time assertion above keeps it above that ladder.
+pub(crate) const RESEAL_GAP_BUDGET: u64 = RECEIVER_FORWARD_WINDOW_FLOOR / 4;
+
+/// Past [`RESEAL_GAP_BUDGET`], a resend whose bytes the receiver can no
+/// longer decrypt is still re-sealed, until the gap reaches this.
+///
+/// A verbatim copy sealed more than the out-of-order tolerance before the
+/// newest frame this device sealed is refused by a receiver that has
+/// decrypted anything since, and refused without an acknowledgement on a
+/// mesh link, so it was resent until its ladder ran out: in run 4 of the
+/// 2026-10-19 volume test, 525 such messages produced 3,308 decrypt
+/// failures and were never delivered. Re-sealing one spends a generation,
+/// which is what the budget rations, so the exception stops at half the
+/// smallest forward window ([`RECEIVER_FORWARD_WINDOW_FLOOR`]): the receiver
+/// going deaf is the failure the budget exists for, and a wasted resend is
+/// not.
+pub(crate) const RESEAL_HARD_LIMIT: u64 = RECEIVER_FORWARD_WINDOW_FLOOR / 2;
+
+/// The longest an acknowledgement timeout is postponed for a frame that is
+/// still waiting in a local transport queue, measured from the attempt.
+///
+/// Bounded so a queue that never drains (a link that died without telling
+/// the transport) still reaches the retry ladder, and through it the other
+/// carriers and the mesh, within a minute.
+pub(crate) const QUEUED_ACK_GRACE_MAX: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Classifies a locally raised send failure for an event field.
 ///
@@ -1085,6 +1179,16 @@ pub struct SendMessageOptions {
     /// Held to the same rules as the configured id; an invalid value fails
     /// the call with `InvalidArgument` before anything is queued.
     pub app_id: Option<String>,
+    /// Send once over the live direct link to the recipient, never
+    /// acknowledged or retried (ADR 0032): for state the next send replaces,
+    /// such as a game's positions. Fails with `PeerNotReachable` when there
+    /// is no such link and with `SessionNotReady` when encryption is on and
+    /// no confirmed session exists; nothing is queued either way. The
+    /// message produces `MessageSent` and never `MessageDelivered` or
+    /// `MessageFailed`. Plain content only: reply threading, rich extras, a
+    /// non-Text content type or `via_transport` is refused with
+    /// `InvalidArgument`.
+    pub ephemeral: bool,
 }
 
 /// Options for `OfflineProtocol::send_media_with`: the chunk-0 media
@@ -1196,7 +1300,7 @@ pub(crate) struct PendingConnectionRequest {
     pub(crate) recipient: String,
     /// When the request was sent — entries older than
     /// [`PENDING_CONNECTION_REQUEST_TTL`] are pruned on insert.
-    pub(crate) sent_at: std::time::Instant,
+    pub(crate) sent_at: offline_protocol_core::time::Instant,
 }
 
 /// How long an outbound connection request stays correlatable to a
@@ -1421,6 +1525,21 @@ pub(crate) struct ReceivedKeyPackage {
     /// Local wall-clock deadline (ms since epoch) computed from the sender's
     /// `remaining_lifetime_ms`, anchored to *our* clock at receive time.
     pub(crate) local_expires_at_ms: u64,
+}
+
+/// Delivery ACKs held for one peer until they go out as one frame (see
+/// `OfflineProtocol::coalesced_acks_out`).
+#[derive(Debug, Clone)]
+pub(crate) struct CoalescedAcks {
+    /// The carrier the answered frames arrived on, which the ACK goes back
+    /// over. A frame from another carrier starts a new batch.
+    pub(crate) transport: offline_protocol_transport::TransportType,
+    /// When the first held ACK was owed.
+    pub(crate) since: offline_protocol_core::time::Instant,
+    /// The first answered frame's hop count, as a single ACK reports it.
+    pub(crate) hop_count: String,
+    /// The answered message ids, oldest first.
+    pub(crate) ids: Vec<String>,
 }
 
 /// Durable record of the end-to-end capability versions a peer last
@@ -2340,6 +2459,12 @@ pub(crate) struct SharedState {
     /// `TelemetryRecord::Protocol`, with identifier scrubbing applied per
     /// `ctx.config`. Set via `OfflineProtocol::install_telemetry_sink`.
     pub(crate) telemetry: Option<Arc<TelemetryContext>>,
+
+    /// Handler calls that panicked and were isolated by [`Self::emit_event`].
+    /// Each one is an event at least one handler never saw, after the engine
+    /// had already acted on what it reports (#514), so it is counted where a
+    /// test can read it rather than only logged.
+    pub(crate) handler_panics: std::sync::atomic::AtomicU64,
 }
 
 impl SharedState {
@@ -2349,10 +2474,40 @@ impl SharedState {
             event_handlers: Vec::new(),
             received_messages: VecDeque::new(),
             telemetry: None,
+            handler_panics: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
     pub(crate) fn emit_event(&self, event: Event) {
+        self.notify_handlers(&event);
+        self.forward_to_telemetry(&event);
+    }
+
+    /// [`Self::emit_event`] without the telemetry sink: the app's handlers
+    /// see the event exactly as they always have, and the pipe never does.
+    ///
+    /// For engine traffic that reuses an app-facing event type but is not
+    /// what that type's telemetry column counts. A delivery acknowledgement
+    /// for a media chunk or an internal frame (a connection request, a key
+    /// package, a Welcome, a data-sync frame) is one: forwarded, it counted
+    /// as a delivered message on the dashboard, once per chunk, against a
+    /// "sent" figure that never included any of them.
+    pub(crate) fn emit_event_to_app(&self, event: Event) {
+        self.notify_handlers(&event);
+    }
+
+    /// A message's terminal event (`MessageDelivered` or `MessageFailed`):
+    /// always to the app's handlers, and to telemetry only when `telemetry`
+    /// is set, which callers derive from [`OutboxEntry::app_send`]. One
+    /// method so every settle site applies the rule the same way.
+    pub(crate) fn emit_settlement(&self, event: Event, telemetry: bool) {
+        self.notify_handlers(&event);
+        if telemetry {
+            self.forward_to_telemetry(&event);
+        }
+    }
+
+    fn notify_handlers(&self, event: &Event) {
         // Legacy `EventCallback` handlers run first and receive the raw
         // event. This preserves the pre-telemetry contract — any app that
         // relied on `on_event` sees exactly what it used to.
@@ -2367,12 +2522,23 @@ impl SharedState {
                 handler(event_for_handler);
             }));
             if result.is_err() {
+                // Counted, and named by type only: the event's fields carry
+                // senders, peers and message content, and an embedder's own
+                // subscriber would print them. The event is already settled
+                // in the engine (a received message is ACKed, a delivered one
+                // has left the outbox), so this is a message the app will not
+                // hear about.
+                self.handler_panics
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 tracing::error!(
-                    event = ?event,
-                    "EventCallback panicked; continuing. Handlers must not panic — see OfflineProtocol::on_event.",
+                    event = event.telemetry_name(),
+                    "EventCallback panicked; this handler missed the event. Handlers must not panic, see OfflineProtocol::on_event.",
                 );
             }
         }
+    }
+
+    fn forward_to_telemetry(&self, event: &Event) {
         // Sink fan-out runs after, gated on an installed context. The pipe,
         // the one production sink, consumes every event by reference in
         // `dispatch_protocol_event` and reads no identifier from it, so it
@@ -2388,23 +2554,39 @@ impl SharedState {
             // The gate comes first so a disabled pipe stops the clone too,
             // and the borrowed offer comes next so a sink that collects by
             // name never pays for an event it drops.
-            if !ctx.enabled() || dispatch_protocol_event(&ctx.sink, &event) {
+            if !ctx.enabled() || dispatch_protocol_event(&ctx.sink, event) {
                 return;
             }
-            let scrubbed = scrub_event::scrub_event(&event, &ctx.scrubber);
+            let scrubbed = scrub_event::scrub_event(event, &ctx.scrubber);
             let record = TelemetryRecord::Protocol(Box::new(scrubbed.into_owned()));
             dispatch_record(&ctx.sink, &record);
         }
     }
 }
 
-/// Helper function to lock a mutex and convert poison errors to protocol errors.
+/// Locks the shared state, recovering it if an earlier holder panicked.
+///
+/// Recovering rather than refusing is what keeps events flowing (#514). The
+/// callers that emit `message_received` and `message_delivered` act first
+/// (the ACK is sent, the outbox entry removed) and lock to emit afterwards, so
+/// a refusal here does not undo anything: it silently drops the one event
+/// that reports what was done, and then every later one too, since a std
+/// mutex stays poisoned for good. Nothing under this lock is left
+/// half-written by a panic that matters: handler and sink calls, the only
+/// foreign code run under it, are panic-isolated in
+/// [`SharedState::emit_event`], and the remaining writes are single pushes
+/// and pops on a queue or a field store.
+///
+/// Still returns a `Result`, so the call sites' existing handling stays
+/// valid, but never `Err`.
 pub(crate) fn lock_shared_state(
     state: &Arc<Mutex<SharedState>>,
 ) -> std::result::Result<std::sync::MutexGuard<'_, SharedState>, Error> {
-    state
-        .lock()
-        .map_err(|_| Error::Other("Shared state mutex poisoned".to_string()))
+    Ok(state.lock().unwrap_or_else(|poisoned| {
+        tracing::error!("Shared state mutex was poisoned by a panic; recovering it");
+        state.clear_poison();
+        poisoned.into_inner()
+    }))
 }
 
 /// Provenance kept on an outbox entry so an encrypted DM can be *re-sealed*
@@ -2440,6 +2622,12 @@ pub(crate) struct OutboxReseal {
     /// Sealed-only rich extras (reply context, rich media metadata, forward
     /// info) — re-evaluated against current capability at re-seal time.
     pub(crate) rich: Option<RichSendExtras>,
+    /// Where the bytes currently on the ladder sit in the session's sealing
+    /// order. An acknowledgement for this message proves the peer decrypted
+    /// that far, which is what lets later re-seals go ahead (see
+    /// `RESEAL_GAP_BUDGET`). Set when the message is staged and on every
+    /// re-seal; `None` when it could not be read.
+    pub(crate) seal_mark: Option<offline_protocol_mls::SealMark>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2474,6 +2662,22 @@ pub(crate) struct OutboxEntry {
     /// probe after upgrading emits once; nothing is lost.
     #[serde(default)]
     pub(crate) relay_pushed: bool,
+    /// The application sent this message: it went through the app send path
+    /// (`send_message`, `forward_message`, a rich send), which is the path
+    /// that reports `MessageSent`. Internal frames share the outbox and the
+    /// acknowledgement machinery but are never set.
+    ///
+    /// Read when the message is acknowledged, to decide whether the delivery
+    /// is reported to telemetry. Telemetry's delivered count is compared with
+    /// its sent count, so both must count the same messages; counting every
+    /// acknowledged frame put connection requests, key packages and Welcomes
+    /// in delivered and never in sent.
+    ///
+    /// Persisted. A legacy record restores as `false`, so a delivery restored
+    /// across the upgrade still reaches `on_event` and is only left out of
+    /// telemetry.
+    #[serde(default)]
+    pub(crate) app_send: bool,
 }
 
 #[derive(Clone)]

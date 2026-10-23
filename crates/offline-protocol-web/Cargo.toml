@@ -1,0 +1,78 @@
+[package]
+name = "offline-protocol-web"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+# Carries its own byte-identical LICENSE copy, as every publishable crate does
+# (see offline-protocol-services/Cargo.toml for why not `license-file`).
+repository.workspace = true
+rust-version.workspace = true
+description = "The Offline Protocol engine for the browser: a full mesh node compiled to WebAssembly"
+
+[lib]
+# `cdylib` is the .wasm module wasm-bindgen post-processes; `rlib` lets the
+# host-side tests and clippy reach the node. Unlike the FFI crate, this one has
+# no LTO reason to refuse `rlib`: the shipped artifact is built by
+# `wasm-bindgen` from the cdylib alone.
+crate-type = ["cdylib", "rlib"]
+
+[lints]
+workspace = true
+
+[dependencies]
+# Without default features: `telemetry-pipe` is a background thread and a
+# blocking HTTPS client, and `file-store` is POSIX files. A browser has
+# neither. `data` is the replicated-document layer, which runs anywhere.
+#
+# Declared here rather than inherited, for the reason offline-protocol-core
+# gives: cargo ignores `default-features = false` beside `workspace = true`
+# (with a warning that is easy to miss), and an inherited entry would put the
+# telemetry thread and its TLS stack into the browser build. The version moves
+# with the workspace's, like every internal dependency's.
+offline-protocol = { path = "../offline-protocol", version = "0.30.0", default-features = false, features = ["data"] }
+offline-protocol-core = { workspace = true }
+offline-protocol-transport = { workspace = true }
+offline-protocol-mls = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+wasm-bindgen = "=0.2.105"
+# The log store's seal: the same AEAD, KDF and randomness the file stores use.
+chacha20poly1305 = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+rand_core = { workspace = true }
+zeroize = { workspace = true }
+# The signalling events' sealed content (W11).
+base64 = { workspace = true }
+# The OPFS handle calls take an options object (`{ at }`).
+js-sys = "0.3.82"
+
+# The browser target's entropy and clock. Each library below compiles for
+# wasm32-unknown-unknown and fails, at build time or on first use, unless its
+# JavaScript backend is named. getrandom 0.3 also needs the
+# `getrandom_backend="wasm_js"` cfg, which `.cargo/config.toml` sets for this
+# target: a library cannot set it for its consumers.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+uuid = { workspace = true, features = ["js"] }
+openmls = { workspace = true, features = ["js"] }
+
+# The in-browser storage conformance test (tests/browser_conformance.rs). The
+# test crate pins the wasm-bindgen it was released with exactly, so these move
+# only with the `=` pin above; cargo refuses a pair that disagrees.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = "=0.3.55"
+wasm-bindgen-futures = "0.4.55"
+web-sys = { version = "0.3.82", features = [
+    "FileSystemDirectoryHandle",
+    "FileSystemFileHandle",
+    "FileSystemGetDirectoryOptions",
+    "FileSystemGetFileOptions",
+    "FileSystemRemoveOptions",
+    "FileSystemSyncAccessHandle",
+    "StorageManager",
+    "WorkerGlobalScope",
+    "WorkerNavigator",
+] }

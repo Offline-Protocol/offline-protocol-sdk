@@ -48,6 +48,12 @@ pub struct PendingAck {
 
     /// Priority of the message (for eviction decisions).
     pub priority: MessagePriority,
+
+    /// How far the deadline has been pushed past `sent_at + timeout_ms` while
+    /// the frame was still waiting in a local transport queue. Kept apart from
+    /// `sent_at`, which the sender reads to measure the round trip, and reset
+    /// on every new attempt.
+    pub extended_ms: u64,
 }
 
 impl PendingAck {
@@ -58,7 +64,7 @@ impl PendingAck {
         }
 
         let elapsed = Utc::now().signed_duration_since(self.sent_at);
-        elapsed.num_milliseconds() >= self.timeout_ms as i64
+        elapsed.num_milliseconds() >= self.timeout_ms.saturating_add(self.extended_ms) as i64
     }
 }
 
@@ -140,22 +146,23 @@ impl AckManager {
         timeout_ms: Option<u64>,
         priority: MessagePriority,
     ) -> crate::Result<Option<AckEvictionInfo>> {
-        // Check if we've hit the limit
+        // At the ceiling, only a strictly lower-priority entry may make room.
+        //
+        // Timed-out entries are deliberately NOT swept here. Marking them
+        // `TimedOut` without handing them to the caller orphaned them: the
+        // engine's timeout sweep reads `is_timed_out`, which is false for an
+        // entry already marked, so those messages were never retried and sat
+        // in the outbox until its seven-day expiry. Only the engine's own
+        // sweep (`drain_timed_out`) marks entries, because only it acts on
+        // the list it gets back.
         let mut eviction = None;
-        if self.pending_acks.len() >= self.config.max_pending_acks {
-            // Clean up timed out ACKs first
-            self.cleanup_timed_out();
-
-            // If still at limit, try priority-based eviction
-            if self.pending_acks.len() >= self.config.max_pending_acks {
-                match self.evict_lowest_priority(priority) {
-                    Some(info) => eviction = Some(info),
-                    None => {
-                        return Err(crate::Error::Other(
-                            "Maximum pending ACKs limit reached (no lower priority ACKs to evict)"
-                                .to_string(),
-                        ));
-                    }
+        if !self.has_capacity_for(&message_id) {
+            match self.evict_lowest_priority(priority) {
+                Some(info) => eviction = Some(info),
+                None => {
+                    return Err(crate::Error::AckCapacity {
+                        max: self.config.max_pending_acks,
+                    });
                 }
             }
         }
@@ -167,6 +174,7 @@ impl AckManager {
             status: AckStatus::Pending,
             retry_count: 0,
             priority,
+            extended_ms: 0,
         };
 
         self.pending_acks.insert(message_id, pending);
@@ -260,8 +268,37 @@ impl AckManager {
         if let Some(pending) = self.pending_acks.get_mut(message_id) {
             pending.retry_count += 1;
             pending.sent_at = Utc::now(); // Reset timer for retry
+            pending.extended_ms = 0;
             pending.status = AckStatus::Pending;
         }
+    }
+
+    /// Gives a timed-out entry another full timeout because its frame has not
+    /// left the device yet, as long as the attempt is younger than
+    /// `max_wait`. Returns whether it was extended; `false` means the caller
+    /// retries it as usual.
+    ///
+    /// The timer starts when a frame is queued, not when it is written, so on
+    /// a link carrying less than it is offered a frame can time out while it
+    /// is still waiting its turn. Retrying it then appends a second copy
+    /// behind the first, re-sealed under a fresh ratchet generation, which
+    /// makes the queue longer and the receiver's gap wider. `max_wait` bounds
+    /// the grace so a queue that never drains still falls through to the retry
+    /// ladder and the other carriers.
+    pub fn extend_while_queued(&mut self, message_id: &MessageId, max_wait: Duration) -> bool {
+        let Some(pending) = self.pending_acks.get_mut(message_id) else {
+            return false;
+        };
+        let elapsed_ms = Utc::now()
+            .signed_duration_since(pending.sent_at)
+            .num_milliseconds()
+            .max(0) as u64;
+        if elapsed_ms >= max_wait.as_millis().min(u128::from(u64::MAX)) as u64 {
+            return false;
+        }
+        pending.extended_ms = elapsed_ms;
+        pending.status = AckStatus::Pending;
+        true
     }
 
     /// Carry an accumulated retry count onto a pending ACK.
@@ -290,14 +327,20 @@ impl AckManager {
         self.pending_acks.len()
     }
 
+    /// Whether registering `message_id` would succeed without evicting
+    /// anything: it is already tracked, or the table has a free slot.
+    ///
+    /// A sender asks this **before** it transmits. Asking after is too late:
+    /// the frame is on the wire, and the only honest outcomes left are to
+    /// track it or to have refused it.
+    pub fn has_capacity_for(&self, message_id: &MessageId) -> bool {
+        self.pending_acks.contains_key(message_id)
+            || self.pending_acks.len() < self.config.max_pending_acks
+    }
+
     /// Checks if a message is waiting for ACK.
     pub fn is_waiting_for_ack(&self, message_id: &MessageId) -> bool {
         self.pending_acks.contains_key(message_id)
-    }
-
-    /// Cleans up timed out ACKs by marking them as timed out.
-    fn cleanup_timed_out(&mut self) {
-        self.drain_timed_out();
     }
 
     /// Removes all ACKs with TimedOut status that are older than a given duration.
@@ -441,9 +484,86 @@ mod tests {
             .register_pending_ack(MessageId::new(), None)
             .unwrap();
 
-        // Fourth should fail (same priority can't evict)
+        // Fourth should fail (same priority can't evict), with the typed
+        // error a sender can recognise and defer on.
         let result = manager.register_pending_ack(MessageId::new(), None);
-        assert!(result.is_err());
+        assert!(matches!(result, Err(crate::Error::AckCapacity { max: 3 })));
+    }
+
+    #[test]
+    fn has_capacity_for_admits_a_tracked_id_at_the_ceiling() {
+        let mut manager = AckManager::with_config(AckConfig {
+            default_timeout_ms: 5000,
+            max_pending_acks: 1,
+        });
+        let tracked = MessageId::new();
+        assert!(manager.has_capacity_for(&tracked));
+        manager.register_pending_ack(tracked.clone(), None).unwrap();
+        // A resend of the tracked message needs no new slot.
+        assert!(manager.has_capacity_for(&tracked));
+        // A new message does.
+        assert!(!manager.has_capacity_for(&MessageId::new()));
+    }
+
+    #[test]
+    fn extend_while_queued_grants_one_more_timeout_within_the_bound() {
+        let mut manager = AckManager::with_config(AckConfig {
+            default_timeout_ms: 10,
+            max_pending_acks: 10,
+        });
+        let id = MessageId::new();
+        manager.register_pending_ack(id.clone(), Some(10)).unwrap();
+        thread::sleep(Duration::from_millis(15));
+        assert_eq!(manager.drain_timed_out().len(), 1);
+
+        assert!(manager.extend_while_queued(&id, Duration::from_secs(60)));
+        assert!(
+            manager.drain_timed_out().is_empty(),
+            "extended for one more timeout"
+        );
+        thread::sleep(Duration::from_millis(15));
+        assert_eq!(manager.drain_timed_out().len(), 1, "and only one");
+
+        // Past the bound it falls through to the retry ladder.
+        assert!(!manager.extend_while_queued(&id, Duration::from_millis(1)));
+        // A new attempt starts from a clean deadline.
+        manager.increment_retry_count(&id);
+        assert_eq!(manager.get_pending_ack(&id).unwrap().extended_ms, 0);
+    }
+
+    /// A refused registration at the ceiling used to mark every timed-out
+    /// entry `TimedOut` and throw the list away. `is_timed_out` is false for a
+    /// marked entry, so the engine's own sweep never saw those messages again
+    /// and they were never retried.
+    #[test]
+    fn a_refused_registration_leaves_timed_out_entries_for_the_sweep() {
+        let mut manager = AckManager::with_config(AckConfig {
+            default_timeout_ms: 10,
+            max_pending_acks: 2,
+        });
+        let first = MessageId::new();
+        let second = MessageId::new();
+        manager
+            .register_pending_ack(first.clone(), Some(10))
+            .unwrap();
+        manager
+            .register_pending_ack(second.clone(), Some(10))
+            .unwrap();
+        thread::sleep(Duration::from_millis(20));
+
+        assert!(manager
+            .register_pending_ack(MessageId::new(), None)
+            .is_err());
+
+        let mut drained: Vec<_> = manager
+            .drain_timed_out()
+            .into_iter()
+            .map(|ack| ack.message_id)
+            .collect();
+        drained.sort_by_key(|id| id.as_str());
+        let mut expected = vec![first, second];
+        expected.sort_by_key(|id| id.as_str());
+        assert_eq!(drained, expected);
     }
 
     #[test]
@@ -523,7 +643,7 @@ mod tests {
 
         // Wait for timeout
         thread::sleep(Duration::from_millis(20));
-        manager.cleanup_timed_out();
+        assert_eq!(manager.drain_timed_out().len(), 1);
 
         assert_eq!(manager.pending_count(), 1);
 

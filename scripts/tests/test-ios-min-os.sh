@@ -313,7 +313,7 @@ line_of() { grep -nF -- "$1" "$BUILD" | head -1 | cut -d: -f1; }
 
 EXPORT_LINE="$(line_of 'export IPHONEOS_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET"')"
 READ_LINE="$(line_of 'IOS_DEPLOYMENT_TARGET="$(ios_deployment_target ')"
-BUILD_LINE="$(line_of 'cargo build --release --target "$arch"')"
+BUILD_LINE="$(line_of 'cargo build --profile mobile --target "$arch"')"
 
 if [ -n "$READ_LINE" ] && [ -n "$EXPORT_LINE" ] && [ "$READ_LINE" -lt "$EXPORT_LINE" ]; then
   pass "the target is read from the podspec, then exported"

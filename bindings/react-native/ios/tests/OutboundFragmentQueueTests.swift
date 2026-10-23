@@ -207,6 +207,102 @@ final class OutboundFragmentQueueTests: XCTestCase {
         XCTAssertFalse(queue.isBackedUp("bob"))
     }
 
+    /// The drain checks this before every destructive pop, so it has to see a
+    /// backed-up peer even when the fragment about to be popped is for someone
+    /// else: the pop is one FIFO across all of them.
+    func testAnyBackedUpTripsWhenAnyOneRecipientReachesTheMark() {
+        let queue = OutboundFragmentQueue(maxPerPeer: 8)
+        XCTAssertFalse(queue.anyBackedUp())
+        for i in 0..<5 { queue.enqueue("bob", bytes(UInt8(i))) }
+        queue.enqueue("carol", bytes(9))
+        XCTAssertFalse(queue.anyBackedUp())
+
+        queue.enqueue("bob", bytes(5))
+        XCTAssertTrue(queue.anyBackedUp())
+        XCTAssertFalse(queue.isBackedUp("carol"))
+    }
+
+    /// A recipient with no link cannot drain, so it must not stop the pull
+    /// for everyone else. Counting it parked every other peer's fragments in
+    /// the core until the linkless queue expired.
+    func testARecipientWithNoLinkDoesNotStopThePullForOthers() {
+        let queue = OutboundFragmentQueue(maxPerPeer: 8)
+        for i in 0..<6 { queue.enqueue("gone", bytes(UInt8(i))) }
+        XCTAssertTrue(queue.anyBackedUp())
+        XCTAssertFalse(queue.anyBackedUp(deliverable: { $0 != "gone" }))
+        for i in 0..<6 { queue.enqueue("bob", bytes(UInt8(i))) }
+        XCTAssertTrue(queue.anyBackedUp(deliverable: { $0 != "gone" }))
+    }
+
+    /// The pull resumes once the backed-up recipient drains below the mark,
+    /// or is removed.
+    func testThePullResumesAfterAFlushOrARemoval() {
+        let queue = OutboundFragmentQueue(maxPerPeer: 8)
+        let sender = Sender()
+        for i in 0..<6 { queue.enqueue("bob", bytes(UInt8(i))) }
+        XCTAssertTrue(queue.anyBackedUp())
+        _ = queue.flush(send: sender.send)
+        XCTAssertFalse(queue.anyBackedUp())
+        for i in 0..<6 { queue.enqueue("bob", bytes(UInt8(i))) }
+        XCTAssertTrue(queue.anyBackedUp())
+        _ = queue.removeAll("bob")
+        XCTAssertFalse(queue.anyBackedUp())
+    }
+
+    /// A cap of one never yields a mark of zero, which read an empty queue as
+    /// backed up.
+    func testATinyCapStillHasAMarkOfAtLeastOne() {
+        let queue = OutboundFragmentQueue(maxPerPeer: 1)
+        queue.enqueue("bob", bytes(0))
+        _ = queue.flush(send: Sender().send)
+        XCTAssertFalse(queue.anyBackedUp())
+    }
+
+    /// A cap between the default mark and the default cap takes the default
+    /// mark, not three quarters of the cap.
+    func testAMidSizedCapTakesTheDefaultMark() {
+        let queue = OutboundFragmentQueue(maxPerPeer: 100)
+        for i in 0..<(OutboundFragmentQueue.defaultBackpressureMark - 1) {
+            queue.enqueue("bob", bytes(UInt8(truncatingIfNeeded: i)))
+        }
+        XCTAssertFalse(queue.isBackedUp("bob"))
+        queue.enqueue("bob", bytes(0))
+        XCTAssertTrue(queue.isBackedUp("bob"))
+    }
+
+    /// A whole maximum-size message fits under the default cap with nothing
+    /// discarded.
+    func testTheDefaultCapTakesAWholeMaximumSizeMessageWithoutADiscard() {
+        var drops = 0
+        let queue = OutboundFragmentQueue(onDropped: { _, _, n in drops += n })
+        for i in 0..<512 { queue.enqueue("bob", bytes(UInt8(truncatingIfNeeded: i))) }
+        XCTAssertEqual(drops, 0)
+        XCTAssertEqual(queue.totalCount(), 512)
+    }
+
+    /// The core fragments a message into at most 512 pieces, and the drain
+    /// stops pulling at the mark, so the overflow discard that tore 16 KB
+    /// messages stays out of reach only while the mark is below the cap.
+    func testTheDefaultCapHoldsAWholeMaximumSizeMessageAndTheMarkSitsBelowIt() {
+        XCTAssertGreaterThanOrEqual(OutboundFragmentQueue.defaultMaxPerPeer, 512)
+        XCTAssertLessThan(OutboundFragmentQueue.defaultBackpressureMark, OutboundFragmentQueue.defaultMaxPerPeer)
+    }
+
+    /// The core counts a message as queued, and defers its retry, only until
+    /// its first fragment is pulled. A mark at 3/4 of the cap let the drain
+    /// pull 576 fragments ahead of the link, so the core resent everything
+    /// behind them.
+    func testTheDefaultQueueBacksUpAfterAFewSecondsOfLinkTime() {
+        let queue = OutboundFragmentQueue()
+        for i in 0..<(OutboundFragmentQueue.defaultBackpressureMark - 1) {
+            queue.enqueue("bob", bytes(UInt8(truncatingIfNeeded: i)))
+        }
+        XCTAssertFalse(queue.anyBackedUp())
+        queue.enqueue("bob", bytes(0))
+        XCTAssertTrue(queue.isBackedUp("bob"))
+        XCTAssertTrue(queue.anyBackedUp())
+    }
+
     /// The NOTIFY queue is enqueued by the drain while main flushes it. A
     /// flush that took the queue out to send it hid those fragments from
     /// `isBackedUp`, so the drain pulled on past the mark, and from the cap,

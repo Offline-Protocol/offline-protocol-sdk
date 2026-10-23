@@ -19,7 +19,7 @@ UDL), so it needs `uniffi-bindgen` at the crate's pinned version first — it re
 mismatch rather than emit bindings whose checksums fail at the app's first call:
 
 ```bash
-cargo install uniffi --version 0.30.0 --features cli --locked
+cargo install uniffi --version 0.32.2 --features cli --locked
 
 cd ../../bindings/react-native
 npm run build:all

@@ -1,0 +1,59 @@
+# frozen_string_literal: true
+
+require "fileutils"
+require "rubygems/package"
+require "rake/testtask"
+
+# The generated code loads the library by name, so the directory holding it has
+# to be on the loader's search path when the test process starts. The loader
+# reads that variable at launch, which is why it is set here, before the task
+# spawns Ruby, and not in a helper the test process runs. Default: the debug
+# build of this repository (`cargo build -p offline-protocol-uniffi`).
+#
+# Windows searches PATH, except that RubyInstaller takes PATH out of the DLL
+# search and reads RUBY_DLL_PATH instead, so both are set there.
+library_dir = File.expand_path(
+  ENV.fetch("OFFLINE_PROTOCOL_LIBRARY_DIR", "../../target/debug"), __dir__
+)
+search_path = if Gem.win_platform?
+  library_dir = library_dir.tr("/", "\\")
+  %w[PATH RUBY_DLL_PATH]
+else
+  %w[LD_LIBRARY_PATH DYLD_LIBRARY_PATH]
+end
+search_path.each do |name|
+  ENV[name] = [library_dir, ENV[name]].compact.reject(&:empty?).join(File::PATH_SEPARATOR)
+end
+
+Rake::TestTask.new(:test) do |t|
+  t.libs << "lib" << "test"
+  t.pattern = "test/**/*_test.rb"
+  t.warning = false
+end
+
+# The gem: the legal files from the repository root are staged beside the
+# gemspec, which names them, and removed again. `gem build` cannot reach outside
+# this directory, and a committed copy would drift from the original.
+desc "Build pkg/offline_protocol-<version>.gem (OFFLINE_PROTOCOL_VERSION sets the version)"
+task :build do
+  spec = Gem::Specification.load(File.expand_path("offline_protocol.gemspec", __dir__))
+  root = File.expand_path("../..", __dir__)
+  legal = spec.files - %w[lib/offline_protocol.rb README.md]
+  staged = legal.map do |name|
+    source = File.join(root, name)
+    raise "the gemspec names #{name}, which is not at #{root}" unless File.file?(source)
+
+    FileUtils.cp(source, __dir__)
+    File.join(__dir__, name)
+  end
+  begin
+    FileUtils.mkdir_p(File.join(__dir__, "pkg"))
+    gem = Dir.chdir(__dir__) { Gem::Package.build(spec) }
+    FileUtils.mv(File.join(__dir__, gem), File.join(__dir__, "pkg", gem))
+    puts "pkg/#{gem}"
+  ensure
+    FileUtils.rm_f(staged)
+  end
+end
+
+task default: :test

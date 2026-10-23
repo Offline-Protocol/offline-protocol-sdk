@@ -13,7 +13,7 @@ Peers advertise what they can parse in the key package payload, the body of a
 | `data_versions` | End to end | Whether we may send `__DATA_V1__` document sync frames, and which document encoding they carry. Entry 1 is 1:1 replication; entry 2 additionally means the peer intercepts these frames inside a *group* ciphertext; entry 3 additionally means the peer speaks the blob-fetch frames and routes a data-purposed media transfer into its document layer; entry 4 additionally means the peer reads the removals a version offer carries; entry 5 additionally means it answers inside the interest an offer declares; entry 6 additionally means it carries attachment bytes inside a group; entry 7 additionally means it parses the custody receipt, so a custodian may answer its deposits | No replication with that peer |
 | `ctrl_versions` | End to end | Which control-frame signing payload we build for this peer. Entry 2 means the peer verifies `offline-ctrl-v2`, which binds the frame's timestamp | Build `offline-ctrl-v1`, which states no freshness |
 | `svc_versions` | End to end | Whether a service request or response may travel sealed inside `__MLS_ENC__` toward this peer. Entry 1 means the peer routes a decrypted `__SVC_REQ__` or `__SVC_RESP__` into its service layer, with the MLS-authenticated sender as the requester | Signed plaintext service frames |
-| `ack_versions` | End to end | Which delivery-ACK statuses we may send this peer. Entry 1 means the peer reads `ack_status: "undecryptable"` as "this frame can never decrypt" (it resends the message once, re-sealed when it can) rather than as a delivery | Never answer an undecryptable frame; leave it unacknowledged |
+| `ack_versions` | End to end | Which delivery-ACK statuses we may send this peer. Entry 1 means the peer reads `ack_status: "undecryptable"` as "this frame can never decrypt" (it resends the message once, re-sealed when it can) rather than as a delivery. Entry 2 means the peer reads `ack_more`, so one delivery ACK may answer up to five of its frames | Never answer an undecryptable frame; leave it unacknowledged. Acknowledge each frame in its own ACK |
 | `nostr_pubkey` | End to end | Which key metadata is sealed to on the Nostr path | Seal to the publicly computable key |
 
 The key package payload also carries `user_id`, the MLS key package itself, a
@@ -158,7 +158,9 @@ or whose advertisement this device has not yet received, is sent no
 `undecryptable` answer at all: an older sender reads any ACK as a delivery, so
 answering it would mark as delivered a message its recipient could not read.
 The cost of not knowing is the older behaviour, an unanswered frame that a relay
-mailbox keeps redelivering until the sender's next key package arrives.
+mailbox keeps redelivering until the sender's next key package arrives. Entry 2
+follows the same rule: a peer not known to read `ack_more` gets one ACK per
+frame, since an older SDK would settle only the first id of a coalesced one.
 
 `wire_versions` is **hop-local** and deliberately in-memory only. It describes
 what the next hop decodes, and it is re-exchanged on connect.

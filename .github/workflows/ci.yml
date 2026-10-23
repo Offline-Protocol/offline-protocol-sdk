@@ -200,8 +200,19 @@ jobs:
         with:
           shared-key: ci-msrv
 
+      # Without the UniFFI crate, which declares its own, higher rust-version:
+      # its bindgen build dependencies need 1.91 (see its Cargo.toml). It is
+      # built on stable by every other job here.
       - name: Check workspace on MSRV
-        run: cargo check --workspace --all-targets --locked
+        run: cargo check --workspace --exclude offline-protocol-uniffi --all-targets --locked
+
+      # The UniFFI crate on its own declared floor. Every other job builds it
+      # on stable, so without this step its `rust-version` could fall behind
+      # what its locked graph needs and nothing would say so.
+      - name: Check the UniFFI crate on its rust-version (1.91)
+        run: |
+          rustup toolchain install 1.91.0 --profile minimal
+          cargo +1.91.0 check -p offline-protocol-uniffi --all-targets --locked
 
   embedded-core:
     name: Embedded core (bare metal)
@@ -335,7 +346,9 @@ jobs:
       # entropy backend would supply a symbol nothing calls and the module
       # would import browser glue. A green build there proves nothing about a
       # non-browser host, which is why this job builds the one target where
-      # the claim is true and no other.
+      # the claim is true and no other. The browser is claimed by the full
+      # engine instead, through `offline-protocol-web` in the `web-binding`
+      # job, where that same `js` backend is the right one.
       - name: Build the leaf node for WASI
         run: >
           cargo build --package offline-protocol-leaf
@@ -434,6 +447,300 @@ jobs:
       - name: Build release cdylib
         run: cargo build --release --locked --target ${{ matrix.release_target }} --package offline-protocol-uniffi
 
+  # The C binding (docs/bridges/c.md). `cargo test` covers the dispatcher and
+  # the boundary from Rust; this is the other side: the committed header is
+  # what the Rust exports today, and a C program compiled against it with
+  # -Wpedantic -Werror links against the shared and the static library and
+  # runs. Nothing else in CI puts a C compiler on the far side of the ABI.
+  c-binding:
+    name: C Binding (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-c-binding
+
+      # Pinned in the generation script, because cbindgen's formatting moves
+      # between releases and would read as drift; read from there so this job
+      # and a local regeneration can never disagree.
+      - name: Read pinned cbindgen version
+        id: pin
+        shell: bash
+        run: |
+          version="$(sed -n 's/^CBINDGEN_VERSION="\(.*\)"$/\1/p' scripts/generate-c-header.sh)"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache cbindgen binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cbindgen
+          key: cbindgen-${{ steps.pin.outputs.version }}-${{ runner.os }}
+
+      - name: Install cbindgen
+        shell: bash
+        run: |
+          if ! cbindgen --version 2>/dev/null | grep -qFx "cbindgen ${{ steps.pin.outputs.version }}"; then
+            cargo install cbindgen --version "${{ steps.pin.outputs.version }}" --locked --force
+          fi
+
+      - name: Header is current
+        run: scripts/generate-c-header.sh --check
+
+      # The Android builds turn the C binding off (the `capi` feature), and
+      # nothing else in CI builds the crate that way before a release does.
+      - name: The crate builds without the C binding
+        run: cargo clippy --locked --package offline-protocol-uniffi --no-default-features -- -D warnings
+
+      # The in-crate test already fails on a stale dispatcher. This runs the
+      # standalone generator, which is the only way to regenerate after a
+      # rename in the definition, so that it cannot rot unnoticed.
+      - name: Dispatcher generator runs and agrees
+        run: cargo run --locked --manifest-path tools/capi-dispatch-gen/Cargo.toml -- --check
+
+      # One link, through the probe that also prints what the static library
+      # needs from the system. `cargo rustc` with extra arguments has its own
+      # fingerprint, so building with `cargo build` first and letting the
+      # Makefile probe afterwards would link the library twice. --color never
+      # because the workflow sets CARGO_TERM_COLOR=always, and a coloured
+      # note ends in an escape sequence the linker reads as a library name.
+      - name: Build the library
+        id: lib
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo rustc --locked --color never --package offline-protocol-uniffi --lib \
+            -- --print native-static-libs 2>&1 | tee "$RUNNER_TEMP/c-lib-build.log"
+          flags="$(sed -n 's/.*native-static-libs: //p' "$RUNNER_TEMP/c-lib-build.log" | tail -1)"
+          test -n "$flags"
+          echo "native_static_libs=$flags" >> "$GITHUB_OUTPUT"
+
+      - name: Compile and run the C consumer check
+        run: make -C bindings/c/consumer-check NATIVE_STATIC_LIBS="${{ steps.lib.outputs.native_static_libs }}"
+
+      # The same programs under AddressSanitizer and UBSan, and LeakSanitizer
+      # on Linux. The library allocates with the system allocator, so a
+      # string freed twice, freed with the host's free or never freed is
+      # reported at the line that did it: the ownership rule (K1) checked
+      # rather than read. Same library build; only the C side is
+      # instrumented.
+      - name: Run the C programs under sanitizers
+        run: make -C bindings/c/consumer-check SANITIZE=1 NATIVE_STATIC_LIBS="${{ steps.lib.outputs.native_static_libs }}"
+
+  # Windows, where the release ships a DLL and its import library for MSVC
+  # and nothing else compiles C against them. The README's quick start is
+  # built with cl from the header and the import library, warnings as
+  # errors, and run; the header is compiled as C++ by cl too. main.c and
+  # exchange.c are POSIX programs (pthreads, mkdtemp) and run on the other
+  # two systems only.
+  c-binding-windows:
+    name: C Binding (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-c-binding-windows
+
+      - name: Build the library
+        run: cargo build --locked --package offline-protocol-uniffi
+
+      - uses: ilammy/msvc-dev-cmd@v1
+
+      # MSYS would read cl's flags as paths and rewrite them.
+      - name: The header and the quick start compile under cl -W4 -WX
+        shell: bash
+        env:
+          MSYS2_ARG_CONV_EXCL: "*"
+        run: |
+          cl -nologo -W4 -WX -EHsc -Ibindings/c/include -c -TP bindings/c/consumer-check/header_check.cpp
+          bindings/c/consumer-check/quickstart.sh bindings/c/README.md "$RUNNER_TEMP/quickstart.c"
+          cl -nologo -W4 -WX -Ibindings/c/include -c "$RUNNER_TEMP/quickstart.c" -Fo"$RUNNER_TEMP/quickstart.obj"
+
+      # The archive README's link line, run as the release check runs it.
+      - name: The quick start links through the import library and runs
+        shell: bash
+        run: bash scripts/check-c-library.sh windows-x86_64 target/debug
+
+  # The Java binding (docs/bridges/java.md). Its sources are generated from the
+  # UDL and their drift is gated with the other bindings (python-bindings). This
+  # is the other side: the generated Java, compiled and run against the
+  # library built from the same definition. The generated code verifies the
+  # library's FFI checksums before the first call, so the tests fail if the two
+  # were produced from different definitions. JDK 22 or later is required for
+  # the foreign function API; Gradle 8.9 cannot run on it, hence 9.x here.
+  java-binding:
+    name: Java Binding (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-java-binding
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: "9.3.1"
+
+      - name: Build the library
+        run: cargo build --locked --package offline-protocol-uniffi
+
+      # Compiles the committed generated sources, runs the consumer check
+      # against the library built above, and builds the Javadoc and sources jars,
+      # then writes the Maven repository the release signs, so a POM or
+      # publication error shows on the pull request and not on a tag.
+      - name: Build and test the Java binding
+        working-directory: bindings/java
+        run: gradle --no-daemon --stacktrace build publishAllPublicationsToStagingRepository
+
+      # The example app against the same library, so it cannot rot: two
+      # engines pair, encrypt and exchange messages in one JVM.
+      - name: Run the Java example
+        working-directory: examples/java-app
+        run: gradle --no-daemon --stacktrace run
+
+  # The Ruby binding (docs/bridges/ruby.md). Its source is generated from the
+  # UDL and its drift is gated with the other bindings (python-bindings). This
+  # is the other side: the generated Ruby, run against the library built from
+  # the same definition. The Ruby generator compares no FFI checksums at load
+  # (docs/bridges/ruby.md, R1), so this run is what proves the two agree: it
+  # fails if they were produced from different definitions, or if the config
+  # names the wrong library.
+  ruby-binding:
+    name: Ruby Binding (${{ matrix.os }}, Ruby ${{ matrix.ruby }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        ruby: ["4.0"]
+        # The gemspec's required_ruby_version, which only this run proves.
+        include:
+          - os: ubuntu-latest
+            ruby: "3.3"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-ruby-binding
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+          working-directory: bindings/ruby
+
+      - name: Build the library
+        run: cargo build --locked --package offline-protocol-uniffi
+
+      # The Rakefile puts target/debug on the loader's search path and runs the
+      # consumer check against the library built above.
+      - name: Test the Ruby binding
+        working-directory: bindings/ruby
+        run: bundle exec rake test
+
+      # The gem the release publishes, so a gemspec error shows on the pull
+      # request and not on a tag.
+      - name: Build the gem
+        working-directory: bindings/ruby
+        run: bundle exec rake build
+
+      # The example app against the same library, so it cannot rot: two
+      # engines pair, encrypt and exchange messages in one Ruby process.
+      - name: Run the Ruby example
+        working-directory: examples/ruby-app
+        run: |
+          bundle install
+          bundle exec rake run
+
+  web-binding:
+    name: Web Binding
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-web-binding
+
+      # Node 24 because release.yml is pinned there.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      # Exactly the lockfile's wasm-bindgen: the CLI and the crate share an
+      # unversioned schema. `the_wasm_bindgen_pins_agree` holds this line, the
+      # crate's `=` pin, the build script and Cargo.lock to one version. The
+      # same install carries wasm-bindgen-test-runner, which the conformance
+      # step uses.
+      - name: Install wasm-bindgen
+        run: cargo install wasm-bindgen-cli --version 0.2.105 --locked
+
+      - name: Build the module
+        run: bash bindings/web/scripts/build.sh | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # Playwright and the three engines it pins: Chromium, Firefox and
+      # WebKit (Safari's engine, not Safari).
+      - name: Install Playwright and its browsers
+        working-directory: bindings/web
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium firefox webkit
+
+      # Every page in bindings/web/test, in each of the three engines: two
+      # nodes over the origin's BroadcastChannel (preambles, an MLS session
+      # both ways, a direct and a group message, a loss on stop); a refused
+      # link's close reaching the other end; a durable node killed and
+      # restarted as the same member; two nodes linked only by WebRTC, at game
+      # rate acknowledged and ephemeral; and two nodes meeting by room code
+      # through a local Nostr relay the script starts. The Rust tests cover
+      # the engine paths on the host; only this run proves the module's clock,
+      # entropy, OPFS store and glue work in a browser, and only a run in more
+      # than one engine catches what one engine forgives (Firefox's
+      # persist() waits for the user, so awaiting it hung every durable start).
+      - name: Run the browser tests
+        run: bash bindings/web/scripts/test-browser.sh
+
+      # Both storage conformance suites, and a reopen through compaction,
+      # against the log store over real OPFS files in a dedicated worker of
+      # Chrome and Firefox (C11). The runner image carries both drivers,
+      # matched to its browsers.
+      - name: Run the storage conformance suites in browsers
+        run: |
+          CHROMEDRIVER="$CHROMEWEBDRIVER/chromedriver" \
+          GECKODRIVER="$GECKOWEBDRIVER/geckodriver" \
+            bash bindings/web/scripts/test-conformance.sh
+
   security:
     name: Dependency Audit
     runs-on: ubuntu-latest
@@ -484,8 +791,18 @@ jobs:
 
       # Keep in sync with the `uniffi` pin in crates/offline-protocol-uniffi/Cargo.toml;
       # scripts/generate-bindings.sh fails the build if the two disagree.
+      # --force: a uniffi-bindgen from before the pin moved can already be in
+      # ~/.cargo/bin (a cache restores it), and `cargo install` refuses to
+      # overwrite a binary it does not know it installed. That failed the
+      # macOS and Windows wheel jobs on the move to 0.32, and the pin moving
+      # is exactly when this step must work.
       - name: Install uniffi-bindgen
-        run: cargo install uniffi --version 0.30.0 --features cli --locked
+        run: cargo install uniffi --version 0.32.2 --features cli --locked --force
+
+      # Versioned apart from uniffi; the 0.5 series generates for UniFFI 0.32.
+      # scripts/generate-bindings.sh fails the build if the series disagrees.
+      - name: Install uniffi-bindgen-java
+        run: cargo install uniffi-bindgen-java --version 0.5.2 --locked --force
 
       # Delete the generated files first, so the drift gate below proves they
       # were *written* and not merely unchanged. `git diff --exit-code` on a
@@ -503,6 +820,8 @@ jobs:
           rm -rf bindings/react-native/ios/Generated \
                  bindings/react-native/android/src/main/java/uniffi
           rm -f bindings/python/offline_protocol_sdk/offline_protocol.py
+          rm -f bindings/ruby/lib/offline_protocol.rb
+          rm -rf bindings/java/src/main/java/com/offlineprotocol/sdk
 
       # Regenerate before building anything. Bindgen reads the UDL and nothing
       # else, so putting this ahead of the cdylib compile means drift surfaces
@@ -511,7 +830,7 @@ jobs:
       - name: Regenerate all UniFFI bindings
         run: bash scripts/generate-bindings.sh
 
-      # One regeneration, one gate: the three files are one artifact set off one
+      # One regeneration, one gate: the five sets are one artifact set off one
       # UDL, so checking them separately would let a half-updated commit pass
       # the half of the gate it happened to satisfy.
       - name: Fail on stale bindings
@@ -519,9 +838,11 @@ jobs:
           if ! git diff --exit-code -- \
             bindings/python/offline_protocol_sdk/offline_protocol.py \
             bindings/react-native/ios/Generated/ \
-            bindings/react-native/android/src/main/java/uniffi/; then
+            bindings/react-native/android/src/main/java/uniffi/ \
+            bindings/ruby/lib/offline_protocol.rb \
+            bindings/java/src/main/java/com/offlineprotocol/sdk/; then
             echo "::error::Committed UniFFI bindings are out of date."
-            echo "Run: bash scripts/generate-bindings.sh and commit all three."
+            echo "Run: bash scripts/generate-bindings.sh and commit all five."
             exit 1
           fi
 
@@ -610,11 +931,13 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/uniffi-bindgen*
-          key: uniffi-bindgen-${{ runner.os }}-0.30.0
+          key: uniffi-bindgen-${{ runner.os }}-0.32.2-java-0.5.2
 
-      - name: Install uniffi-bindgen
+      - name: Install uniffi-bindgen and uniffi-bindgen-java
         if: steps.cache-uniffi.outputs.cache-hit != 'true'
-        run: cargo install uniffi --version 0.30.0 --features cli --locked
+        run: |
+          cargo install uniffi --version 0.32.2 --features cli --locked --force
+          cargo install uniffi-bindgen-java --version 0.5.2 --locked --force
 
       - name: Build the desktop library and the bindings
         shell: bash
@@ -855,13 +1178,13 @@ jobs:
             PeerStreamSession.swift ReticulumManager.swift mesh/Mesh.swift ble/MeshConnectionRegistry.swift \
             ble/BleDiscoveryBootstrapPolicy.swift \
             PeripheralRestorationAgeOutPolicy.swift \
-            BleHelloPolicy.swift BleMessageNotificationPolicy.swift \
+            BleHelloPolicy.swift BleMessageNotificationPolicy.swift BleWriteStallPolicy.swift \
             BleAppTag.swift BleDensityPolicy.swift BleServiceInstanceSelection.swift \
             Generated/offline_protocol.swift ForcedPresenceCheckQueue.swift \
             AddressDeclarationPolicy.swift \
             GatewayAttachPolicy.swift GatewayVerdictTracker.swift \
             InboundFragmentBuffer.swift OutboundFragmentQueue.swift \
-            PeerIdentityBinding.swift RelayAnswerPrefixes.swift \
+            PeerIdentityBinding.swift PeerLinkResolution.swift RelayAnswerPrefixes.swift \
             RelayControlOpTranslator.swift RelayGroupSnapshotBridge.swift \
             RelayRateLimiter.swift LegacyRelayMessage.swift MonotonicClock.swift \
             NostrQueryTracker.swift \
@@ -1011,9 +1334,9 @@ jobs:
           source bindings/react-native/scripts/shared/xcframework.sh
           IPHONEOS_DEPLOYMENT_TARGET="$(bash scripts/ios-deployment-target.sh)"
           export IPHONEOS_DEPLOYMENT_TARGET
-          cargo build --release --locked --target "$TARGET" \
+          cargo build --profile mobile --locked --target "$TARGET" \
             --package offline-protocol-uniffi
-          ARCHIVE="target/$TARGET/release/liboffline_protocol_uniffi.a"
+          ARCHIVE="target/$TARGET/mobile/liboffline_protocol_uniffi.a"
           CEILING="$IPHONEOS_DEPLOYMENT_TARGET"
           if [ "$TARGET" = aarch64-apple-ios-sim ]; then
             CEILING="$(arm64_simulator_ceiling "$IPHONEOS_DEPLOYMENT_TARGET")"
@@ -1133,3 +1456,130 @@ jobs:
       - name: Build a minified application against the published library
         working-directory: bindings/kotlin/consumer-check
         run: gradle --no-daemon --stacktrace -PVERSION_NAME=0.0.0 :app:assembleRelease
+
+  flutter-binding:
+    name: Flutter Binding
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # paths-filter compares the PR diff to the base branch.
+          fetch-depth: 0
+
+      # Native AAR gate: structural/UniFFI paths or lockfile (engine-only PRs skip
+      # NDK/Gradle; pushes to main always run the full job).
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        id: flutter_paths
+        with:
+          filters: |
+            flutter_dart:
+              - 'bindings/flutter/**'
+              - 'docs/bridges/flutter.md'
+              - '.github/workflows/ci.yml'
+              - 'crates/offline-protocol-uniffi/src/tests/flutter_bridge_guards.rs'
+            flutter_native:
+              # The plugin's own Kotlin and Gradle build: `flutter analyze`
+              # excludes android/**, so without these a pull request that
+              # touches only them never compiles them, and main is where it
+              # breaks.
+              - 'bindings/flutter/offline_protocol/android/**'
+              - 'bindings/flutter/offline_protocol/example/android/**'
+              - 'bindings/flutter/baselines/**'
+              - 'bindings/flutter/scripts/**'
+              - 'bindings/react-native/android/**'
+              - 'scripts/generate-bindings.sh'
+              - 'crates/offline-protocol-uniffi/Cargo.toml'
+              - 'crates/offline-protocol-uniffi/build.rs'
+              - 'crates/offline-protocol-uniffi/src/lib.rs'
+              - 'crates/offline-protocol-uniffi/src/offline_protocol.udl'
+              - 'crates/offline-protocol-uniffi/src/capi/**'
+              - 'crates/offline-protocol-uniffi/src/host_log.rs'
+            flutter_lock:
+              - 'Cargo.lock'
+              - 'Cargo.toml'
+
+      - name: Decide Flutter native (NDK + AAR) gate
+        id: flutter_native_gate
+        run: |
+          run=false
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            run=true
+          elif [[ "${{ steps.flutter_paths.outputs.flutter_native }}" == "true" ]]; then
+            run=true
+          elif [[ "${{ steps.flutter_paths.outputs.flutter_lock }}" == "true" ]]; then
+            run=true
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      - name: Skip (no Flutter-related changes on this PR)
+        if: >-
+          github.event_name == 'pull_request'
+          && steps.flutter_paths.outputs.flutter_dart != 'true'
+          && steps.flutter_paths.outputs.flutter_native != 'true'
+          && steps.flutter_paths.outputs.flutter_lock != 'true'
+        run: echo "No matching paths; Flutter Binding checks skipped for this PR."
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        if: >-
+          github.event_name == 'push'
+          || steps.flutter_paths.outputs.flutter_dart == 'true'
+          || steps.flutter_paths.outputs.flutter_native == 'true'
+          || steps.flutter_paths.outputs.flutter_lock == 'true'
+        with:
+          channel: stable
+          flutter-version: "3.27.4"
+          cache: true
+
+      - name: Dart unit tests and analyzer
+        if: >-
+          github.event_name == 'push'
+          || steps.flutter_paths.outputs.flutter_dart == 'true'
+          || steps.flutter_paths.outputs.flutter_native == 'true'
+          || steps.flutter_paths.outputs.flutter_lock == 'true'
+        working-directory: bindings/flutter/offline_protocol
+        run: |
+          flutter pub get
+          flutter test
+          flutter analyze
+
+      - uses: actions/setup-java@v6
+        if: steps.flutter_native_gate.outputs.run == 'true'
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android NDK
+        if: steps.flutter_native_gate.outputs.run == 'true'
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1.6.0
+        id: setup-ndk
+        with:
+          ndk-version: r26b
+          add-to-path: true
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.flutter_native_gate.outputs.run == 'true'
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.flutter_native_gate.outputs.run == 'true'
+        with:
+          shared-key: ci-flutter-binding
+
+      - name: Build arm64 UniFFI for Flutter Android
+        if: steps.flutter_native_gate.outputs.run == 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: bash bindings/flutter/scripts/ci-build-android-jni-arm64.sh
+
+      # The example's Gradle wrapper is committed and the next step runs it,
+      # so its jar is checked against Gradle's published checksums first.
+      - uses: gradle/actions/wrapper-validation@v6
+        if: steps.flutter_native_gate.outputs.run == 'true'
+
+      - name: Assemble release AAR and check size baseline
+        if: steps.flutter_native_gate.outputs.run == 'true'
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: bindings/flutter/scripts/measure-plugin-aar-size.sh --check

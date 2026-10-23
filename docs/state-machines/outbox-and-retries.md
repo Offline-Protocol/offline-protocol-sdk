@@ -30,6 +30,15 @@ persisted, and an entry restored after a restart replays verbatim. See
 **S4. Frames that cannot be acknowledged never enter the ladder.** See relay
 hint frames below.
 
+**S5. A sender never has more than sixteen frames awaiting acknowledgement from
+one peer over a mesh link.** The next one waits in the outbox and goes out,
+oldest first, when an acknowledgement or a give-up frees a slot. See
+[The per-peer window](#the-per-peer-window).
+
+**S6. A full outbox refuses the newest message for the recipient with the
+largest backlog, and never fails a message awaiting its acknowledgement.** See
+[At outbox capacity](#at-outbox-capacity).
+
 ## States
 
 ```mermaid
@@ -49,9 +58,9 @@ stateDiagram-v2
     Parked --> Queued: probe succeeds / peer returns
     Parked --> Failed: lifetime expired
 
-    Queued --> Failed: evicted, outbox full
-    Pending --> Failed: evicted, outbox full
-    Parked --> Failed: evicted, outbox full
+    [*] --> Failed: refused, outbox full
+    Queued --> Failed: evicted for a lighter recipient
+    Parked --> Failed: evicted for a lighter recipient
 
     Delivered --> [*]
     Failed --> [*]
@@ -89,9 +98,8 @@ should be:
   accepted, which is why there is a pending acknowledgement for the park to
   remove.
 
-Eviction is the one edge that leaves every non-terminal state. When the outbox
-is full, the least recently sent entry fails to make room, whatever it was
-doing.
+A message awaiting its acknowledgement is never evicted, so the eviction edges
+leave `Queued` and `Parked` only. See [At outbox capacity](#at-outbox-capacity).
 
 ### Giving a message up
 
@@ -122,12 +130,12 @@ reports it delivered after it was reported failed.
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
-| Acknowledgement timeout | 10 s | Starts at **local enqueue**, not at wire write |
+| Acknowledgement timeout | 10 s | Starts at **local enqueue**; extended up to 60 s while the frame is still queued |
 | Maximum retries | 10 | |
 | Backoff multiplier | 2.0 | Exponential |
 | Maximum backoff delay | 300 s | Caps the exponential |
-| Maximum pending acknowledgements | 1000 | |
-| Outbox capacity | 500 entries | When full, the least recently sent entry fails |
+| Maximum pending acknowledgements | 1000 | At the ceiling a send is held, not failed (see below) |
+| Outbox capacity | 500 entries | When full, the newest message to the heaviest recipient is refused (see below) |
 | Outbox lifetime | 7 days | Per entry, carrier-relative |
 | Absolute lifetime cap | 4 × lifetime (28 days) | Measured from first send, bounds restart refreshes |
 
@@ -142,6 +150,145 @@ limiter defers frames, a frame late in a large fan-out can time out and be
 retransmitted before it was ever written. Deduplication absorbs the duplicates,
 so the cost is wasted work rather than loss, but the effect is real past roughly
 118 members.
+
+**A frame still in a local transport queue gets a bounded extension instead
+of a retry.** When an acknowledgement times out, the sender asks its carriers
+which frames they have accepted but not started writing (only BLE knows today:
+a message counts as queued until the bridge pulls its first fragment, which is
+why each bridge stops pulling once a peer holds 32 fragments; at 576 the
+extension saw almost nothing). Such a
+frame gets one more full timeout, repeatedly, until a minute has passed since
+the attempt, and only then falls through to the ladder. The bound is what keeps
+a link that died without telling the transport from pinning a message to it.
+
+The failure this prevents is a feedback loop on a link carrying less than it
+is offered. Each retry appended a second copy behind the first, re-sealed under
+a fresh ratchet generation, so the queue grew, the round trip grew past the
+timeout, more frames were retried, and the receiver skipped one generation per
+copy it dropped as a duplicate. In the 2026-10-19 volume test the sender logged
+12,152 retries against 2,434 messages the receiver decrypted, and the receiver
+ended up past its forward window (see
+[Session lifecycle](session-lifecycle.md)). The extension restarts the deadline
+without touching the send time the round-trip estimate reads.
+
+## At the acknowledgement ceiling
+
+**A frame is never transmitted without a slot to track it, and a full table
+holds a send back rather than failing it.** Every transmit path asks the
+pending-acknowledgement table for a slot before it writes. With none free, the
+message goes to the outbox and the retry queue at its first attempt, the
+application receives `message_deferred` with reason `ack_capacity`, and the send
+returns its id as usual. The retry queue tries it again at the ladder's first
+rung, without spending an attempt and without re-sealing it, and sends it as
+soon as an acknowledgement frees a slot.
+
+Both halves exist because the other order failed. The check used to come after
+the transmit, as a registration error. The direct send path returned that error
+to the application for a message already on the wire, so in the volume test one
+phone's API accepted 2,748 messages while the other received 4,626. The retry
+path propagated the same error out of `process()`, which then returned before
+the timeout sweep on every tick: the one step that frees slots never ran again,
+and the engine never recovered. `process()` now runs every step on every tick
+and reports the first error at the end.
+
+Two more things kept the table from draining, and both are gone. A refused
+registration used to mark every timed-out entry and discard the list, and the
+sweep skips a marked entry, so those messages were never retried. And the
+prune of timed-out entries ran at a fixed five minutes, exactly the ladder's
+maximum delay, so the slot of a message on its ninth retry was gone just before
+that resend fired. The prune age is now twice the ACK timeout plus the maximum
+delay.
+
+`ack_capacity` is the signal to slow down. It appears when the application
+offers more than the link carries for long enough to fill the table. With the
+per-peer window below, a single mesh peer can no longer fill it.
+
+## At outbox capacity
+
+**A full outbox refuses the newest message for the recipient holding the
+largest backlog, and never fails a message awaiting its acknowledgement.**
+Three rules, applied when the application sends and the outbox already holds
+500 entries:
+
+1. A message awaiting its acknowledgement is never evicted: it is on the wire,
+   and failing it leaves an acknowledgement that settles nothing.
+2. A message never displaces another to the same recipient. When the new
+   message's recipient holds the largest backlog (ties included), the new
+   message is refused: it gets no outbox entry, the application receives
+   `message_failed` with reason "Outbox capacity exceeded" and no attempts,
+   and `send` still returns its id.
+3. Otherwise the recipient with the largest backlog pays, with the same
+   terminal event. A message the per-peer window holds for a live peer goes
+   newest first, so the front of that line, the part about to be sent, stays
+   and the conversation stays contiguous; any other entry goes oldest first.
+   A week of messages to one unreachable peer, or a long held line to one
+   slow peer, cannot block a message to anyone else.
+
+Held messages were once never evicted on a live link. Then one slow peer whose
+held line filled the outbox made every send to every other recipient a
+refusal: the outbox was full of messages that had never left the device.
+
+When nothing may be evicted (every entry awaits its acknowledgement), the new
+message is refused. Internal frames
+(key packages, Welcomes, receipts) are never refused: they evict by rules 1
+and 3 regardless of their own recipient, and when every entry is being
+delivered they are admitted over the cap, which the acknowledgement table
+bounds. Media chunks keep their own cap and their oldest-first eviction.
+
+The rule this replaces evicted the least recently sent entry to admit any new
+one, whatever either was doing. In run 5 of the 2026-10-19 volume test a
+ten-minute Bluetooth outage failed about 2,500 queued messages per phone that
+way, each so that a newer message to the same unreachable peer could take its
+slot, and the application learned of each failure minutes after it had shown
+the message as queued. Under load on a live link the same rule failed frames
+already on the wire, whose acknowledgements then settled nothing. Refusing the
+newest instead keeps a queued conversation contiguous and tells the
+application at the moment of sending.
+
+## The per-peer window
+
+**At most sixteen frames that wait for an acknowledgement are in flight to one
+peer over a mesh carrier (Bluetooth LE, Wi-Fi Direct).** A seventeenth is held:
+it goes to the outbox, the application receives `message_deferred` with reason
+`peer_window`, and the send returns its id as usual. Held messages go out
+oldest first as slots free, at most a flush batch per peer per tick. A new
+message never overtakes one already held. Holding is not an attempt: nothing is
+sealed and no retry is counted.
+
+Session control is never held: a key package, a Welcome, a confirmation probe
+or its answer. They heal the session the window's frames are sealed under, and
+held behind sixteen frames the peer cannot decrypt they would wait for
+acknowledgements that never come.
+
+The count is derived from the outbox, entries to that peer with at least one
+attempt whose last carrier was a mesh one, so a settle, give-up, expiry or
+eviction frees its slot without a path having to remember to. A resend of a
+frame already in flight always passes. When the peer's mesh link goes, the
+window stops applying and everything held goes to transport selection.
+
+The failure it prevents is congestion collapse on a link carrying less than it
+is offered. Without it the sender handed the carrier every new frame, every
+resend and one acknowledgement per received frame, into one unbounded queue,
+on a timer that starts at enqueue. In run 4 of the 2026-10-19 volume test the
+Android phone's indication path carried 12 to 16 frames a second against 15
+offered. The acknowledgement round trip crossed the timeout after about two
+minutes, each resend cost the receiver one more acknowledgement on the
+saturated path, that path's rate halved, both phones filled their
+acknowledgement tables, and every later send evicted a message as "Outbox
+capacity exceeded": 70.5% delivered, 50,000 retries. The four earlier fixes on
+that branch (the ceiling above, the re-seal budget, the BLE stall teardown,
+the bridge pull mark) each removed one amplifier of the same loop. The window
+removes the loop: it bounds the queue, and with it the round trip, the
+resends and the receiver's ratchet gap, at any link rate.
+
+Sixteen is above what that link carries in one unloaded round trip (about six
+messages, counting the receiver's acknowledgement coalescing and a processing
+tick on each side), so it costs no throughput, and it keeps the loaded round
+trip there near three seconds. A compile-time assertion keeps a full window's
+worth of retries inside the re-seal budget.
+
+The relay is not windowed. Its mailbox is store-and-forward, and holding a
+message back from it would strand it on a device the user may close.
 
 ## Retry re-sealing
 
@@ -160,6 +307,50 @@ This is the sender-side half of the desync recovery documented in
 [Session lifecycle](session-lifecycle.md). Together with the receiver-side
 withheld acknowledgement, it is what makes a session fork recoverable without
 message loss, for entries whose provenance is still in memory.
+
+### The re-seal budget
+
+**A sender never seals more than a quarter of the smallest receiver forward
+window past the last frame that receiver acknowledged by re-sealing
+resends.** Every
+re-seal spends a ratchet generation. The receiver has to fast-forward over it,
+and one it drops as a duplicate of a message it already holds is never
+decrypted at all. A receiver more than the forward window behind decrypts
+nothing from that sender until the pair re-keys. So the sender counts, per
+session, the frames it has sealed past the newest one the peer acknowledged
+(an acknowledgement proves the peer decrypted that far). Once the count reaches
+the budget, a resend goes out verbatim,
+which spends nothing and still decrypts unless the receiver has since moved
+more than the out-of-order tolerance past it. The next acknowledgement re-opens
+the budget. New messages always seal; the budget leaves them the rest of the
+window.
+
+The budget is 256: a quarter of 1,024, the window of a leaf node, which runs
+mls-rs. mls-rs fixes that window and offers no setting, so it is smaller than
+the 8,192 a phone's OpenMLS group is configured with, and a budget derived
+from the phone's window (2,048) let a sender walk a leaf past its window by
+re-sealing alone. `tools/mls-interop` pins the leaf's 1,024 against mls-rs
+itself. With the per-peer window, unacknowledged seals grow only by resends of
+at most sixteen frames, so the budget trips only after a whole retry ladder
+with no acknowledgement; a compile-time assertion keeps it above that.
+
+**One exception: a resend whose verbatim bytes can no longer decrypt is
+re-sealed past the budget, up to half the smallest forward window (512).** A copy sealed more
+than the out-of-order tolerance (32) before the newest frame this device sealed
+is refused by a receiver that has decrypted anything since, and a mesh link
+carries no answer for it, so verbatim it was resent until its ladder ran out.
+Run 4 of the volume test lost 525 messages that way, 3,308 decrypt failures on
+the receiver. Re-sealing such a resend spends a generation, which is what the
+budget rations, so the exception stops at half the window: the receiver going
+deaf is the failure the budget exists for, a wasted resend is not.
+
+Without it, a link that stops carrying acknowledgements turns the retry ladder
+into a key-burner. In the 2026-10-19 rerun one phone re-sealed 20,919 resends
+during a 17-minute stall and left its peer past even the widened window. The
+count is in memory and per session incarnation, so a rebuilt session starts
+from nothing and an acknowledgement for a frame of the old one vouches for
+nothing. Acknowledgements are unauthenticated, so a forged one can give
+re-seals back, but never more than a sender had before the budget existed.
 
 ### Provenance handling
 
