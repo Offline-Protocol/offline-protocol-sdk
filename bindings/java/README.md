@@ -49,7 +49,7 @@ ProtocolConfig config = new ProtocolConfig(
     "com.example.app", "default",
     false, false, true, false, false, false, // ble, wifi direct, internet, reticulum, nostr, prefer online
     (byte) 8, true, true, true, true,        // ttl, encryption, auto key exchange, store pending, require encryption
-    64L, 4096L, 60_000L, OverflowPolicy.DROP_OLDEST,
+    64L, 4096L, 86_400_000L, OverflowPolicy.DROP_OLDEST, // pending queue: per peer, global, ttl (24 h), overflow
     false, 256, true, true, false, false,
     true, true, true, false, true, true, true,
     null, null,
@@ -113,6 +113,8 @@ library for your platform from the release's assets, and give the JVM its path:
 `-Duniffi.component.offline_protocol.libraryOverride=<file>` for an absolute
 path. Run on JDK 22 or later with `--enable-native-access=ALL-UNNAMED`. On
 Android use the AAR (`com.offlineprotocol:offline-protocol-sdk`) instead.
+
+A complete, runnable program is in [examples/java-app](../../examples/java-app/README.md).
 
 ## Telemetry
 

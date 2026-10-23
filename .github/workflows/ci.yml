@@ -614,6 +614,12 @@ jobs:
         working-directory: bindings/java
         run: gradle --no-daemon --stacktrace build publishAllPublicationsToStagingRepository
 
+      # The example app against the same library, so it cannot rot: two
+      # engines pair, encrypt and exchange messages in one JVM.
+      - name: Run the Java example
+        working-directory: examples/java-app
+        run: gradle --no-daemon --stacktrace run
+
   security:
     name: Dependency Audit
     runs-on: ubuntu-latest
