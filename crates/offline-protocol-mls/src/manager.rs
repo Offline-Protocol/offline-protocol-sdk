@@ -977,6 +977,16 @@ impl MlsManager {
         self.session_manager.has_session(other_user_id)
     }
 
+    /// The 1:1 session's epoch and its corroboration tag for `nonce`, or
+    /// `None` without a session. See [`SessionManager::corroboration`].
+    pub fn session_corroboration(
+        &self,
+        other_user_id: &str,
+        nonce: &[u8],
+    ) -> Result<Option<(u64, Vec<u8>)>> {
+        self.session_manager.corroboration(other_user_id, nonce)
+    }
+
     /// Creates a new 1:1 session with another user.
     pub fn create_session(&self, other_user_id: &str) -> Result<WelcomeMessage> {
         let their_key_package = self.get_contact_key_package(other_user_id)?;
@@ -4191,6 +4201,55 @@ mod tests {
             "a split session must fail as Decryption, got {err:?}"
         );
         assert_eq!(err.decryption_detail(), Some("aead"));
+    }
+
+    /// Both members of one session compute the same tag for a nonce, and a
+    /// different nonce gives a different tag, so a tag links no two frames.
+    #[test]
+    fn test_one_session_corroborates_on_both_sides() {
+        let (alice, bob) = create_test_session();
+        let nonce = [3u8; 16];
+        let ours = alice.session_corroboration(&addr("bob"), &nonce).unwrap();
+        let theirs = bob.session_corroboration(&addr("alice"), &nonce).unwrap();
+        assert!(ours.is_some());
+        assert_eq!(ours, theirs);
+        let other = alice
+            .session_corroboration(&addr("bob"), &[4u8; 16])
+            .unwrap();
+        assert_ne!(ours.unwrap().1, other.unwrap().1);
+        assert_eq!(
+            alice.session_corroboration(&addr("carol"), &nonce).unwrap(),
+            None
+        );
+    }
+
+    /// A split pair agrees on the epoch and not on the tag, which is the one
+    /// signal that tells it apart from a healthy session.
+    #[test]
+    fn test_a_split_session_agrees_on_the_epoch_and_not_the_tag() {
+        let alice = create_test_manager("alice");
+        let bob = create_test_manager("bob");
+        let alice_kp = alice.generate_key_package().unwrap();
+        let bob_kp = bob.generate_key_package().unwrap();
+        alice
+            .import_key_package(&addr("bob"), &bob_kp.key_package_data)
+            .unwrap();
+        bob.import_key_package(&addr("alice"), &alice_kp.key_package_data)
+            .unwrap();
+        alice.create_session(&addr("bob")).unwrap();
+        bob.create_session(&addr("alice")).unwrap();
+
+        let nonce = [3u8; 16];
+        let (alice_epoch, alice_tag) = alice
+            .session_corroboration(&addr("bob"), &nonce)
+            .unwrap()
+            .unwrap();
+        let (bob_epoch, bob_tag) = bob
+            .session_corroboration(&addr("alice"), &nonce)
+            .unwrap()
+            .unwrap();
+        assert_eq!(alice_epoch, bob_epoch);
+        assert_ne!(alice_tag, bob_tag);
     }
 
     /// The seal count is what bounds a sender's re-seals, so it must move

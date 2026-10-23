@@ -59,6 +59,21 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   nothing the error renders reaches telemetry. `MlsError::decryption_detail`
   reads it.
 
+### Fixed
+
+- **A pair no longer splits into two sessions that never decrypt each
+  other.** When both sides created a session at once and the lesser
+  address's Welcome was lost, the greater side kept a group the other never
+  joined, and the other side's plaintext confirmation probe confirmed it.
+  Every message after that failed as `INVALID_CIPHERTEXT`, and nothing healed
+  it, because the two groups sit at the same epoch and the re-key fires only
+  on an epoch mismatch. A probe and its acknowledgement now carry an MLS
+  exporter tag that only a member of the same group computes. A match
+  confirms, including the session owner, which before only a decrypted
+  message could. A mismatch is a split, and the greater side heals it with
+  the existing re-key. An older peer sends no tag and keeps the old rules. See
+  [ADR 0033](docs/adr/0033-a-session-is-confirmed-only-by-proof-of-the-same-group.md).
+
 ## [0.30.0] — 2026-10-21
 
 > **Update if you enable telemetry.** The telemetry uploader in 0.26.0 to

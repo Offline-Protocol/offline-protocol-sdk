@@ -156,6 +156,35 @@ impl SessionManager {
         Ok(group.is_some())
     }
 
+    /// This session's epoch, and a tag only a member of the same group at the
+    /// same epoch computes for `nonce`. `None` without a session.
+    ///
+    /// Two groups for one slot sit at the same epoch, since a session never
+    /// commits after it is created, so the epoch alone cannot tell them
+    /// apart and the tag is what does. It is an MLS exporter value: it shows
+    /// nothing about the group, and a fresh `nonce` per frame links no two.
+    pub fn corroboration(
+        &self,
+        other_user_id: &str,
+        nonce: &[u8],
+    ) -> Result<Option<(u64, Vec<u8>)>> {
+        let session_id = self.get_session_id(other_user_id)?;
+        let Some(group) = self.group_manager.load_group(&session_id)? else {
+            return Ok(None);
+        };
+        let tag = group
+            .export_secret(
+                self.group_manager.provider().crypto(),
+                offline_protocol_sealed::SESSION_CORROBORATION_LABEL,
+                nonce,
+                offline_protocol_sealed::SESSION_CORROBORATION_TAG_LEN,
+            )
+            .map_err(|e| {
+                MlsError::Encryption(format!("session corroboration export failed: {e}"))
+            })?;
+        Ok(Some((group.epoch().as_u64(), tag)))
+    }
+
     /// Creates a new session with another user using their key package.
     pub fn create_session(
         &self,

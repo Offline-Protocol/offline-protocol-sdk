@@ -49,8 +49,45 @@ vector.
 | `__MLS_KEY_PKG__` | peer to peer | Key package payload, JSON |
 | `__MLS_WELCOME__` | peer to peer | JSON `WelcomeMessage`; the MLS Welcome bytes are a JSON byte array inside it, not base64 |
 | `__MLS_ENC__` | peer to peer | Encrypted envelope, see [Encryption envelopes](encryption-envelopes.md) |
-| `__MLS_CONFIRM_PROBE__` | peer to peer | Session confirmation probe |
-| `__MLS_CONFIRM_ACK__` | peer to peer | Session confirmation acknowledgement |
+| `__MLS_CONFIRM_PROBE__` | peer to peer | Session confirmation probe: a [session corroboration](#session-corroboration), or empty from an older peer |
+| `__MLS_CONFIRM_ACK__` | peer to peer | Session confirmation acknowledgement, with the same body |
+
+### Session corroboration
+
+**A plaintext probe or acknowledgement confirms a session only if it shows
+the sender holds the same group.** A peer holding a group of its own for the
+same slot sits at the same epoch, because a 1:1 session never commits after it
+is created, so its frames pass MLS framing and fail as an ordinary decryption
+failure, which nothing re-keys on. A probe that said only "I hold a session"
+confirmed such a pair, and that is how a split session formed.
+
+The body is JSON, `{"epoch": E, "nonce": [...], "tag": [...]}`:
+
+| Field | Meaning |
+|-------|---------|
+| `epoch` | The sender's MLS epoch for the session |
+| `nonce` | 16 bytes, fresh per frame, as a JSON byte array |
+| `tag` | 16 bytes: `MLS-Exporter("offline-protocol session corroboration v1", nonce, 16)` over the session's current epoch |
+
+A receiver holding a session computes the exporter over the same nonce and:
+
+- **MUST** treat a matching epoch and tag as group-aware proof, as it would a
+  successful decrypt. That includes the both-create owner, which no plaintext
+  frame could confirm before.
+- **MUST NOT** confirm on a matching epoch with a different tag. That is a
+  split. The side whose address is greater (the side that adopts in the
+  both-create tiebreak) **MUST** end it with the re-key: a `session_reset`
+  key package, then dropping its own group. The lesser side does nothing,
+  and its answer to the greater side's probe is how the greater side learns.
+- **MUST NOT** act on a different epoch, which the epoch-desync path owns, or
+  on a tag it cannot compute.
+- **MUST** read an empty or unparseable body as an older peer and apply the
+  plaintext rules it always had.
+
+Every probe is answered with the receiver's own corroboration. A leaf answers
+with an empty body and is held to the plaintext rules. The frames are signed,
+so a mismatch is the peer's own statement; the re-key floor bounds what a
+replayed one can do to one teardown per window.
 
 ### Prefixes that never appear on the wire
 

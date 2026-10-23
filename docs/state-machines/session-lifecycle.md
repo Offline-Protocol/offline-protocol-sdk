@@ -32,8 +32,11 @@ stateDiagram-v2
     Establishing --> Owner: we created the group
     Establishing --> Joined: we processed a Welcome
 
-    Owner --> Confirmed: successful decrypt
+    Owner --> Confirmed: successful decrypt, or a corroborated probe/ack
     Joined --> Confirmed: Welcome processed, probe/ack, or decrypt
+
+    Owner --> None: split detected, greater side re-keys
+    Joined --> None: split detected, greater side re-keys
 
     Confirmed --> Desynced: WrongEpoch / NoPastEpochData
     Desynced --> None: session_reset, tear down + advertise
@@ -405,6 +408,44 @@ honest failure rather than a false delivery.
 **What would close it:** a signed epoch-corroboration exchange before teardown. A
 liveness-only probe does not work, because a healthy peer answers and the
 teardown happens anyway.
+
+## Split sessions
+
+**A confirmation stands only on proof that both sides hold the same group.**
+Two sides can hold two different groups for one slot, and nothing above sees
+it: a 1:1 session never commits after it is created, so the two groups sit at
+the same epoch, frames between them pass MLS framing validation, and each
+fails as an ordinary decryption failure. ADR 0006 keeps the re-key off that
+class, rightly, because a corrupted frame reaches it.
+
+The common way in is a both-create race that loses the owner's Welcome. The
+owner keeps its group, as the tiebreak says. The adopter never received the
+Welcome it was meant to adopt, so it still holds its own, and before this rule
+the owner's plaintext probe confirmed it. The adopter then flushed its queue
+under a group the owner never joined.
+
+So a probe and its acknowledgement carry a corroboration: the sender's epoch
+and an MLS exporter tag over a fresh nonce, which only a member of the same
+group at the same epoch computes (see
+[the spec](../spec/control-messages.md#session-corroboration)).
+
+| What the frame shows | What the receiver does |
+|----------------------|------------------------|
+| Same epoch, same tag | Confirms, as group-aware proof. The both-create owner included |
+| Same epoch, different tag | Does not confirm. The split: the side whose address is greater re-keys |
+| Different epoch, or nothing this side can compare | Does not confirm, and does nothing. The epoch-desync path owns an epoch mismatch |
+| Empty body | An older peer or a leaf: the plaintext rules above |
+
+**Only the greater side heals**, the side that adopts in the tiebreak. If both
+did, both would tear down at once, each would rebuild from the other's
+package, and the pair would race again. The lesser side still answers every
+probe with its own tag, so whichever side probes, the greater side learns.
+
+The heal is the re-key, through the same shared step as a desync: the reset
+key package first, then the local group dropped. It shares the re-key floor,
+so a replayed probe from an earlier group buys at most one teardown per
+window. A reset that could not be sent drops nothing and gives the floor back,
+because the peer was told nothing and the next probe asks again.
 
 ## Session reset semantics
 

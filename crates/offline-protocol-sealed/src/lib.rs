@@ -54,6 +54,7 @@ extern crate alloc;
 
 pub mod canonical;
 pub mod constants;
+pub mod corroboration;
 pub mod derive;
 pub mod envelope;
 pub mod error;
@@ -71,6 +72,10 @@ pub use constants::{
     ACK_FOR_KEY, LEAF_KEY_PACKAGE_LIFETIME, LEAF_KEY_PACKAGE_NOT_BEFORE_BACKDATE_SECONDS,
     LEAF_SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE, MAX_ACCEPTED_KEY_PACKAGE_LIFETIME,
     SENDER_RATCHET_MAXIMUM_FORWARD_DISTANCE, SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE,
+};
+pub use corroboration::{
+    SessionCorroboration, SESSION_CORROBORATION_LABEL, SESSION_CORROBORATION_NONCE_LEN,
+    SESSION_CORROBORATION_TAG_LEN,
 };
 pub use derive::{derive_address, ED25519_PUBLIC_KEY_LEN};
 pub use envelope::{EncryptedMessage, GroupId, MlsMessageType, WelcomeMessage};

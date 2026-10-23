@@ -42,6 +42,7 @@ silently undo it. Decisions that follow from the obvious default do not need one
 | [0029](0029-mobile-libraries-are-sized-not-aborting.md) | The mobile libraries are optimised for size and still unwind | Accepted |
 | [0030](0030-one-bluetooth-le-link-per-peer-pair.md) | One Bluetooth LE link per peer pair | Accepted |
 | [0031](0031-telemetry-trusts-only-the-ingests-issuers.md) | The telemetry uploader trusts only the ingest's issuers | Accepted |
+| [0033](0033-a-session-is-confirmed-only-by-proof-of-the-same-group.md) | A session is confirmed only by proof of the same group | Accepted |
 
 ## Format
 

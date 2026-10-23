@@ -44238,3 +44238,180 @@ fn a_full_outbox_refuses_on_a_tie() {
         vec![refused.as_str().to_string()]
     );
 }
+
+/// The two users of the split-session tests, lower address first. The lower
+/// side is the both-create owner (it keeps its group); the higher adopts.
+fn split_pair() -> (&'static str, &'static str) {
+    let (a, b) = ("alice", "bob");
+    if id(a).parse::<offline_protocol_core::Address>().unwrap()
+        < id(b).parse::<offline_protocol_core::Address>().unwrap()
+    {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+fn received_contents(protocol: &mut OfflineProtocol) -> Arc<Mutex<Vec<String>>> {
+    let rx: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let h = Arc::clone(&rx);
+    protocol.on_event(move |e| {
+        if let Event::MessageReceived { content, .. } = e {
+            h.lock().unwrap().push(content);
+        }
+    });
+    rx
+}
+
+/// Both sides create a group for the slot at once, and the owner's Welcome
+/// to the adopter is lost while the adopter's reaches the owner. The owner
+/// keeps its group, as the tiebreak says. Leaves both sides' first message
+/// queued and nothing in flight.
+fn both_create_losing_the_owners_welcome(
+    owner: &mut OfflineProtocol,
+    owner_h: &MockTransport,
+    adopter: &mut OfflineProtocol,
+    adopter_h: &MockTransport,
+) {
+    let (lo, hi) = split_pair();
+    let package = |p: &OfflineProtocol| {
+        let m = p.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap().key_package_data
+    };
+    let expires = Utc::now().timestamp_millis() as u64 + 60_000;
+    let (owner_kp, adopter_kp) = (package(owner), package(adopter));
+    owner.pending_key_packages.insert(
+        id(hi),
+        ReceivedKeyPackage {
+            key_package_data: adopter_kp,
+            local_expires_at_ms: expires,
+        },
+    );
+    adopter.pending_key_packages.insert(
+        id(lo),
+        ReceivedKeyPackage {
+            key_package_data: owner_kp,
+            local_expires_at_ms: expires,
+        },
+    );
+    owner
+        .send_message(&id(hi), "from-owner", None, None::<String>)
+        .unwrap();
+    adopter
+        .send_message(&id(lo), "from-adopter", None, None::<String>)
+        .unwrap();
+
+    owner_h.clear_sent_messages();
+    for m in adopter_h.sent_messages() {
+        owner_h.queue_message_from(m, id(hi));
+    }
+    adopter_h.clear_sent_messages();
+    while owner.receive_message().is_some() {}
+    assert!(
+        owner.both_create_awaiting_decrypt.contains(&id(hi)),
+        "precondition: the owner kept its own group"
+    );
+}
+
+/// The split session. Before corroboration, the owner's plaintext probe
+/// confirmed the adopter's own group, the adopter flushed under it, and every
+/// frame failed at the owner as an ordinary decrypt failure, which nothing
+/// re-keys on. Now the probe's tag does not match, the adopter does not
+/// confirm, and it heals: both first messages arrive, then a fresh one each
+/// way.
+#[test]
+fn a_both_create_race_that_loses_the_owners_welcome_heals_rather_than_splits() {
+    let (lo, hi) = split_pair();
+    let (mut owner, owner_h) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    let owner_rx = received_contents(&mut owner);
+    let adopter_rx = received_contents(&mut adopter);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+
+    both_create_losing_the_owners_welcome(&mut owner, &owner_h, &mut adopter, &adopter_h);
+
+    owner.send_session_confirmation_probe(&id(hi), "test");
+    let probe = owner_h.sent_messages();
+    owner_h.clear_sent_messages();
+    for m in probe {
+        adopter_h.queue_message_from(m, id(lo));
+    }
+    while adopter.receive_message().is_some() {}
+    assert!(
+        !adopter.confirmed_sessions.contains(&id(lo)),
+        "a probe from a peer holding another group must not confirm ours"
+    );
+
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+    owner
+        .send_message(&id(hi), "healed-owner", None, None::<String>)
+        .unwrap();
+    adopter
+        .send_message(&id(lo), "healed-adopter", None, None::<String>)
+        .unwrap();
+    pump_between(&mut owner, &owner_h, &mut adopter, &adopter_h, 40);
+
+    let adopter_got = adopter_rx.lock().unwrap().clone();
+    let owner_got = owner_rx.lock().unwrap().clone();
+    for (got, want) in [
+        (&adopter_got, "from-owner"),
+        (&adopter_got, "healed-owner"),
+        (&owner_got, "from-adopter"),
+        (&owner_got, "healed-adopter"),
+    ] {
+        assert!(got.iter().any(|c| c == want), "{want} missing from {got:?}");
+    }
+}
+
+/// A corroborated probe is group-aware proof, as a decrypt is, so it
+/// confirms a both-create owner, which before only a decrypt could. A probe
+/// with no corroboration, from an older peer, is still refused there.
+#[test]
+fn a_corroborated_probe_confirms_a_both_create_owner_and_a_bare_one_does_not() {
+    let (lo, hi) = split_pair();
+    let (mut owner, owner_h) = make_encrypted_protocol(lo);
+    let (mut adopter, adopter_h) = make_encrypted_protocol(hi);
+    owner.start().unwrap();
+    adopter.start().unwrap();
+
+    let adopter_kp = {
+        let m = adopter.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap().key_package_data
+    };
+    owner.pending_key_packages.insert(
+        id(hi),
+        ReceivedKeyPackage {
+            key_package_data: adopter_kp,
+            local_expires_at_ms: Utc::now().timestamp_millis() as u64 + 60_000,
+        },
+    );
+    owner
+        .send_message(&id(hi), "hello", None, None::<String>)
+        .unwrap();
+    for m in owner_h.sent_messages() {
+        adopter_h.queue_message_from(m, id(lo));
+    }
+    owner_h.clear_sent_messages();
+    while adopter.receive_message().is_some() {}
+    adopter_h.clear_sent_messages();
+    assert!(adopter.has_mls_session(&id(lo)).unwrap());
+    owner.mark_both_create_awaiting_decrypt(&id(hi));
+
+    let bare = signed_frame(&id(hi), &id(lo), internal_prefixes::SESSION_CONFIRM_PROBE);
+    let _ = owner.process_internal_message(&bare);
+    assert!(
+        !owner.confirmed_sessions.contains(&id(hi)),
+        "a bare probe must not confirm a both-create owner"
+    );
+
+    adopter.send_session_confirmation_probe(&id(lo), "test");
+    for m in adopter_h.sent_messages() {
+        owner_h.queue_message_from(m, id(hi));
+    }
+    while owner.receive_message().is_some() {}
+    assert!(
+        owner.confirmed_sessions.contains(&id(hi)),
+        "a corroborated probe must confirm the owner"
+    );
+}

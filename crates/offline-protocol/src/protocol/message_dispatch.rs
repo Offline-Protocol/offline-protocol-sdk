@@ -1,5 +1,6 @@
 //! Message dispatch handlers for internal protocol messages.
 
+use super::session::{Corroboration, SESSION_CORROBORATED};
 use super::{
     base64_decode, internal_prefixes, lock_shared_state, ConnectionAcceptedPayload,
     ConnectionRequestPayload, GroupCreatedPayload, GroupErrorPayload, GroupInfoPayload,
@@ -641,36 +642,41 @@ impl OfflineProtocol {
     }
 
     /// Handles a session confirmation probe message.
-    pub(crate) fn handle_session_confirm_probe(&mut self, sender: &str, _content: &str) {
+    ///
+    /// A probe carrying a corroboration confirms only when the tag matches,
+    /// because a peer holding a group of its own for this slot would
+    /// otherwise confirm ours, and the pair would then fail every frame as an
+    /// ordinary decrypt failure that nothing heals. A mismatch is the split
+    /// itself, and is healed. An empty body is an older peer, under the
+    /// plaintext rules it always had. Every probe is answered with this
+    /// side's own corroboration, which is how the peer learns of a split
+    /// this side does not heal.
+    pub(crate) fn handle_session_confirm_probe(&mut self, sender: &str, content: &str) {
         let sender_owned = sender.to_string();
         match self.has_mls_session(&sender_owned) {
             Ok(true) => {
-                if !self.can_confirm_from_source(&sender_owned, "confirmation_probe_received") {
-                    debug!(
-                        sender = %sender_owned,
-                        "Skipping probe confirmation until welcome send is at least attempted"
-                    );
-                } else {
-                    match self.confirm_session_state(&sender_owned, "confirmation_probe_received") {
-                        Ok(_) => {
-                            let _ = self.flush_pending_messages(&sender_owned);
-                            self.process_pending_decryption(&sender_owned);
-                        }
-                        Err(err) => {
-                            warn!(
-                                sender = %sender_owned,
-                                error = %err,
-                                "Failed to persist session confirmation after probe"
-                            );
-                        }
-                    }
-                }
-
-                if let Err(err) = self.send_internal_message(
+                let body = content
+                    .strip_prefix(internal_prefixes::SESSION_CONFIRM_PROBE)
+                    .unwrap_or_default();
+                self.apply_session_corroboration(
                     &sender_owned,
-                    internal_prefixes::SESSION_CONFIRM_ACK.to_string(),
-                    MessagePriority::High,
-                ) {
+                    body,
+                    "confirmation_probe_received",
+                );
+
+                if !self.has_mls_session(&sender_owned).unwrap_or(false) {
+                    // Healed: the group the peer asked about is gone, and the
+                    // reset already told it so.
+                    return;
+                }
+                let ack = format!(
+                    "{}{}",
+                    internal_prefixes::SESSION_CONFIRM_ACK,
+                    self.session_corroboration_body(&sender_owned)
+                );
+                if let Err(err) =
+                    self.send_internal_message(&sender_owned, ack, MessagePriority::High)
+                {
                     warn!(
                         sender = %sender_owned,
                         error = %err,
@@ -694,31 +700,16 @@ impl OfflineProtocol {
         }
     }
 
-    /// Handles a session confirmation acknowledgment message.
-    pub(crate) fn handle_session_confirm_ack(&mut self, sender: &str, _content: &str) {
+    /// Handles a session confirmation acknowledgment message, under the same
+    /// corroboration rules as a probe.
+    pub(crate) fn handle_session_confirm_ack(&mut self, sender: &str, content: &str) {
         let sender_owned = sender.to_string();
         match self.has_mls_session(&sender_owned) {
             Ok(true) => {
-                if !self.can_confirm_from_source(&sender_owned, "confirmation_ack_received") {
-                    debug!(
-                        sender = %sender_owned,
-                        "Skipping ack confirmation until welcome send is at least attempted"
-                    );
-                } else {
-                    match self.confirm_session_state(&sender_owned, "confirmation_ack_received") {
-                        Ok(_) => {
-                            let _ = self.flush_pending_messages(&sender_owned);
-                            self.process_pending_decryption(&sender_owned);
-                        }
-                        Err(err) => {
-                            warn!(
-                                sender = %sender_owned,
-                                error = %err,
-                                "Failed to persist session confirmation after ack"
-                            );
-                        }
-                    }
-                }
+                let body = content
+                    .strip_prefix(internal_prefixes::SESSION_CONFIRM_ACK)
+                    .unwrap_or_default();
+                self.apply_session_corroboration(&sender_owned, body, "confirmation_ack_received");
             }
             Ok(false) => {
                 debug!(
@@ -731,6 +722,49 @@ impl OfflineProtocol {
                     sender = %sender_owned,
                     error = %err,
                     "Failed to validate local MLS session for confirmation ack"
+                );
+            }
+        }
+    }
+
+    /// Confirms, heals or ignores on a probe or acknowledgement body.
+    /// `plaintext_source` is the confirmation source an older peer's empty
+    /// body is held to.
+    fn apply_session_corroboration(&mut self, peer_id: &str, body: &str, plaintext_source: &str) {
+        let source = match self.corroborate_session(peer_id, body) {
+            Corroboration::Agrees => SESSION_CORROBORATED,
+            Corroboration::Absent => plaintext_source,
+            Corroboration::Split => {
+                self.heal_split_session(peer_id);
+                return;
+            }
+            Corroboration::Inconclusive => {
+                debug!(
+                    sender = %peer_id,
+                    "Not confirming on a corroboration this side cannot compare"
+                );
+                return;
+            }
+        };
+        if !self.can_confirm_from_source(peer_id, source) {
+            debug!(
+                sender = %peer_id,
+                source_event = %source,
+                "Skipping confirmation until welcome send is at least attempted"
+            );
+            return;
+        }
+        match self.confirm_session_state(peer_id, source) {
+            Ok(_) => {
+                let _ = self.flush_pending_messages(peer_id);
+                self.process_pending_decryption(peer_id);
+            }
+            Err(err) => {
+                warn!(
+                    sender = %peer_id,
+                    error = %err,
+                    source_event = %source,
+                    "Failed to persist session confirmation"
                 );
             }
         }
@@ -811,24 +845,8 @@ impl OfflineProtocol {
                         // *greater* id adopts the remote Welcome; the other
                         // keeps its own session. This guarantees both devices
                         // converge on the same MLS group.
-                        //
-                        // Addresses compare as addresses — hash bytes, the same
-                        // order `GroupId::for_session` canonicalizes slots with
-                        // — because the bech32 charset is not ASCII-monotonic,
-                        // so comparing the rendered strings would give a
-                        // different answer than every other address comparison.
-                        // Any total order converges as long as both peers use
-                        // the same one; ids that are not both addresses keep
-                        // string order.
                         let local_id: &str = &self.local_id;
-                        let remote_id: &str = sender;
-                        let local_adopts = match (
-                            local_id.parse::<offline_protocol_core::Address>(),
-                            remote_id.parse::<offline_protocol_core::Address>(),
-                        ) {
-                            (Ok(local), Ok(remote)) => local > remote,
-                            _ => local_id > remote_id,
-                        };
+                        let local_adopts = self.gives_way_to(sender);
                         if local_adopts {
                             info!(
                                 sender = %sender,

@@ -19,11 +19,32 @@ use chrono::{Duration as ChronoDuration, Utc};
 use offline_protocol_core::time::{Duration as StdDuration, Instant};
 use offline_protocol_core::{Message, MessageId, MessagePriority};
 use offline_protocol_mls::{MlsManager, WelcomeMessage};
+use offline_protocol_sealed::SessionCorroboration;
 use offline_protocol_transport::TransportType;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info, warn};
+
+/// The confirmation source for a probe or acknowledgement whose
+/// corroboration matched: group-aware proof, like a successful decrypt.
+pub(super) const SESSION_CORROBORATED: &str = "session_corroborated";
+
+/// What a confirmation probe or acknowledgement says about the session the
+/// two sides hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Corroboration {
+    /// No corroboration in the frame: an older peer, or a leaf. The plaintext
+    /// rules apply as they always did.
+    Absent,
+    /// The same group at the same epoch.
+    Agrees,
+    /// The same epoch and a different group: a split session.
+    Split,
+    /// A different epoch, which the desync path owns, or no session or MLS
+    /// on this side to compare against. Evidence of nothing.
+    Inconclusive,
+}
 
 impl OfflineProtocol {
     // ========================================================================
@@ -581,11 +602,12 @@ impl OfflineProtocol {
             .entry(peer_id.to_string())
             .or_insert(next);
         *due_at = (*due_at).max(next);
-        match self.send_internal_message(
-            peer_id,
-            internal_prefixes::SESSION_CONFIRM_PROBE.to_string(),
-            MessagePriority::High,
-        ) {
+        let probe = format!(
+            "{}{}",
+            internal_prefixes::SESSION_CONFIRM_PROBE,
+            self.session_corroboration_body(peer_id)
+        );
+        match self.send_internal_message(peer_id, probe, MessagePriority::High) {
             Ok(message_id) => {
                 self.confirmation_probe_outstanding
                     .insert(peer_id.to_string(), message_id);
@@ -1029,7 +1051,9 @@ impl OfflineProtocol {
         // proof of that; a plaintext probe/ack proves only that the peer holds
         // some session (possibly its own, pre-adoption group), so it must not
         // confirm us or we would stop retransmitting and strand the peer.
-        if self.both_create_awaiting_decrypt.contains(peer_id) && source_event != "decrypt_success"
+        if self.both_create_awaiting_decrypt.contains(peer_id)
+            && source_event != "decrypt_success"
+            && source_event != SESSION_CORROBORATED
         {
             return false;
         }
@@ -1047,7 +1071,11 @@ impl OfflineProtocol {
         // `SessionNotReady` — it can receive but never reply. The both-create gate
         // above is preserved, so a both-create owner is still restricted to *only*
         // decrypt_success (a plaintext probe/ack can never confirm it).
-        if source_event == "decrypt_success" {
+        //
+        // A corroborated probe or acknowledgement is the same proof without a
+        // message to carry it: its tag is computable only by a member of this
+        // very group at this epoch (`SessionCorroboration`).
+        if source_event == "decrypt_success" || source_event == SESSION_CORROBORATED {
             return true;
         }
 
@@ -1071,6 +1099,104 @@ impl OfflineProtocol {
                 // decrypt already returned true above and never reaches this arm.
                 "confirmation_ack_received" | "confirmation_probe_received" | "confirmation_retry"
             ),
+        }
+    }
+
+    /// Whether this device gives way to `remote_id` when the two hold
+    /// competing groups for their slot: the greater address adopts.
+    ///
+    /// Addresses compare as addresses, hash bytes, the order
+    /// `GroupId::for_session` canonicalizes slots with, because the bech32
+    /// charset is not ASCII-monotonic and comparing the rendered strings would
+    /// give a different answer than every other address comparison. Any total
+    /// order converges as long as both peers use the same one; ids that are
+    /// not both addresses keep string order.
+    pub(super) fn gives_way_to(&self, remote_id: &str) -> bool {
+        match (
+            self.local_id.parse::<offline_protocol_core::Address>(),
+            remote_id.parse::<offline_protocol_core::Address>(),
+        ) {
+            (Ok(local), Ok(remote)) => local > remote,
+            _ => self.local_id.as_str() > remote_id,
+        }
+    }
+
+    /// The body of a confirmation probe or acknowledgement to `peer_id`: this
+    /// side's corroboration of the session, or empty when there is none to
+    /// give, which the peer reads as an older device.
+    pub(super) fn session_corroboration_body(&self, peer_id: &str) -> String {
+        let nonce = *uuid::Uuid::new_v4().as_bytes();
+        let Some(mls) = self.mls_manager.as_ref() else {
+            return String::new();
+        };
+        let Ok(manager) = mls.read() else {
+            return String::new();
+        };
+        match manager.session_corroboration(peer_id, &nonce) {
+            Ok(Some((epoch, tag))) => SessionCorroboration {
+                epoch,
+                nonce: nonce.to_vec(),
+                tag,
+            }
+            .to_body(),
+            _ => String::new(),
+        }
+    }
+
+    /// What a probe or acknowledgement body from `peer_id` says about the
+    /// session the two sides hold.
+    pub(super) fn corroborate_session(&self, peer_id: &str, body: &str) -> Corroboration {
+        let Some(theirs) = SessionCorroboration::parse(body) else {
+            return Corroboration::Absent;
+        };
+        let ours = self
+            .mls_manager
+            .as_ref()
+            .and_then(|mls| mls.read().ok())
+            .and_then(|manager| manager.session_corroboration(peer_id, &theirs.nonce).ok())
+            .flatten();
+        match ours {
+            Some((epoch, tag)) if epoch == theirs.epoch && tag == theirs.tag => {
+                Corroboration::Agrees
+            }
+            Some((epoch, _)) if epoch == theirs.epoch => Corroboration::Split,
+            _ => Corroboration::Inconclusive,
+        }
+    }
+
+    /// Heals a pair that holds two different groups for its slot.
+    ///
+    /// Invariant: a split is ended by exactly one side, the one that
+    /// [`gives_way_to`](Self::gives_way_to) the other, so the pair rebuilds in
+    /// one round rather than both tearing down at once. The other side's own
+    /// probe or acknowledgement is what tells it, since each answers the
+    /// other with its tag.
+    ///
+    /// The heal is the re-key: the reset key package goes out first, then the
+    /// local group is dropped, and the peer drops its own and Welcomes this
+    /// side back. It shares the re-key floor, so a replayed probe from an
+    /// earlier session buys at most one teardown per window, and a reset that
+    /// could not be sent discards nothing and gives the slot back: the peer
+    /// was told nothing, and the next probe asks again.
+    ///
+    /// The evidence is the peer's identity signature on a tag only a member
+    /// of a different group at the same epoch would send, which is why this
+    /// is safe to act on where an ordinary decrypt failure is not (ADR 0006).
+    pub(super) fn heal_split_session(&mut self, peer_id: &str) {
+        let acts = self.gives_way_to(peer_id);
+        self.emit_event(Event::convergence_diag(
+            "session_split_detected".to_string(),
+            peer_id.to_string(),
+            format!("heals={acts}"),
+        ));
+        if !acts || !self.claim_rekey_slot(peer_id) {
+            return;
+        }
+        if self
+            .drive_session_rekey(peer_id, "after a split session")
+            .is_err()
+        {
+            self.release_rekey_slot(peer_id);
         }
     }
 
@@ -2359,9 +2485,10 @@ impl OfflineProtocol {
 
     pub(super) fn session_ready_context_for_source(source_event: &str) -> MlsOperationContext {
         match source_event {
-            "confirmation_ack_received" | "confirmation_probe_received" | "decrypt_success" => {
-                MlsOperationContext::Receive
-            }
+            "confirmation_ack_received"
+            | "confirmation_probe_received"
+            | "decrypt_success"
+            | SESSION_CORROBORATED => MlsOperationContext::Receive,
             "welcome_received" => MlsOperationContext::Welcome,
             _ => MlsOperationContext::Send,
         }
