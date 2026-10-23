@@ -21,8 +21,43 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   each other over a `BroadcastChannel`, prove their identities with the
   peer-stream preamble, and exchange end-to-end encrypted direct and group
   messages with no server; see [docs/bridges/web.md](docs/bridges/web.md) and
-  [examples/web-two-tabs](examples/web-two-tabs). Storage is in memory for
-  now, so a reload is a new device.
+  [examples/web-two-tabs](examples/web-two-tabs).
+- **A browser node is durable.** Its identity, groups and delivery state live
+  in sealed append logs over origin-private (OPFS) files, so a reload or a
+  crash comes back as the same device and still a member of its groups. Every
+  write is flushed before it is acknowledged, every record is sealed and
+  bound to its position, and the store key is itself sealed under a
+  non-extractable WebCrypto key. One node runs per account per origin; a
+  second is refused. `storage: "memory"` keeps the old behaviour. See
+  [W8](docs/bridges/web.md#w8-storage-is-a-sealed-log-one-node-per-account),
+  and [R26](docs/security/threat-model.md#r26-a-browser-nodes-store-key-is-reachable-from-its-origin)
+  for what the sealing does not protect against.
+- **Browsers connect over WebRTC with no server.** `WebRtcCarrier` links two
+  devices on one network with one data channel, set up from two codes the
+  people exchange by QR code or paste; no ICE server is configured. See
+  [W9](docs/bridges/web.md#w9-webrtc-lives-on-the-page-and-is-set-up-offline),
+  [R27](docs/security/threat-model.md#r27-a-webrtc-connection-code-is-unauthenticated-and-names-local-addresses)
+  and [examples/web-lobby](examples/web-lobby), a two-player Pong game.
+- **Ephemeral sends for state the next send replaces.**
+  `SendMessageOptions::ephemeral` and `GroupSendOptions::ephemeral` (and
+  `{ ephemeral: true }` on the browser's `sendMessage` and
+  `sendGroupMessage`) send once over a live direct link, ask for no
+  acknowledgement and keep nothing to retry, so a game's positions never
+  arrive late. With no link, or no confirmed session, the call fails at once.
+  A group member who keeps missing them gets a reliable message every 256
+  sends, so their ratchet never falls out of reach, and is handed nothing
+  newer until that message is acknowledged. On the browser's store an
+  ephemeral group message costs the sender two flushes against four. Not yet
+  on the native bindings. See
+  [ADR 0032](docs/adr/0032-ephemeral-sends-go-once-over-a-live-link.md) and
+  [W10](docs/bridges/web.md#w10-an-ephemeral-send-goes-once-over-a-live-link).
+- **Browsers can meet by room code through Nostr relays.** `NostrSignaller`
+  carries the two WebRTC codes through relays the application names, sealed
+  under a key derived from a room code and signed by single-use keys. See
+  [W11](docs/bridges/web.md#w11-signalling-can-ride-a-nostr-room) and
+  [R28](docs/security/threat-model.md#r28-a-signalling-room-code-admits-whoever-holds-it).
+- **`WebRtcCarrier` takes the application's STUN and TURN servers**
+  (`iceServers`), for links between networks. The default is still none.
 
 - **A Ruby binding.** `bindings/ruby` is one generated file,
   `lib/offline_protocol.rb`, written by UniFFI's own Ruby generator from the
@@ -49,6 +84,38 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   and panics on first use; there it is `web-time`. Nothing changes on any
   existing platform: the types are the standard library's own.
   `clocks_are_read_through_core_time_only` refuses a direct import.
+- **`account_storage_namespace` no longer needs the `file-store` feature.**
+  The browser's store derives its folder with it, and a browser build has no
+  POSIX files. It is still re-exported from `offline_protocol::file_store`.
+- **Telemetry counts only acknowledged sends as sent.** An ephemeral message
+  is never delivered or failed, so counting it would lower the delivery ratio
+  by every game update.
+
+### Fixed
+
+- **A browser log store whose compaction fails no longer retries it on every
+  write.** The next attempt waits for another mebibyte of log.
+- **A corrupted length prefix in the browser log store is refused, not cut.**
+  It read as a torn tail, so acknowledged records after it were truncated.
+  The log is now refused untouched whenever an intact record follows the
+  damage anywhere. Replay also reads the log in one call instead of two per
+  record.
+- **A slow WebRTC peer no longer grows the page's memory without bound.** A
+  connection with more than 8 MiB waiting behind the channel is closed.
+- **A browser node's calls after `stop()` reject** instead of waiting for
+  ever, and the tab carrier no longer throws on a frame queued as it closed.
+- **One unreachable Nostr relay no longer stops a signalling room from
+  opening on the others.** A refused socket was counted as two failed
+  relays.
+- **A signalling host no longer forgets a joiner whose offer is still
+  fresh.** It held each session for two minutes from the first offer, while
+  a republished offer, or one from a joiner whose clock runs ahead, stays
+  acceptable for longer, so a relay's late repeat opened a second
+  connection. The worker now reports when each offer stops being fresh, and
+  the host holds the session until the newest one does.
+- **A signalling room that fails to open closes its relay sockets.** A relay
+  that took the connection and never confirmed the subscription left its
+  socket open after `host()` rejected.
 
 ## [0.30.0] — 2026-10-21
 

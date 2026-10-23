@@ -19,7 +19,7 @@
 - **Group Roles**: Admin/member role management with last-admin safety invariants
 - **DORS**: Dynamic Offline Relay Switch for optimal transport selection
 - **Reliability**: ACKs, retries, and deduplication built-in
-- **Cross-Platform Bindings**: React Native for iOS/Android and Python for macOS/Linux/Windows, plus an early native Swift package and Android library, and a C API for every other language
+- **Cross-Platform Bindings**: React Native for iOS/Android and Python for macOS/Linux/Windows, plus an early native Swift package and Android library, a C API for every other language, and an experimental browser build
 
 > **What you must implement:** the Rust crates are I/O-free protocol engines for everything that moves a message. They queue, route, encrypt, and select transports, but never open a socket or touch a radio for the protocol itself. A *platform bridge* does the actual I/O: it drains each transport's outbound queue, performs the send, reports the outcome, and injects inbound bytes. The React Native binding ships these bridges for iOS and Android (BLE, WiFi Direct, Internet, Nostr, Reticulum), and the Python binding ships BLE, Internet, LAN peer-stream (the WiFi Direct slot) and gateway client (the Reticulum slot) bridges. If you consume the Rust crates directly via `cargo add`, you write the bridge yourself; the contract is documented in the [`offline-protocol-transport`](crates/offline-protocol-transport/src/lib.rs) crate docs. The one socket the crates do open is the [telemetry pipe](docs/telemetry.md)'s HTTPS upload, and only once an app enables telemetry with a key.
 
@@ -38,6 +38,7 @@ Every channel carries the version number of the release it came from.
 | Flutter (iOS, Android, preview) | [`offline_protocol`](bindings/flutter/README.md) plugin in this repository | Path dependency; see [bindings/flutter](bindings/flutter/README.md) |
 | Java (JVM 22+, desktop and server) | [`com.offlineprotocol:offline-protocol-java`](https://central.sonatype.com/artifact/com.offlineprotocol/offline-protocol-java) on Maven Central, over the native library in each release's desktop archives | `implementation("com.offlineprotocol:offline-protocol-java:0.30.0")`, see [bindings/java](bindings/java/README.md) |
 | Ruby (desktop and server) | Generated source in [bindings/ruby](bindings/ruby/README.md), over the native library in each release's desktop archives; not on RubyGems yet | See [bindings/ruby](bindings/ruby/README.md) |
+| Browser (Chrome, experimental) | [`bindings/web`](bindings/web) in this repository, over the `offline-protocol-web` crate; not yet published | Build from source; see [docs/bridges/web.md](docs/bridges/web.md) |
 
 **Python.** Wheels are published for Python 3.10 or later on macOS arm64
 (macOS 14 or later), Linux x86_64 and aarch64 (`manylinux_2_34`, so glibc

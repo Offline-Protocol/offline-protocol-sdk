@@ -123,6 +123,17 @@ implementation's decrypt-result type also has five cases, but they are not the
 same five: it splits a delivered message out as its own case and does not model
 duplicates at all, because the duplicate check runs before it.
 
+## A frame that asks for no acknowledgement
+
+A frame with `requires_ack: false` resolves to the same outcomes, and the
+receiver never acknowledges it. Control frames have always been such frames.
+Since [ADR 0032](../adr/0032-ephemeral-sends-go-once-over-a-live-link.md) an
+application message can be too: an ephemeral send, which the sender hands
+once to a live direct link and keeps nothing for. Its sender never resends
+it, so a Deferred outcome that unmarks its identifier waits for nothing, and
+a frame a receiver could not process is simply not seen; the sender's next
+update replaces it.
+
 ## Acknowledgements on a mesh link
 
 **An acknowledgement is queued ahead of data, and one frame may answer up to

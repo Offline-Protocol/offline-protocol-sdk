@@ -35,8 +35,11 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use offline_protocol::mls::InMemoryStorage;
-use offline_protocol::{Event, GroupInfo, OfflineProtocol, ProtocolConfig};
+use offline_protocol::mls::{InMemoryStorage, MlsStorage};
+use offline_protocol::{
+    Event, GroupInfo, GroupSendOptions, OfflineProtocol, ProtocolConfig, ProtocolStateStorage,
+    SendMessageOptions,
+};
 use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_transport::{
     frame, PeerStreamReader, StreamEvent, Transport, TransportStatus, TransportType,
@@ -147,16 +150,29 @@ impl Node {
     }
 
     /// Mints this device's identity over in-memory stores and returns its
-    /// address. Must run before [`Self::start`]: the address replaces the
-    /// placeholder the transport was built on.
+    /// address: a new device every time the worker starts.
     pub fn initialize(&mut self) -> NodeResult<String> {
+        self.initialize_with(
+            Arc::new(InMemoryStorage::new()),
+            Arc::new(MemoryProtocolStateStorage::new()),
+        )
+    }
+
+    /// Loads this device's identity from `mls`, minting it on the first run,
+    /// and returns its address. Must run before [`Self::start`]: the address
+    /// replaces the placeholder the transport was built on.
+    ///
+    /// The two stores must be separate instances; one backend behind both
+    /// handles lets one category collide with the other's.
+    pub fn initialize_with(
+        &mut self,
+        mls: Arc<dyn MlsStorage>,
+        state: Arc<dyn ProtocolStateStorage>,
+    ) -> NodeResult<String> {
         if let Some(address) = self.protocol.local_address() {
             return Ok(address.to_string());
         }
-        self.protocol.initialize_mls(
-            Arc::new(InMemoryStorage::new()),
-            Arc::new(MemoryProtocolStateStorage::new()),
-        )?;
+        self.protocol.initialize_mls(mls, state)?;
         let address = self
             .protocol
             .local_address()
@@ -347,10 +363,24 @@ impl Node {
     }
 
     /// Sends a direct message, end-to-end encrypted once a session exists.
-    pub fn send_message(&mut self, recipient: &str, content: &str) -> NodeResult<String> {
-        let id = self
-            .protocol
-            .send_message(recipient, content, None, None::<String>)?;
+    ///
+    /// `ephemeral` sends it once over the live link to `recipient` and never
+    /// retries it (ADR 0032): for state the next send replaces. It fails at
+    /// once with no link or no confirmed session.
+    pub fn send_message(
+        &mut self,
+        recipient: &str,
+        content: &str,
+        ephemeral: bool,
+    ) -> NodeResult<String> {
+        let id = self.protocol.send_message_with(
+            recipient,
+            content,
+            SendMessageOptions {
+                ephemeral,
+                ..Default::default()
+            },
+        )?;
         Ok(id.to_string())
     }
 
@@ -368,11 +398,22 @@ impl Node {
     }
 
     /// Sends to every member of `group_id`; returns the per-member ids as a
-    /// JSON array.
-    pub fn send_group_message(&mut self, group_id: &str, content: &str) -> NodeResult<String> {
-        let ids = self
-            .protocol
-            .send_group_message(group_id, content, None, None)?;
+    /// JSON array. `ephemeral` as for [`Self::send_message`], to every member
+    /// holding a live link.
+    pub fn send_group_message(
+        &mut self,
+        group_id: &str,
+        content: &str,
+        ephemeral: bool,
+    ) -> NodeResult<String> {
+        let ids = self.protocol.send_group_message_with(
+            group_id,
+            content,
+            GroupSendOptions {
+                ephemeral,
+                ..Default::default()
+            },
+        )?;
         let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
         serde_json::to_string(&ids).map_err(|e| NodeError(e.to_string()))
     }

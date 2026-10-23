@@ -1,7 +1,9 @@
 //! Two engines on one host, joined by the links a page would carry.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use crate::log_store::{Category, LogStore, MemoryFile, STORE_KEY_BYTES};
 use crate::node::{LinkId, Node, MAX_LINKS};
 
 struct Peer {
@@ -77,7 +79,7 @@ fn a_direct_message_arrives_end_to_end_encrypted() {
         saw(a, "secure_session_established", "peer_id", &b_addr)
     }));
     a.node
-        .send_message(&b_addr, "hello from a tab")
+        .send_message(&b_addr, "hello from a tab", false)
         .expect("send");
     assert!(run_until(&mut a, &mut b, |_, b| {
         b.events.iter().any(|e| {
@@ -116,7 +118,9 @@ fn a_group_message_reaches_an_invited_member() {
         "group_id",
         &group
     )));
-    a.node.send_group_message(&group, "serve").expect("send");
+    a.node
+        .send_group_message(&group, "serve", false)
+        .expect("send");
     assert!(run_until(&mut a, &mut b, |_, b| {
         b.events
             .iter()
@@ -146,7 +150,9 @@ fn a_second_link_proving_an_announced_address_is_refused() {
     let refusal = refusal.expect("the duplicate link was accepted");
     assert!(refusal.contains("already announced"), "{refusal}");
     // The first link still carries traffic.
-    a.node.send_message(&b_addr, "still here").expect("send");
+    a.node
+        .send_message(&b_addr, "still here", false)
+        .expect("send");
     assert!(run_until(&mut a, &mut b, |_, b| {
         b.events
             .iter()
@@ -199,7 +205,9 @@ fn a_frame_for_a_link_that_closed_is_dropped_not_misdelivered() {
         &b_addr
     )));
     // Queued for b's link, which then closes before the page drains it.
-    a.node.send_message(&b_addr, "too late").expect("send");
+    a.node
+        .send_message(&b_addr, "too late", false)
+        .expect("send");
     a.node.close_link(a.link);
     assert_eq!(a.node.next_outbound(), None);
 }
@@ -243,7 +251,9 @@ fn a_link_that_never_proves_anyone_is_closed_and_reported() {
         Some("unknown link")
     );
     // The proved link is untouched.
-    a.node.send_message(&b_addr, "still here").expect("send");
+    a.node
+        .send_message(&b_addr, "still here", false)
+        .expect("send");
     assert!(run_until(&mut a, &mut b, |_, b| {
         b.events
             .iter()
@@ -323,4 +333,238 @@ fn the_browser_tests_run_in_ci() {
             needle.trim()
         );
     }
+}
+
+/// The page remembers a signalling session until the newest offer it has
+/// seen for it stops being fresh, by the bound the worker reports, rather
+/// than for a fixed time from first sight. A fixed hold forgets a session
+/// whose republished offer, or whose joiner's fast clock, keeps it fresh
+/// longer, and a relay's late repeat then opens a second connection (W11).
+/// The bound itself is pinned by
+/// `an_opened_signal_says_how_long_a_relay_can_repeat_it`.
+#[test]
+fn the_host_remembers_a_session_as_long_as_its_offer_is_fresh() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let Some(page) = read_repo_file(&root.join("bindings/web/src/nostr-signal.js")) else {
+        return;
+    };
+    let host = page
+        .split_once("async host(")
+        .and_then(|(_, rest)| rest.split_once("async join("))
+        .map(|(host, _)| host)
+        .expect("nostr-signal.js defines host() before join()");
+    for repeat_or_first in [
+        "hold(signal.session, known, signal.freshUntilMs)",
+        "hold(signal.session, entry, signal.freshUntilMs)",
+    ] {
+        assert!(
+            host.contains(repeat_or_first),
+            "host() does not hold a session by the offer's freshness: `{repeat_or_first}`"
+        );
+    }
+    assert!(
+        !page.contains("SESSION_HOLD_MS"),
+        "nostr-signal.js holds a session for a fixed time again"
+    );
+}
+
+/// The files of one node's two logs, kept across a restart.
+struct Disk {
+    mls: (MemoryFile, MemoryFile),
+    state: (MemoryFile, MemoryFile),
+}
+
+impl Disk {
+    fn new() -> Self {
+        Self {
+            mls: Default::default(),
+            state: Default::default(),
+        }
+    }
+
+    fn boot(&self, profile: &str) -> Peer {
+        self.boot_measured(profile).0
+    }
+
+    /// [`Self::boot`], with the two logs for a test that reads their costs.
+    fn boot_measured(&self, profile: &str) -> (Peer, [Arc<LogStore<MemoryFile>>; 2]) {
+        let key = [42u8; STORE_KEY_BYTES];
+        let mls = LogStore::open(&key, Category::Mls, self.mls.0.clone(), self.mls.1.clone())
+            .expect("mls log");
+        let state = LogStore::open(
+            &key,
+            Category::ProtocolState,
+            self.state.0.clone(),
+            self.state.1.clone(),
+        )
+        .expect("state log");
+        let (mls, state) = (Arc::new(mls), Arc::new(state));
+        let mut node = Node::new("web-test", profile).expect("node");
+        let address = node
+            .initialize_with(mls.clone(), state.clone())
+            .expect("initialize");
+        node.start().expect("start");
+        let link = node.open_link().expect("link");
+        let peer = Peer {
+            node,
+            link,
+            events: Vec::new(),
+            address,
+        };
+        (peer, [mls, state])
+    }
+}
+
+#[test]
+fn a_node_killed_and_restarted_over_its_logs_is_the_same_member() {
+    let mut a = peer("host");
+    let disk = Disk::new();
+    let mut b = disk.boot("player");
+    let b_addr = b.address.clone();
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        saw(a, "secure_session_established", "peer_id", &b_addr)
+    }));
+    let info: serde_json::Value =
+        serde_json::from_str(&a.node.create_group("lobby").expect("group")).expect("json");
+    let group = info["group_id"].as_str().expect("group id").to_string();
+    let mut invited = false;
+    for _ in 0..40 {
+        if a.node.invite_to_group(&group, &b_addr).is_ok() {
+            invited = true;
+            break;
+        }
+        run_until(&mut a, &mut b, |_, _| true);
+    }
+    assert!(invited, "the invite never found the member's key package");
+    assert!(run_until(&mut a, &mut b, |_, b| saw(
+        b,
+        "group_member_added",
+        "group_id",
+        &group
+    )));
+    a.node
+        .send_group_message(&group, "before", false)
+        .expect("send");
+    assert!(run_until(&mut a, &mut b, |_, b| {
+        b.events
+            .iter()
+            .any(|e| e["type"] == "group_message_received" && e["content"] == "before")
+    }));
+
+    // A crash: b is dropped without stop, and a's carrier to it closes.
+    drop(b);
+    a.node.close_link(a.link);
+    a.link = a.node.open_link().expect("link");
+    a.events.clear();
+
+    let mut b = disk.boot("player");
+    assert_eq!(
+        b.address, b_addr,
+        "a restart must load the identity, not mint one"
+    );
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        saw(a, "neighbor_discovered", "peer_id", &b_addr)
+    }));
+    a.node
+        .send_group_message(&group, "after", false)
+        .expect("send");
+    assert!(
+        run_until(&mut a, &mut b, |_, b| {
+            b.events
+                .iter()
+                .any(|e| e["type"] == "group_message_received" && e["content"] == "after")
+        }),
+        "the restarted member could not read the group: {:?}",
+        b.events
+    );
+    assert!(
+        !b.events
+            .iter()
+            .any(|e| e["type"] == "message_decryption_failed"),
+        "{:?}",
+        b.events
+    );
+}
+
+/// Store flushes per message for one member at 10 Hz-style sends: what an
+/// ephemeral send saves against the acknowledged ladder (W10).
+#[test]
+fn an_ephemeral_group_send_costs_fewer_flushes_than_a_reliable_one() {
+    let disk = Disk::new();
+    let (mut a, logs) = disk.boot_measured("host");
+    let mut b = peer("player");
+    let b_addr = b.address.clone();
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        saw(a, "secure_session_established", "peer_id", &b_addr)
+    }));
+    let info: serde_json::Value =
+        serde_json::from_str(&a.node.create_group("pong").expect("group")).expect("json");
+    let group = info["group_id"].as_str().expect("group id").to_string();
+    let mut invited = false;
+    for _ in 0..40 {
+        if a.node.invite_to_group(&group, &b_addr).is_ok() {
+            invited = true;
+            break;
+        }
+        run_until(&mut a, &mut b, |_, _| true);
+    }
+    assert!(invited, "the invite never found the member's key package");
+    assert!(run_until(&mut a, &mut b, |_, b| saw(
+        b,
+        "group_member_added",
+        "group_id",
+        &group
+    )));
+    assert!(run_until(&mut a, &mut b, |_, _| true));
+
+    let flushes = |_: &Peer| logs.iter().map(|log| log.stats().flushes).sum::<u64>();
+    const SENDS: usize = 20;
+    let measure = |a: &mut Peer, b: &mut Peer, ephemeral: bool, tag: &str| {
+        let before = flushes(a);
+        for n in 0..SENDS {
+            a.node
+                .send_group_message(&group, &format!("{tag} {n}"), ephemeral)
+                .expect("send");
+            let wanted = format!("{tag} {n}");
+            assert!(run_until(a, b, |_, b| b.events.iter().any(|e| e["type"]
+                == "group_message_received"
+                && e["content"] == wanted.as_str())));
+        }
+        // Let acknowledgements land and the outbox settle.
+        for _ in 0..8 {
+            run_until(a, b, |_, _| true);
+        }
+        (flushes(a) - before) as f64 / SENDS as f64
+    };
+    let reliable = measure(&mut a, &mut b, false, "reliable");
+    let ephemeral = measure(&mut a, &mut b, true, "ephemeral");
+    eprintln!("flushes per group message: reliable {reliable:.2}, ephemeral {ephemeral:.2}");
+    assert!(
+        ephemeral < reliable,
+        "reliable {reliable:.2} vs ephemeral {ephemeral:.2}"
+    );
+}
+
+#[test]
+fn an_ephemeral_direct_message_with_no_link_fails_at_once() {
+    let (mut a, mut b) = (peer("alice"), peer("bob"));
+    let b_addr = b.address.clone();
+    assert!(run_until(&mut a, &mut b, |a, _| {
+        saw(a, "secure_session_established", "peer_id", &b_addr)
+    }));
+    a.node
+        .send_message(&b_addr, "paddle 4", true)
+        .expect("linked and confirmed");
+    assert!(run_until(&mut a, &mut b, |_, b| b
+        .events
+        .iter()
+        .any(
+            |e| e["type"] == "message_received" && e["content"] == "paddle 4"
+        )));
+    a.node.close_link(a.link);
+    let error = a
+        .node
+        .send_message(&b_addr, "paddle 5", true)
+        .expect_err("no link");
+    assert!(error.0.contains("live direct link"), "{}", error.0);
 }

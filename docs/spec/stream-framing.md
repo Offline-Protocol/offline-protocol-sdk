@@ -226,9 +226,9 @@ sixteen open streams, of which at most twelve are inbound and four come from
 one remote address, because a listener on a shared network is open to every
 device on it; the Python manager's choices are in its bridge rules.
 Which of two streams for one address to keep is policy too, but every
-implementation in this repository keeps the same one: the stream opened by
-the lower address (addresses compared by their UTF-8 bytes), and the newer of
-two such. Both ends of a pair dial and must agree without talking: a host
+implementation in this repository that dials over a LAN keeps the same one:
+the stream opened by the lower address (addresses compared by their UTF-8
+bytes), and the newer of two such. Both ends of a pair dial and must agree without talking: a host
 dials every peer it lists or discovers, and so do an iPhone and an Android
 phone ([ADR 0027](../adr/0027-ios-peer-streams-ride-network-framework.md),
 [ADR 0028](../adr/0028-android-peer-streams-join-the-lan.md)). Two ends that
@@ -236,6 +236,18 @@ compute the rule differently each keep the stream the other closes and
 reconnect forever. The rule costs the higher address an immediate reconnect
 past its own half-open stream: the lower end refuses the new one until
 keepalive ends the old.
+
+The browser node is the exception, and only meets itself: it keeps whichever
+link verified first and refuses every later one for that address
+([web bridge W3](../bridges/web.md#w3-the-page-moves-bytes-the-engine-decides-what-they-mean)).
+Its carriers do not dial on discovery. A tab carrier opens one link per
+remote instance, and a WebRTC link exists only because two people exchanged
+codes, so two links to one address are a second tab with the same identity
+or a code used twice, and the first link is the one both ends already use.
+A WebRTC data channel is a peer stream like any other: reliable and ordered,
+with message boundaries the framing ignores. The browser cuts outbound bytes
+into chunks of at most 16 KiB, a size every browser accepts, and the reader
+joins them, so a frame is never limited by a browser's message ceiling.
 
 ## Finding a peer on a LAN
 

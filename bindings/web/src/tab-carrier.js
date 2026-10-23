@@ -28,12 +28,15 @@ const REFUSAL_MS = 30000;
 const MAX_REFUSED = 256;
 
 export class TabCarrier {
-  constructor(appId, engine) {
+  /// `instance` is this node's carrier address. The page chooses it, so the
+  /// page can say `bye` for a worker it terminated, which cannot say it.
+  constructor(appId, engine, instance = crypto.randomUUID()) {
     this.engine = engine;
-    this.self = crypto.randomUUID();
+    this.self = instance;
     this.links = new Map(); // remote instance -> { link, heard }
     this.instances = new Map(); // link -> remote instance
     this.refused = new Map(); // remote instance -> ignored until (ms)
+    this.closed = false;
     this.channel = new BroadcastChannel(`offline-protocol/${appId}`);
     this.channel.onmessage = ({ data }) => this.#receive(data);
     this.#say({ type: "hello" });
@@ -53,12 +56,17 @@ export class TabCarrier {
   }
 
   close() {
+    if (this.closed) return;
     clearInterval(this.heartbeat);
     this.#say({ type: "bye" });
+    this.closed = true;
     this.channel.close();
   }
 
+  // A closed channel throws on post, and a frame the engine queued before
+  // the carrier closed has nowhere to go.
   #say(message) {
+    if (this.closed) return;
     this.channel.postMessage({ ...message, from: this.self });
   }
 

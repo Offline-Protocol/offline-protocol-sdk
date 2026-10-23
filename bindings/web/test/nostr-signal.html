@@ -1,0 +1,141 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<pre id="log"></pre>
+<script type="module">
+// Two nodes that share only a room code find each other through a Nostr
+// relay (the runner's local one), link over WebRTC, and send an ephemeral
+// direct message across, with a dead relay listed ahead of the live one. A
+// join to a room nobody hosts gives up, a room that never opens closes its
+// sockets, the host remembers a session for as long as its newest offer is
+// fresh, and a stopped node refuses calls instead of hanging. The title ends
+// as PASS or FAIL: <step>.
+import { OfflineNode, WebRtcCarrier, NostrSignaller } from "../src/index.js";
+import { log, waitFor, run } from "./common.js";
+
+const relay = new URLSearchParams(location.search).get("relay") ?? "ws://127.0.0.1:8766";
+const appId = `web-nostr-${crypto.randomUUID()}`;
+
+await run(async (step) => {
+  const [a, b] = await Promise.all([
+    OfflineNode.start({ appId, profile: "host", storage: "memory", tabs: false }),
+    OfflineNode.start({ appId, profile: "joiner", storage: "memory", tabs: false }),
+  ]);
+  // A relay that refuses the connection ahead of the live one: a failed
+  // socket fires both error and close, and the room must still open on the
+  // relay that answers.
+  const relays = ["ws://127.0.0.1:9", relay];
+
+  step.name = "host";
+  const room = await a.newRoom();
+  const hosting = await new NostrSignaller(a, { relays }).host(room, new WebRtcCarrier(a));
+  log(`hosting room ${room} on ${relay}`);
+
+  step.name = "join";
+  const sessions = Promise.all([
+    waitFor(a, "secure_session_established", (e) => e.peer_id === b.address),
+    waitFor(b, "secure_session_established", (e) => e.peer_id === a.address),
+  ]);
+  await new NostrSignaller(b, { relays }).join(room, new WebRtcCarrier(b));
+  await sessions;
+  log("joined through the relay; session established over WebRTC");
+
+  step.name = "ephemeral message";
+  const received = waitFor(a, "message_received", (e) => e.content === "paddle at 12");
+  await b.sendMessage(a.address, "paddle at 12", { ephemeral: true });
+  await received;
+  log("an ephemeral direct message crossed");
+
+  step.name = "an empty room";
+  const c = await OfflineNode.start({ appId, profile: "stray", storage: "memory", tabs: false });
+  const nobody = await c.newRoom();
+  const refused = await new NostrSignaller(c, { relays })
+    .join(nobody, new WebRtcCarrier(c), { timeoutMs: 3000 })
+    .then(() => false, () => true);
+  if (!refused) throw new Error("a join to a room nobody hosts resolved");
+  log("a join to a room nobody hosts gave up");
+
+  step.name = "a room that never opens";
+  // A relay that takes the socket and never confirms the subscription: host()
+  // gives up after its open timeout and must not leave that socket open.
+  const made = [];
+  const NativeWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = class extends NativeWebSocket {
+    constructor(...args) {
+      super(...args);
+      made.push(this);
+    }
+  };
+  let failed;
+  try {
+    failed = await new NostrSignaller(c, { relays: [`${relay}/silent`] })
+      .host(await c.newRoom(), new WebRtcCarrier(c))
+      .then(() => false, () => true);
+  } finally {
+    globalThis.WebSocket = NativeWebSocket;
+  }
+  if (!failed) throw new Error("a room on a silent relay opened");
+  if (made.length === 0) throw new Error("the silent relay was never dialled");
+  const open = made.filter((s) => s.readyState === WebSocket.CONNECTING || s.readyState === WebSocket.OPEN);
+  if (open.length > 0) throw new Error(`${open.length} socket(s) left open after host() failed`);
+  log("a room that never opened closed its sockets");
+
+  step.name = "session hold";
+  // host() driven with offers whose freshness the page sets: a stand-in node
+  // opens a relay message as the signal its content names, so each offer's
+  // freshUntilMs is chosen here. The carrier counts the connections host()
+  // answers: one per session the host does not remember.
+  const topic = crypto.randomUUID();
+  const stand = {
+    signalSubscription: async (_room, id) => JSON.stringify(["REQ", id, { "#t": [topic] }]),
+    signalOpen: async (_room, message) => {
+      const [type, , event] = JSON.parse(message);
+      return type === "EVENT" ? JSON.parse(event.content) : null;
+    },
+    signalEvent: async () => JSON.stringify(["EVENT", { kind: 1, tags: [], content: "{}" }]),
+  };
+  let answered = 0;
+  const counting = { answer: async () => (answered++, { code: "op1.x", close() {} }) };
+  const holder = await new NostrSignaller(stand, { relays: [relay] }).host("room", counting);
+  const sender = new WebSocket(relay);
+  await new Promise((r) => (sender.onopen = r));
+  const session = "ab".repeat(16);
+  const offer = (freshForMs) =>
+    sender.send(
+      JSON.stringify([
+        "EVENT",
+        {
+          kind: 25912,
+          tags: [["t", topic]],
+          created_at: Math.floor(Date.now() / 1000),
+          content: JSON.stringify({ role: "offer", session, code: "op1.y", freshUntilMs: Date.now() + freshForMs }),
+        },
+      ]),
+    );
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+  offer(1000); // fresh for 1 s
+  await pause(500);
+  offer(1500); // a republish, fresh 1 s past the first
+  await pause(1000); // past the first offer's bound, inside the second's
+  offer(1500);
+  await pause(300);
+  if (answered !== 1) throw new Error(`a repeat inside the newest offer's freshness opened ${answered} connections`);
+  await pause(2000); // past every offer's bound: the session is forgotten
+  offer(1000);
+  await pause(300);
+  if (answered !== 2) throw new Error(`an offer after the hold ran out opened ${answered} connections, not 2`);
+  sender.close();
+  holder.close();
+  log("the host held a session until its newest offer went stale");
+
+  step.name = "stop";
+  hosting.close();
+  await Promise.all([a.stop(), b.stop(), c.stop()]);
+  const after = await Promise.race([
+    a.sendMessage(b.address, "after stop").then(() => "resolved", () => "rejected"),
+    new Promise((r) => setTimeout(() => r("hung"), 2000)),
+  ]);
+  if (after !== "rejected") throw new Error(`a call after stop ${after}`);
+  log("a call after stop rejects");
+});
+</script>

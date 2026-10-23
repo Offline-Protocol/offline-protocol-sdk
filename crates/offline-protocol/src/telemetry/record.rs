@@ -398,7 +398,9 @@ pub(crate) mod tests {
                 recipient: String::new(),
                 content: String::new(),
                 priority: String::new(),
-                requires_ack: false,
+                // An app message, which asks for an acknowledgement. An
+                // ephemeral one does not and is not collected (ADR 0032).
+                requires_ack: true,
                 timestamp: 0,
                 lamport_clock: 0,
                 forward_info: None,

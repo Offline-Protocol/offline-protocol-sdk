@@ -4,9 +4,64 @@
 //! JavaScript, so the worker that owns the engine decides when events and
 //! outbound frames are read (see the invariants in [`crate::node`]).
 
+use std::sync::Arc;
+
 use wasm_bindgen::prelude::*;
 
+use crate::log_store::{Category, LogStats, LogStore, STORE_KEY_BYTES};
 use crate::node::{LinkId, Node, NodeError};
+use crate::opfs::{OpfsFile, SyncAccessHandle};
+use crate::signal;
+
+/// The folder an account's files live in, under the origin's OPFS root: the
+/// namespace every binding derives for one application id and profile, so
+/// two profiles never share a log.
+#[wasm_bindgen(js_name = storageNamespace)]
+pub fn storage_namespace(app_id: &str, profile: &str) -> String {
+    offline_protocol::account_storage_namespace(app_id, profile)
+}
+
+/// A fresh room code for signalling through Nostr (W11): eighty bits, in
+/// letters and digits a person can read out.
+#[wasm_bindgen(js_name = signalNewRoom)]
+pub fn signal_new_room() -> String {
+    signal::new_room()
+}
+
+/// The relay `REQ` text that receives `room`'s signalling.
+///
+/// It asks from as far back as [`signal::open`] accepts an event, so a peer
+/// whose clock runs behind this one by anything inside that window is
+/// forwarded and then accepted, rather than filtered out by the relay first.
+#[wasm_bindgen(js_name = signalSubscription)]
+pub fn signal_subscription(room: &str, subscription_id: &str) -> Result<String, JsError> {
+    let since = signal::now_unix_secs().saturating_sub(signal::MAX_EVENT_AGE_SECS);
+    signal::subscription(room, subscription_id, since).map_err(|e| JsError::new(&e))
+}
+
+/// The relay `EVENT` text carrying one connection code for `room`, sealed
+/// under the room key and signed by a key used once. `role` is "offer" or
+/// "answer"; `session` is the joiner's 32 hex characters.
+#[wasm_bindgen(js_name = signalEvent)]
+pub fn signal_event(room: &str, role: &str, session: &str, code: &str) -> Result<String, JsError> {
+    let signal = signal::Signal {
+        role: signal::Role::parse(role).map_err(|e| JsError::new(&e))?,
+        session: session.to_string(),
+        code: code.to_string(),
+    };
+    signal::event(room, &signal).map_err(|e| JsError::new(&e))
+}
+
+/// Opens one message a relay sent: `{role, session, code, freshUntilMs}` as
+/// JSON when it is an authentic, fresh signal for `room`, otherwise
+/// `undefined`. `freshUntilMs` is when this clock stops accepting the event
+/// ([`signal::Opened::fresh_until`]).
+#[wasm_bindgen(js_name = signalOpen)]
+pub fn signal_open(room: &str, relay_message: &str) -> Option<String> {
+    signal::open(room, relay_message, signal::now_unix_secs()).map(|o| o.to_json())
+}
+
+type DurableStores = (Arc<LogStore<OpfsFile>>, Arc<LogStore<OpfsFile>>);
 
 fn js(error: NodeError) -> JsError {
     JsError::new(&error.0)
@@ -38,6 +93,7 @@ impl OutboundFrame {
 #[wasm_bindgen]
 pub struct WebEngine {
     node: Node,
+    durable: Option<DurableStores>,
 }
 
 #[wasm_bindgen]
@@ -48,12 +104,66 @@ impl WebEngine {
     pub fn new(app_id: &str, profile: &str) -> Result<WebEngine, JsError> {
         Ok(Self {
             node: Node::new(app_id, profile).map_err(js)?,
+            durable: None,
         })
     }
 
-    /// Mints this device's identity and returns its `off1…` address.
+    /// Mints a new identity held in memory and returns its `off1…` address.
+    /// The identity ends with the worker.
     pub fn initialize(&mut self) -> Result<String, JsError> {
         self.node.initialize().map_err(js)
+    }
+
+    /// Opens the account's sealed logs, loads its identity (minting it on the
+    /// first run), and returns its `off1…` address.
+    ///
+    /// `store_key` is the 32-byte key the worker unwrapped; the four handles
+    /// are the MLS log's two files and the protocol-state log's two. Refuses,
+    /// and changes nothing, when a log holds records this key does not open.
+    #[wasm_bindgen(js_name = initializeDurable)]
+    pub fn initialize_durable(
+        &mut self,
+        store_key: &[u8],
+        mls_first: SyncAccessHandle,
+        mls_second: SyncAccessHandle,
+        state_first: SyncAccessHandle,
+        state_second: SyncAccessHandle,
+    ) -> Result<String, JsError> {
+        let key: &[u8; STORE_KEY_BYTES] = store_key
+            .try_into()
+            .map_err(|_| JsError::new("the store key must be 32 bytes"))?;
+        let open = |category, first, second| {
+            LogStore::open(key, category, OpfsFile::new(first), OpfsFile::new(second))
+                .map(Arc::new)
+                .map_err(|e| JsError::new(&e.to_string()))
+        };
+        let mls = open(Category::Mls, mls_first, mls_second)?;
+        let state = open(Category::ProtocolState, state_first, state_second)?;
+        let address = self
+            .node
+            .initialize_with(mls.clone(), state.clone())
+            .map_err(js)?;
+        self.durable = Some((mls, state));
+        Ok(address)
+    }
+
+    /// What the durable logs have cost since they opened, as JSON
+    /// (`{"mls": {...}, "protocol_state": {...}}`), or `undefined` for an
+    /// engine held in memory.
+    #[wasm_bindgen(js_name = storeStats)]
+    pub fn store_stats(&self) -> Option<String> {
+        let (mls, state) = self.durable.as_ref()?;
+        let render = |stats: LogStats| {
+            format!(
+                r#"{{"flushes":{},"log_bytes":{},"live_bytes":{},"compactions":{}}}"#,
+                stats.flushes, stats.log_bytes, stats.live_bytes, stats.compactions
+            )
+        };
+        Some(format!(
+            r#"{{"mls":{},"protocol_state":{}}}"#,
+            render(mls.stats()),
+            render(state.stats())
+        ))
     }
 
     /// Starts the engine.
@@ -118,10 +228,18 @@ impl WebEngine {
         self.node.next_closed()
     }
 
-    /// Sends a direct message; returns its id.
+    /// Sends a direct message; returns its id. `ephemeral` sends it once
+    /// over the live link, never acknowledged or retried (W10).
     #[wasm_bindgen(js_name = sendMessage)]
-    pub fn send_message(&mut self, recipient: &str, content: &str) -> Result<String, JsError> {
-        self.node.send_message(recipient, content).map_err(js)
+    pub fn send_message(
+        &mut self,
+        recipient: &str,
+        content: &str,
+        ephemeral: bool,
+    ) -> Result<String, JsError> {
+        self.node
+            .send_message(recipient, content, ephemeral)
+            .map_err(js)
     }
 
     /// Creates a group; returns its info as JSON.
@@ -137,8 +255,16 @@ impl WebEngine {
     }
 
     /// Sends to a group; returns the per-member message ids as JSON.
+    /// `ephemeral` as for [`WebEngine::send_message`].
     #[wasm_bindgen(js_name = sendGroupMessage)]
-    pub fn send_group_message(&mut self, group_id: &str, content: &str) -> Result<String, JsError> {
-        self.node.send_group_message(group_id, content).map_err(js)
+    pub fn send_group_message(
+        &mut self,
+        group_id: &str,
+        content: &str,
+        ephemeral: bool,
+    ) -> Result<String, JsError> {
+        self.node
+            .send_group_message(group_id, content, ephemeral)
+            .map_err(js)
     }
 }
