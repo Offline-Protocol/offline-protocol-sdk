@@ -63,6 +63,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   ("disconnected", which may recover), and when it closed, naming the object
   `offer()` or `answer()` resolved to. A page can warn about a link seconds
   before the browser gives up on it and the engine reports the peer lost.
+  A call that rejects reports nothing, and a connection closed while its
+  code was still gathering makes `offer()` or `answer()` reject rather than
+  resolve to a code nobody can use.
 
 - **A Ruby binding.** `bindings/ruby` is one generated file,
   `lib/offline_protocol.rb`, written by UniFFI's own Ruby generator from the

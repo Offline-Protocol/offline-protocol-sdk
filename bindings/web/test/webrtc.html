@@ -6,8 +6,9 @@
 // Two nodes with no tab carrier, linked only by a WebRTC data channel set up
 // from two codes and no server. Checks an MLS session, an encrypted direct
 // message, a group, game-rate group traffic acknowledged and ephemeral (with
-// what each costs the durable store), that the carrier reports the connection's state, and that closing the connection reports the peer lost. The title
-// ends as PASS or FAIL: <step>.
+// what each costs the durable store), that the carrier reports the connection's
+// state and reports nothing for a call that rejects, and that closing the
+// connection reports the peer lost. The title ends as PASS or FAIL: <step>.
 import { OfflineNode, WebRtcCarrier } from "../src/index.js";
 import { log, waitFor, invite, run } from "./common.js";
 
@@ -21,6 +22,37 @@ await run(async (step) => {
     OfflineNode.start({ appId, profile: "bob", tabs: false }),
   ]);
   log(`a ${a.address}\nb ${b.address}`);
+
+  step.name = "rejected calls";
+  // A call that rejects reports nothing: the page never held its object.
+  // Two ways to fail: a damaged code, and a carrier closed after the
+  // description is set but before the code is ready (pinned by closing
+  // right after setLocalDescription, so the timing is exact).
+  const spare = new WebRtcCarrier(a);
+  const reported = [];
+  spare.addEventListener("connection", ({ detail }) => reported.push(detail.state));
+  const rejects = (promise, what) =>
+    promise.then(
+      () => {
+        throw new Error(`${what} resolved`);
+      },
+      () => {},
+    );
+  await rejects(spare.answer("op1.not-a-code"), "an answer to a damaged code");
+  const setLocal = RTCPeerConnection.prototype.setLocalDescription;
+  RTCPeerConnection.prototype.setLocalDescription = async function (...args) {
+    RTCPeerConnection.prototype.setLocalDescription = setLocal;
+    await setLocal.apply(this, args);
+    spare.close();
+  };
+  try {
+    await rejects(spare.offer(), "an offer whose connection closed while it gathered");
+  } finally {
+    RTCPeerConnection.prototype.setLocalDescription = setLocal;
+  }
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  if (reported.length) throw new Error(`rejected calls reported ${reported.join(", ")}`);
+  log("rejected calls reported nothing");
 
   step.name = "signalling";
   const [ra, rb] = [new WebRtcCarrier(a), new WebRtcCarrier(b)];
