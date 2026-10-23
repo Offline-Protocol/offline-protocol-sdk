@@ -84,9 +84,11 @@ like a reset, by the spent mark, which the frame that built the session now
 moves. A session the send path builds later from a cached package records no
 stamp, so a recording older than it is bounded only as a reset always was.
 With freshness enforcement switched off no frame carries a checked stamp, so
-a `no_session` teardown is never honoured; a split whose lesser side cannot
-resend a Welcome naming the offered package then churns at the re-key floor
-instead of healing, as it would have stayed split before this decision.
+a `no_session` teardown is never honoured. A split whose lesser side cannot
+resend a Welcome naming the offered package then does not heal: the greater
+side gives up its group and waits without one until the lesser side next
+pushes a key package (a restart, or a session reset), much as the pair would
+have stayed split before this decision.
 
 ## What would undo this
 

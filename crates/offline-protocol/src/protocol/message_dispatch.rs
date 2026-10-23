@@ -749,11 +749,14 @@ impl OfflineProtocol {
                     "confirmation_probe_received",
                 );
 
-                let ack = format!(
-                    "{}{}",
-                    internal_prefixes::SESSION_CONFIRM_ACK,
-                    self.session_answer_body(&sender_owned, theirs.as_ref())
-                );
+                let Some(answer) = self.session_answer_body(&sender_owned, theirs.as_ref()) else {
+                    debug!(
+                        sender = %sender_owned,
+                        "Cannot corroborate our session; not answering the probe"
+                    );
+                    return;
+                };
+                let ack = format!("{}{}", internal_prefixes::SESSION_CONFIRM_ACK, answer);
                 if let Err(err) =
                     self.send_internal_message(&sender_owned, ack, MessagePriority::High)
                 {

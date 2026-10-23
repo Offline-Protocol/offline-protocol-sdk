@@ -572,6 +572,14 @@ impl OfflineProtocol {
     }
 
     pub(super) fn send_session_confirmation_probe(&mut self, peer_id: &str, source_event: &str) {
+        let Some(challenge) = self.session_challenge_body(peer_id) else {
+            debug!(
+                session_or_group_id = %peer_id,
+                source_event = %source_event,
+                "No corroboration to probe with; not probing"
+            );
+            return;
+        };
         // Superseded, not failed: the new probe asks the same question, so
         // the old one's retry ladder would only stack onto it. Here rather
         // than in the scan because the Welcome fast path sends one too, and
@@ -602,11 +610,7 @@ impl OfflineProtocol {
             .entry(peer_id.to_string())
             .or_insert(next);
         *due_at = (*due_at).max(next);
-        let probe = format!(
-            "{}{}",
-            internal_prefixes::SESSION_CONFIRM_PROBE,
-            self.session_challenge_body(peer_id)
-        );
+        let probe = format!("{}{}", internal_prefixes::SESSION_CONFIRM_PROBE, challenge);
         match self.send_internal_message(peer_id, probe, MessagePriority::High) {
             Ok(message_id) => {
                 self.confirmation_probe_outstanding
@@ -1148,23 +1152,24 @@ impl OfflineProtocol {
             .flatten()
     }
 
-    /// The body of a confirmation probe to `peer_id`: a challenge, or empty
-    /// when there is no session, which the peer reads as an older device.
+    /// The body of a confirmation probe to `peer_id`: a challenge. `None`
+    /// when this side cannot compute one (no session, a store read or export
+    /// that failed), and the probe is then not sent. Never an empty body: the
+    /// peer reads that as an older device and confirms on the plaintext
+    /// rules, which is how a split used to confirm.
     ///
     /// One challenge per peer and session, carried by every probe until it
     /// is answered: an unconfirmed session is probed every few seconds, and a
     /// fresh nonce per probe would retire each challenge before an answer
     /// over a slow path (the mesh, a relay) could come back, so a split
     /// there would never heal.
-    pub(super) fn session_challenge_body(&mut self, peer_id: &str) -> String {
+    pub(super) fn session_challenge_body(&mut self, peer_id: &str) -> Option<String> {
         let incarnation = self.session_incarnation(peer_id);
         let nonce = match self.corroboration_challenges.get(peer_id) {
             Some((nonce, issued_under)) if *issued_under == incarnation => *nonce,
             _ => *uuid::Uuid::new_v4().as_bytes(),
         };
-        let Some(body) = self.corroboration_body(peer_id, &nonce) else {
-            return String::new();
-        };
+        let body = self.corroboration_body(peer_id, &nonce)?;
         if !self.corroboration_challenges.contains_key(peer_id)
             && self.corroboration_challenges.len() >= MAX_REKEY_TRACKED_PEERS
         {
@@ -1172,21 +1177,25 @@ impl OfflineProtocol {
         }
         self.corroboration_challenges
             .insert(peer_id.to_string(), (nonce, incarnation));
-        body
+        Some(body)
     }
 
     /// The body of an acknowledgement answering `probe`: this side's tag over
     /// the prober's own nonce, so the prober can tell an answer to its
     /// challenge from any other frame. Empty for a probe with no
-    /// corroboration, from an older peer that reads no body.
+    /// corroboration, from an older peer that reads no body. `None` when the
+    /// tag cannot be computed, and the acknowledgement is then not sent: an
+    /// empty body would be read as an older device and confirmed on the
+    /// plaintext rules.
     pub(super) fn session_answer_body(
         &self,
         peer_id: &str,
         probe: Option<&SessionCorroboration>,
-    ) -> String {
-        probe
-            .and_then(|probe| self.corroboration_body(peer_id, &probe.nonce))
-            .unwrap_or_default()
+    ) -> Option<String> {
+        match probe {
+            None => Some(String::new()),
+            Some(probe) => self.corroboration_body(peer_id, &probe.nonce),
+        }
     }
 
     /// Whether `nonce` is the challenge this side has out to `peer_id`, issued
@@ -1246,7 +1255,10 @@ impl OfflineProtocol {
     /// Sent apart from the confirmation probes, because a confirmed session
     /// has none: one tracked as a confirmation probe was withdrawn from the
     /// outbox by the next reconciliation scan, so a first send that did not
-    /// leave was never retried.
+    /// leave was never retried. A confirmation probe whose own send fails
+    /// still clears every probe queued for the peer, this one included; only
+    /// an unconfirmed session reaches that, and its next probe carries the
+    /// same challenge.
     pub(super) fn request_session_corroboration(&mut self, peer_id: &str) {
         let now = Utc::now();
         if self
@@ -1265,11 +1277,10 @@ impl OfflineProtocol {
             peer_id.to_string(),
             now + ChronoDuration::seconds(REKEY_INTERVAL_SECS),
         );
-        let probe = format!(
-            "{}{}",
-            internal_prefixes::SESSION_CONFIRM_PROBE,
-            self.session_challenge_body(peer_id)
-        );
+        let Some(challenge) = self.session_challenge_body(peer_id) else {
+            return;
+        };
+        let probe = format!("{}{}", internal_prefixes::SESSION_CONFIRM_PROBE, challenge);
         if let Err(err) = self.send_internal_message(peer_id, probe, MessagePriority::High) {
             debug!(peer_id = %peer_id, error = %err, "Corroboration probe deferred");
         }

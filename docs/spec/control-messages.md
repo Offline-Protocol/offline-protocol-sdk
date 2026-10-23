@@ -96,7 +96,12 @@ A receiver holding a session computes the exporter over the same nonce and:
   plaintext rules it always had.
 
 Every probe is answered with the receiver's tag over the probe's nonce. A
-leaf answers with an empty body and is held to the plaintext rules. The
+leaf answers with an empty body and is held to the plaintext rules. An
+implementation that holds a session but cannot compute its tag (a store read
+or export that failed) **MUST NOT** send an empty body in its place, neither
+in a probe nor in an answer to a probe that carried one: the peer would read
+it as an older device and confirm on the plaintext rules. It sends nothing,
+and the next probe asks again. The
 frames are signed, so a mismatch is the peer's own statement, and a challenge
 is spent by its first answer, so neither a late frame nor a recording can
 drive a teardown. A challenge is repeated rather than replaced by each probe,

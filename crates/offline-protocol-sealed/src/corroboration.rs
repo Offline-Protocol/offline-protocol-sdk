@@ -10,8 +10,10 @@
 //! MLS exporter value, so only a member of the same group at the same epoch
 //! computes the same one.
 //!
-//! Both ends must agree on the label and the lengths, and a leaf builds its
-//! answer with a different MLS implementation, so they live here.
+//! Both ends must agree on the label and the lengths, and every
+//! implementation of the protocol builds against this crate, so they live
+//! here. A leaf does not corroborate: it answers a probe with an empty
+//! acknowledgement and is held to the plaintext rules.
 //!
 //! An empty or unparseable body is an older peer, and selects the plaintext
 //! rules it always had.

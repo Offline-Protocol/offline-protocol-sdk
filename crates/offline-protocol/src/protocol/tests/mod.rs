@@ -42333,6 +42333,19 @@ fn a_confirmation_probe_is_withdrawn_when_nothing_could_supersede_it() {
     assert!(!alice.confirmation_probe_outstanding.contains_key(&bob));
     assert!(!alice.confirmation_probe_superseded.contains_key(&bob));
 
+    // The rest needs a session again: a probe with no corroboration to carry
+    // is not sent at all.
+    {
+        let bob_manager =
+            crate::test_identity::manager_for("bob", Arc::new(crate::mls::InMemoryStorage::new()));
+        let bob_key_package = bob_manager.get_or_create_key_package().unwrap();
+        let manager = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        manager
+            .import_key_package(&id("bob"), &bob_key_package.key_package_data)
+            .unwrap();
+        manager.create_session(&id("bob")).unwrap();
+    }
+
     // A full ACK tracker holds the probe for the retry queue instead of
     // failing its send, so its id still comes back and the next probe can
     // supersede it: exactly one probe stays queued, and it is the tracked one.
@@ -44955,16 +44968,22 @@ fn a_challenge_outlives_the_probes_that_repeat_it() {
             .unwrap()
             .nonce
     };
-    let first = nonce_of(alice.session_challenge_body(&id("bob")));
+    let first = nonce_of(alice.session_challenge_body(&id("bob")).unwrap());
     for _ in 0..10 {
-        assert_eq!(nonce_of(alice.session_challenge_body(&id("bob"))), first);
+        assert_eq!(
+            nonce_of(alice.session_challenge_body(&id("bob")).unwrap()),
+            first
+        );
     }
     assert!(alice.answers_live_challenge(&id("bob"), &first));
     assert!(
         !alice.answers_live_challenge(&id("bob"), &first),
         "the first answer retires the challenge"
     );
-    assert_ne!(nonce_of(alice.session_challenge_body(&id("bob"))), first);
+    assert_ne!(
+        nonce_of(alice.session_challenge_body(&id("bob")).unwrap()),
+        first
+    );
 }
 
 /// Only the frames that built the session move the spent mark. An ordinary
@@ -45099,7 +45118,7 @@ fn a_successful_decrypt_retires_the_challenge() {
     establish_confirmed_session(&mut alice, &id("alice"), &mut bob, &id("bob"));
 
     let challenge = offline_protocol_sealed::SessionCorroboration::parse(
-        &alice.session_challenge_body(&id("bob")),
+        &alice.session_challenge_body(&id("bob")).unwrap(),
     )
     .unwrap()
     .nonce;
@@ -45222,7 +45241,7 @@ fn a_group_decrypt_neither_retires_the_challenge_nor_confirms_the_session() {
     both_create_losing_the_owners_welcome(&mut owner, &owner_h, &mut adopter, &adopter_h);
 
     let challenge = offline_protocol_sealed::SessionCorroboration::parse(
-        &owner.session_challenge_body(&id(hi)),
+        &owner.session_challenge_body(&id(hi)).unwrap(),
     )
     .unwrap()
     .nonce;
@@ -45234,5 +45253,36 @@ fn a_group_decrypt_neither_retires_the_challenge_nor_confirms_the_session() {
     assert!(
         owner.answers_live_challenge(&id(hi), &challenge),
         "a group decrypt must not retire the 1:1 challenge"
+    );
+}
+
+/// A side that cannot compute its tag sends nothing rather than an empty
+/// body: the peer reads an empty body as an older device and confirms on the
+/// plaintext rules, which is how a split used to confirm. An older peer's
+/// empty probe still gets the empty answer it can read.
+#[test]
+fn an_untaggable_corroboration_is_withheld_not_sent_empty() {
+    let (mut alice, alice_h) = make_encrypted_protocol("alice");
+    alice.start().unwrap();
+    // No session with bob, so no tag can be computed for him.
+    assert_eq!(alice.session_challenge_body(&id("bob")), None);
+    let probe = offline_protocol_sealed::SessionCorroboration {
+        epoch: 1,
+        nonce: vec![5u8; 16],
+        tag: vec![6u8; 16],
+    };
+    assert_eq!(alice.session_answer_body(&id("bob"), Some(&probe)), None);
+    assert_eq!(
+        alice.session_answer_body(&id("bob"), None),
+        Some(String::new())
+    );
+
+    alice_h.clear_sent_messages();
+    alice.send_session_confirmation_probe(&id("bob"), "test");
+    assert!(
+        !alice_h.sent_messages().iter().any(|m| m
+            .content
+            .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)),
+        "a probe with no challenge to carry must not be sent"
     );
 }
