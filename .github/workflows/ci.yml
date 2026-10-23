@@ -699,6 +699,7 @@ jobs:
           rm -rf bindings/react-native/ios/Generated \
                  bindings/react-native/android/src/main/java/uniffi
           rm -f bindings/python/offline_protocol_sdk/offline_protocol.py
+          rm -f bindings/ruby/lib/offline_protocol.rb
           rm -rf bindings/java/src/main/java/com/offlineprotocol/sdk
 
       # Regenerate before building anything. Bindgen reads the UDL and nothing
@@ -708,7 +709,7 @@ jobs:
       - name: Regenerate all UniFFI bindings
         run: bash scripts/generate-bindings.sh
 
-      # One regeneration, one gate: the four sets are one artifact set off one
+      # One regeneration, one gate: the five sets are one artifact set off one
       # UDL, so checking them separately would let a half-updated commit pass
       # the half of the gate it happened to satisfy.
       - name: Fail on stale bindings
@@ -717,9 +718,10 @@ jobs:
             bindings/python/offline_protocol_sdk/offline_protocol.py \
             bindings/react-native/ios/Generated/ \
             bindings/react-native/android/src/main/java/uniffi/ \
+            bindings/ruby/lib/offline_protocol.rb \
             bindings/java/src/main/java/com/offlineprotocol/sdk/; then
             echo "::error::Committed UniFFI bindings are out of date."
-            echo "Run: bash scripts/generate-bindings.sh and commit all four."
+            echo "Run: bash scripts/generate-bindings.sh and commit all five."
             exit 1
           fi
 
