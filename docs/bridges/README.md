@@ -129,7 +129,7 @@ in the uniffi crate pins the mobile call sites, which no CI job executes.
 ## C5. Hand-mirrored constants must be pinned in every language
 
 Some constants exist in several places no single compiler sees together.
-Fifteen sets do today, and they are pinned by **two different** mechanisms, so
+Sixteen sets do today, and they are pinned by **two different** mechanisms, so
 knowing which one you are touching matters.
 
 **The relay-answer prefix exemption list** is the canonical example: the core,
@@ -311,6 +311,15 @@ address opened, by UTF-8 bytes, and the newer of two such, written in
 `PeerStreamFraming.swift`, `PeerStreamFraming.kt` and `peer_stream_manager.py`
 and pinned by `every_peer_stream_manager_keeps_the_same_stream`. A drift
 reads as a pair that reconnects forever with no error on either side.
+
+**The signal-reading feed interval** is the sixteenth, pinned for a
+*relationship*: `PeerRssiFeedPolicy.kt` and `PeerRssiFeedPolicy.swift` throttle
+readings at 260 ms per address, which has to stay above the core's 250 ms
+`PeerRssi` cap. The two are measured on different clocks with a lock wait or
+queue hop between them, so an interval at or under the cap lets the core drop
+readings and halves the event rate, with no error on either side.
+`peer_rssi_feed_interval_stays_above_the_core_cap` reads both bridge sources
+and compares them with the Rust constant itself.
 
 ## C6. Config parsers must not default to literals
 

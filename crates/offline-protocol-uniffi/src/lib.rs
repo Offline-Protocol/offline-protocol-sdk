@@ -22474,6 +22474,65 @@ mod tests {
         );
     }
 
+    /// The bridges' signal-reading feed interval stays above the core's
+    /// `PeerRssi` cap.
+    ///
+    /// `PeerRssiFeedPolicy.kt` and `PeerRssiFeedPolicy.swift` each throttle
+    /// readings per address, and the core caps the event per peer at
+    /// [`PEER_RSSI_INTERVAL`]. The two are measured on different clocks with a
+    /// lock wait or queue hop between them, so a bridge interval at or under
+    /// the cap lets the core see a gap just short of it, drop the reading, and
+    /// deliver about half the rate, with nothing failing anywhere. Each
+    /// bridge's own test compares against a literal, so only this guard sees
+    /// the core constant move.
+    #[test]
+    fn peer_rssi_feed_interval_stays_above_the_core_cap() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rn_dir = manifest.join("../../bindings/react-native");
+        let read = |rel: &str| -> String {
+            std::fs::read_to_string(rn_dir.join(rel))
+                .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
+        };
+        // The number that follows `marker` on its line.
+        let value_after = |source: &str, marker: &str, file: &str| -> f64 {
+            let start = source
+                .find(marker)
+                .unwrap_or_else(|| panic!("{file} no longer declares `{marker}`"))
+                + marker.len();
+            source[start..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '_')
+                .filter(|c| *c != '_')
+                .collect::<String>()
+                .parse()
+                .unwrap_or_else(|e| panic!("{file}: `{marker}` is not a number: {e}"))
+        };
+        let cap_ms = PEER_RSSI_INTERVAL.as_millis() as f64;
+
+        let kotlin_ms = value_after(
+            &read("android/src/main/java/com/offlineprotocol/PeerRssiFeedPolicy.kt"),
+            "const val INTERVAL_MS = ",
+            "PeerRssiFeedPolicy.kt",
+        );
+        let swift_ms = 1000.0
+            * value_after(
+                &read("ios/PeerRssiFeedPolicy.swift"),
+                "static let interval: TimeInterval = ",
+                "PeerRssiFeedPolicy.swift",
+            );
+        for (bridge, ms) in [("Kotlin", kotlin_ms), ("Swift", swift_ms)] {
+            assert!(
+                ms > cap_ms,
+                "the {bridge} feed interval ({ms} ms) must stay above the core's PeerRssi cap \
+                 ({cap_ms} ms), or the core drops readings and the event rate halves"
+            );
+        }
+        assert_eq!(
+            kotlin_ms, swift_ms,
+            "the two bridges feed at different intervals"
+        );
+    }
+
     /// Every `DataValue` kind reaches the three places that enumerate them
     /// by hand.
     ///

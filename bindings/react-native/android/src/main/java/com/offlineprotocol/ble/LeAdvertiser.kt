@@ -201,9 +201,10 @@ class LeAdvertiser(
             // which iOS's CoreBluetooth reads from actively requested scan
             // responses more reliably than from Android's main packet, or,
             // when the app opts in to `advertiseNodeHash`, the node hash as
-            // service data under that UUID in its place. Whether iOS still
-            // finds the phone in the background with the latter is unverified
-            // on a device; see PeerRssiFeedPolicy.scanResponse.
+            // service data under that UUID in its place. iOS still finds the
+            // phone in the background with the latter, through the UUID in the
+            // main packet (iPhone 16 and Samsung M17, 2026-10-24); see
+            // PeerRssiFeedPolicy.scanResponse.
             val scanResponse = host.buildScanResponse()
 
             val cb = object : AdvertiseCallback() {
