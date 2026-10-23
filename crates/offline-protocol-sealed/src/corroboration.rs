@@ -64,9 +64,12 @@ impl SessionCorroboration {
             .then_some(parsed)
     }
 
-    /// The frame body for this value.
-    pub fn to_body(&self) -> alloc::string::String {
-        serde_json::to_string(self).unwrap_or_default()
+    /// The frame body for this value, or `None` if it cannot be encoded.
+    ///
+    /// Never an empty body in its place: the peer reads an empty body as an
+    /// older device and confirms on the plaintext rules.
+    pub fn to_body(&self) -> Option<alloc::string::String> {
+        serde_json::to_string(self).ok()
     }
 }
 
@@ -82,7 +85,10 @@ mod tests {
             nonce: vec![7; SESSION_CORROBORATION_NONCE_LEN],
             tag: vec![9; SESSION_CORROBORATION_TAG_LEN],
         };
-        assert_eq!(SessionCorroboration::parse(&value.to_body()), Some(value));
+        assert_eq!(
+            SessionCorroboration::parse(&value.to_body().unwrap()),
+            Some(value)
+        );
     }
 
     /// An older peer's empty body, and anything short, are not evidence.
@@ -95,7 +101,7 @@ mod tests {
             nonce: vec![7; SESSION_CORROBORATION_NONCE_LEN],
             tag: vec![9; SESSION_CORROBORATION_TAG_LEN - 1],
         };
-        assert_eq!(SessionCorroboration::parse(&short.to_body()), None);
+        assert_eq!(SessionCorroboration::parse(&short.to_body().unwrap()), None);
     }
 
     /// The label is a wire constant shared with an implementation not

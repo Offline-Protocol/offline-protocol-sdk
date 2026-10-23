@@ -848,6 +848,13 @@ pub struct OfflineProtocol {
     /// after a restart is not acted on, and the next challenge asks again.
     corroboration_challenges: HashMap<String, CorroborationChallenge>,
 
+    /// The signed stamp, unclamped, of the frame each peer's session was built
+    /// from, and when it was noted (`note_session_frame_stamp`). Refuses a
+    /// `no_session` teardown older than that frame for
+    /// `SESSION_BUILD_STAMP_WINDOW` after it, whatever the skew between the
+    /// two clocks. In memory only, and bounded like `rekey_due_at`.
+    session_build_stamps: HashMap<String, (i64, Instant)>,
+
     /// Outbound welcome lifecycle records keyed by peer id.
     welcome_lifecycles: HashMap<String, WelcomeLifecycleRecord>,
 
@@ -1308,6 +1315,7 @@ impl OfflineProtocol {
             rekey_due_at: HashMap::new(),
             corroboration_due_at: HashMap::new(),
             corroboration_challenges: HashMap::new(),
+            session_build_stamps: HashMap::new(),
             welcome_lifecycles: HashMap::new(),
             pending_connection_requests: HashMap::new(),
             welcome_presence_rescue: HashMap::new(),

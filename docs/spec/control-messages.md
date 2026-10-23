@@ -444,7 +444,11 @@ dropping its group. A receiver holding a session that gets one, signed:
   stamp.
 - **MUST** otherwise drop its session as for a reset and build a new one from
   the package, but only on a frame whose stamp is signed and newer than the
-  spent mark of rule 3, recording the stamp first. An unstamped frame is
+  spent mark of rule 3, recording the stamp first. For ten minutes after the
+  session was built it **MUST** also be newer than the unclamped stamp of the
+  frame that built it: with more skew than the mark's clamp, a first-contact
+  push the peer sent just before its Welcome would otherwise arrive behind
+  the Welcome and tear down the session it had just built. An unstamped frame is
   refused here, because every first-contact push carries the flag and the
   mark could not refuse a recording of one.
 

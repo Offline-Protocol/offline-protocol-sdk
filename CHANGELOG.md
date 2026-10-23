@@ -135,8 +135,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   sent it held no session, the other kept its own, and the first side's
   repeated key packages only refreshed the other's copy. Messages then waited
   on both sides until they expired. A key package sent while the sender
-  holds no session now says so (`no_session`, omitted when false, so older
-  receivers see the payload they always did). The holder sends its Welcome
+  holds no session now says so (`no_session`). It is omitted when false, so
+  a package that does not set it is byte for byte what it was, and an older
+  receiver ignores it where it is set, which is every push from a side
+  holding no session, first contact included. The holder sends its Welcome
   again when that Welcome was built on the very package offered, since the
   sender never processed it, and otherwise drops its session and rebuilds,
   under the same freshness and spent-reset rules as a reset. A flag older

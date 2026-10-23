@@ -718,6 +718,10 @@ impl OfflineProtocol {
             debug!(sender = %peer_id, "Not dropping our session on an unstamped or spent no_session frame");
             return;
         };
+        if self.no_session_predates_session(peer_id, stamp) {
+            debug!(sender = %peer_id, "Not dropping our session on a no_session frame older than the one that built it");
+            return;
+        }
         self.record_reset_spent(peer_id, stamp);
         info!(sender = %peer_id, "Peer holds no session we can reach, deleting ours to rebuild");
         self.drop_session_for_reset(peer_id);

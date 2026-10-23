@@ -498,6 +498,13 @@ rules keep the comparison honest:
   rather than none, so ordinary skew between the two clocks does not put the
   mark below the session's own stamp. The teardown also needs the frame's stamp
   to be signed at all; resending a Welcome needs neither.
+- **A push that crossed the Welcome is refused at any skew.** Every push from
+  a side holding no session carries the flag, first contact included, so the
+  peer's first-contact key package can arrive just behind the Welcome it sent
+  after it. For ten minutes after the session is built, a `no_session` frame
+  not newer than the unclamped stamp of the frame that built it is refused.
+  Both are the peer's own clock, so the five-minute clamp on the spent mark
+  does not decide this case.
 - **An adopted Welcome retires our own.** Adopting the peer's Welcome in the
   both-create tiebreak gives up our group, and our outbound Welcome for it is
   dropped. It names a package the peer never processed and still offers, so

@@ -44750,7 +44750,8 @@ fn a_split_shown_by_anything_but_an_answer_to_our_challenge_heals_nothing() {
         nonce: nonce.to_vec(),
         tag: vec![0u8; 16],
     }
-    .to_body();
+    .to_body()
+    .unwrap();
 
     adopter.handle_session_confirm_ack(
         &id(lo),
@@ -45332,5 +45333,58 @@ fn a_split_heals_with_crypto_recovery_switched_off() {
     assert!(
         owner_got.iter().any(|c| c == "healed-adopter"),
         "healed-adopter missing from {owner_got:?}"
+    );
+}
+
+/// More skew than the spent mark's five-minute clamp: the peer's clock runs
+/// twenty minutes ahead. Its first-contact key package, sent just before the
+/// Welcome and so carrying `no_session`, arrives behind the Welcome. It is
+/// older than the frame that built the session on the peer's own clock, so it
+/// is refused; the peer's next genuine push is still answered.
+#[test]
+fn a_crossing_first_contact_push_is_refused_at_any_skew() {
+    let (alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&proof, None);
+
+    let bob_kp = {
+        let m = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap()
+    };
+    let welcome = {
+        let m = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        m.import_key_package(&id("bob"), &bob_kp.key_package_data)
+            .unwrap();
+        m.create_session(&id("bob")).unwrap()
+    };
+    let alices_now = Utc::now().timestamp_millis() + 20 * 60 * 1000;
+    bob.handle_welcome_message(
+        &id("alice"),
+        &serde_json::to_string(&welcome).unwrap(),
+        Some(alices_now),
+    );
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "precondition: bob joined"
+    );
+
+    let mut payload: KeyPackagePayload = serde_json::from_str(
+        key_package_frame_body(&id("alice"), false, Vec::new())
+            .strip_prefix(internal_prefixes::KEY_PACKAGE)
+            .unwrap(),
+    )
+    .unwrap();
+    payload.no_session = true;
+    let data = serde_json::to_string(&payload).unwrap();
+    bob.handle_key_package_message(&id("alice"), &data, true, Some(alices_now - 1_000));
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "a push that crossed the Welcome must not tear the session down"
+    );
+    bob.handle_key_package_message(&id("alice"), &data, true, Some(alices_now + 1_000));
+    assert!(
+        !bob_has_session(&bob, &id("alice")),
+        "a later push from a peer that really lost the session is answered"
     );
 }

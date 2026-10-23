@@ -578,6 +578,15 @@ impl OfflineProtocol {
                 source_event = %source_event,
                 "No corroboration to probe with; not probing"
             );
+            // Next interval rather than the next scan: a tag that keeps
+            // failing would otherwise cost a group load and an export on
+            // every reconciliation pass.
+            let next = Utc::now() + ChronoDuration::seconds(CONFIRMATION_PROBE_INTERVAL_SECS);
+            let due_at = self
+                .confirmation_probe_due_at
+                .entry(peer_id.to_string())
+                .or_insert(next);
+            *due_at = (*due_at).max(next);
             return;
         };
         // Superseded, not failed: the new probe asks the same question, so
@@ -1132,14 +1141,12 @@ impl OfflineProtocol {
         let mls = self.mls_manager.as_ref()?;
         let manager = mls.read().ok()?;
         let (epoch, tag) = manager.session_corroboration(peer_id, nonce).ok()??;
-        Some(
-            SessionCorroboration {
-                epoch,
-                nonce: nonce.to_vec(),
-                tag,
-            }
-            .to_body(),
-        )
+        SessionCorroboration {
+            epoch,
+            nonce: nonce.to_vec(),
+            tag,
+        }
+        .to_body()
     }
 
     /// When this side's session with `peer_id` was established, which names
