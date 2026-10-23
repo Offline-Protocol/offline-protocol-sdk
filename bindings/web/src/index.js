@@ -4,11 +4,19 @@ export class OfflineNode extends EventTarget {
   #worker;
   #next = 1;
   #pending = new Map();
+  #failed = null;
 
   constructor(worker) {
     super();
     this.#worker = worker;
     this.#worker.onmessage = ({ data }) => this.#receive(data);
+    // A worker that fails to load or throws outside a call ends here. Without
+    // it every call in flight would wait for a reply that never comes.
+    this.#worker.onerror = (event) => {
+      event.preventDefault?.();
+      this.#fail(event.message || "the node's worker failed");
+    };
+    this.#worker.onmessageerror = () => this.#fail("the node's worker sent an unreadable message");
     this.address = null;
   }
 
@@ -42,7 +50,20 @@ export class OfflineNode extends EventTarget {
     this.#worker.terminate();
   }
 
+  /// Ends the node: rejects every call in flight and every later one, and
+  /// dispatches one `fatal` event. The engine traps on a panic (W5), and
+  /// with in-memory storage the recovery is a new node, which is a new device.
+  #fail(reason) {
+    if (this.#failed) return;
+    this.#failed = new Error(reason);
+    for (const { reject } of this.#pending.values()) reject(this.#failed);
+    this.#pending.clear();
+    this.#worker.terminate();
+    this.dispatchEvent(new CustomEvent("fatal", { detail: reason }));
+  }
+
   #call(op, args) {
+    if (this.#failed) return Promise.reject(this.#failed);
     const id = this.#next++;
     return new Promise((resolve, reject) => {
       this.#pending.set(id, { resolve, reject });
@@ -64,6 +85,8 @@ export class OfflineNode extends EventTarget {
       this.dispatchEvent(new CustomEvent("event", { detail: message.event }));
     } else if (message.kind === "error") {
       this.dispatchEvent(new CustomEvent("error", { detail: message.message }));
+    } else if (message.kind === "fatal") {
+      this.#fail(message.message);
     }
   }
 }

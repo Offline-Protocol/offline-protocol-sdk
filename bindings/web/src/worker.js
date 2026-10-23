@@ -6,8 +6,13 @@
 // - This file moves bytes. What a link's bytes mean (the identity preamble,
 //   the frame boundary, one link per address) is decided in Rust, by
 //   WebEngine.linkReceived and WebEngine.nextOutbound.
-// - One tick every 100 ms, as both mobile bridges run: process, then hand
-//   every queued frame to its carrier, then every queued event to the page.
+// - One tick every 100 ms, as both mobile bridges run: process, then close
+//   every carrier the engine closed, then hand every queued frame to its
+//   carrier, then every queued event to the page.
+// - A trap is fatal (W5). A Rust panic aborts the module, and JavaScript sees
+//   it as a catchable WebAssembly.RuntimeError, so a worker that caught it and
+//   ticked on would drive a module whose state stopped mid-update. The worker
+//   says so once and stops.
 
 import init, { WebEngine } from "../pkg/offline_protocol_web.js";
 import { TabCarrier } from "./tab-carrier.js";
@@ -17,19 +22,41 @@ const TICK_MS = 100;
 let engine = null;
 let carrier = null;
 let timer = null;
+let dead = null;
+
+// Stops everything after a trap. The page rejects every call in flight and
+// every later one; the module is not called again.
+function die(error) {
+  dead = String(error?.message ?? error);
+  clearInterval(timer);
+  try {
+    carrier?.close();
+  } catch {
+    // The carrier is JavaScript and does not trap; nothing to add.
+  }
+  post({ kind: "fatal", message: dead });
+  self.close();
+}
+
+const trapped = (error) => error instanceof WebAssembly.RuntimeError;
 
 function tick() {
   try {
     engine.process();
+    flush();
   } catch (error) {
+    if (trapped(error)) return die(error);
     post({ kind: "error", message: String(error) });
+    flush();
   }
-  flush();
 }
 
 // Frames and events produced by a call are delivered before the call returns
 // to the page, so a send does not wait for the next tick to leave.
 function flush() {
+  for (let link = engine.nextClosed(); link !== undefined; link = engine.nextClosed()) {
+    carrier.engineClosed(link);
+  }
   for (let frame = engine.nextOutbound(); frame; frame = engine.nextOutbound()) {
     const link = frame.link;
     const data = frame.data;
@@ -89,6 +116,7 @@ const handlers = {
 };
 
 self.onmessage = async ({ data: { id, op, args } }) => {
+  if (dead) return post({ kind: "reply", id, error: `the node stopped: ${dead}` });
   try {
     const handler = handlers[op];
     if (!handler) throw new Error(`unknown operation ${op}`);
@@ -98,5 +126,6 @@ self.onmessage = async ({ data: { id, op, args } }) => {
     post({ kind: "reply", id, result });
   } catch (error) {
     post({ kind: "reply", id, error: String(error?.message ?? error) });
+    if (trapped(error)) die(error);
   }
 };

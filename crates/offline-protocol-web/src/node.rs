@@ -20,6 +20,13 @@
 //! - **One link per address.** A second link that proves an address already
 //!   announced is refused, so the engine sees one announcement and one loss
 //!   per peer however many carriers the page opened toward it.
+//! - **A link that has not proved anyone is temporary.** At most
+//!   [`MAX_LINKS`] are open, and one whose preamble has not verified within
+//!   [`PREAMBLE_DEADLINE`] is closed. Both are the stream-framing chapter's
+//!   local policy, at the mobile managers' values; without them a carrier
+//!   that opens links and never speaks holds memory and a preamble each for
+//!   as long as the worker lives. The page learns of a close the engine
+//!   decided from [`Node::next_closed`], and tells the other end.
 //! - **Nothing calls back into the page.** Events and outbound frames wait in
 //!   queues the page drains. The engine fires its own callbacks while it holds
 //!   its state lock, and a page that answered one by calling back in would
@@ -30,6 +37,7 @@ use std::sync::{Arc, Mutex};
 
 use offline_protocol::mls::InMemoryStorage;
 use offline_protocol::{Event, GroupInfo, OfflineProtocol, ProtocolConfig};
+use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_transport::{
     frame, PeerStreamReader, StreamEvent, Transport, TransportStatus, TransportType,
     WifiDirectTransport,
@@ -49,6 +57,13 @@ const MAX_QUEUED_EVENTS: usize = 1024;
 /// Inbound messages one [`Node::process`] call hands to the engine. Matches
 /// the mobile tickers' drain cap, so one tick's cost is bounded the same way.
 const MAX_RECEIVES_PER_TICK: usize = 100;
+
+/// Links open at once, at most, as the mobile managers' sixteen streams.
+pub const MAX_LINKS: usize = 16;
+
+/// How long a link may stay open without a verified preamble, as the mobile
+/// managers' ten seconds.
+pub const PREAMBLE_DEADLINE: Duration = Duration::from_secs(10);
 
 /// What went wrong, as one string the binding turns into a JavaScript error.
 #[derive(Debug)]
@@ -74,6 +89,8 @@ struct Link {
     reader: PeerStreamReader,
     /// The address this link's preamble proved, once it has.
     peer: Option<String>,
+    /// When the page opened it, for the preamble deadline.
+    opened: Instant,
 }
 
 /// One engine, its links, and the queues the page drains.
@@ -85,6 +102,10 @@ pub struct Node {
     peers: HashMap<String, LinkId>,
     /// Frames this module produced itself (preambles), ahead of the engine's.
     outbound: VecDeque<(LinkId, Vec<u8>)>,
+    /// Links this module closed on its own (the preamble deadline), for the
+    /// page to close the carrier and tell the other end.
+    closed: VecDeque<LinkId>,
+    preamble_deadline: Duration,
     next_link: LinkId,
 }
 
@@ -119,6 +140,8 @@ impl Node {
             links: BTreeMap::new(),
             peers: HashMap::new(),
             outbound: VecDeque::new(),
+            closed: VecDeque::new(),
+            preamble_deadline: PREAMBLE_DEADLINE,
             next_link: 1,
         })
     }
@@ -173,10 +196,22 @@ impl Node {
         self.protocol.local_address().map(str::to_string)
     }
 
-    /// One tick: the engine's timers, then up to 100 queued inbound
-    /// messages. The page calls this
-    /// every 100 ms, as both mobile bridges do.
+    /// One tick: links past the preamble deadline, the engine's timers, then
+    /// up to 100 queued inbound messages. The page calls this every 100 ms,
+    /// as both mobile bridges do.
     pub fn process(&mut self) -> NodeResult<()> {
+        let silent: Vec<LinkId> = self
+            .links
+            .iter()
+            .filter(|(_, state)| {
+                state.peer.is_none() && state.opened.elapsed() >= self.preamble_deadline
+            })
+            .map(|(&link, _)| link)
+            .collect();
+        for link in silent {
+            self.close_link(link);
+            self.closed.push_back(link);
+        }
         self.protocol.process()?;
         for _ in 0..MAX_RECEIVES_PER_TICK {
             if self.protocol.receive_message().is_none() {
@@ -193,8 +228,11 @@ impl Node {
 
     /// Registers a carrier the page opened and queues this device's preamble
     /// on it. The page sends whatever [`Self::next_outbound`] yields for the
-    /// returned id.
+    /// returned id. Refused once [`MAX_LINKS`] are open.
     pub fn open_link(&mut self) -> NodeResult<LinkId> {
+        if self.links.len() >= MAX_LINKS {
+            return Err(NodeError(format!("{MAX_LINKS} links are already open")));
+        }
         let preamble = self.preamble()?;
         let link = self.next_link;
         self.next_link = self
@@ -211,6 +249,7 @@ impl Node {
             Link {
                 reader: PeerStreamReader::new(verify),
                 peer: None,
+                opened: Instant::now(),
             },
         );
         self.outbound.push_back((link, preamble));
@@ -262,6 +301,19 @@ impl Node {
         }
         self.protocol.on_neighbor_lost(&peer);
         push_event(&self.events, &Event::NeighborLost { peer_id: peer });
+    }
+
+    /// The next link this module closed on its own. The page closes its
+    /// carrier and tells the other end, exactly as for a link
+    /// [`Self::link_received`] refused.
+    pub fn next_closed(&mut self) -> Option<LinkId> {
+        self.closed.pop_front()
+    }
+
+    /// Shortens the preamble deadline, so a test need not wait ten seconds.
+    #[cfg(test)]
+    pub(crate) fn set_preamble_deadline(&mut self, deadline: Duration) {
+        self.preamble_deadline = deadline;
     }
 
     /// The next frame to put on a carrier: this module's own preambles first,
@@ -423,4 +475,27 @@ fn push_event(queue: &Mutex<VecDeque<String>>, event: &Event) {
         queue.pop_front();
     }
     queue.push_back(json);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_event_queue_keeps_the_newest_up_to_its_cap() {
+        let queue = Mutex::new(VecDeque::new());
+        for n in 0..MAX_QUEUED_EVENTS + 5 {
+            push_event(
+                &queue,
+                &Event::NeighborLost {
+                    peer_id: format!("peer-{n}"),
+                },
+            );
+        }
+        let queue = queue.lock().expect("queue");
+        assert_eq!(queue.len(), MAX_QUEUED_EVENTS);
+        assert!(queue.front().expect("oldest").contains("\"peer-5\""));
+        let newest = format!("\"peer-{}\"", MAX_QUEUED_EVENTS + 4);
+        assert!(queue.back().expect("newest").contains(&newest));
+    }
 }

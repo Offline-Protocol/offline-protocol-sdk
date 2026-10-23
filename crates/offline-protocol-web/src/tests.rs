@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::node::{LinkId, Node};
+use crate::node::{LinkId, Node, MAX_LINKS};
 
 struct Peer {
     node: Node,
@@ -188,6 +188,79 @@ fn closing_an_announced_link_reports_the_peer_lost() {
     assert!(lost);
 }
 
+#[test]
+fn a_frame_for_a_link_that_closed_is_dropped_not_misdelivered() {
+    let (mut a, mut b) = (peer("alice"), peer("bob"));
+    let b_addr = b.address.clone();
+    assert!(run_until(&mut a, &mut b, |a, _| saw(
+        a,
+        "secure_session_established",
+        "peer_id",
+        &b_addr
+    )));
+    // Queued for b's link, which then closes before the page drains it.
+    a.node.send_message(&b_addr, "too late").expect("send");
+    a.node.close_link(a.link);
+    assert_eq!(a.node.next_outbound(), None);
+}
+
+#[test]
+fn links_past_the_ceiling_are_refused() {
+    let mut a = peer("alice");
+    // `peer` already opened one.
+    for _ in 1..MAX_LINKS {
+        a.node.open_link().expect("under the ceiling");
+    }
+    assert!(
+        a.node.open_link().is_err(),
+        "a link past the ceiling opened"
+    );
+    a.node.close_link(a.link);
+    a.node.open_link().expect("a closed link frees its place");
+}
+
+#[test]
+fn a_link_that_never_proves_anyone_is_closed_and_reported() {
+    let (mut a, mut b) = (peer("alice"), peer("bob"));
+    let b_addr = b.address.clone();
+    assert!(run_until(&mut a, &mut b, |a, _| saw(
+        a,
+        "neighbor_discovered",
+        "peer_id",
+        &b_addr
+    )));
+    // A second carrier opens, takes our preamble, and never answers.
+    a.node.set_preamble_deadline(Duration::from_millis(50));
+    let silent = a.node.open_link().expect("link");
+    let (link, _preamble) = a.node.next_outbound().expect("our preamble");
+    assert_eq!(link, silent);
+    std::thread::sleep(Duration::from_millis(60));
+    a.node.process().expect("process");
+    assert_eq!(a.node.next_closed(), Some(silent));
+    assert_eq!(a.node.next_closed(), None, "the proved link was closed too");
+    assert_eq!(
+        a.node.link_received(silent, &[0, 0, 0, 1, 0]).as_deref(),
+        Some("unknown link")
+    );
+    // The proved link is untouched.
+    a.node.send_message(&b_addr, "still here").expect("send");
+    assert!(run_until(&mut a, &mut b, |_, b| {
+        b.events
+            .iter()
+            .any(|e| e["type"] == "message_received" && e["content"] == "still here")
+    }));
+}
+
+/// Reads a repository file with its line endings normalised. A Windows
+/// checkout writes CRLF into every file `.gitattributes` does not pin, which
+/// includes `Cargo.lock` and the workflows, and a guard that matches `\n`
+/// against those fails there for a reason unrelated to what it guards.
+fn read_repo_file(path: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|text| text.replace("\r\n", "\n"))
+}
+
 /// The wasm-bindgen crate and its command-line tool share an unversioned
 /// schema, so every place that names the version must name the same one: the
 /// lockfile, this crate's `=` pin, the build script, and CI's install. A
@@ -196,7 +269,7 @@ fn closing_an_announced_link_reports_the_peer_lost() {
 #[test]
 fn the_wasm_bindgen_pins_agree() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let Ok(lock) = std::fs::read_to_string(root.join("Cargo.lock")) else {
+    let Some(lock) = read_repo_file(&root.join("Cargo.lock")) else {
         // A published .crate archive has no workspace around it.
         return;
     };
@@ -222,7 +295,7 @@ fn the_wasm_bindgen_pins_agree() {
             format!("cargo install wasm-bindgen-cli --version {locked} --locked"),
         ),
     ] {
-        let text = std::fs::read_to_string(root.join(file)).expect(file);
+        let text = read_repo_file(&root.join(file)).expect(file);
         assert!(
             text.contains(&needle),
             "{file} must name wasm-bindgen {locked}, the Cargo.lock version: expected `{needle}`"
@@ -235,7 +308,7 @@ fn the_wasm_bindgen_pins_agree() {
 #[test]
 fn the_browser_tests_run_in_ci() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let Ok(ci) = std::fs::read_to_string(root.join(".github/workflows/ci.yml")) else {
+    let Some(ci) = read_repo_file(&root.join(".github/workflows/ci.yml")) else {
         return;
     };
     for needle in [

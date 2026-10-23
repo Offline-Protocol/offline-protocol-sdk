@@ -16,6 +16,12 @@ export interface StartOptions {
 /**
  * A node running in its own worker. Every engine event is dispatched twice:
  * as a DOM event named by its `type` and as `event`, with the JSON as `detail`.
+ *
+ * Two more events are the binding's own. `error` carries a tick that failed
+ * and the node carried on. `fatal` carries why the node ended (its module
+ * trapped, or its worker failed): every call in flight and every later one
+ * rejects, and the recovery is a new node, which is a new device until
+ * storage is durable.
  */
 export class OfflineNode extends EventTarget {
   /** This device's `off1…` address. */

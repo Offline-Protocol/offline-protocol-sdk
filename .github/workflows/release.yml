@@ -1779,16 +1779,17 @@ jobs:
             | jq -r '.packages[] | select(.name == "offline-protocol") | .version')"
 
           # All workspace crates version in lockstep, and offline-protocol-uniffi
-          # sits atop the internal dependency graph — it is what the topological
-          # publish below reaches last — so if it is already published at this
-          # version, every other crate is too and the whole run is a no-op. Say
+          # and offline-protocol-web sit atop the internal dependency graph; the
+          # topological publish below reaches them last, so if both are already
+          # published at this version, every other crate is too and the whole
+          # run is a no-op. Say
           # so as a warning annotation rather than letting a screenful of
           # "skipping" lines scroll by. Since `version-gate` pins the version
           # to the tag, this can only mean a re-run of a release that published,
           # which is exactly what the skip below exists to make safe — but it is
           # worth saying out loud, because the run reports success either way.
           #
-          # Probing the *last* crate rather than offline-protocol is what makes
+          # Probing the *last* crates rather than offline-protocol is what makes
           # the annotation true during the incident it is read in: a run that
           # died partway leaves the lower crates published and the top one not,
           # and a probe aimed lower would tell the operator resuming it that

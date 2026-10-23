@@ -2590,6 +2590,7 @@ dependencies = [
  "getrandom 0.2.16",
  "getrandom 0.3.4",
  "offline-protocol",
+ "offline-protocol-core",
  "offline-protocol-mls",
  "offline-protocol-transport",
  "openmls",

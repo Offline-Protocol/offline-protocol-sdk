@@ -110,6 +110,14 @@ impl WebEngine {
             .map(|(link, data)| OutboundFrame { link, data })
     }
 
+    /// The next link the engine closed on its own (a preamble that never
+    /// came), or `undefined`. The page closes that carrier and tells the
+    /// other end, as for a link `linkReceived` refused.
+    #[wasm_bindgen(js_name = nextClosed)]
+    pub fn next_closed(&mut self) -> Option<LinkId> {
+        self.node.next_closed()
+    }
+
     /// Sends a direct message; returns its id.
     #[wasm_bindgen(js_name = sendMessage)]
     pub fn send_message(&mut self, recipient: &str, content: &str) -> Result<String, JsError> {

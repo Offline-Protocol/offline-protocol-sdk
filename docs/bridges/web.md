@@ -66,6 +66,22 @@ A carrier address (the tab carrier's random instance id, later a WebRTC
 connection) proves nothing. Who is on the other end is what the preamble
 proves, and a link is announced under that address only.
 
+A link that has proved nobody is temporary. The engine holds at most sixteen
+links and closes one whose preamble has not verified within ten seconds, the
+mobile managers' values for the chapter's local policy. Without them, a
+carrier that opens links and never speaks holds memory and one of our
+preambles each for as long as the worker lives.
+
+**Every close reaches the other end.** When the engine refuses a link
+(`linkReceived` returns a reason) or closes one itself (`nextClosed`), its
+side is already gone, and the carrier tells the other end, which closes its
+side. The tab carrier sends `close` to that instance. A carrier that only
+forgot the link would leave the other end announcing a peer it will never
+hear from again, and its own heartbeat would keep that link alive: the
+chapter's rule is that the close is the refused side's signal. Both ends then
+ignore each other for thirty seconds before trying again, so a heartbeat does
+not reopen a link the engine just refused.
+
 ### W4. The clock is read through `offline_protocol_core::time`
 
 On `wasm32-unknown-unknown`, `std::time::Instant::now()` and
@@ -80,7 +96,13 @@ direct import.
 
 The standard library for this target is built to abort, so no
 `catch_unwind` seam the other bindings rely on catches anything here. A panic
-traps the module. The page's recovery is to start a new worker, which with
+traps the module, and JavaScript sees the trap as a `WebAssembly.RuntimeError`
+it can catch. The worker must not: a module that trapped stopped in the
+middle of whatever it was changing, and ticking it again drives state no
+invariant covers. The worker reports the trap once, says `bye` on the
+carrier, and closes itself. `OfflineNode` then rejects every call in flight
+and every later one, and dispatches one `fatal` event; it does the same when
+the worker fails to load. The page's recovery is a new node, which with
 in-memory storage is a new device.
 
 ### W6. Entropy comes from the browser
@@ -113,6 +135,8 @@ lockfile, the crate, `scripts/build.sh` and CI's install to one version.
 ## What the host owes
 
 - One worker per node, started through `OfflineNode.start({ appId })`.
+- A `fatal` listener that starts a new node, or tells the user the node
+  ended (W5).
 - `node.stop()` on `pagehide`, so the other nodes see the link close instead
   of waiting out the tab carrier's seven-second silence.
 - Nothing about framing, identity or encryption: those are the engine's.
@@ -126,10 +150,12 @@ bash bindings/web/scripts/build.sh                          # module + glue in b
 bash bindings/web/scripts/test-browser.sh                   # headless Chrome
 ```
 
-The browser test starts two nodes in two workers of one page, which reach each
-other over the origin's `BroadcastChannel` exactly as two tabs do, and checks
+The browser tests start two nodes in two workers of one page, which reach each
+other over the origin's `BroadcastChannel` exactly as two tabs do, and check
 an MLS session both ways, an encrypted direct message, a group message, and a
-loss on stop. CI's `web-binding` job runs both.
+loss on stop. A second page opens a link to a node from a carrier instance that
+sends no preamble and checks that the node's carrier tells it the link closed
+(W3). CI's `web-binding` job runs both pages.
 
 [`examples/web-two-tabs`](../../examples/web-two-tabs) is the same thing as a
 page to open in two tabs.
