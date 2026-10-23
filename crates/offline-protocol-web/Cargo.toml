@@ -43,6 +43,8 @@ hkdf = { workspace = true }
 sha2 = { workspace = true }
 rand_core = { workspace = true }
 zeroize = { workspace = true }
+# The signalling events' sealed content (W11).
+base64 = { workspace = true }
 # The OPFS handle calls take an options object (`{ at }`).
 js-sys = "0.3.82"
 

@@ -5,8 +5,8 @@
 <script type="module">
 // Two nodes with no tab carrier, linked only by a WebRTC data channel set up
 // from two codes and no server. Checks an MLS session, an encrypted direct
-// message, a group, game-rate group traffic (with what it costs the durable
-// store), and that closing the connection reports the peer lost. The title
+// message, a group, game-rate group traffic acknowledged and ephemeral (with
+// what each costs the durable store), and that closing the connection reports the peer lost. The title
 // ends as PASS or FAIL: <step>.
 import { OfflineNode, WebRtcCarrier } from "../src/index.js";
 import { log, waitFor, invite, run } from "./common.js";
@@ -59,34 +59,47 @@ await run(async (step) => {
   await invite(a, group.group_id, b.address);
   await joined;
 
-  step.name = "game rate";
+  // The same game-rate traffic twice: acknowledged, then ephemeral (W10).
+  // Each phase reports delivery latency and what the sender's store paid.
   const sent = new Map();
   const latencies = [];
   b.addEventListener("group_message_received", ({ detail }) => {
     const at = sent.get(detail.content);
     if (at !== undefined) latencies.push(performance.now() - at);
   });
-  const before = await a.stats();
   const total = RATE_HZ * SECONDS;
-  for (let n = 0; n < total; n++) {
-    const content = `state ${n}`;
-    sent.set(content, performance.now());
-    await a.sendGroupMessage(group.group_id, content);
-    await new Promise((r) => setTimeout(r, 1000 / RATE_HZ));
+  async function phase(name, options) {
+    step.name = `game rate, ${name}`;
+    latencies.length = 0;
+    const before = await a.stats();
+    for (let n = 0; n < total; n++) {
+      const content = `${name} state ${n}`;
+      sent.set(content, performance.now());
+      await a.sendGroupMessage(group.group_id, content, options);
+      await new Promise((r) => setTimeout(r, 1000 / RATE_HZ));
+    }
+    const deadline = performance.now() + 10000;
+    while (latencies.length < total && performance.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    // Acknowledgements still in flight are part of what a reliable send costs.
+    await new Promise((r) => setTimeout(r, 1500));
+    const after = await a.stats();
+    latencies.sort((x, y) => x - y);
+    const pct = (p) => latencies[Math.min(latencies.length - 1, Math.floor(p * latencies.length))]?.toFixed(1);
+    const flushes = (after.mls.flushes + after.protocol_state.flushes) -
+      (before.mls.flushes + before.protocol_state.flushes);
+    log(`${name}: ${RATE_HZ} Hz for ${SECONDS} s: ${latencies.length}/${total} delivered, ` +
+      `p50 ${pct(0.5)} ms, p95 ${pct(0.95)} ms; sender flushes ${flushes} ` +
+      `(${(flushes / total).toFixed(1)} per message)`);
+    if (latencies.length < total) throw new Error(`only ${latencies.length} of ${total} arrived`);
+    return flushes;
   }
-  const deadline = performance.now() + 10000;
-  while (latencies.length < total && performance.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 100));
+  const reliable = await phase("reliable");
+  const ephemeral = await phase("ephemeral", { ephemeral: true });
+  if (ephemeral >= reliable) {
+    throw new Error(`ephemeral sends cost ${ephemeral} flushes, reliable ${reliable}`);
   }
-  const after = await a.stats();
-  latencies.sort((x, y) => x - y);
-  const pct = (p) => latencies[Math.min(latencies.length - 1, Math.floor(p * latencies.length))]?.toFixed(1);
-  const flushes = (after.mls.flushes + after.protocol_state.flushes) -
-    (before.mls.flushes + before.protocol_state.flushes);
-  log(`${RATE_HZ} Hz for ${SECONDS} s: ${latencies.length}/${total} delivered, ` +
-    `p50 ${pct(0.5)} ms, p95 ${pct(0.95)} ms; sender flushes ${flushes} ` +
-    `(${(flushes / SECONDS).toFixed(1)}/s)`);
-  if (latencies.length < total) throw new Error(`only ${latencies.length} of ${total} arrived`);
 
   step.name = "loss";
   const lost = waitFor(a, "neighbor_lost", (e) => e.peer_id === b.address);

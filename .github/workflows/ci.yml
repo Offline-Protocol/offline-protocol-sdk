@@ -655,9 +655,11 @@ jobs:
       # BroadcastChannel (preambles, an MLS session both ways, a direct and a
       # group message, a loss on stop); a refused link's close reaching the
       # other end; a durable node killed and restarted as the same member;
-      # and two nodes linked only by WebRTC, at game rate. The Rust tests
-      # cover the engine paths on the host; only this run proves the module's
-      # clock, entropy, OPFS store and glue work in a browser.
+      # two nodes linked only by WebRTC, at game rate acknowledged and
+      # ephemeral; and two nodes meeting by room code through a local Nostr
+      # relay the script starts. The Rust tests cover the engine paths on the
+      # host; only this run proves the module's clock, entropy, OPFS store and
+      # glue work in a browser.
       - name: Run the browser tests
         env:
           CHROME: google-chrome

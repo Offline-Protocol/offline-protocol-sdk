@@ -159,6 +159,11 @@ impl OfflineProtocol {
             ));
         }
 
+        if options.ephemeral {
+            Self::check_ephemeral_options(&options)?;
+            return self.send_ephemeral_message(&recipient_str, &content_str, priority, app_id);
+        }
+
         // Parse reply_to_msg if provided
         let reply_to_msg_id = options
             .reply_to_msg

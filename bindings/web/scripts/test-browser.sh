@@ -11,6 +11,8 @@ cd "$(dirname "$0")/.."
 
 CHROME="${CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 PORT="${PORT:-8765}"
+# The local Nostr relay the signalling page publishes through.
+RELAY_PORT="${RELAY_PORT:-8766}"
 DEVTOOLS_PORT="${DEVTOOLS_PORT:-9333}"
 
 [ -f pkg/offline_protocol_web.js ] || bash scripts/build.sh
@@ -18,6 +20,8 @@ DEVTOOLS_PORT="${DEVTOOLS_PORT:-9333}"
 profile="$(mktemp -d)"
 python3 -m http.server "$PORT" --bind 127.0.0.1 >/dev/null 2>&1 &
 server=$!
+node test/nostr-relay.mjs "$RELAY_PORT" >/dev/null 2>&1 &
+relay=$!
 # CHROME_FLAGS carries what a CI sandbox needs (--no-sandbox on Linux runners).
 # WebRtcHideLocalIpsWithMdns is off so the WebRTC page's candidates are
 # addresses rather than .local names, which a runner may have no mDNS
@@ -29,8 +33,8 @@ server=$!
   >/dev/null 2>&1 &
 chrome=$!
 cleanup() {
-  kill "$server" "$chrome" 2>/dev/null || true
-  wait "$server" "$chrome" 2>/dev/null || true
+  kill "$server" "$relay" "$chrome" 2>/dev/null || true
+  wait "$server" "$relay" "$chrome" 2>/dev/null || true
   # Chrome's helper processes can still be writing the profile as it exits.
   rm -rf "$profile" 2>/dev/null || true
 }
@@ -44,6 +48,6 @@ done
 status=0
 for page in test/*.html; do
   echo "== $page"
-  node test/run.mjs "$DEVTOOLS_PORT" "http://127.0.0.1:$PORT/$page" 90000 || status=1
+  node test/run.mjs "$DEVTOOLS_PORT" "http://127.0.0.1:$PORT/$page?relay=ws://127.0.0.1:$RELAY_PORT" 90000 || status=1
 done
 exit $status

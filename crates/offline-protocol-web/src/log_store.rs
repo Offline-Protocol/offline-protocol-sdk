@@ -31,10 +31,15 @@
 //!   first record that is short or does not authenticate ends the log, and
 //!   the file is truncated there. A crash during a write leaves exactly that
 //!   (a partial record after the last whole one), and the record it was
-//!   writing was never acknowledged. A damaged record with an intact one
-//!   after it is not a tear: cutting there would roll back acknowledged
-//!   state (ratchet generations an AEAD nonce depends on), so the log is
-//!   refused and left untouched, as for a wrong key.
+//!   writing was never acknowledged. A damaged record followed, at any
+//!   offset, by an intact record sealed under the next sequence number is
+//!   not a tear: cutting there would roll back acknowledged state (ratchet
+//!   generations an AEAD nonce depends on), so the log is refused and left
+//!   untouched, as for a wrong key. The search does not trust the damaged
+//!   record's length prefix, because a corrupted prefix is the damage that
+//!   otherwise looks exactly like a tear. What still reads as a tear and is
+//!   cut: damage to the very last record, and two damaged records in a row,
+//!   since the search looks for the next sequence number only.
 //! - **Compaction commits by its header.** It truncates the spare file, writes
 //!   every live record into it, flushes, and only then writes and flushes the
 //!   header that makes it valid, under the next generation. A crash at any
@@ -45,6 +50,10 @@
 //!   every later append to the old one is lost. So the spare is emptied
 //!   again, and if even that fails, the log refuses every later write
 //!   rather than acknowledge one that a restart would drop.
+//! - **A failed compaction is not retried on every write.** Compacting seals
+//!   every live record again, so retrying after each append would multiply
+//!   the cost of every write while the cause lasts (a full disk). The next
+//!   attempt waits until the log has grown by another compaction floor.
 //!
 //! What this does not protect against is in the threat model's browser entry:
 //! the store key is reachable from the origin, so sealing keeps the records
@@ -163,7 +172,7 @@ impl std::error::Error for OpenError {}
 /// What a log has cost, for a page that measures it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LogStats {
-    /// Flushes since open: one per acknowledged write, three per compaction.
+    /// Flushes since open: one per acknowledged write, four per compaction.
     pub flushes: u64,
     /// Bytes in the live file.
     pub log_bytes: u64,
@@ -193,6 +202,8 @@ struct Log<F> {
     /// Set when a failed compaction could not be undone: every later write
     /// is refused, because the spare may win the next open.
     poisoned: Option<String>,
+    /// The log length a compaction waits for after one failed.
+    compact_after: u64,
 }
 
 /// One category's records, durable in two files. Implements both storage
@@ -244,6 +255,7 @@ impl<F: LogFile> LogStore<F> {
             store_key,
             category,
             poisoned: None,
+            compact_after: 0,
         };
 
         let states = [log.header_state(0)?, log.header_state(1)?];
@@ -436,33 +448,18 @@ impl<F: LogFile> Log<F> {
 
     fn replay(&mut self) -> Result<(), OpenError> {
         let len = self.files[self.active].size().map_err(OpenError::Io)?;
-        let mut at = HEADER_BYTES;
+        // One read for the whole log: a record at a time would cost two
+        // synchronous OPFS calls per record, about ten thousand for a
+        // mebibyte of ratchet updates.
+        let mut file =
+            vec![0u8; usize::try_from(len).map_err(|_| OpenError::Io("log too large".into()))?];
+        self.files[self.active]
+            .read_exact_at(0, &mut file)
+            .map_err(OpenError::Io)?;
+        let mut at = HEADER_BYTES as usize;
         let mut seq = 0u64;
-        loop {
-            if at + 4 > len {
-                break;
-            }
-            let mut prefix = [0u8; 4];
-            self.files[self.active]
-                .read_exact_at(at, &mut prefix)
-                .map_err(OpenError::Io)?;
-            let size = u32::from_be_bytes(prefix) as usize;
-            if !(NONCE_BYTES + TAG_BYTES..=MAX_SEALED_BYTES).contains(&size)
-                || at + 4 + size as u64 > len
-            {
-                break;
-            }
-            let mut sealed = vec![0u8; size];
-            self.files[self.active]
-                .read_exact_at(at + 4, &mut sealed)
-                .map_err(OpenError::Io)?;
-            let Some(plain) = self.open_record(seq, &sealed) else {
-                // A tear leaves nothing whole after it. An intact record
-                // next is damage inside the log, and cutting there would
-                // drop acknowledged writes.
-                if self.authenticates_at(at + 4 + size as u64, seq + 1, len)? {
-                    return Err(OpenError::Damaged);
-                }
+        while let Some(sealed) = record_at(&file, at) {
+            let Some(plain) = self.open_record(seq, sealed) else {
                 break;
             };
             let Some((op, key_type, key_id, value)) = decode(&plain) else {
@@ -470,20 +467,26 @@ impl<F: LogFile> Log<F> {
             };
             self.apply(op, key_type, key_id, value);
             seq += 1;
-            at += 4 + size as u64;
+            at += 4 + sealed.len();
         }
-        if at < len {
+        if (at as u64) < len {
+            // A tear leaves nothing whole after it. An intact record next is
+            // damage inside the log, and cutting there would drop
+            // acknowledged writes.
+            if self.intact_record_after(&file, at, seq + 1) {
+                return Err(OpenError::Damaged);
+            }
             warn!(
-                dropped = len - at,
+                dropped = len - at as u64,
                 "web log store: dropping a torn tail after the last whole record"
             );
             let file = &mut self.files[self.active];
-            file.truncate(at).map_err(OpenError::Io)?;
+            file.truncate(at as u64).map_err(OpenError::Io)?;
             file.flush().map_err(OpenError::Io)?;
             self.stats.flushes += 1;
         }
         self.seq = seq;
-        self.end = at;
+        self.end = at as u64;
         Ok(())
     }
 
@@ -500,26 +503,16 @@ impl<F: LogFile> Log<F> {
             .ok()
     }
 
-    /// Whether a whole record sealed under `seq` starts at `at`.
-    fn authenticates_at(&mut self, at: u64, seq: u64, len: u64) -> Result<bool, OpenError> {
-        if at + 4 > len {
-            return Ok(false);
-        }
-        let mut prefix = [0u8; 4];
-        self.files[self.active]
-            .read_exact_at(at, &mut prefix)
-            .map_err(OpenError::Io)?;
-        let size = u32::from_be_bytes(prefix) as usize;
-        if !(NONCE_BYTES + TAG_BYTES..=MAX_SEALED_BYTES).contains(&size)
-            || at + 4 + size as u64 > len
-        {
-            return Ok(false);
-        }
-        let mut sealed = vec![0u8; size];
-        self.files[self.active]
-            .read_exact_at(at + 4, &mut sealed)
-            .map_err(OpenError::Io)?;
-        Ok(self.open_record(seq, &sealed).is_some())
+    /// Whether a whole record sealed under `seq` starts anywhere after the
+    /// record at `at` that failed. Every offset is tried rather than the one
+    /// the failed record's length prefix names, since that prefix may be
+    /// the damage. Reached only at open, and only when the log does not end
+    /// cleanly.
+    fn intact_record_after(&self, file: &[u8], at: usize, seq: u64) -> bool {
+        let first = at + 4 + NONCE_BYTES + TAG_BYTES;
+        (first..file.len()).any(|offset| {
+            record_at(file, offset).is_some_and(|sealed| self.open_record(seq, sealed).is_some())
+        })
     }
 
     fn apply(&mut self, op: u8, key_type: String, key_id: String, value: Vec<u8>) {
@@ -576,9 +569,16 @@ impl<F: LogFile> Log<F> {
         self.end += record.len() as u64;
         self.seq += 1;
         self.apply(op, key_type.to_string(), key_id.to_string(), value.to_vec());
-        if self.end > COMPACT_FLOOR && self.end > 2 * (self.live + HEADER_BYTES) {
-            if let Err(error) = self.compact() {
-                warn!(%error, "web log store: compaction failed; the log stays as it was");
+        if self.end > COMPACT_FLOOR
+            && self.end > 2 * (self.live + HEADER_BYTES)
+            && self.end >= self.compact_after
+        {
+            match self.compact() {
+                Ok(()) => self.compact_after = 0,
+                Err(error) => {
+                    warn!(%error, "web log store: compaction failed; the log stays as it was");
+                    self.compact_after = self.end + COMPACT_FLOOR;
+                }
             }
         }
         self.stats.log_bytes = self.end;
@@ -631,6 +631,17 @@ impl<F: LogFile> Log<F> {
         self.stats.compactions += 1;
         Ok(())
     }
+}
+
+/// The sealed bytes of the record whose length prefix starts at `at`, when
+/// the prefix names a plausible size that fits in `file`.
+fn record_at(file: &[u8], at: usize) -> Option<&[u8]> {
+    let prefix: [u8; 4] = file.get(at..at.checked_add(4)?)?.try_into().ok()?;
+    let size = u32::from_be_bytes(prefix) as usize;
+    if !(NONCE_BYTES + TAG_BYTES..=MAX_SEALED_BYTES).contains(&size) {
+        return None;
+    }
+    file.get(at + 4..(at + 4).checked_add(size)?)
 }
 
 /// The cipher for one category's records in one generation of its log.
@@ -1108,5 +1119,82 @@ mod tests {
         let nonce = Nonce::from_slice(&[0u8; NONCE_BYTES]);
         let sealed = a.encrypt(nonce, &b"x"[..]).expect("seal");
         assert!(b.decrypt(nonce, sealed.as_slice()).is_err());
+    }
+
+    #[test]
+    fn a_damaged_length_prefix_before_intact_records_is_refused_untouched() {
+        let files = (MemoryFile::default(), MemoryFile::default());
+        let store = open(&KEY, &files).expect("open");
+        put(&store, "a", b"first");
+        put(&store, "b", b"second");
+        put(&store, "c", b"third");
+        drop(store);
+        // A length prefix that names more bytes than the file holds is what
+        // a tear looks like, so this damage used to cut "b" and "c".
+        let before = {
+            let mut data = files.0 .0.lock().expect("file");
+            data[HEADER_BYTES as usize + 1] = 0x40;
+            data.clone()
+        };
+        assert_eq!(open(&KEY, &files).err(), Some(OpenError::Damaged));
+        assert_eq!(*files.0 .0.lock().expect("file"), before);
+    }
+
+    /// A file that counts its truncates and, when `refuse` is set, fails
+    /// every one after the first. Open truncates the spare once; each
+    /// compaction starts with one.
+    #[derive(Clone, Default)]
+    struct RefusingSpare {
+        inner: MemoryFile,
+        truncates: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        refuse: bool,
+    }
+
+    impl LogFile for RefusingSpare {
+        fn size(&mut self) -> Result<u64, String> {
+            self.inner.size()
+        }
+        fn read_exact_at(&mut self, at: u64, buffer: &mut [u8]) -> Result<(), String> {
+            self.inner.read_exact_at(at, buffer)
+        }
+        fn write_all_at(&mut self, at: u64, data: &[u8]) -> Result<(), String> {
+            self.inner.write_all_at(at, data)
+        }
+        fn truncate(&mut self, len: u64) -> Result<(), String> {
+            if self
+                .truncates
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                > 0
+                && self.refuse
+            {
+                return Err("the disk is full".to_string());
+            }
+            self.inner.truncate(len)
+        }
+        fn flush(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_failed_compaction_waits_for_the_log_to_grow_before_it_is_retried() {
+        let spare = RefusingSpare {
+            refuse: true,
+            ..Default::default()
+        };
+        let store = LogStore::open(&KEY, Category::Mls, RefusingSpare::default(), spare.clone())
+            .expect("open");
+        // About 2.4 MiB of overwrites: every append past the first mebibyte
+        // wants a compaction, and each one fails.
+        let value = vec![1u8; 4096];
+        for n in 0..600 {
+            MlsStorage::store(&store, "kind", &format!("k{}", n % 3), &value).expect("store");
+        }
+        let attempts = spare.truncates.load(std::sync::atomic::Ordering::SeqCst) - 1;
+        assert!(
+            (1..=3).contains(&attempts),
+            "{attempts} compaction attempts in 600 appends"
+        );
+        assert_eq!(store.stats().compactions, 0);
     }
 }
