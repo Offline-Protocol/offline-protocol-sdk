@@ -948,11 +948,13 @@ so they cost no extra radio time.
   Android, so expect fewer there.
 - **Only linked peers.** A reading is named only for a peer that proved its
   address on a link, matched by that link or by a digest of its address the
-  peer advertises. An iPhone names an Android peer whose link was opened by
-  the Android phone only when that app sets
-  `transports.ble.advertiseNodeHash: true` (off by default; see its
-  documentation for the privacy cost). iOS cannot advertise a digest, so an
-  iPhone linked to another iPhone as central is not named on that side.
+  peer advertises. In practice an iPhone names an Android peer only when
+  that app sets `transports.ble.advertiseNodeHash: true` (off by default;
+  see its documentation for the privacy cost): Android advertises from a new
+  Bluetooth address each time it restarts advertising, which it does on every
+  link change, so the iPhone's link soon stops matching the advertisement,
+  whichever side opened it. iOS cannot advertise a digest, so an iPhone
+  linked to another iPhone as central is not named on that side.
 - **Raw.** Readings swing by about ±8 dB between samples. Smooth them for a
   display, for example with an exponential moving average:
 

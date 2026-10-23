@@ -55,8 +55,9 @@ pub const NODE_HASH_LEN: usize = 8;
 /// first eight bytes of SHA-256 over the address string.
 ///
 /// It exists so a scanner can name the advertiser of a reading. Without it
-/// iOS cannot: a peer linked to it as central advertises from a different
-/// CoreBluetooth identifier than the link has. It is matched only against
+/// iOS rarely can: a link runs under one CoreBluetooth identifier, and an
+/// Android peer re-advertises from a new address on every link change, so its
+/// advertisements soon match no link the iPhone holds. It is matched only against
 /// peers that already proved their address on a link
 /// ([`BleTransport::on_peer_rssi`]), so it never names anyone new.
 pub fn node_hash(address: &str) -> [u8; NODE_HASH_LEN] {

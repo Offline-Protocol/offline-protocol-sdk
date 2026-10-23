@@ -391,9 +391,11 @@ export interface BleTransportConfig {
   /**
    * Android only, default `false`. Carry an 8-byte digest of this device's
    * address in its scan response, so an iPhone can attribute `peer_rssi`
-   * readings to this phone when the link between them was opened by this
-   * phone. Without it the iPhone names this phone only on a link it opened
-   * itself. The digest never changes, so anyone in radio range who knows
+   * readings to this phone. Without it an iPhone rarely can: Android
+   * advertises from a new Bluetooth address each time it restarts
+   * advertising, which it does on every link change, so the advertisement
+   * soon stops matching any link the iPhone holds, whichever side opened
+   * it. The digest never changes, so anyone in radio range who knows
    * the address can recognise the phone without connecting, across
    * Bluetooth address rotation (threat model R29). iOS cannot advertise it.
    */

@@ -3226,9 +3226,10 @@ extension BleManager: CBCentralManagerDelegate {
         // but would also bias the readings toward bucket changes. The policy's
         // own throttle keeps this to about four calls a second per peripheral.
         // The core attributes the reading to a linked peer, by this link or by
-        // the node hash an Android peer carries in its scan response (a peer
-        // linked to us as central advertises from an identifier no link of
-        // ours has), and drops anything else, so no mesh gate is needed in
+        // the node hash an Android peer carries in its scan response (Android
+        // re-advertises from a new address on every link change, so its
+        // advertisements soon match no link of ours), and drops anything
+        // else, so no mesh gate is needed in
         // front of it. Off the main thread, like every protocol call here.
         let linkedPeerId = connections.peripheralDeviceId(for: peripheral.identifier)
         let advertisedHash = (advertisementData[CBAdvertisementDataServiceDataKey] as? [CBUUID: Data])?[SERVICE_UUID]

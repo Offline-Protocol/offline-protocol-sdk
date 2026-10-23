@@ -1255,9 +1255,11 @@ admits none of those joiners to anything until the host invites them.
 An Android device whose application sets `transports.ble.advertiseNodeHash`
 (off by default) advertises the first eight bytes of SHA-256 over its own
 address, as service data under the mesh UUID in its scan response. It is
-how a scanner attributes a signal reading to a linked peer when the link
-was opened from the other side, which on iOS runs under a CoreBluetooth
-identifier the advertisement does not share. The digest is stable across
+how a scanner attributes a signal reading to a linked peer whose
+advertisement no longer matches the link: on iOS a link runs under a
+CoreBluetooth identifier, and Android re-advertises from a new address on
+every link change, so the advertisement soon shares no identifier with any
+link the iPhone holds. The digest is stable across
 restarts and unsalted, so any device in radio range that sends a scan
 request (A1) can follow the phone across Bluetooth address rotation, and
 anyone who knows the address can recognise it: every contact and group
