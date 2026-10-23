@@ -246,7 +246,10 @@ It carries plain content only.
 A group send that misses a member still moves this device's ratchet for
 them, so once 256 such sends have missed someone, one goes out reliable and
 waits in their outbox: a rung they can decrypt across the gap when they come
-back. The first ephemeral send to a group after the node starts is one of
+back. Until that rung is acknowledged the member is handed no newer
+ephemeral frame, because a receiver keeps only 32 generations behind the
+newest it has seen, and a rung that arrived after more than that could never
+be read. The first ephemeral send to a group after the node starts is one of
 those. On the browser's sealed log an ephemeral group message costs the
 sender two flushes, against four for a reliable one.
 

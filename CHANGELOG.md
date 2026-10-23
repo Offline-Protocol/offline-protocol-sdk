@@ -45,7 +45,8 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   acknowledgement and keep nothing to retry, so a game's positions never
   arrive late. With no link, or no confirmed session, the call fails at once.
   A group member who keeps missing them gets a reliable message every 256
-  sends, so their ratchet never falls out of reach. On the browser's store an
+  sends, so their ratchet never falls out of reach, and is handed nothing
+  newer until that message is acknowledged. On the browser's store an
   ephemeral group message costs the sender two flushes against four. Not yet
   on the native bindings. See
   [ADR 0032](docs/adr/0032-ephemeral-sends-go-once-over-a-live-link.md) and

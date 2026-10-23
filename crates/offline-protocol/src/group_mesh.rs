@@ -377,6 +377,23 @@ pub(crate) struct GroupMeshState {
     /// pruned on the same teardown paths.
     pub(crate) roster_invisible_generations: HashMap<String, RosterRatchetGap>,
 
+    /// Per group, the reliable copy (the "rung") an ephemeral send parked
+    /// for each member who had no live link when the ratchet-gap budget was
+    /// spent, by message id (ADR 0032).
+    ///
+    /// While a member's rung is still in the outbox, ephemeral frames skip
+    /// that member. A frame sent after the rung carries a later generation,
+    /// and OpenMLS keeps only `SENDER_RATCHET_OUT_OF_ORDER_TOLERANCE` (32)
+    /// generations behind the newest it has seen: a returning member handed
+    /// more than that before the rung could never decrypt it, would never
+    /// acknowledge it, and the sender would retry it to `MessageFailed`.
+    /// Holding the frames back makes the rung arrive first, and the outbox
+    /// flush on the member's reachability edge sends it. An entry whose id
+    /// has left the outbox (acknowledged, expired or failed) releases the
+    /// member and is dropped. Pruned on the same teardown paths as
+    /// [`Self::roster_invisible_generations`].
+    pub(crate) ephemeral_rungs: HashMap<String, HashMap<String, Vec<MessageId>>>,
+
     /// Buffer for out-of-order MLS commits that failed to decrypt.
     /// Maps group_id -> deque of pending commits awaiting retry.
     /// When a commit succeeds for a group, buffered commits are drained and retried.
@@ -1882,6 +1899,7 @@ impl OfflineProtocol {
                     self.group_mesh
                         .roster_invisible_generations
                         .remove(&payload.group_id);
+                    self.group_mesh.ephemeral_rungs.remove(&payload.group_id);
                     let was_synced = self.group_mesh.relay_synced.remove(&payload.group_id);
                     let was_pending = self
                         .group_mesh
@@ -3779,6 +3797,7 @@ impl OfflineProtocol {
         self.group_mesh
             .roster_invisible_generations
             .remove(group_id);
+        self.group_mesh.ephemeral_rungs.remove(group_id);
         let was_synced = self.group_mesh.relay_synced.remove(group_id);
         let was_pending = self
             .group_mesh
@@ -4272,6 +4291,9 @@ impl OfflineProtocol {
         content: &str,
         priority: MessagePriority,
     ) -> Result<Vec<MessageId>> {
+        // The reliable arm checks this inside every per-member send; this
+        // arm sends through neither, so it asks here, before anything else.
+        self.ensure_running()?;
         let members = self.group_roster(group_id)?;
         let self_id = self.local_id.clone();
         let others: Vec<String> = members
@@ -4282,19 +4304,26 @@ impl OfflineProtocol {
         if others.is_empty() {
             return Ok(Vec::new());
         }
+        // A member whose rung has not been acknowledged yet is handed
+        // nothing newer, so the rung reaches them first. See
+        // [`GroupMeshState::ephemeral_rungs`].
+        let held = self.members_awaiting_a_rung(group_id);
         let linked: Vec<String> = others
             .iter()
             .filter(|member| {
-                self.transport_manager
-                    .mesh_transport_for(member.as_str())
-                    .is_some()
+                !held.contains(*member)
+                    && self
+                        .transport_manager
+                        .mesh_transport_for(member.as_str())
+                        .is_some()
             })
             .cloned()
             .collect();
         if linked.is_empty() {
             return Err(Error::Transport(
                 offline_protocol_transport::Error::PeerNotReachable(format!(
-                    "group {group_id}: no member holds a live direct link for an ephemeral send"
+                    "group {group_id}: no member can take an ephemeral send over a live \
+                     direct link now"
                 )),
             ));
         }
@@ -4304,7 +4333,7 @@ impl OfflineProtocol {
                 group_id = %group_id,
                 "Ratchet-gap budget spent; this ephemeral group send goes out reliable"
             );
-            return self.send_group_message_inner(
+            let ids = self.send_group_message_inner(
                 group_id,
                 content,
                 priority,
@@ -4312,7 +4341,9 @@ impl OfflineProtocol {
                 None,
                 None,
                 ContentType::Text,
-            );
+            )?;
+            self.record_ephemeral_rungs(group_id, &ids, &linked);
+            return Ok(ids);
         }
 
         let encrypted = {

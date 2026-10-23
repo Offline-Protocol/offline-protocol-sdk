@@ -478,3 +478,96 @@ fn an_ephemeral_direct_message_refuses_rich_options() {
     );
     assert!(alice.take_sent().is_empty());
 }
+
+#[test]
+fn a_returning_member_gets_their_rung_before_any_newer_ephemeral_frame() {
+    // OpenMLS keeps 32 generations behind the newest it has seen. A rung
+    // handed over after more than that many newer frames could never be
+    // decrypted or acknowledged, so newer frames wait for it.
+    let (mut alice, mut bob, mut carol, group) = trio();
+    alice.link(&bob);
+    alice.link(&carol);
+    alice
+        .protocol
+        .send_group_message_with(&group, "warm up", ephemeral())
+        .expect("send");
+    let warm = alice.take_sent();
+    bob.deliver(&warm);
+    carol.deliver(&warm);
+    // Settle the warm-up's acknowledgements, so the only copy left in the
+    // outbox below is the rung.
+    for member in [&mut bob, &mut carol] {
+        member.protocol.process().expect("process");
+    }
+    let acks: Vec<Message> = [&bob, &carol]
+        .iter()
+        .flat_map(|member| member.take_sent())
+        .collect();
+    alice.deliver(&acks);
+
+    alice.unlink(&carol);
+    let epoch = gap(&alice, &group).unwrap().epoch;
+    alice
+        .protocol
+        .group_mesh
+        .roster_invisible_generations
+        .insert(
+            group.clone(),
+            RosterRatchetGap {
+                epoch,
+                invisible: MAX_ROSTER_INVISIBLE_GROUP_GENERATIONS,
+            },
+        );
+    alice
+        .protocol
+        .send_group_message_with(&group, "rung", ephemeral())
+        .expect("send");
+    let rung = alice.take_sent();
+    bob.deliver(&rung);
+
+    // Carol is back in range, and the game goes on at full rate.
+    alice.link(&carol);
+    for n in 0..40 {
+        alice
+            .protocol
+            .send_group_message_with(&group, &format!("tick {n}"), ephemeral())
+            .expect("bob is linked");
+    }
+    let ticks = alice.take_sent();
+    assert!(
+        ticks.iter().all(|f| f.recipient.as_str() != carol.address),
+        "nothing newer than the rung reaches Carol before it"
+    );
+
+    // The rung reaches her (the outbox flush on her reachability edge), she
+    // decrypts it across the gap and acknowledges it.
+    carol.deliver(&rung);
+    assert!(carol.received_group_message("rung"));
+    carol.protocol.process().expect("process");
+    let acks = carol.take_sent();
+    alice.deliver(&acks);
+
+    // Acknowledged, so Carol takes ephemeral frames again, and reads them.
+    alice
+        .protocol
+        .send_group_message_with(&group, "back in", ephemeral())
+        .expect("send");
+    let sent = alice.take_sent();
+    assert!(
+        sent.iter().any(|f| f.recipient.as_str() == carol.address),
+        "{sent:?}"
+    );
+    carol.deliver(&sent);
+    assert!(carol.received_group_message("back in"));
+}
+
+#[test]
+fn an_ephemeral_group_send_on_a_stopped_engine_is_not_started() {
+    let (mut alice, bob, _carol, group) = trio();
+    alice.link(&bob);
+    alice.protocol.stop().expect("stop");
+    let result = alice
+        .protocol
+        .send_group_message_with(&group, "late", ephemeral());
+    assert!(matches!(result, Err(Error::NotStarted)), "{result:?}");
+}

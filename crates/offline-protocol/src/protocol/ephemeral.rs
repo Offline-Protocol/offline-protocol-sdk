@@ -21,11 +21,13 @@
 //!   use, and when it is spent the send is made reliable instead, which puts
 //!   a rung every member can decrypt into each absent member's outbox.
 
+use std::collections::HashSet;
+
 use offline_protocol_core::{ContentType, MessageId, MessagePriority};
 use offline_protocol_transport::TransportType;
 use tracing::debug;
 
-use super::{OfflineProtocol, SendMessageOptions};
+use super::{lock_shared_state, OfflineProtocol, ProtocolState, SendMessageOptions};
 use crate::{Error, Result};
 
 /// Why an ephemeral send refuses an option.
@@ -126,6 +128,9 @@ impl OfflineProtocol {
         priority: MessagePriority,
     ) -> Result<MessageId> {
         let transport = self.direct_link_to(member)?;
+        // `create_message`, not the alerting `create_message_for_app` the
+        // reliable chat path uses: the alert marker only tells the relay
+        // whether to push, and this frame only ever takes a direct link.
         let mut message = self.create_message(member, content, Some(priority), None)?;
         message.requires_ack = false;
         self.sign_control_message(&mut message)?;
@@ -140,6 +145,64 @@ impl OfflineProtocol {
             return Err(err);
         }
         Ok(message_id)
+    }
+
+    /// `NotStarted` unless the engine is running.
+    pub(crate) fn ensure_running(&self) -> Result<()> {
+        let state = lock_shared_state(&self.shared_state)?;
+        if state.state == ProtocolState::Running {
+            Ok(())
+        } else {
+            Err(Error::NotStarted)
+        }
+    }
+
+    /// The members of `group_id` still waiting for a rung an ephemeral
+    /// send parked for them. Forgets every rung that has left the outbox:
+    /// acknowledged, expired or failed, it no longer has to arrive first.
+    pub(crate) fn members_awaiting_a_rung(&mut self, group_id: &str) -> HashSet<String> {
+        let Some(rungs) = self.group_mesh.ephemeral_rungs.get_mut(group_id) else {
+            return HashSet::new();
+        };
+        let outbox = &self.outbox;
+        rungs.retain(|_, ids| {
+            ids.retain(|id| outbox.contains_key(id));
+            !ids.is_empty()
+        });
+        let held: HashSet<String> = rungs.keys().cloned().collect();
+        if rungs.is_empty() {
+            self.group_mesh.ephemeral_rungs.remove(group_id);
+        }
+        held
+    }
+
+    /// Remembers the copies of a reliable group send that wait in the outbox
+    /// for members an ephemeral send could not reach (`linked` is who it
+    /// could). A member it reached got the copy in order on a live link
+    /// and needs no hold. A relay broadcast parks nothing here, so it
+    /// records nothing.
+    pub(crate) fn record_ephemeral_rungs(
+        &mut self,
+        group_id: &str,
+        ids: &[MessageId],
+        linked: &[String],
+    ) {
+        for id in ids {
+            let Some(entry) = self.outbox.get(id) else {
+                continue;
+            };
+            let member = entry.message.recipient.as_str().to_string();
+            if linked.contains(&member) {
+                continue;
+            }
+            self.group_mesh
+                .ephemeral_rungs
+                .entry(group_id.to_string())
+                .or_default()
+                .entry(member)
+                .or_default()
+                .push(id.clone());
+        }
     }
 
     fn direct_link_to(&self, recipient: &str) -> Result<TransportType> {
