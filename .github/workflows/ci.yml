@@ -620,6 +620,43 @@ jobs:
         working-directory: examples/java-app
         run: gradle --no-daemon --stacktrace run
 
+  # The Ruby binding (docs/bridges/ruby.md). Its source is generated from the
+  # UDL and its drift is gated with the other bindings (python-bindings). This
+  # is the other side: the generated Ruby, run against the library built from
+  # the same definition. The generated code verifies the library's FFI
+  # checksums before the first call, so the tests fail if the two were produced
+  # from different definitions, or if the config names the wrong library.
+  ruby-binding:
+    name: Ruby Binding (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-ruby-binding
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "4.0"
+          bundler-cache: true
+          working-directory: bindings/ruby
+
+      - name: Build the library
+        run: cargo build --locked --package offline-protocol-uniffi
+
+      # The Rakefile puts target/debug on the loader's search path and runs the
+      # consumer check against the library built above.
+      - name: Test the Ruby binding
+        working-directory: bindings/ruby
+        run: bundle exec rake test
+
   security:
     name: Dependency Audit
     runs-on: ubuntu-latest
