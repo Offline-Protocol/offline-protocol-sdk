@@ -4267,7 +4267,11 @@ impl OfflineProtocol {
             let hashed = || {
                 let hash: [u8; offline_protocol_transport::NODE_HASH_LEN] =
                     node_hash.as_deref()?.try_into().ok()?;
-                ble.node_hashes.get(&hash).cloned()
+                // Held to the same rule as the link: a linked peer only.
+                ble.node_hashes
+                    .get(&hash)
+                    .filter(|id| ble.peers.contains_key(*id))
+                    .cloned()
             };
             let Some(peer_id) = linked.or_else(hashed) else {
                 return;
@@ -4282,20 +4286,23 @@ impl OfflineProtocol {
             }
             (peer_id, emit)
         };
-        let blocked = {
+        let deliver = {
             let protocol = self.lock_inner_recovering();
-            if let Some(transport) = protocol
+            // The transport is the last word on whether the peer is still
+            // linked: it may have gone since the BLE state lock was released.
+            let linked = protocol
                 .transport_manager()
                 .get_transport(CoreTransportType::BLE)
-            {
-                if let Some(ble) = transport.as_any().downcast_ref::<BleTransport>() {
-                    ble.on_peer_rssi(&peer_id, rssi);
-                }
-            }
+                .is_some_and(|transport| {
+                    transport
+                        .as_any()
+                        .downcast_ref::<BleTransport>()
+                        .is_some_and(|ble| ble.on_peer_rssi(&peer_id, rssi))
+                });
             // Suppressed like `NeighborDiscovered`: the app blocked this peer.
-            emit && protocol.is_user_blocked(&peer_id)
+            emit && linked && !protocol.is_user_blocked(&peer_id)
         };
-        if !emit || blocked {
+        if !deliver {
             return;
         }
         self.emit_event(CoreEvent::PeerRssi {
@@ -4392,6 +4399,10 @@ impl OfflineProtocol {
         let dropped: Vec<String> = {
             let mut ble_state = self.lock_ble()?;
             ble_state.peer_count = 0;
+            // The hash index and the rate cap describe these peers too; left
+            // behind, a reading could still name a peer no longer linked.
+            ble_state.node_hashes.clear();
+            ble_state.rssi_emitted.clear();
             ble_state
                 .peers
                 .drain()
@@ -10753,8 +10764,22 @@ mod tests {
         assert!(got[0].contains("\"peer_id\":\"near\""), "{got:?}");
         protocol.ble_peer_lost("near".to_string()).unwrap();
         std::thread::sleep(PEER_RSSI_INTERVAL);
-        protocol.ble_peer_rssi(None, Some(hash), -30);
+        protocol.ble_peer_rssi(None, Some(hash.clone()), -30);
         assert!(readings(&protocol).is_empty(), "a lost peer is not named");
+        // Nor one dropped when the radio went away, which reports no loss
+        // per peer: the hash index goes with the peers.
+        protocol
+            .ble_peer_discovered("near".to_string(), -60)
+            .unwrap();
+        protocol.ble_status_changed(false).unwrap();
+        protocol.ble_status_changed(true).unwrap();
+        drained_events(&protocol);
+        std::thread::sleep(PEER_RSSI_INTERVAL);
+        protocol.ble_peer_rssi(None, Some(hash), -30);
+        assert!(
+            readings(&protocol).is_empty(),
+            "a peer dropped with the radio is not named"
+        );
         protocol
             .ble_peer_discovered("near".to_string(), -60)
             .unwrap();
