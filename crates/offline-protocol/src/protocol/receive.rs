@@ -1621,6 +1621,12 @@ impl OfflineProtocol {
                             error_code = classification.code(),
                             "Failed to decrypt media chunk; withholding ACK so the transfer can be resent"
                         );
+                        // As on the text path: a split fails here on every
+                        // chunk, and a pair that only exchanges media would
+                        // otherwise never ask, its transfers stalling for good.
+                        if group_id.starts_with("session:") {
+                            self.request_session_corroboration(sender);
+                        }
                         let kind = DecryptionFailureKind::from_mls_error(&e);
                         self.emit_mls_decryption_failed(
                             sender,

@@ -45030,10 +45030,11 @@ fn a_peer_clock_set_back_after_building_the_session_can_still_reset_it() {
 
     let reset = key_package_frame_body(&id("alice"), true, Vec::new());
     let reset = reset.strip_prefix(internal_prefixes::KEY_PACKAGE).unwrap();
-    bob.handle_key_package_message(&id("alice"), reset, true, Some(now + 5_000));
+    let past_tolerance = now + crate::protocol::security::SPENT_MARK_CLOCK_TOLERANCE_MS + 1_000;
+    bob.handle_key_package_message(&id("alice"), reset, true, Some(past_tolerance));
     assert!(
         !bob_has_session(&bob, &id("alice")),
-        "a reset from the corrected clock must be honoured"
+        "a reset from the corrected clock must be honoured past the tolerance, not an hour later"
     );
 }
 
@@ -45114,5 +45115,95 @@ fn a_successful_decrypt_retires_the_challenge() {
     assert!(
         !alice.answers_live_challenge(&id("bob"), &challenge),
         "a decrypt must retire the challenge"
+    );
+}
+
+/// Ordinary skew must not reopen the stale-flag hole. The peer's clock runs
+/// two minutes ahead of ours; it pushed `no_session` a minute before it built
+/// the session, and that push arrives late. Its stamp is older than the
+/// Welcome's, so it is refused, which it was not when the mark was clamped
+/// at our own clock.
+#[test]
+fn a_late_no_session_push_is_refused_under_ordinary_clock_skew() {
+    let (alice, _ah) = make_encrypted_protocol("alice");
+    let (mut bob, _bh) = make_encrypted_protocol("bob");
+    let proof = frame_stamped_v2(&id("alice"), &id("bob"), &conn_request_body(), -60_000);
+    bob.security_gate_control_message(&proof, None);
+
+    let bob_kp = {
+        let m = bob.mls_manager.as_ref().unwrap().read().unwrap();
+        m.get_or_create_key_package().unwrap()
+    };
+    let welcome = {
+        let m = alice.mls_manager.as_ref().unwrap().read().unwrap();
+        m.import_key_package(&id("bob"), &bob_kp.key_package_data)
+            .unwrap();
+        m.create_session(&id("bob")).unwrap()
+    };
+    let now = Utc::now().timestamp_millis();
+    let alices_now = now + 120_000;
+    bob.handle_welcome_message(
+        &id("alice"),
+        &serde_json::to_string(&welcome).unwrap(),
+        Some(alices_now),
+    );
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "precondition: bob joined"
+    );
+
+    let mut payload: KeyPackagePayload = serde_json::from_str(
+        key_package_frame_body(&id("alice"), false, Vec::new())
+            .strip_prefix(internal_prefixes::KEY_PACKAGE)
+            .unwrap(),
+    )
+    .unwrap();
+    payload.no_session = true;
+    bob.handle_key_package_message(
+        &id("alice"),
+        &serde_json::to_string(&payload).unwrap(),
+        true,
+        Some(alices_now - 60_000),
+    );
+    assert!(
+        bob_has_session(&bob, &id("alice")),
+        "a push older than the Welcome must be refused under ordinary skew"
+    );
+}
+
+/// A media chunk that fails an ordinary decrypt asks for corroboration as a
+/// text frame does, so a pair exchanging only media still finds a split.
+#[test]
+fn a_failed_media_chunk_asks_the_peer_to_corroborate() {
+    use crate::media_envelope::{decode_media_envelope, encode_media_envelope};
+
+    let (mut alice, alice_handle) = media_test_protocol("alice");
+    let (mut bob, bob_handle) = media_test_protocol("bob");
+    establish_media_session(&mut alice, &mut bob);
+
+    alice
+        .send_media(&id("bob"), vec![3u8; 512], "s.bin", ContentType::File, None)
+        .unwrap();
+    let chunk_wire = alice_handle
+        .sent_messages()
+        .into_iter()
+        .find(|m| m.content_type == ContentType::FileChunk)
+        .expect("alice should have sent a media chunk");
+    let mut corrupt = chunk_wire.clone();
+    let mut envelope = decode_media_envelope(chunk_wire.binary_content.as_ref().unwrap()).unwrap();
+    envelope.ciphertext = vec![0u8; 24];
+    corrupt.binary_content = Some(encode_media_envelope(
+        &envelope,
+        crate::media_envelope::MEDIA_ENVELOPE_VERSION_MLS_V1,
+    ));
+
+    bob_handle.clear_sent_messages();
+    bob_handle.queue_message(corrupt);
+    while bob.receive_message().is_some() {}
+    assert!(
+        bob_handle.sent_messages().iter().any(|m| m
+            .content
+            .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)),
+        "a failed chunk must send a corroboration probe"
     );
 }

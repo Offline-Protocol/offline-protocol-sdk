@@ -449,10 +449,13 @@ stamp of the frame the current session was built from: the key package it was
 created from, or the Welcome it was joined from. A `no_session` or
 `session_reset` frame older than that predates the session it would destroy: a
 first-contact push carried slowly, or a recording. Only those frames, and
-never past the receiver's own clock: the mark is durable, so a stamp from a
-peer whose clock ran fast, and was then set back, would have that peer's
-resets refused until its clock caught up, and neither side could heal
-meanwhile.
+never more than five minutes past the receiver's own clock: the mark is
+durable, so a stamp from a peer whose clock ran fast, and was then set back,
+would have that peer's resets refused until its clock caught up, and neither
+side could heal meanwhile. Not at the receiver's clock itself, because
+ordinary skew would then set the mark below the peer's own stamp, and an
+honest `no_session` push sent just before the session was built, delivered
+late, would tear it down.
 
 A receiver that adopted the peer's Welcome in the both-create tiebreak gave
 up its own group, and **MUST** then discard its own Welcome: it names a

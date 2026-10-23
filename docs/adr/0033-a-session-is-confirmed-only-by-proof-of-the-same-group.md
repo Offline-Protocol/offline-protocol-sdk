@@ -75,9 +75,11 @@ challenge.
 **Residual.** None from stale or replayed corroborations: only a fresh
 answer to a live challenge drives a heal, and a successful decrypt retires
 the challenge, so an answer the peer sealed under a group it has since left
-finds nothing live. The mark is clamped to this device's clock, so on a slow
-clock of ours a recording made just before the session is refused only as a
-reset always was. A `no_session` teardown is bounded
+finds nothing live. The mark is clamped to five minutes past this device's
+clock, so a peer whose clock was set back is locked out of resetting for at
+most that long, and on a clock of ours more than five minutes slow a
+recording made just before the session is refused only as a reset always
+was. A `no_session` teardown is bounded
 like a reset, by the spent mark, which the frame that built the session now
 moves. A session the send path builds later from a cached package records no
 stamp, so a recording older than it is bounded only as a reset always was.

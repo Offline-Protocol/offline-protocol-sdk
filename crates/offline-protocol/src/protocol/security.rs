@@ -82,6 +82,12 @@ enum FreshnessVerdict {
     Refused,
 }
 
+/// How far past this device's clock a session-building frame's stamp may set
+/// the spent mark (`note_session_frame_stamp`). Covers ordinary skew between
+/// two devices; bounds how long a peer whose clock was set back is locked
+/// out of resetting.
+pub(crate) const SPENT_MARK_CLOCK_TOLERANCE_MS: i64 = 5 * 60 * 1000;
+
 impl OfflineProtocol {
     /// Builds the canonical signing payload a control frame is authenticated
     /// over: `CTRL_SIGN_DOMAIN` followed by sender, message id, recipient and
@@ -1509,16 +1515,22 @@ impl OfflineProtocol {
     /// the peer's own clock, so skew between the two devices does not enter.
     ///
     /// Only those frames, and not every key package or Welcome, because each
-    /// move is a secure-storage write. And never past this device's own
-    /// clock: the mark is durable, so a stamp from a peer whose clock ran fast
-    /// and was then set back would refuse that peer's every reset and
-    /// `no_session` teardown until its clock caught up, up to the two days the
-    /// freshness window admits, with neither side able to heal meanwhile. The
-    /// clamp changes nothing for an accurate or slow peer clock. The cost is
-    /// on a slow clock of ours, where a recording made between our clock and
-    /// the session's true start is no longer refused by this mark.
+    /// move is a secure-storage write. And never more than
+    /// [`SPENT_MARK_CLOCK_TOLERANCE_MS`] past this device's own clock: the
+    /// mark is durable, so a stamp from a peer whose clock ran fast and was
+    /// then set back would refuse that peer's every reset and `no_session`
+    /// teardown until its clock caught up, up to the two days the freshness
+    /// window admits, with neither side able to heal meanwhile.
+    ///
+    /// The tolerance, rather than our clock itself, because the two clocks
+    /// differ by ordinary skew. Clamped at our clock, a receiver running a
+    /// few seconds slow set the mark below the peer's own stamp, and an
+    /// honest `no_session` push the peer sent just before building the
+    /// session, delivered late, then tore that session down. Within the
+    /// tolerance the peer's stamp is kept as it is; past it, a peer whose
+    /// clock is set back is locked out for at most the tolerance.
     pub(crate) fn note_session_frame_stamp(&mut self, peer_id: &str, signed_ms: i64) {
-        let stamp = signed_ms.min(Utc::now().timestamp_millis());
+        let stamp = signed_ms.min(Utc::now().timestamp_millis() + SPENT_MARK_CLOCK_TOLERANCE_MS);
         if self.reset_is_unspent(peer_id, stamp) {
             self.record_reset_spent(peer_id, stamp);
         }
