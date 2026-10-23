@@ -21,8 +21,23 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   each other over a `BroadcastChannel`, prove their identities with the
   peer-stream preamble, and exchange end-to-end encrypted direct and group
   messages with no server; see [docs/bridges/web.md](docs/bridges/web.md) and
-  [examples/web-two-tabs](examples/web-two-tabs). Storage is in memory for
-  now, so a reload is a new device.
+  [examples/web-two-tabs](examples/web-two-tabs).
+- **A browser node is durable.** Its identity, groups and delivery state live
+  in sealed append logs over origin-private (OPFS) files, so a reload or a
+  crash comes back as the same device and still a member of its groups. Every
+  write is flushed before it is acknowledged, every record is sealed and
+  bound to its position, and the store key is itself sealed under a
+  non-extractable WebCrypto key. One node runs per account per origin; a
+  second is refused. `storage: "memory"` keeps the old behaviour. See
+  [W8](docs/bridges/web.md#w8-storage-is-a-sealed-log-one-node-per-account),
+  and [R26](docs/security/threat-model.md#r26-a-browser-nodes-store-key-is-reachable-from-its-origin)
+  for what the sealing does not protect against.
+- **Browsers connect over WebRTC with no server.** `WebRtcCarrier` links two
+  devices on one network with one data channel, set up from two codes the
+  people exchange by QR code or paste; no ICE server is configured. See
+  [W9](docs/bridges/web.md#w9-webrtc-lives-on-the-page-and-is-set-up-offline),
+  [R27](docs/security/threat-model.md#r27-a-webrtc-connection-code-is-unauthenticated-and-names-local-addresses)
+  and [examples/web-lobby](examples/web-lobby), a two-player Pong game.
 
 ### Changed
 
@@ -31,6 +46,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   and panics on first use; there it is `web-time`. Nothing changes on any
   existing platform: the types are the standard library's own.
   `clocks_are_read_through_core_time_only` refuses a direct import.
+- **`account_storage_namespace` no longer needs the `file-store` feature.**
+  The browser's store derives its folder with it, and a browser build has no
+  POSIX files. It is still re-exported from `offline_protocol::file_store`.
 
 ## [0.30.0] — 2026-10-21
 

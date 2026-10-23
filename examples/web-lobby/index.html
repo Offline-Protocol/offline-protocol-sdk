@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pong Lobby</title>
+<style>
+  :root { --bg: #fafaf7; --fg: #1c1c1a; --muted: #6b6b66; --line: #ddddd6; --accent: #2457c5; --court: #10100f; }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) { --bg: #161615; --fg: #ecece8; --muted: #9a9a94; --line: #33332f; --accent: #7aa2ff; }
+  }
+  :root[data-theme="dark"] { --bg: #161615; --fg: #ecece8; --muted: #9a9a94; --line: #33332f; --accent: #7aa2ff; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, sans-serif; max-width: 760px; margin-inline: auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p { color: var(--muted); margin: 0 0 16px; }
+  code { font-size: 13px; word-break: break-all; }
+  section { border-top: 1px solid var(--line); padding: 14px 0; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  textarea { width: 100%; min-height: 64px; font: 12px/1.4 ui-monospace, monospace; padding: 8px;
+             border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
+  button { font: inherit; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+           border: 1px solid var(--accent); background: var(--accent); color: #fff; }
+  button.quiet { background: transparent; color: var(--accent); }
+  canvas { width: 100%; aspect-ratio: 16 / 9; background: var(--court); border-radius: 8px; display: block; touch-action: none; }
+  .meta { color: var(--muted); font-size: 13px; }
+  .stats { font: 12px/1.6 ui-monospace, monospace; color: var(--muted); }
+  [hidden] { display: none !important; }
+</style>
+<h1>Pong Lobby</h1>
+<p>Each browser runs a full Offline Protocol node in a Web Worker. The host makes an MLS group, every device that connects is invited, and the game state travels end-to-end encrypted through the group, ten times a second, with no server. Devices connect over WebRTC on the local network with two codes; tabs of one browser find each other on their own.</p>
+
+<section>
+  <div class="meta">This device</div>
+  <code id="me">starting…</code>
+  <div class="meta" id="role"></div>
+</section>
+
+<section>
+  <div class="row">
+    <button id="host">Host a game</button>
+    <button id="offer" class="quiet">Connect a device: make a code</button>
+    <button id="answer" class="quiet">I have a code</button>
+  </div>
+  <div id="offer-panel" hidden>
+    <p>Show this code to the other device (paste it, or turn it into a QR code), then paste the code it gives back.</p>
+    <textarea id="offer-code" readonly></textarea>
+    <div class="row"><button id="copy-offer" class="quiet">Copy</button></div>
+    <textarea id="answer-in" placeholder="Their answer code"></textarea>
+    <div class="row"><button id="accept">Connect</button></div>
+  </div>
+  <div id="answer-panel" hidden>
+    <textarea id="offer-in" placeholder="The code the other device showed"></textarea>
+    <div class="row"><button id="make-answer">Make my answer</button></div>
+    <textarea id="answer-code" readonly hidden></textarea>
+    <div class="row"><button id="copy-answer" class="quiet" hidden>Copy</button></div>
+  </div>
+  <div class="meta" id="status"></div>
+</section>
+
+<section>
+  <canvas id="court" width="800" height="450"></canvas>
+  <div class="meta">Move your paddle with the mouse, a finger, or the arrow keys.</div>
+</section>
+
+<section class="stats" id="stats">no game yet</section>
+
+<script type="module">
+import { OfflineNode, WebRtcCarrier } from "../../bindings/web/src/index.js";
+
+const RATE_HZ = 10;
+const PADDLE = 0.22;
+const $ = (id) => document.getElementById(id);
+const status = (text) => ($("status").textContent = text);
+
+// One durable node per account per origin: a second tab of this browser
+// needs its own profile (?profile=b).
+const profile = new URLSearchParams(location.search).get("profile") ?? "player";
+const node = await OfflineNode.start({ appId: "web-pong-lobby", profile });
+const rtc = new WebRtcCarrier(node);
+$("me").textContent = node.address;
+node.addEventListener("fatal", ({ detail }) => status(`the node ended: ${detail}. Reload to start it again.`));
+addEventListener("pagehide", () => rtc.close());
+
+let groupId = null;
+let hosting = false;
+let host = null; // the host's address, for a player
+let opponent = null; // the member who plays the right paddle
+const members = new Set();
+let state = { ball: { x: 0.5, y: 0.5, vx: 0.45, vy: 0.3 }, left: 0.5, right: 0.5, score: [0, 0] };
+let mine = 0.5;
+const counters = { statesIn: 0, statesOut: 0 };
+
+// --- Lobby ----------------------------------------------------------------
+
+$("host").onclick = async () => {
+  if (hosting) return;
+  const group = await node.createGroup("pong");
+  groupId = group.group_id;
+  hosting = true;
+  $("role").textContent = "Hosting. You play the left paddle; the first device to join plays the right.";
+  $("host").disabled = true;
+  setInterval(broadcast, 1000 / RATE_HZ);
+  for (const peer of sessions) admit(peer);
+};
+
+// The host invites every device it has a session with: those that formed
+// before it pressed Host, and every later one. The invite needs the device's
+// key package, which follows the session, so it is retried.
+const sessions = new Set();
+async function admit(peer) {
+  if (!hosting || members.has(peer)) return;
+  members.add(peer);
+  for (let attempt = 0; attempt < 50; attempt++) {
+    try {
+      await node.inviteToGroup(groupId, peer);
+      opponent ??= peer;
+      status(`${members.size} player${members.size === 1 ? "" : "s"} joined`);
+      return;
+    } catch {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+  members.delete(peer);
+}
+node.addEventListener("secure_session_established", ({ detail }) => {
+  sessions.add(detail.peer_id);
+  admit(detail.peer_id);
+});
+
+node.addEventListener("group_member_added", ({ detail }) => {
+  if (hosting) return;
+  groupId = detail.group_id;
+  $("role").textContent = "Joined a game.";
+});
+
+$("offer").onclick = async () => {
+  $("answer-panel").hidden = true;
+  $("offer-panel").hidden = false;
+  $("offer-code").value = "gathering…";
+  const offer = await rtc.offer();
+  $("offer-code").value = offer.code;
+  $("accept").onclick = async () => {
+    try {
+      await offer.accept($("answer-in").value);
+      status("connecting…");
+    } catch (error) {
+      status(error.message);
+    }
+  };
+};
+
+$("answer").onclick = () => {
+  $("offer-panel").hidden = true;
+  $("answer-panel").hidden = false;
+};
+
+$("make-answer").onclick = async () => {
+  try {
+    const answer = await rtc.answer($("offer-in").value);
+    $("answer-code").value = answer.code;
+    $("answer-code").hidden = $("copy-answer").hidden = false;
+    status("show this answer to the device that made the code");
+  } catch (error) {
+    status(error.message);
+  }
+};
+
+$("copy-offer").onclick = () => navigator.clipboard.writeText($("offer-code").value);
+$("copy-answer").onclick = () => navigator.clipboard.writeText($("answer-code").value);
+
+node.addEventListener("neighbor_lost", ({ detail }) => {
+  if (detail.peer_id === opponent) status("the other player disconnected");
+});
+
+// --- Game -----------------------------------------------------------------
+
+// The host owns the state and sends all of it at RATE_HZ; a player sends its
+// paddle to the host. Every message is an ordinary, acknowledged MLS send.
+function broadcast() {
+  if (!opponent) return;
+  counters.statesOut++;
+  node.sendGroupMessage(groupId, JSON.stringify({ s: state })).catch(() => {});
+}
+
+node.addEventListener("group_message_received", ({ detail }) => {
+  if (hosting) return;
+  try {
+    const message = JSON.parse(detail.content);
+    if (message.s) {
+      host = detail.sender ?? host;
+      state = message.s;
+      counters.statesIn++;
+    }
+  } catch {
+    // Not game traffic.
+  }
+});
+
+node.addEventListener("message_received", ({ detail }) => {
+  if (!hosting || detail.sender !== opponent) return;
+  try {
+    const message = JSON.parse(detail.content);
+    if (typeof message.p === "number") state.right = Math.min(1, Math.max(0, message.p));
+  } catch {
+    // Not game traffic.
+  }
+});
+
+let sentPaddle = null;
+setInterval(() => {
+  if (hosting || !host || sentPaddle === mine) return;
+  sentPaddle = mine;
+  node.sendMessage(host, JSON.stringify({ p: mine })).catch(() => {});
+}, 1000 / RATE_HZ);
+
+const court = $("court");
+const point = (event) => {
+  const box = court.getBoundingClientRect();
+  mine = Math.min(1, Math.max(0, (event.clientY - box.top) / box.height));
+};
+court.addEventListener("pointermove", point);
+court.addEventListener("pointerdown", point);
+addEventListener("keydown", (event) => {
+  if (event.key === "ArrowUp") mine = Math.max(0, mine - 0.05);
+  if (event.key === "ArrowDown") mine = Math.min(1, mine + 0.05);
+});
+
+function step(dt) {
+  state.left = mine;
+  const ball = state.ball;
+  ball.x += ball.vx * dt;
+  ball.y += ball.vy * dt;
+  if (ball.y < 0 || ball.y > 1) {
+    ball.vy = -ball.vy;
+    ball.y = Math.min(1, Math.max(0, ball.y));
+  }
+  for (const [side, edge, paddle] of [[0, 0.03, state.left], [1, 0.97, state.right]]) {
+    const crossing = side === 0 ? ball.x < edge && ball.vx < 0 : ball.x > edge && ball.vx > 0;
+    if (!crossing) continue;
+    if (Math.abs(ball.y - paddle) < PADDLE / 2) {
+      ball.vx = -ball.vx * 1.04;
+      ball.vy += (ball.y - paddle) * 1.5;
+    } else {
+      state.score[1 - side]++;
+      Object.assign(ball, { x: 0.5, y: 0.5, vx: side === 0 ? 0.45 : -0.45, vy: 0.3 });
+    }
+  }
+}
+
+const ctx = court.getContext("2d");
+function draw() {
+  const { width: w, height: h } = court;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = "#3a3a36";
+  for (let y = 0; y < h; y += 24) ctx.fillRect(w / 2 - 2, y, 4, 12);
+  ctx.fillStyle = "#ecece8";
+  const paddleH = PADDLE * h;
+  const left = hosting ? mine : state.left;
+  const right = hosting ? state.right : (host ? mine : state.right);
+  ctx.fillRect(0.02 * w, left * h - paddleH / 2, 10, paddleH);
+  ctx.fillRect(0.98 * w - 10, right * h - paddleH / 2, 10, paddleH);
+  ctx.beginPath();
+  ctx.arc(state.ball.x * w, state.ball.y * h, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.font = "32px system-ui";
+  ctx.textAlign = "center";
+  ctx.fillText(`${state.score[0]}   ${state.score[1]}`, w / 2, 44);
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  if (hosting) step(dt);
+  draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// What the game costs: states per second each way, and the durable store's
+// flushes per second (every MLS encrypt and every acknowledgement is a write).
+// Rates over the last second. A browser runs a background tab's timers at
+// most once a second, so a hidden host sends fewer states.
+let lastFlushes = null;
+setInterval(async () => {
+  const stats = await node.stats().catch(() => null);
+  const flushes = stats ? stats.mls.flushes + stats.protocol_state.flushes : 0;
+  const perSecond = lastFlushes === null ? 0 : flushes - lastFlushes;
+  lastFlushes = flushes;
+  $("stats").textContent =
+    `states sent ${counters.statesOut}/s, received ${counters.statesIn}/s; ` +
+    `store flushes ${perSecond}/s, log ${stats ? stats.mls.log_bytes + stats.protocol_state.log_bytes : 0} bytes`;
+  counters.statesOut = counters.statesIn = 0;
+}, 1000);
+</script>

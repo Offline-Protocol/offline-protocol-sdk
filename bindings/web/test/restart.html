@@ -1,0 +1,71 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<pre id="log"></pre>
+<script type="module">
+// A durable node is killed mid-session and started again. It must come back
+// as the same member: the same address, and able to read the group's next
+// message, with no decryption failure. A second node for an account that is
+// already running is refused. The title ends as PASS or FAIL: <step>.
+import { OfflineNode } from "../src/index.js";
+import { log, waitFor, invite, run } from "./common.js";
+
+const appId = `web-restart-${crypto.randomUUID()}`;
+
+await run(async (step) => {
+  const host = await OfflineNode.start({ appId, profile: "host" });
+  let player = await OfflineNode.start({ appId, profile: "player" });
+  const address = player.address;
+  log(`host ${host.address}\nplayer ${address}`);
+
+  step.name = "one node per account";
+  try {
+    const second = await OfflineNode.start({ appId, profile: "player" });
+    await second.stop();
+    throw new Error("a second node for a running account was started");
+  } catch (error) {
+    if (!/already runs this account/.test(error.message)) throw error;
+  }
+  log("a second node for the account was refused");
+
+  step.name = "session";
+  await waitFor(host, "secure_session_established", (e) => e.peer_id === address);
+
+  step.name = "group";
+  const group = await host.createGroup("lobby");
+  const joined = waitFor(player, "group_member_added", (e) => e.group_id === group.group_id);
+  await invite(host, group.group_id, address);
+  await joined;
+  const before = waitFor(player, "group_message_received", (e) => e.content === "before");
+  await host.sendGroupMessage(group.group_id, "before");
+  await before;
+  const stats = await player.stats();
+  log(`player store before the kill: ${JSON.stringify(stats)}`);
+  if (!stats || stats.mls.flushes === 0) throw new Error("the durable store never flushed");
+
+  step.name = "kill";
+  const lost = waitFor(host, "neighbor_lost", (e) => e.peer_id === address, 5000);
+  player.terminate();
+  await lost;
+  log("killed; the host saw the link close at once");
+
+  step.name = "restart";
+  player = await OfflineNode.start({ appId, profile: "player" });
+  if (player.address !== address) {
+    throw new Error(`restarted as ${player.address}, a new device`);
+  }
+  log("restarted with the same address");
+  const failures = [];
+  player.addEventListener("message_decryption_failed", ({ detail }) => failures.push(detail));
+  await waitFor(host, "neighbor_discovered", (e) => e.peer_id === address);
+
+  step.name = "group after restart";
+  const after = waitFor(player, "group_message_received", (e) => e.content === "after");
+  await host.sendGroupMessage(group.group_id, "after");
+  await after;
+  if (failures.length) throw new Error(`decryption failed: ${JSON.stringify(failures)}`);
+  log("the restarted member read the group's next message");
+
+  await Promise.all([host.stop(), player.stop()]);
+});
+</script>
