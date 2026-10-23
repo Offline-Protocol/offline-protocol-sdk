@@ -949,12 +949,13 @@ impl OfflineProtocol {
 
     /// Gives back a re-key slot claimed for work that did not happen.
     ///
-    /// Only the application-driven entry may call this, and only when the
-    /// advertisement never left: no teardown happened, so nothing was spent
-    /// and a caller back in range a second later should not be made to wait
-    /// out a window that bounds teardowns. The desync path must **not**, since
-    /// it discards the session whether or not the reset was sent, and that is
-    /// exactly the churn the floor exists to bound.
+    /// Only the application-driven entry and the split heal may call this,
+    /// and only when the advertisement never left: no teardown happened, so
+    /// nothing was spent and a caller back in range a second later should not
+    /// be made to wait out a window that bounds teardowns. Both drop nothing
+    /// unless the push left. The desync path must **not**, since it discards
+    /// the session whether or not the reset was sent, and that is exactly the
+    /// churn the floor exists to bound.
     pub(super) fn release_rekey_slot(&mut self, peer_id: &str) {
         self.rekey_due_at.remove(peer_id);
     }
@@ -1300,14 +1301,8 @@ impl OfflineProtocol {
     /// next challenge asks again.
     pub(super) fn heal_split_session(&mut self, peer_id: &str, answered_our_challenge: bool) {
         let gives_way = self.gives_way_to(peer_id);
-        let acts = gives_way && answered_our_challenge;
-        self.emit_event(Event::convergence_diag(
-            "session_split_detected".to_string(),
-            peer_id.to_string(),
-            format!("heals={acts}"),
-        ));
-        if !acts {
-            if gives_way && !answered_our_challenge {
+        if !(gives_way && answered_our_challenge) {
+            if gives_way {
                 self.request_session_corroboration(peer_id);
             }
             return;
@@ -1315,6 +1310,14 @@ impl OfflineProtocol {
         if !self.claim_rekey_slot(peer_id) {
             return;
         }
+        // Here and not on every mismatching frame: an unconfirmed split side
+        // is probed every few seconds, and the event reaches the application
+        // and telemetry. Once per heal, bounded by the re-key floor.
+        self.emit_event(Event::convergence_diag(
+            "session_split_detected".to_string(),
+            peer_id.to_string(),
+            "heals=true".to_string(),
+        ));
         if let Err(err) = self.push_key_package(peer_id, false, true) {
             debug!(peer_id = %peer_id, error = %err, "Split heal deferred");
             self.release_rekey_slot(peer_id);

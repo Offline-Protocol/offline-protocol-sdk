@@ -135,23 +135,67 @@ fn rendered_credential(credential: &Credential) -> String {
 /// produces on every frame, while a frame too far in the past is a healthy
 /// session whose sender's re-sealed resend recovers it. A fixed name rather
 /// than the error's rendering, because the reason reaches telemetry verbatim.
+///
+/// Exhaustive, with no catch-all arm (ADR 0013): none of these OpenMLS enums
+/// is `#[non_exhaustive]`, so a variant a future OpenMLS adds fails to compile
+/// here, and is named, instead of being filed silently under a neighbour's
+/// name.
 fn decryption_detail<E>(e: &ProcessMessageError<E>) -> &'static str {
     match e {
-        ProcessMessageError::ValidationError(ValidationError::UnableToDecrypt(d)) => match d {
-            MessageDecryptionError::AeadError => "aead",
-            MessageDecryptionError::GenerationOutOfBound => "generation_out_of_bound",
-            MessageDecryptionError::MalformedContent => "malformed_content",
-            MessageDecryptionError::SecretTreeError(SecretTreeError::TooDistantInThePast) => {
-                "too_distant_in_the_past"
-            }
-            MessageDecryptionError::SecretTreeError(SecretTreeError::SecretReuseError) => {
-                "secret_reuse"
-            }
-            MessageDecryptionError::SecretTreeError(_) => "secret_tree",
-            _ => "unable_to_decrypt",
+        ProcessMessageError::ValidationError(validation) => match validation {
+            ValidationError::UnableToDecrypt(decryption) => match decryption {
+                MessageDecryptionError::AeadError => "aead",
+                MessageDecryptionError::GenerationOutOfBound => "generation_out_of_bound",
+                MessageDecryptionError::MalformedContent => "malformed_content",
+                MessageDecryptionError::SecretTreeError(tree) => match tree {
+                    SecretTreeError::TooDistantInThePast => "too_distant_in_the_past",
+                    SecretTreeError::SecretReuseError => "secret_reuse",
+                    SecretTreeError::TooDistantInTheFuture
+                    | SecretTreeError::IndexOutOfBounds
+                    | SecretTreeError::RatchetTypeError
+                    | SecretTreeError::RatchetTooLong
+                    | SecretTreeError::LibraryError
+                    | SecretTreeError::CodecError(_)
+                    | SecretTreeError::CryptoError(_) => "secret_tree",
+                },
+                MessageDecryptionError::LibraryError(_)
+                | MessageDecryptionError::WrongWireFormat => "unable_to_decrypt",
+            },
+            ValidationError::LibraryError(_)
+            | ValidationError::WrongGroupId
+            | ValidationError::WrongEpoch
+            | ValidationError::NotACommit
+            | ValidationError::NotAnExternalAddProposal
+            | ValidationError::NoPath
+            | ValidationError::UnencryptedApplicationMessage
+            | ValidationError::UnknownMember
+            | ValidationError::MissingMembershipTag
+            | ValidationError::InvalidMembershipTag
+            | ValidationError::MissingConfirmationTag
+            | ValidationError::WrongWireFormat
+            | ValidationError::InvalidSignature
+            | ValidationError::NonMemberApplicationMessage
+            | ValidationError::NoPastEpochData
+            | ValidationError::UnauthorizedExternalSender
+            | ValidationError::NoExternalSendersExtension
+            | ValidationError::KeyPackageVerifyError(_)
+            | ValidationError::UpdatePathError(_)
+            | ValidationError::InvalidLeafNodeSignature
+            | ValidationError::InvalidLeafNodeSourceType
+            | ValidationError::InvalidSenderType
+            | ValidationError::CommitterIncludedOwnUpdate
+            | ValidationError::InvalidAddProposalCiphersuite
+            | ValidationError::CannotDecryptOwnMessage
+            | ValidationError::ExternalCommitValidation(_) => "validation",
         },
-        ProcessMessageError::ValidationError(_) => "validation",
-        _ => "other",
+        ProcessMessageError::LibraryError(_)
+        | ProcessMessageError::StorageError(_)
+        | ProcessMessageError::IncompatibleWireFormat
+        | ProcessMessageError::GroupStateError(_)
+        | ProcessMessageError::InvalidCommit(_)
+        | ProcessMessageError::UnauthorizedExternalApplicationMessage
+        | ProcessMessageError::UnauthorizedExternalCommitMessage
+        | ProcessMessageError::UnsupportedProposalType => "other",
     }
 }
 
