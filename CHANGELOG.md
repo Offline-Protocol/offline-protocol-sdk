@@ -63,6 +63,9 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   ("disconnected", which may recover), and when it closed, naming the object
   `offer()` or `answer()` resolved to. A page can warn about a link seconds
   before the browser gives up on it and the engine reports the peer lost.
+  A call that rejects reports nothing, and a connection closed while its
+  code was still gathering makes `offer()` or `answer()` reject rather than
+  resolve to a code nobody can use.
 
 - **A Ruby binding.** `bindings/ruby` is one generated file,
   `lib/offline_protocol.rb`, written by UniFFI's own Ruby generator from the
@@ -137,7 +140,12 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   on, and warn while the connection is unstable. The game state and the
   paddle are ephemeral sends, so a long absence no longer piles up states
   that all arrive on the next link; a returning device is let back in without
-  a new invite; and a host that reloads resumes the same game.
+  a new invite; and a host that reloads resumes the same game. The host keeps
+  inviting a device for as long as it holds a link, where a fixed number of
+  tries could give up before the device's key package arrived and leave it
+  never invited with nothing on screen. An invite that keeps failing, or game
+  updates that stop reaching anyone, are shown with the engine's reason, and
+  a resumed game the node no longer holds points at **End this game**.
 - **A signalling room that fails to open closes its relay sockets.** A relay
   that took the connection and never confirmed the subscription left its
   socket open after `host()` rejected.

@@ -232,7 +232,10 @@ peer. So the carrier dispatches a `connection` event for every change,
 `answer()` resolved to. A page that waits for `neighbor_lost` alone looks
 connected for those seconds, and a page that watches for it on one side only
 looks connected for ever: the lobby's player did, over a frozen court, until
-the [two-device run](web-devices.md#results) found it.
+the [two-device run](web-devices.md#results) found it. Events start once
+`offer()` or `answer()` has resolved: a call that rejects, including one
+whose connection closed while it gathered, reports nothing, as an event
+naming an object the page never received matches nothing it holds.
 
 Signalling needs no network. Each side's description waits for ICE gathering
 to finish, so one code carries every candidate, and the two codes cross by

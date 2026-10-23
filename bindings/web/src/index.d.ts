@@ -125,8 +125,11 @@ export interface AnsweredConnection {
  * The detail of a WebRtcCarrier `connection` event, one per change of state.
  * "disconnected" means the last connectivity checks went unanswered and may
  * recover; the connection closes, and the engine reports the peer lost, only
- * when the browser gives up ("failed", about 15 s later in Chrome). "closed"
- * comes once, at the end.
+ * when the browser gives up ("failed": in Chrome 10 s after "disconnected",
+ * 15 s after the last answered check). "closed" comes once, at the end.
+ * Events start once `offer()` or `answer()` has resolved; a call that
+ * rejects, including one whose connection closed while it gathered, reports
+ * nothing.
  */
 export interface ConnectionStateDetail {
   state: "connected" | "disconnected" | "closed";
