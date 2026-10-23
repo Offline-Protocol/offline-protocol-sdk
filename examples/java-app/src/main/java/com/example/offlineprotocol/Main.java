@@ -92,7 +92,9 @@ public final class Main {
         /**
          * Best effort. With auto_key_exchange on, the engine finishes the session
          * itself once the peer's key package arrives over the wire, so a refusal
-         * for want of one here only means "not yet".
+         * for want of one here only means "not yet". Both sides calling this is
+         * fine: when both create a session, the engine keeps one by a tiebreak
+         * and the other side adopts it.
          */
         private void tryEstablish(String peer) {
             try {
@@ -156,13 +158,21 @@ public final class Main {
         for (Device from : devices) {
             InternetMessage message;
             while ((message = from.engine.internetGetNextMessage()) != null) {
+                boolean carried = false;
                 for (Device to : devices) {
                     if (to.address.equals(message.recipientId())) {
                         to.engine.internetMessageReceived(from.address, message.data());
-                        // The carrier accepted the frame. A real socket bridge
-                        // confirms only after its write succeeds.
-                        from.engine.internetConfirmSent(message.messageId());
+                        carried = true;
                     }
+                }
+                // Every frame taken gets an outcome, as a real socket bridge
+                // reports one after its write: confirmed once carried, failed
+                // when there was nobody to carry it to. A frame given neither
+                // waits out the transport's timeout before it counts as lost.
+                if (carried) {
+                    from.engine.internetConfirmSent(message.messageId());
+                } else {
+                    from.engine.internetSendFailed(message.messageId());
                 }
             }
         }
@@ -203,7 +213,7 @@ public final class Main {
             // other's key package, which is what the session is made from.
             alice.engine.sendConnectionRequest(bob.address, alice.name, alice.keyPackage(), null);
             until(devices, "bob and alice are paired",
-                    () -> alice.saw("connection_accepted") && alice.engine.hasPendingKeyPackage(bob.address));
+                    () -> alice.engine.mlsHasSession(bob.address) && bob.engine.mlsHasSession(alice.address));
 
             alice.engine.sendPresenceUpdate(bob.address, PresenceStatus.ONLINE);
             until(devices, "bob sees alice online",
