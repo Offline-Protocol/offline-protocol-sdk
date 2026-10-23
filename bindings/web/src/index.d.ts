@@ -101,11 +101,36 @@ export class OfflineNode extends EventTarget {
  * network; `iceServers` names STUN and TURN servers for networks where
  * devices cannot reach each other directly.
  */
-export class WebRtcCarrier {
+export class WebRtcCarrier extends EventTarget {
   constructor(node: OfflineNode, options?: { iceServers?: RTCIceServer[] });
-  offer(): Promise<{ code: string; accept(answerCode: string): Promise<void>; close(): void }>;
-  answer(offerCode: string): Promise<{ code: string; close(): void }>;
+  offer(): Promise<OfferedConnection>;
+  answer(offerCode: string): Promise<AnsweredConnection>;
   close(): void;
+}
+
+/** What `offer()` resolves to: show `code`, then pass the answer to `accept`. */
+export interface OfferedConnection {
+  code: string;
+  accept(answerCode: string): Promise<void>;
+  close(): void;
+}
+
+/** What `answer()` resolves to: show `code` to the device that offered. */
+export interface AnsweredConnection {
+  code: string;
+  close(): void;
+}
+
+/**
+ * The detail of a WebRtcCarrier `connection` event, one per change of state.
+ * "disconnected" means the last connectivity checks went unanswered and may
+ * recover; the connection closes, and the engine reports the peer lost, only
+ * when the browser gives up ("failed", about 15 s later in Chrome). "closed"
+ * comes once, at the end.
+ */
+export interface ConnectionStateDetail {
+  state: "connected" | "disconnected" | "closed";
+  connection: OfferedConnection | AnsweredConnection;
 }
 
 /** A connection one side of a NostrSignaller room made. */

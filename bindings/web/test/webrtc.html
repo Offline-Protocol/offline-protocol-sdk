@@ -6,7 +6,7 @@
 // Two nodes with no tab carrier, linked only by a WebRTC data channel set up
 // from two codes and no server. Checks an MLS session, an encrypted direct
 // message, a group, game-rate group traffic acknowledged and ephemeral (with
-// what each costs the durable store), and that closing the connection reports the peer lost. The title
+// what each costs the durable store), that the carrier reports the connection's state, and that closing the connection reports the peer lost. The title
 // ends as PASS or FAIL: <step>.
 import { OfflineNode, WebRtcCarrier } from "../src/index.js";
 import { log, waitFor, invite, run } from "./common.js";
@@ -24,10 +24,12 @@ await run(async (step) => {
 
   step.name = "signalling";
   const [ra, rb] = [new WebRtcCarrier(a), new WebRtcCarrier(b)];
+  const connected = waitFor(ra, "connection", (e) => e.state === "connected");
   const offer = await ra.offer();
   const answer = await rb.answer(offer.code);
   await offer.accept(answer.code);
   log(`offer code ${offer.code.length} chars, answer ${answer.code.length}`);
+  if ((await connected).connection !== offer) throw new Error("the connected event named another connection");
 
   step.name = "session";
   await Promise.all([
@@ -102,10 +104,15 @@ await run(async (step) => {
   }
 
   step.name = "loss";
+  // The far end closing is a "closed" connection event on this side, naming
+  // the object offer() resolved to, as well as the engine's lost peer.
   const lost = waitFor(a, "neighbor_lost", (e) => e.peer_id === b.address);
+  const closed = waitFor(ra, "connection", (e) => e.state === "closed");
   rb.close();
   await lost;
-  log("closing the connection reported the peer lost");
+  const event = await closed;
+  if (event.connection !== offer) throw new Error("the closed event named another connection");
+  log("closing the connection reported the peer lost and the connection closed");
 
   await Promise.all([a.stop(), b.stop()]);
 });

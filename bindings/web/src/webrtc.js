@@ -19,6 +19,12 @@
 //   code.
 // - A carrier address proves nothing. The connection only carries bytes; the
 //   engine's preamble proves who is on the other end.
+// - A connection closes on "failed" or "closed" only. "disconnected" may
+//   recover on its own, and closing there would turn a Wi-Fi blip into two
+//   new codes typed by hand. The page hears every state as a `connection`
+//   event instead, so it can warn at "disconnected" (5 s after the last
+//   answered check in Chrome) rather than look connected until "failed"
+//   (15 s, when the engine reports the peer lost).
 
 const CODE_PREFIX = "op1.";
 const CHANNEL_ID = 0;
@@ -97,10 +103,13 @@ class Connection {
   #draining = new Set();
   #closed = false;
   #onClose;
+  #onState;
+  #reported = null;
 
-  constructor(node, iceServers, onClose) {
+  constructor(node, iceServers, onClose, onState) {
     this.#node = node;
     this.#onClose = onClose;
+    this.#onState = onState;
     this.#pc = new RTCPeerConnection({ iceServers });
     this.#channel = this.#pc.createDataChannel("offline-protocol", {
       negotiated: true,
@@ -113,8 +122,21 @@ class Connection {
     this.#channel.onmessage = ({ data }) => this.#received(new Uint8Array(data));
     this.#channel.onclose = () => this.close();
     this.#pc.onconnectionstatechange = () => {
-      if (["failed", "closed"].includes(this.#pc.connectionState)) this.close();
+      const state = this.#pc.connectionState;
+      if (state === "failed" || state === "closed") this.close();
+      else if (state === "connected" || state === "disconnected") this.#report(state);
     };
+  }
+
+  // Once per change: "connected", "disconnected", then "closed" exactly once.
+  #report(state) {
+    if (this.#reported === state || this.#reported === "closed") return;
+    this.#reported = state;
+    try {
+      this.#onState(state);
+    } catch {
+      // A listener that throws does not stop the carrier.
+    }
   }
 
   get peerConnection() {
@@ -207,13 +229,20 @@ class Connection {
     this.#channel.close();
     this.#pc.close();
     this.#onClose(this);
+    this.#report("closed");
   }
 }
 
 /// WebRTC links for one node. Each connection takes two codes: the side that
 /// offers shows an offer code and reads back an answer code; the other side
 /// reads the offer and shows its answer.
-export class WebRtcCarrier {
+///
+/// Every change of a connection's state is a `connection` event with
+/// `{ state, connection }` as its detail: `state` is "connected",
+/// "disconnected" (no answer to the last checks; it may recover) or "closed"
+/// (once, at the end), and `connection` is the object `offer()` or `answer()`
+/// resolved to, so a page with several devices can tell them apart.
+export class WebRtcCarrier extends EventTarget {
   #node;
   #iceServers;
   #connections = new Set();
@@ -223,6 +252,7 @@ export class WebRtcCarrier {
   /// NAT, a TURN server to relay. The default is none, so links stay on the
   /// local network and no server learns of them (W9).
   constructor(node, { iceServers = [] } = {}) {
+    super();
     this.#node = node;
     this.#iceServers = iceServers;
   }
@@ -230,14 +260,15 @@ export class WebRtcCarrier {
   /// Starts a connection. Resolves to `{ code, accept(answerCode), close() }`:
   /// show `code` to the other device, then pass its answer to `accept`.
   async offer() {
-    const connection = this.#track(this.#connection());
+    // The handle exists before the connection can change state, so every
+    // event names the object this call resolves to.
+    const handle = { code: null, accept: null, close: null };
+    const connection = this.#track(this.#connection(handle));
+    handle.accept = (answerCode) => connection.accept(answerCode);
+    handle.close = () => connection.close();
     try {
-      const code = await connection.offer();
-      return {
-        code,
-        accept: (answerCode) => connection.accept(answerCode),
-        close: () => connection.close(),
-      };
+      handle.code = await connection.offer();
+      return handle;
     } catch (error) {
       connection.close();
       throw error;
@@ -247,10 +278,12 @@ export class WebRtcCarrier {
   /// Answers another device's offer. Resolves to `{ code, close() }`: show
   /// `code` to the device that offered.
   async answer(offerCode) {
-    const connection = this.#track(this.#connection());
+    const handle = { code: null, close: null };
+    const connection = this.#track(this.#connection(handle));
+    handle.close = () => connection.close();
     try {
-      const code = await connection.answer(offerCode);
-      return { code, close: () => connection.close() };
+      handle.code = await connection.answer(offerCode);
+      return handle;
     } catch (error) {
       connection.close();
       throw error;
@@ -262,8 +295,13 @@ export class WebRtcCarrier {
     for (const connection of [...this.#connections]) connection.close();
   }
 
-  #connection() {
-    return new Connection(this.#node, this.#iceServers, (c) => this.#connections.delete(c));
+  #connection(handle) {
+    return new Connection(
+      this.#node,
+      this.#iceServers,
+      (c) => this.#connections.delete(c),
+      (state) => this.dispatchEvent(new CustomEvent("connection", { detail: { state, connection: handle } })),
+    );
   }
 
   #track(connection) {
