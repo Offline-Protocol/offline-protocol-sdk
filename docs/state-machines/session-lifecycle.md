@@ -466,7 +466,10 @@ only delayed is joined the same way. A reset there made the peer rebuild on
 the same package, and the delayed Welcome then split the pair again. The heal
 shares the re-key floor; a push that could not be sent drops nothing and gives
 the floor back, because the peer was told nothing and the next challenge asks
-again.
+again. An answer that meets the floor held (a heal or re-key within the last
+30 seconds) has spent its challenge, so the greater side asks again once the
+floor opens, from the reconciliation tick; asking at once would do nothing,
+since the ask that drew the answer has just set its own limit.
 
 ### A peer that holds no session
 

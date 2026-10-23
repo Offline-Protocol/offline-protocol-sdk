@@ -855,6 +855,13 @@ pub struct OfflineProtocol {
     /// two clocks. In memory only, and bounded like `rekey_due_at`.
     session_build_stamps: HashMap<String, (i64, Instant)>,
 
+    /// When to ask each peer again for a corroboration whose heal the re-key
+    /// floor held back: the moment the floor opens. Sent from the
+    /// reconciliation tick (`send_due_corroboration_reasks`), because the ask
+    /// that drew the answer has just set its own limit and an inline ask would
+    /// do nothing. Bounded like `rekey_due_at`. In memory only.
+    corroboration_reask_at: HashMap<String, DateTime<Utc>>,
+
     /// Outbound welcome lifecycle records keyed by peer id.
     welcome_lifecycles: HashMap<String, WelcomeLifecycleRecord>,
 
@@ -1316,6 +1323,7 @@ impl OfflineProtocol {
             corroboration_due_at: HashMap::new(),
             corroboration_challenges: HashMap::new(),
             session_build_stamps: HashMap::new(),
+            corroboration_reask_at: HashMap::new(),
             welcome_lifecycles: HashMap::new(),
             pending_connection_requests: HashMap::new(),
             welcome_presence_rescue: HashMap::new(),

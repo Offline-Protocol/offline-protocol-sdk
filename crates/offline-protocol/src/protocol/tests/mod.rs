@@ -45400,7 +45400,18 @@ fn a_heal_held_by_the_rekey_floor_asks_again() {
     adopter.start().unwrap();
     establish_confirmed_session(&mut owner, &id(lo), &mut adopter, &id(hi));
     assert!(adopter.gives_way_to(&id(lo)));
+    let probes = |h: &MockTransport| {
+        h.sent_messages()
+            .iter()
+            .filter(|m| {
+                m.content
+                    .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)
+            })
+            .count()
+    };
 
+    // The ask that draws the answer sets its own limit, as in a real run.
+    adopter.request_session_corroboration(&id(lo));
     assert!(adopter.claim_rekey_slot(&id(lo)));
     adopter_h.clear_sent_messages();
     adopter.heal_split_session(&id(lo), true);
@@ -45408,10 +45419,25 @@ fn a_heal_held_by_the_rekey_floor_asks_again() {
         adopter.has_mls_session(&id(lo)).unwrap(),
         "the floor holds the heal back"
     );
+    assert_eq!(
+        probes(&adopter_h),
+        0,
+        "an answer now would meet the same floor"
+    );
     assert!(
-        adopter_h.sent_messages().iter().any(|m| m
-            .content
-            .starts_with(internal_prefixes::SESSION_CONFIRM_PROBE)),
-        "a held heal must ask again"
+        adopter.corroboration_reask_at.contains_key(&id(lo)),
+        "the held heal schedules its re-ask"
+    );
+
+    // The floor opens: the next tick asks again, past the ask's own limit.
+    let opened = Utc::now() - ChronoDuration::seconds(1);
+    adopter.rekey_due_at.insert(id(lo), opened);
+    adopter.corroboration_reask_at.insert(id(lo), opened);
+    adopter.last_reconciliation_at = None;
+    adopter.run_throttled_reconciliation("test");
+    assert_eq!(
+        probes(&adopter_h),
+        1,
+        "a held heal must ask again once the floor opens"
     );
 }

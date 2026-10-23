@@ -671,7 +671,8 @@ impl OfflineProtocol {
         // Fast path: nothing pending → skip entirely (no storage I/O)
         let has_pending_work = !self.pending_encrypted_messages.is_empty()
             || !self.confirmation_probe_due_at.is_empty()
-            || !self.confirmation_retry_due_at.is_empty();
+            || !self.confirmation_retry_due_at.is_empty()
+            || !self.corroboration_reask_at.is_empty();
 
         if !has_pending_work {
             return;
@@ -689,6 +690,7 @@ impl OfflineProtocol {
         self.last_reconciliation_at = Some(now);
         self.retry_pending_session_confirmations();
         self.kick_pending_session_reconciliation(source_event);
+        self.send_due_corroboration_reasks();
 
         // A message queued for a session is the standing reason to want one,
         // so a lost key package is re-armed here too, not only on a discovery
@@ -1295,6 +1297,25 @@ impl OfflineProtocol {
         }
     }
 
+    /// Asks again each peer whose split heal the re-key floor held back, once
+    /// the floor has opened. The ask's own limit is lifted first: it was set
+    /// by the ask that drew the held answer, and would otherwise swallow this
+    /// one.
+    pub(super) fn send_due_corroboration_reasks(&mut self) {
+        let now = Utc::now();
+        let due: Vec<String> = self
+            .corroboration_reask_at
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(peer, _)| peer.clone())
+            .collect();
+        for peer_id in due {
+            self.corroboration_reask_at.remove(&peer_id);
+            self.corroboration_due_at.remove(&peer_id);
+            self.request_session_corroboration(&peer_id);
+        }
+    }
+
     /// Acts on a corroboration from `peer_id` that shows a split.
     ///
     /// Invariant: a split is ended by exactly one side, the one that
@@ -1329,8 +1350,21 @@ impl OfflineProtocol {
         }
         if !self.claim_rekey_slot(peer_id) {
             // The answer spent the challenge, and a quiet confirmed pair has no
-            // failing frame to ask again: ask now, under the ask's own limit.
-            self.request_session_corroboration(peer_id);
+            // failing frame to ask again. Asking now would do nothing (the ask
+            // that drew this answer has just set its own limit) and an answer
+            // would meet the same floor, so ask once it opens.
+            let opens = self
+                .rekey_due_at
+                .get(peer_id)
+                .copied()
+                .unwrap_or_else(|| Utc::now() + ChronoDuration::seconds(REKEY_INTERVAL_SECS));
+            if !self.corroboration_reask_at.contains_key(peer_id)
+                && self.corroboration_reask_at.len() >= MAX_REKEY_TRACKED_PEERS
+            {
+                self.corroboration_reask_at.clear();
+            }
+            self.corroboration_reask_at
+                .insert(peer_id.to_string(), opens);
             return;
         }
         if let Err(err) = self.push_key_package(peer_id, false, true) {

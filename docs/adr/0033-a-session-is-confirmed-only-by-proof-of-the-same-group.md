@@ -75,28 +75,36 @@ challenge.
 **Residual.** None from stale or replayed corroborations: only a fresh
 answer to a live challenge drives a heal, and a successful decrypt retires
 the challenge, so an answer the peer sealed under a group it has since left
-finds nothing live. The mark is clamped to five minutes past this device's
-clock, so a session build never locks a peer whose clock was set back out of
-resetting for longer than that. A teardown that is acted on, a reset as
-always and now a `no_session` frame too, still records the frame's own
-stamp, up to the two days the freshness window admits ahead: a peer whose
-clock ran that fast when it lost its session, and was then corrected, has
-its later resets refused until its clock catches up. Clamping that record
-instead would let the same frame be replayed until ours did, and refusing
-directives stamped ahead would leave a fast peer unable to reset at all. With more skew than that, a `no_session` frame older than
-the frame that built the session is still refused for ten minutes on the
-unclamped stamp, which covers a first-contact push arriving behind its own
-Welcome; past that window, only a recording made just before the session
-gets through, and only as a reset always could. A `no_session` teardown is bounded
-like a reset, by the spent mark, which the frame that built the session now
-moves. A session the send path builds later from a cached package records no
-stamp, so a recording older than it is bounded only as a reset always was.
+finds nothing live.
+
+A `no_session` teardown is bounded like a reset, by the spent mark, which the
+frame that built the session now moves, clamped to five minutes past this
+device's clock. A session build therefore never locks a peer whose clock was
+set back out of resetting for longer than that. A teardown that is acted on, a
+reset as always and now a `no_session` frame too, still records the frame's
+own stamp, up to the two days the freshness window admits ahead: a peer whose
+clock ran that fast when it lost its session, and was then corrected, has its
+later resets refused until its clock catches up. Clamping that record instead
+would let the same frame be replayed until ours did, and refusing directives
+stamped ahead would leave a fast peer unable to reset at all.
+
+With more skew than the clamp, a `no_session` frame older than the frame that
+built the session is still refused for ten minutes on the unclamped stamp,
+which covers a first-contact push arriving behind its own Welcome. Past that
+window only a recording made just before the session gets through, and only
+as a reset always could. A session the send path builds later from a cached
+package records no stamp, so a recording older than it is bounded only as a
+reset always was.
+
 With freshness enforcement switched off no frame carries a checked stamp, so
 a `no_session` teardown is never honoured. A split whose lesser side cannot
 resend a Welcome naming the offered package then does not heal: the greater
-side gives up its group and waits without one until the lesser side next
-pushes a key package (a restart, or a session reset), much as the pair would
-have stayed split before this decision.
+side gives up its group and waits without one. If its send path then builds a
+group from a package of the peer's it still holds, the lesser side, already
+confirmed, does not adopt it, the pair splits again, and the heal repeats at
+the re-key floor until the lesser side next pushes a key package (a restart,
+or a session reset). That is churn on a configuration meant for emergencies,
+where before this decision the pair stayed split.
 
 ## What would undo this
 
