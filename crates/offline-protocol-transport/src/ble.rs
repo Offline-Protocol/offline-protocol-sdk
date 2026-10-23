@@ -58,8 +58,8 @@ pub const NODE_HASH_LEN: usize = 8;
 /// iOS rarely can: a link runs under one CoreBluetooth identifier, and an
 /// Android peer re-advertises from a new address on every link change, so its
 /// advertisements soon match no link the iPhone holds. It is matched only against
-/// peers that already proved their address on a link
-/// ([`BleTransport::on_peer_rssi`]), so it never names anyone new.
+/// peers that already proved their address on a link, so it never names
+/// anyone new.
 pub fn node_hash(address: &str) -> [u8; NODE_HASH_LEN] {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(address.as_bytes());
@@ -408,8 +408,11 @@ impl BleTransport {
         self.peer_mtus.lock_or_recover().remove(device_id);
     }
 
-    /// Records a signal reading taken from an advertisement, and returns the
-    /// peer it was attributed to.
+    /// Records a signal reading for a linked peer, and returns whether the
+    /// peer is one (a reading for anyone else is dropped, so it never
+    /// introduces a peer). Attribution, by link or by [`node_hash`], is the
+    /// caller's: the FFI layer does it under its own lock, so a reading that
+    /// names nobody never reaches the engine.
     ///
     /// The stored value is smoothed (`0.7 * stored + 0.3 * reading`), not
     /// replaced. It is what the mesh relay ranks fan-out targets by, and a raw
@@ -417,32 +420,14 @@ impl BleTransport {
     /// hand the retransmissions of one frame to different neighbours. Smoothed,
     /// that swing shrinks to under 2 dB and the ranking follows only a lasting
     /// change in signal. The caller reports the raw reading to the app.
-    ///
-    /// `peer_id` is the peer the platform's link to that advertiser names;
-    /// `node_hash` is the [`node_hash`] the advertisement carried. Either
-    /// may be absent, and the link wins when both are present. A reading is
-    /// attributed only to a peer already registered by
-    /// [`Self::on_peer_discovered`], so neither value can introduce one.
-    pub fn on_peer_rssi(
-        &self,
-        peer_id: Option<&str>,
-        node_hash: Option<&[u8]>,
-        rssi: i16,
-    ) -> Option<String> {
+    pub fn on_peer_rssi(&self, peer_id: &str, rssi: i16) -> bool {
         let mut peers = self.peers.lock_or_recover();
-        let id = match peer_id.filter(|id| peers.contains_key(*id)) {
-            Some(id) => id.to_string(),
-            // ponytail: one SHA-256 per linked peer per reading; links are
-            // capped in single digits, cache the digests if that changes.
-            None => {
-                let hash = node_hash.filter(|h| h.len() == NODE_HASH_LEN)?;
-                peers.keys().find(|id| self::node_hash(id) == hash)?.clone()
-            }
+        let Some(peer) = peers.get_mut(peer_id) else {
+            return false;
         };
-        let peer = peers.get_mut(&id)?;
         peer.rssi = ((7 * i32::from(peer.rssi) + 3 * i32::from(rssi)) as f32 / 10.0).round() as i16;
         peer.last_seen = SystemTime::now();
-        Some(id)
+        true
     }
 
     /// Called when a message is received from a peer.
@@ -1494,7 +1479,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reading_reaches_only_a_linked_peer_by_link_or_by_hash() {
+    fn a_reading_moves_only_a_linked_peer_and_is_smoothed() {
         // SHA-256("abc") begins ba7816bf 8f01cfea: the digest is the standard
         // one, so any platform can compute it without this crate.
         assert_eq!(
@@ -1505,42 +1490,27 @@ mod tests {
         let transport = BleTransport::new("me");
         transport.start().unwrap();
         transport.on_peer_discovered(peer_device("carol"));
-        transport.on_peer_discovered(peer_device("dave"));
 
-        let rssi_of = |id: &str| transport.get_peer(id).unwrap().rssi;
+        assert!(transport.on_peer_rssi("carol", -41));
         assert_eq!(
-            transport.on_peer_rssi(Some("carol"), None, -41),
-            Some("carol".into())
+            transport.get_peer("carol").unwrap().rssi,
+            -54,
+            "0.7 * -60 + 0.3 * -41, rounded"
         );
-        assert_eq!(rssi_of("carol"), -54, "0.7 * -60 + 0.3 * -41, rounded");
-        // The link wins over a hash naming someone else.
-        let dave = node_hash("dave");
-        assert_eq!(
-            transport.on_peer_rssi(Some("carol"), Some(&dave), -42),
-            Some("carol".into())
-        );
-        // An unknown link falls through to the hash.
-        assert_eq!(
-            transport.on_peer_rssi(Some("eve"), Some(&dave), -70),
-            Some("dave".into())
-        );
-        assert_eq!(rssi_of("dave"), -63);
         assert_eq!(
             transport
                 .connected_peers()
                 .iter()
-                .find(|l| l.peer_id == "dave")
+                .find(|l| l.peer_id == "carol")
                 .unwrap()
                 .rssi,
-            Some(-63)
+            Some(-54)
         );
-        // Neither an unlinked address, its hash, nor a malformed hash is named.
-        assert_eq!(
-            transport.on_peer_rssi(Some("eve"), Some(&node_hash("eve")), -30),
-            None
+        assert!(
+            !transport.on_peer_rssi("eve", -30),
+            "never introduces a peer"
         );
-        assert_eq!(transport.on_peer_rssi(None, Some(&dave[..4]), -30), None);
-        assert_eq!(transport.get_peer("eve").map(|p| p.rssi), None);
+        assert!(transport.get_peer("eve").is_none());
     }
 
     /// Raw readings swing about ±8 dB between samples. Two links 10 dB apart
@@ -1563,8 +1533,8 @@ mod tests {
         for i in 0..60 {
             // Opposite phases, so the two readings cross every sample.
             let swing = if i % 2 == 0 { 8 } else { -8 };
-            transport.on_peer_rssi(Some("strong"), None, -60 + swing);
-            transport.on_peer_rssi(Some("weak"), None, -70 - swing);
+            transport.on_peer_rssi("strong", -60 + swing);
+            transport.on_peer_rssi("weak", -70 - swing);
             if i >= 10 {
                 assert!(
                     quality("strong") > quality("weak"),
@@ -1574,7 +1544,7 @@ mod tests {
         }
         // A lasting change still moves the ranking.
         for _ in 0..30 {
-            transport.on_peer_rssi(Some("weak"), None, -45);
+            transport.on_peer_rssi("weak", -45);
         }
         assert!(quality("weak") > quality("strong"));
     }

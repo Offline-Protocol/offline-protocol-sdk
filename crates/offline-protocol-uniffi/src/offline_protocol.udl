@@ -1271,9 +1271,11 @@ interface OfflineProtocol {
     // A signal reading from an advertisement, for every scan result. Pass
     // the peer the link to that advertiser names, and the service data the
     // advertisement carried under the mesh service UUID, whichever are
-    // known. Cheap: no key exchange, no outbox flush. A reading that names
-    // no peer announced through `ble_peer_discovered` is dropped, so this
-    // never introduces one and is outside the identity contract above.
+    // known. No key exchange, no outbox flush, and while readings are off,
+    // or when it names no peer announced through `ble_peer_discovered`, it
+    // returns without taking the protocol lock. Such a reading is dropped,
+    // so this never introduces a peer and is outside the identity contract
+    // above.
     void ble_peer_rssi(string? peer_id, sequence<u8>? node_hash, i16 rssi);
 
     // Live readings, off by default: `PeerRssi` events and the link

@@ -2604,6 +2604,9 @@ struct BleState {
     fragments: VecDeque<(String, Vec<u8>)>,
     peer_count: u32,
     peers: HashMap<String, PeerDevice>,
+    /// The advertised node hash of each peer in `peers`, kept in step with
+    /// it, so a reading is attributed under this lock alone.
+    node_hashes: HashMap<[u8; offline_protocol_transport::NODE_HASH_LEN], String>,
     /// Whether `PeerRssi` is emitted at all (`set_peer_rssi_events`).
     rssi_events: bool,
     /// When each peer's last `PeerRssi` went out, for the per-peer rate cap.
@@ -2851,6 +2854,7 @@ impl OfflineProtocol {
                 fragments: VecDeque::new(),
                 peer_count: 0,
                 peers: HashMap::new(),
+                node_hashes: HashMap::new(),
                 rssi_events: false,
                 rssi_emitted: HashMap::new(),
             }),
@@ -4211,6 +4215,10 @@ impl OfflineProtocol {
         };
         ble_state.peers.insert(peer_id.clone(), peer);
         ble_state.peer_count = ble_state.peers.len() as u32;
+        ble_state.node_hashes.insert(
+            offline_protocol_transport::node_hash(&peer_id),
+            peer_id.clone(),
+        );
         drop(ble_state);
 
         // Register peer with the BLE transport so send() can route to them
@@ -4229,50 +4237,65 @@ impl OfflineProtocol {
 
     /// BLE: a signal reading from an advertisement.
     ///
-    /// Cheap and safe to call for every scan result, unlike
+    /// Safe to call for every scan result, unlike
     /// [`Self::ble_peer_discovered`], which starts key exchange and flushes
     /// the outbox. The platform passes what it has: the peer its link to the
-    /// advertiser names, and the node hash the advertisement carried. While
+    /// advertiser names, and the node hash the advertisement carried; the
+    /// link wins when both name someone. While
     /// [`Self::set_peer_rssi_events`] is on, the reading updates that peer's
     /// link quality and reaches the app as `PeerRssi`, at most four a second
     /// per peer. Neither value can name a peer that has not proved its
     /// address on a link; such a reading is dropped.
     ///
-    /// While it is off the reading is dropped at once, under the BLE state
-    /// lock alone: an app that never asked for readings keeps the relay
-    /// ranking it had before they existed, and its scan path never waits on
-    /// the protocol lock.
+    /// The protocol lock is the cost, and the Android bridge calls this on
+    /// its BLE thread, which must not wait behind MLS work for nothing. So a
+    /// reading is attributed under the BLE state lock alone: while readings
+    /// are off, or when it names no linked peer, it returns there. One that
+    /// names a peer takes the protocol lock once, for the link quality and
+    /// the block check together.
     pub fn ble_peer_rssi(&self, peer_id: Option<String>, node_hash: Option<Vec<u8>>, rssi: i16) {
         // CoreBluetooth's "no reading", not a signal of +127 dBm.
-        if rssi == 127 || !recover_mutex(&self.ble_state, "ble_state").rssi_events {
+        if rssi == 127 {
             return;
         }
-        let Some(peer_id) = self
-            .with_ble_transport(|ble| {
-                ble.on_peer_rssi(peer_id.as_deref(), node_hash.as_deref(), rssi)
-            })
-            .flatten()
-        else {
-            return;
-        };
-        {
+        let (peer_id, emit) = {
             let mut ble = recover_mutex(&self.ble_state, "ble_state");
-            // Switched off while the transport was being updated.
             if !ble.rssi_events {
                 return;
             }
+            let linked = peer_id.filter(|id| ble.peers.contains_key(id));
+            let hashed = || {
+                let hash: [u8; offline_protocol_transport::NODE_HASH_LEN] =
+                    node_hash.as_deref()?.try_into().ok()?;
+                ble.node_hashes.get(&hash).cloned()
+            };
+            let Some(peer_id) = linked.or_else(hashed) else {
+                return;
+            };
             let now = offline_protocol_core::time::Instant::now();
-            if ble
+            let emit = !ble
                 .rssi_emitted
                 .get(&peer_id)
-                .is_some_and(|at| now.duration_since(*at) < PEER_RSSI_INTERVAL)
-            {
-                return;
+                .is_some_and(|at| now.duration_since(*at) < PEER_RSSI_INTERVAL);
+            if emit {
+                ble.rssi_emitted.insert(peer_id.clone(), now);
             }
-            ble.rssi_emitted.insert(peer_id.clone(), now);
-        }
-        // Suppressed like `NeighborDiscovered`: the app blocked this peer.
-        if self.lock_inner_recovering().is_user_blocked(&peer_id) {
+            (peer_id, emit)
+        };
+        let blocked = {
+            let protocol = self.lock_inner_recovering();
+            if let Some(transport) = protocol
+                .transport_manager()
+                .get_transport(CoreTransportType::BLE)
+            {
+                if let Some(ble) = transport.as_any().downcast_ref::<BleTransport>() {
+                    ble.on_peer_rssi(&peer_id, rssi);
+                }
+            }
+            // Suppressed like `NeighborDiscovered`: the app blocked this peer.
+            emit && protocol.is_user_blocked(&peer_id)
+        };
+        if !emit || blocked {
             return;
         }
         self.emit_event(CoreEvent::PeerRssi {
@@ -4307,6 +4330,9 @@ impl OfflineProtocol {
         let was_known = ble_state.peers.remove(&peer_id).is_some();
         ble_state.peer_count = ble_state.peers.len() as u32;
         ble_state.rssi_emitted.remove(&peer_id);
+        ble_state
+            .node_hashes
+            .remove(&offline_protocol_transport::node_hash(&peer_id));
         drop(ble_state);
 
         // Unregister peer from the BLE transport
@@ -10712,11 +10738,67 @@ mod tests {
             "the cap is on events, not on readings"
         );
 
+        // The link wins over a hash naming someone else, a malformed hash
+        // names nobody, and a lost peer's hash stops matching.
+        std::thread::sleep(PEER_RSSI_INTERVAL);
+        protocol.ble_peer_rssi(
+            Some("near".to_string()),
+            Some(offline_protocol_transport::node_hash("shy").to_vec()),
+            -41,
+        );
+        let hash = offline_protocol_transport::node_hash("near").to_vec();
+        protocol.ble_peer_rssi(None, Some(hash[..4].to_vec()), -30);
+        let got = readings(&protocol);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert!(got[0].contains("\"peer_id\":\"near\""), "{got:?}");
+        protocol.ble_peer_lost("near".to_string()).unwrap();
+        std::thread::sleep(PEER_RSSI_INTERVAL);
+        protocol.ble_peer_rssi(None, Some(hash), -30);
+        assert!(readings(&protocol).is_empty(), "a lost peer is not named");
+        protocol
+            .ble_peer_discovered("near".to_string(), -60)
+            .unwrap();
+        drained_events(&protocol);
+
         protocol.set_peer_rssi_events(false);
         let before = link_rssi(&protocol);
         protocol.ble_peer_rssi(Some("near".to_string()), None, -42);
         assert!(readings(&protocol).is_empty());
         assert_eq!(link_rssi(&protocol), before);
+    }
+
+    /// The Android bridge feeds readings from its BLE thread, which serves
+    /// scanning, advertising and GATT and must not wait behind MLS work on the
+    /// protocol lock for a reading that names nobody. With readings on and the
+    /// protocol lock held elsewhere, an unattributable reading still returns.
+    #[test]
+    fn test_an_unattributable_reading_never_waits_on_the_protocol_lock() {
+        let protocol = Arc::new(OfflineProtocol::new(create_test_config()).unwrap());
+        protocol.start().unwrap();
+        protocol
+            .ble_peer_discovered("near".to_string(), -60)
+            .unwrap();
+        protocol.set_peer_rssi_events(true);
+
+        let held = protocol.lock_inner().unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        let feeder = Arc::clone(&protocol);
+        thread::spawn(move || {
+            feeder.ble_peer_rssi(Some("stranger".to_string()), None, -40);
+            feeder.ble_peer_rssi(
+                None,
+                Some(offline_protocol_transport::node_hash("stranger").to_vec()),
+                -40,
+            );
+            feeder.ble_peer_rssi(None, Some(vec![1, 2, 3]), -40);
+            let _ = done.send(());
+        });
+        let returned = finished.recv_timeout(std::time::Duration::from_secs(2));
+        drop(held);
+        assert!(
+            returned.is_ok(),
+            "a reading that names no linked peer waited on the protocol lock"
+        );
     }
 
     /// A peer that leaves the Wi-Fi Direct group but is still linked over
