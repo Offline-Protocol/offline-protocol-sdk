@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 
-# Generate every UniFFI binding from the one UDL: Swift, Kotlin, Python and Java.
+# Generate every UniFFI binding from the one UDL: Swift, Kotlin, Python, Ruby
+# and Java.
 #
-# This is the single entry point, and the reason it exists is that the four
-# generated sets are one artifact set, not four independent ones: they are
+# This is the single entry point, and the reason it exists is that the five
+# generated sets are one artifact set, not five independent ones: they are
 # produced from one UDL and carry the FFI checksums of the
 # cdylib they were generated against. Regenerating a subset leaves the others
 # describing a different ABI — which does not fail any build, only the app at
@@ -43,7 +44,7 @@ if [[ $# -gt 0 ]]; then
   # generate-bindings.sh, and the RN one execs this, so a basename cannot say
   # which of them rejected the flag.
   echo "Error: scripts/generate-bindings.sh takes no arguments (got: $*)." >&2
-  echo "It generates Swift, Kotlin, Python and Java together on purpose — they are one" >&2
+  echo "It generates Swift, Kotlin, Python, Ruby and Java together on purpose — they are one" >&2
   echo "artifact set off one UDL, and a partial set fails at runtime, not build time." >&2
   exit 2
 fi
@@ -56,6 +57,8 @@ UDL="src/offline_protocol.udl"
 SWIFT_OUT="$PROJECT_ROOT/bindings/react-native/ios/Generated"
 KOTLIN_OUT="$PROJECT_ROOT/bindings/react-native/android/src/main/java"
 PYTHON_OUT="$PROJECT_ROOT/bindings/python/offline_protocol_sdk"
+RUBY_OUT="$PROJECT_ROOT/bindings/ruby/lib"
+RUBY_CONFIG="$PROJECT_ROOT/bindings/ruby/uniffi.toml"
 JAVA_OUT="$PROJECT_ROOT/bindings/java/src/main/java"
 JAVA_CONFIG="$PROJECT_ROOT/bindings/java/uniffi.toml"
 
@@ -129,10 +132,16 @@ fi
 # tool), which means an Android or iOS contributor with those formatters —
 # exactly the people editing this repo — would regenerate correctly and still
 # trip the drift gate. Pin the output to the one form instead.
+#
+# The optional third argument is a global config file. Only Ruby passes one: its
+# generator names the library after the namespace unless told otherwise, and the
+# crate's cdylib is not called that.
 generate() {
-  local language="$1" out_dir="$2"
+  local language="$1" out_dir="$2" config="${3:-}"
+  local args=(--no-format "$UDL" --language "$language" --out-dir "$out_dir")
+  [[ -n "$config" ]] && args+=(--config "$config")
   mkdir -p "$out_dir"
-  uniffi-bindgen generate --no-format "$UDL" --language "$language" --out-dir "$out_dir"
+  uniffi-bindgen generate "${args[@]}"
   printf '  %-7s -> %s\n' "$language" "${out_dir#"$PROJECT_ROOT"/}"
 }
 
@@ -151,6 +160,7 @@ echo "Generating UniFFI bindings from $UDL (uniffi-bindgen $INSTALLED_VERSION)"
 generate swift "$SWIFT_OUT"
 generate kotlin "$KOTLIN_OUT"
 generate python "$PYTHON_OUT"
+generate ruby "$RUBY_OUT" "$RUBY_CONFIG"
 generate_java
 
-echo "All bindings generated. Commit all four together — a partial commit is drift."
+echo "All bindings generated. Commit all five together — a partial commit is drift."

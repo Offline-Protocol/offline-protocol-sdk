@@ -2,11 +2,11 @@
 
 # Guards the single-entry-point rule for UniFFI codegen.
 #
-# scripts/generate-bindings.sh exists so that Swift, Kotlin and Python are
+# scripts/generate-bindings.sh exists so that Swift, Kotlin, Python, Ruby and Java are
 # always regenerated together — they are one artifact set off one UDL, and a
 # partial set does not fail any build, only the app at its first FFI call. That
 # property is only as good as two things nothing else checks: that the
-# generator still writes all four languages to the four committed paths, and
+# generator still writes all five languages to the five committed paths, and
 # that nothing else in the repo shells out to uniffi-bindgen behind its back.
 #
 # Both are asserted here, and deliberately by *behavior* rather than by
@@ -135,15 +135,16 @@ prose
 prose-adjacent
 "
 
-# The four committed paths, repo-relative. CI deletes exactly these before
+# The five committed paths, repo-relative. CI deletes exactly these before
 # regenerating and diffs exactly these afterwards; if the generator ever writes
 # somewhere else, `git diff` on a path nothing wrote to reports no diff and the
 # gate goes green on stale bindings. This list is the single record of what
-# those four places must agree on, and it is checked against both.
+# those five places must agree on, and it is checked against both.
 EXPECTED_OUTPUTS="
 swift:bindings/react-native/ios/Generated
 kotlin:bindings/react-native/android/src/main/java
 python:bindings/python/offline_protocol_sdk
+ruby:bindings/ruby/lib
 java:bindings/java/src/main/java
 "
 
@@ -159,7 +160,7 @@ java:bindings/java/src/main/java
 # purpose. That is the intended cost: the failure is loud, names the expected
 # and actual counts, and updating it is a deliberate one-line acknowledgement
 # that the guard's coverage changed.
-EXPECTED_ASSERTIONS=63
+EXPECTED_ASSERTIONS=69
 
 FAILURES=0
 ASSERTIONS=0
@@ -251,7 +252,7 @@ ci_step_body() {
 
 echo "Guarding the shared binding generator..."
 
-assert_list_size EXPECTED_OUTPUTS 4 "$EXPECTED_OUTPUTS"
+assert_list_size EXPECTED_OUTPUTS 5 "$EXPECTED_OUTPUTS"
 assert_list_size DELEGATING_CALLERS 6 "$DELEGATING_CALLERS"
 assert_list_size NATIVE_BUILD_ALIASES 3 "$NATIVE_BUILD_ALIASES"
 # EXPECTED_OUTPUTS is covered by assert_set_equals against a hardcoded literal;
@@ -298,7 +299,7 @@ STUB
   chmod +x "$bin_dir/uniffi-bindgen"
 
   # The Java generator has no --language, so the stub logs one for it: the
-  # per-language checks below then read all four calls the same way.
+  # per-language checks below then read all five calls the same way.
   cat >"$bin_dir/uniffi-bindgen-java" <<STUB
 #!/usr/bin/env bash
 if [[ "\${1:-}" == "--version" ]]; then
@@ -390,10 +391,10 @@ else
 fi
 
 call_count="$(find "$call_dir" -type f | wc -l | tr -d ' ')"
-if [[ "$call_count" -eq 4 ]]; then
-  pass "it invoked bindgen exactly 4 times — one per language"
+if [[ "$call_count" -eq 5 ]]; then
+  pass "it invoked bindgen exactly 5 times — one per language"
 else
-  fail "it invoked bindgen $call_count time(s), expected 4 (Swift, Kotlin, Python, Java)"
+  fail "it invoked bindgen $call_count time(s), expected 5 (Swift, Kotlin, Python, Ruby, Java)"
 fi
 
 languages_seen=""
@@ -461,7 +462,26 @@ done <<EOF
 $EXPECTED_OUTPUTS
 EOF
 
-assert_set_equals "the per-language checks" "swift kotlin python java" "$languages_seen"
+assert_set_equals "the per-language checks" "swift kotlin python ruby java" "$languages_seen"
+
+# Ruby is the one language generated with a config: without it the generated
+# code loads a library named after the namespace, which no build produces, and
+# the failure is a LoadError in the consumer's first require, not here. The
+# generator ignores a config key it does not know, so only the argument itself
+# can be pinned at this level.
+ruby_call=""
+for candidate in "$call_dir"/*; do
+  [[ -f "$candidate" ]] || continue
+  if [[ "$(arg_value "$candidate" --language || true)" == "ruby" ]]; then
+    ruby_call="$candidate"
+    break
+  fi
+done
+if [[ -n "$ruby_call" && "$(arg_value "$ruby_call" --config || true)" == "$REPO_ROOT/bindings/ruby/uniffi.toml" ]]; then
+  pass "ruby is generated with bindings/ruby/uniffi.toml"
+else
+  fail "ruby is not generated with --config bindings/ruby/uniffi.toml — the generated code would load a library the build does not produce"
+fi
 
 # ---------------------------------------------------------------------------
 # 3. Behavioral: the version gate actually rejects a mismatched bindgen.
@@ -512,7 +532,7 @@ else
   if [[ "$bad_java_calls" -eq 0 ]]; then
     pass "a uniffi-bindgen-java outside its series is rejected before anything is written"
   else
-    fail "$GENERATOR refused the mismatched Java bindgen only after $bad_java_calls call(s) — Swift, Kotlin or Python was already written"
+    fail "$GENERATOR refused the mismatched Java bindgen only after $bad_java_calls call(s) — Swift, Kotlin, Python or Ruby was already written"
   fi
 fi
 

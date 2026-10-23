@@ -116,8 +116,8 @@ pip install -e .
 ```
 
 `build-desktop.sh` compiles the Rust core for your platform and generates the
-FFI bindings. It regenerates Swift, Kotlin and Java alongside Python by delegating to
-the repo-root `scripts/generate-bindings.sh`: the four are one artifact set
+FFI bindings. It regenerates Swift, Kotlin, Ruby and Java alongside Python by delegating to
+the repo-root `scripts/generate-bindings.sh`: the five are one artifact set
 off one UDL, so they are never refreshed apart.
 
 **Prerequisites:** Rust toolchain, `uniffi-bindgen` (`cargo install uniffi --version 0.32.2 --features cli --locked`) and `uniffi-bindgen-java` (`cargo install uniffi-bindgen-java --version 0.5.2 --locked`).

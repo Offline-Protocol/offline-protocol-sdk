@@ -59,6 +59,24 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 - **`WebRtcCarrier` takes the application's STUN and TURN servers**
   (`iceServers`), for links between networks. The default is still none.
 
+- **A Ruby binding.** `bindings/ruby` is one generated file,
+  `lib/offline_protocol.rb`, written by UniFFI's own Ruby generator from the
+  interface definition with the other bindings, so it needs no generator
+  beyond the `uniffi-bindgen` the rest already use. It calls the native
+  library through the `ffi` gem, with no glue of its own and not through the C
+  API. `OfflineProtocol::OfflineProtocol`, `MeshServices`, `DataStore`, every
+  record and enum, the objects a host implements (events, transports, storage
+  providers) and an exception per engine refusal. Unlike the generated Java,
+  the records keep the definition's field defaults. CI regenerates and diffs
+  the Ruby with the rest, and runs a minitest consumer check against the
+  library on Linux, macOS and Windows. A config names the library, because the
+  generator's default is a name no build produces. An engine that Ruby's
+  garbage collector frees while it holds a callback leaks the callback and
+  warns, which is a defect in the generator and is documented as such. The
+  release builds it as the `offline_protocol` gem, which carries no native
+  code, and publishes it to RubyGems with trusted publishing under the
+  `RUBYGEMS_PUBLISH` switch. The contract is `docs/bridges/ruby.md`.
+
 ### Changed
 
 - **The workspace reads the clock through `offline_protocol_core::time`.** It

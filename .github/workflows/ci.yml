@@ -622,6 +622,63 @@ jobs:
         working-directory: examples/java-app
         run: gradle --no-daemon --stacktrace run
 
+  # The Ruby binding (docs/bridges/ruby.md). Its source is generated from the
+  # UDL and its drift is gated with the other bindings (python-bindings). This
+  # is the other side: the generated Ruby, run against the library built from
+  # the same definition. The Ruby generator compares no FFI checksums at load
+  # (docs/bridges/ruby.md, R1), so this run is what proves the two agree: it
+  # fails if they were produced from different definitions, or if the config
+  # names the wrong library.
+  ruby-binding:
+    name: Ruby Binding (${{ matrix.os }}, Ruby ${{ matrix.ruby }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        ruby: ["4.0"]
+        # The gemspec's required_ruby_version, which only this run proves.
+        include:
+          - os: ubuntu-latest
+            ruby: "3.3"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-ruby-binding
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
+          working-directory: bindings/ruby
+
+      - name: Build the library
+        run: cargo build --locked --package offline-protocol-uniffi
+
+      # The Rakefile puts target/debug on the loader's search path and runs the
+      # consumer check against the library built above.
+      - name: Test the Ruby binding
+        working-directory: bindings/ruby
+        run: bundle exec rake test
+
+      # The gem the release publishes, so a gemspec error shows on the pull
+      # request and not on a tag.
+      - name: Build the gem
+        working-directory: bindings/ruby
+        run: bundle exec rake build
+
+      # The example app against the same library, so it cannot rot: two
+      # engines pair, encrypt and exchange messages in one Ruby process.
+      - name: Run the Ruby example
+        working-directory: examples/ruby-app
+        run: |
+          bundle install
+          bundle exec rake run
+
   web-binding:
     name: Web Binding
     runs-on: ubuntu-latest
@@ -763,6 +820,7 @@ jobs:
           rm -rf bindings/react-native/ios/Generated \
                  bindings/react-native/android/src/main/java/uniffi
           rm -f bindings/python/offline_protocol_sdk/offline_protocol.py
+          rm -f bindings/ruby/lib/offline_protocol.rb
           rm -rf bindings/java/src/main/java/com/offlineprotocol/sdk
 
       # Regenerate before building anything. Bindgen reads the UDL and nothing
@@ -772,7 +830,7 @@ jobs:
       - name: Regenerate all UniFFI bindings
         run: bash scripts/generate-bindings.sh
 
-      # One regeneration, one gate: the four sets are one artifact set off one
+      # One regeneration, one gate: the five sets are one artifact set off one
       # UDL, so checking them separately would let a half-updated commit pass
       # the half of the gate it happened to satisfy.
       - name: Fail on stale bindings
@@ -781,9 +839,10 @@ jobs:
             bindings/python/offline_protocol_sdk/offline_protocol.py \
             bindings/react-native/ios/Generated/ \
             bindings/react-native/android/src/main/java/uniffi/ \
+            bindings/ruby/lib/offline_protocol.rb \
             bindings/java/src/main/java/com/offlineprotocol/sdk/; then
             echo "::error::Committed UniFFI bindings are out of date."
-            echo "Run: bash scripts/generate-bindings.sh and commit all four."
+            echo "Run: bash scripts/generate-bindings.sh and commit all five."
             exit 1
           fi
 
