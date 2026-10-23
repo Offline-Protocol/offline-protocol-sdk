@@ -27,7 +27,7 @@
 //! The uploader never takes the emit path's lock and holds the store only
 //! while it is the only thread that could touch it.
 
-use std::time::{Duration, Instant};
+use offline_protocol_core::time::{Duration, Instant};
 
 use crate::telemetry::pipe::store::BatchStore;
 

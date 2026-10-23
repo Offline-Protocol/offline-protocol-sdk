@@ -4,12 +4,12 @@
 //!
 //! Nothing here knows about sealing or about either trait's error type.
 
+use offline_protocol_core::time::{Duration, SystemTime};
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, SystemTime};
 
 use rand_core::{OsRng, RngCore};
 

@@ -308,9 +308,11 @@ impl OfflineProtocol {
     pub(crate) fn cleanup_expired_entries(&mut self) {
         self.deduplicator.cleanup_expired();
         self.retry_queue.cleanup_expired();
-        self.mesh_relay.maintain(std::time::Instant::now());
-        self.prune_stale_known_peers(std::time::Instant::now());
-        self.reachability.prune(std::time::Instant::now());
+        self.mesh_relay
+            .maintain(offline_protocol_core::time::Instant::now());
+        self.prune_stale_known_peers(offline_protocol_core::time::Instant::now());
+        self.reachability
+            .prune(offline_protocol_core::time::Instant::now());
         self.cleanup_expired_pending_messages_if_due();
         self.cleanup_outbox();
         self.mesh_services.cleanup_expired();
@@ -386,7 +388,7 @@ impl OfflineProtocol {
     /// This is the only removal path for peers on carriers without a
     /// disconnect signal (Internet, Reticulum, Nostr, WiFi Direct
     /// message-path senders). `now` is injected for test determinism.
-    pub(crate) fn prune_stale_known_peers(&mut self, now: std::time::Instant) {
+    pub(crate) fn prune_stale_known_peers(&mut self, now: offline_protocol_core::time::Instant) {
         let ttl = StdDuration::from_secs(KNOWN_PEER_TTL_SECS);
         let stale: Vec<String> = self
             .known_peers

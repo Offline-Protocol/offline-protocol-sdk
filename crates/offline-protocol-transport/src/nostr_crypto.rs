@@ -253,8 +253,8 @@ pub fn record_seal_keypair_for_address(address: &Address) -> Result<NostrKeypair
 /// Saturates to 0 rather than panicking if the system clock is set before the
 /// epoch; a zero here only widens a subscription window.
 pub(crate) fn now_unix_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    offline_protocol_core::time::SystemTime::now()
+        .duration_since(offline_protocol_core::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }

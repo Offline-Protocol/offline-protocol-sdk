@@ -724,7 +724,7 @@ fn a_replication_frame_buffered_before_the_group_was_ready_is_intercepted_on_dra
             timestamp: Some("2026-08-20T00:00:00Z".to_string()),
             reply_to: None,
             forward_info: None,
-            buffered_at: std::time::Instant::now(),
+            buffered_at: offline_protocol_core::time::Instant::now(),
             received_via: None,
         },
     );
@@ -1432,7 +1432,7 @@ fn a_removal_buffered_before_the_group_was_ready_is_applied_on_drain() {
             timestamp: Some("2026-09-22T00:00:00Z".to_string()),
             reply_to: None,
             forward_info: None,
-            buffered_at: std::time::Instant::now(),
+            buffered_at: offline_protocol_core::time::Instant::now(),
             received_via: None,
         },
     );
@@ -1884,7 +1884,7 @@ fn a_group_fetch_that_nobody_answers_names_the_member_it_was_put_to() {
         .expect("fetch");
     pump(&mut bob, &mut [&mut alice, &mut carol]);
 
-    let stale = std::time::Instant::now()
+    let stale = offline_protocol_core::time::Instant::now()
         - crate::protocol::data_sync::ATTACHMENT_FETCH_TIMEOUT
         - std::time::Duration::from_secs(1);
     for pending in bob.protocol.pending_attachment_fetches.values_mut() {
@@ -2216,7 +2216,7 @@ fn a_carriage_that_stops_half_way_still_ends() {
         "the half-arrived answer left no question behind"
     );
 
-    let stale = std::time::Instant::now()
+    let stale = offline_protocol_core::time::Instant::now()
         - crate::protocol::data_sync::ATTACHMENT_FETCH_TIMEOUT
         - std::time::Duration::from_secs(1);
     for pending in bob.protocol.pending_attachment_fetches.values_mut() {
@@ -2323,7 +2323,7 @@ fn a_refusal_from_a_member_the_question_was_not_put_to_is_ignored() {
 ///
 /// [`DATA_SYNC_SETTLE_DELAY`]: crate::protocol::data_sync::DATA_SYNC_SETTLE_DELAY
 fn let_commits_go_quiet(member: &mut Member) {
-    let now = std::time::Instant::now();
+    let now = offline_protocol_core::time::Instant::now();
     for (due, _) in member.protocol.data_sync_settle.values_mut() {
         *due = now;
     }

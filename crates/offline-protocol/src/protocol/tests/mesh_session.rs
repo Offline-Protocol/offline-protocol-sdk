@@ -8,8 +8,8 @@
 //! leans on: the session forms through bob, the message arrives, and its
 //! acknowledgement comes back, with nothing readable on bob's side.
 
+use offline_protocol_core::time::{Duration, Instant};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use offline_protocol_core::Message;
 use offline_protocol_transport::{MockTransport, Transport, TransportType};

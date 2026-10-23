@@ -6,9 +6,9 @@ use super::decryption_queue::{DroppedPendingMessage, PendingDecryptMessage};
 use super::{lock_shared_state, ChunkOutcome, InternalMessageResult, OfflineProtocol};
 use crate::events::{DecryptionFailureCode, Event};
 use chrono::Utc;
+use offline_protocol_core::time::Instant;
 use offline_protocol_core::{ContentType, Message};
 use offline_protocol_transport::TransportType;
-use std::time::Instant;
 use tracing::{debug, error, info, warn};
 
 impl OfflineProtocol {

@@ -21,13 +21,13 @@ use crate::constants::{MAX_MEDIA_DESCRIPTORS, MAX_OUTBOX_ENTRIES};
 use crate::events::DecryptionFailureCode;
 use crate::{Error, Event, ProtocolStateError, ProtocolStateResult, ProtocolStateStorage, Result};
 use chrono::{Duration as ChronoDuration, Utc};
+use offline_protocol_core::time::Instant;
 use offline_protocol_core::{LamportClock, Message, MessageId};
 use offline_protocol_mls::{MlsManager, MlsStorage, StorageError};
 use offline_protocol_transport::{NostrKeypair, NostrTransport, TransportType};
 use serde::de::DeserializeOwned;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 

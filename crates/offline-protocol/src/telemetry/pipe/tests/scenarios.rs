@@ -443,7 +443,7 @@ fn a_threaded_pipe_starts_flushes_on_request_and_stops_within_the_budget() {
     let stats = pipe.stats();
     assert_eq!(stats.sent_events, 1);
     assert_eq!(stats.last_flush_at_ms, Some(5_000));
-    let started = std::time::Instant::now();
+    let started = offline_protocol_core::time::Instant::now();
     assert!(pipe.stop(FINAL_FLUSH_BUDGET));
     assert!(started.elapsed() < FINAL_FLUSH_BUDGET);
 }
@@ -466,9 +466,9 @@ fn a_detached_worker_finishing_an_upload_cannot_orphan_its_replacements_batch() 
     use crate::telemetry::pipe::store::BatchStore;
     use crate::telemetry::pipe::uploader::{HttpClient, Request, Response};
     use crate::telemetry::pipe::PipeParts;
+    use offline_protocol_core::time::{Duration, Instant};
     use std::sync::atomic::AtomicBool;
     use std::sync::{Condvar, Mutex};
-    use std::time::{Duration, Instant};
 
     /// Accepts every request, but holds each one until the gate opens.
     #[derive(Clone, Default)]

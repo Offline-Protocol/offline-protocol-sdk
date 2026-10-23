@@ -436,7 +436,7 @@ mod tests {
         );
         proto
             .key_package_sent_to
-            .insert(id("bob"), (std::time::Instant::now(), 0));
+            .insert(id("bob"), (offline_protocol_core::time::Instant::now(), 0));
 
         // Queue a pending encrypted message for bob
         let pending_msg = Message::new(
@@ -849,7 +849,7 @@ mod tests {
             .unwrap();
 
         use crate::protocol::types::PendingMediaMetadataEntry;
-        use std::time::Instant;
+        use offline_protocol_core::time::Instant;
         proto.pending_media_metadata.insert(
             "file-from-bob".to_string(),
             PendingMediaMetadataEntry {

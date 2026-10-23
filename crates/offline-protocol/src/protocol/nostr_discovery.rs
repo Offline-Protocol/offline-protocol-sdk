@@ -17,8 +17,8 @@
 //! resolves to a set, and the set is the only thing ever emitted.** See
 //! [`PendingResolution`].
 
+use offline_protocol_core::time::{Duration, Instant};
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use offline_protocol_core::Username;

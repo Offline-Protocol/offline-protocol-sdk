@@ -3,11 +3,11 @@
 //! side never waits long for the pipe's lock while the uploader drains, and
 //! enabling telemetry does no I/O on the caller.
 
+use offline_protocol_core::time::{Duration, Instant};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use crate::events::Event;
 use crate::telemetry::pipe::store::Backend;

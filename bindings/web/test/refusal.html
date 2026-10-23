@@ -1,0 +1,60 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<pre id="log"></pre>
+<script type="module">
+// A carrier instance that is not a node opens a link to a real node and
+// sends a first frame that is not an identity assertion. The node's engine
+// refuses the link, and the tab carrier must say so to the other end with a
+// `close` addressed to it, or that end would keep the link for ever. The title
+// ends as PASS or FAIL: <step>, which scripts/test-browser.sh reads.
+import { OfflineNode } from "../src/index.js";
+
+const log = (line) => (document.getElementById("log").textContent += line + "\n");
+const appId = `web-refusal-${crypto.randomUUID()}`;
+const fake = crypto.randomUUID();
+const channel = new BroadcastChannel(`offline-protocol/${appId}`);
+const say = (message) => channel.postMessage({ ...message, from: fake });
+
+function heard(predicate, ms = 15000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("timed out")), ms);
+    channel.addEventListener("message", function on({ data }) {
+      if (!predicate(data)) return;
+      clearTimeout(timer);
+      channel.removeEventListener("message", on);
+      resolve(data);
+    });
+  });
+}
+
+let step = "start";
+try {
+  const node = await OfflineNode.start({ appId, profile: "alice" });
+  let announced = false;
+  node.addEventListener("neighbor_discovered", () => (announced = true));
+
+  step = "link";
+  const nodeHello = heard((m) => m.type === "hello" && m.from !== fake);
+  say({ type: "hello" });
+  const nodeInstance = (await nodeHello).from;
+  log(`node instance ${nodeInstance}`);
+
+  step = "refusal";
+  const closed = heard((m) => m.type === "close" && m.to === fake && m.from === nodeInstance);
+  // A length prefix of 120, then 120 bytes that are not an identity assertion.
+  const junk = new Uint8Array(124);
+  junk.set([0, 0, 0, 120]);
+  junk.fill(7, 4);
+  say({ type: "data", to: nodeInstance, bytes: junk });
+  await closed;
+  log("the node told the refused end its link closed");
+  if (announced) throw new Error("a refused link was announced");
+
+  await node.stop();
+  document.title = "PASS";
+} catch (error) {
+  log(String(error?.stack ?? error));
+  document.title = `FAIL: ${step}: ${error?.message ?? error}`;
+}
+</script>

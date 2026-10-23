@@ -60,12 +60,12 @@
 //! ([`MeshRelayGovernor::observe_activity`]), so it describes behaviour rather
 //! than predicting it.
 
+use offline_protocol_core::time::{Duration, Instant};
 use offline_protocol_core::{Message, MessagePriority};
 use offline_protocol_reliability::{RelaySeenCache, RelaySeenConfig};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::time::{Duration, Instant};
 
 use super::custody::CUSTODY_META_KEY;
 

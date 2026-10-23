@@ -1,12 +1,12 @@
 //! File transfer with chunking and reassembly.
 
 use crate::constants::DEFAULT_CHUNK_SIZE;
+use offline_protocol_core::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::hash_map::RandomState;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::BuildHasher;
-use std::time::{Duration, Instant};
 
 mod base64_bytes {
     use base64::{engine::general_purpose::STANDARD, Engine};

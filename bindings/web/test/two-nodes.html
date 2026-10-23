@@ -1,0 +1,80 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>running</title>
+<pre id="log"></pre>
+<script type="module">
+// Two nodes, two workers, one page: both reach each other over the origin's
+// BroadcastChannel exactly as two tabs would. The title ends as PASS or
+// FAIL: <step>, which scripts/test-browser.sh reads.
+import { OfflineNode } from "../src/index.js";
+
+const log = (line) => (document.getElementById("log").textContent += line + "\n");
+const appId = `web-test-${crypto.randomUUID()}`;
+
+function waitFor(node, type, predicate = () => true, ms = 20000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out waiting for ${type}`)), ms);
+    node.addEventListener(type, function on({ detail }) {
+      if (!predicate(detail)) return;
+      clearTimeout(timer);
+      node.removeEventListener(type, on);
+      resolve(detail);
+    });
+  });
+}
+
+let step = "start";
+try {
+  const [a, b] = await Promise.all([
+    OfflineNode.start({ appId, profile: "alice" }),
+    OfflineNode.start({ appId, profile: "bob" }),
+  ]);
+  log(`a ${a.address}\nb ${b.address}`);
+
+  step = "session";
+  await Promise.all([
+    waitFor(a, "secure_session_established", (e) => e.peer_id === b.address),
+    waitFor(b, "secure_session_established", (e) => e.peer_id === a.address),
+  ]);
+  log("session established both ways");
+
+  step = "direct message";
+  const received = waitFor(b, "message_received", (e) => e.content === "hello from a worker");
+  await a.sendMessage(b.address, "hello from a worker");
+  const message = await received;
+  if (message.encrypted !== true || message.sender !== a.address) {
+    throw new Error(`unexpected message ${JSON.stringify(message)}`);
+  }
+  log("direct message arrived encrypted");
+
+  step = "group";
+  const group = await a.createGroup("lobby");
+  const joined = waitFor(b, "group_member_added", (e) => e.group_id === group.group_id);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await a.inviteToGroup(group.group_id, b.address);
+      break;
+    } catch (error) {
+      // The member's post-session key package may still be in flight.
+      if (attempt > 50) throw error;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+  await joined;
+  const groupMessage = waitFor(b, "group_message_received", (e) => e.content === "serve");
+  await a.sendGroupMessage(group.group_id, "serve");
+  await groupMessage;
+  log("group message arrived");
+
+  step = "loss";
+  const lost = waitFor(a, "neighbor_lost", (e) => e.peer_id === b.address);
+  await b.stop();
+  await lost;
+  log("stopped node reported lost");
+
+  document.title = "PASS";
+} catch (error) {
+  log(String(error?.stack ?? error));
+  document.title = `FAIL: ${step}: ${error?.message ?? error}`;
+}
+</script>

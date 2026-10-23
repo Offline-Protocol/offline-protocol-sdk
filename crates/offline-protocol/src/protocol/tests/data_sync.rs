@@ -1293,7 +1293,7 @@ fn a_lost_final_delta_heals_once_local_commits_go_quiet() {
 /// Make every settle offer `node` holds due now, as if its commits had gone
 /// quiet for the settle delay.
 fn bring_settle_forward(node: &mut Node) {
-    let now = std::time::Instant::now();
+    let now = offline_protocol_core::time::Instant::now();
     for (due, _) in node.protocol.data_sync_settle.values_mut() {
         *due = now;
     }
@@ -2555,7 +2555,7 @@ fn a_fetch_nobody_answers_eventually_reports() {
     clear_events(&bob);
 
     // Age the question past the timeout, then run the sweep the tick runs.
-    let stale = std::time::Instant::now()
+    let stale = offline_protocol_core::time::Instant::now()
         - crate::protocol::data_sync::ATTACHMENT_FETCH_TIMEOUT
         - std::time::Duration::from_secs(1);
     for pending in bob.protocol.pending_attachment_fetches.values_mut() {
@@ -3003,7 +3003,7 @@ fn a_fetch_does_not_expire_while_its_own_answer_is_arriving() {
 
     // Age the question past the timeout, exactly as the wall clock would on a
     // radio slow enough to matter, and then let some of the answer land.
-    let stale = std::time::Instant::now()
+    let stale = offline_protocol_core::time::Instant::now()
         - crate::protocol::data_sync::ATTACHMENT_FETCH_TIMEOUT
         - std::time::Duration::from_secs(1);
     for pending in bob.protocol.pending_attachment_fetches.values_mut() {
@@ -3567,7 +3567,7 @@ fn the_requester_bounds_how_often_it_asks() {
 
     // And the bound is a window rather than a latch: once it passes, the
     // question can be asked again.
-    let stale = std::time::Instant::now()
+    let stale = offline_protocol_core::time::Instant::now()
         - crate::protocol::data_sync::DATA_SYNC_OFFER_INTERVAL
         - std::time::Duration::from_secs(1);
     for pending in bob.protocol.pending_attachment_fetches.values_mut() {
