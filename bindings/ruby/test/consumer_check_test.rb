@@ -103,6 +103,29 @@ class ConsumerCheckTest < Minitest::Test
     e.stop
   end
 
+  # The key material provider's store receives signed values (R8) and keeps
+  # them through pack("C*"), which wraps them back to bytes. Only a reload of
+  # sealed state proves that: the record key that seals it is random bytes and
+  # goes through the signed read, where the identity key pair is stored as text
+  # and never does. A store that kept the wrong bytes reopens a flushed document
+  # as absent, without an error, and passes every other test here.
+  def test_a_document_sealed_through_ruby_providers_survives_a_reload
+    store = MemoryStorage.new
+    title = '{"kind":"text","value":"hello"}'
+    first = engine
+    first.initialize_mls(store.mls, store.state)
+    docs = Sdk::DataStore.new(first)
+    docs.create_doc("notes", "n1")
+    docs.map_set("notes", "n1", "fields", "title", title)
+    docs.flush("notes", "n1")
+
+    second = engine
+    second.initialize_mls(store.mls, store.state)
+    assert_equal first.local_address, second.local_address, "the identity did not survive a reload"
+    assert_equal title, Sdk::DataStore.new(second).map_get_json("notes", "n1", "fields", "title"),
+                 "a sealed document did not survive a reload through the Ruby providers"
+  end
+
   def test_the_built_in_file_stores_need_no_provider
     Dir.mktmpdir do |dir|
       mls = File.join(dir, "mls")
