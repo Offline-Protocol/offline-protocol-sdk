@@ -5,7 +5,8 @@
 //! cannot hold across the storage traits' `Send + Sync` bound, so the handles
 //! live in a table on the worker's one thread and [`OpfsFile`] names a slot.
 //! A worker has exactly one thread, so the table is never reached from
-//! another.
+//! another. Dropping an [`OpfsFile`] frees its slot, so a start that fails
+//! after taking its handles leaves nothing in the table for the next one.
 
 use std::cell::RefCell;
 
@@ -36,7 +37,7 @@ extern "C" {
 }
 
 thread_local! {
-    static HANDLES: RefCell<Vec<SyncAccessHandle>> = const { RefCell::new(Vec::new()) };
+    static HANDLES: RefCell<Vec<Option<SyncAccessHandle>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// One handle in the worker's table.
@@ -50,8 +51,13 @@ impl OpfsFile {
     pub fn new(handle: SyncAccessHandle) -> Self {
         let slot = HANDLES.with(|handles| {
             let mut handles = handles.borrow_mut();
-            handles.push(handle);
-            handles.len() - 1
+            if let Some(free) = handles.iter().position(Option::is_none) {
+                handles[free] = Some(handle);
+                free
+            } else {
+                handles.push(Some(handle));
+                handles.len() - 1
+            }
         });
         Self { slot }
     }
@@ -64,9 +70,21 @@ impl OpfsFile {
             let handles = handles.borrow();
             let handle = handles
                 .get(self.slot)
+                .and_then(Option::as_ref)
                 .ok_or_else(|| "the file handle is gone".to_string())?;
             op(handle).map_err(describe)
         })
+    }
+}
+
+impl Drop for OpfsFile {
+    fn drop(&mut self) {
+        // The worker closes the handle itself; this only forgets it.
+        HANDLES.with(|handles| {
+            if let Some(slot) = handles.borrow_mut().get_mut(self.slot) {
+                *slot = None;
+            }
+        });
     }
 }
 

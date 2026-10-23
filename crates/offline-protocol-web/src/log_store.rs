@@ -17,10 +17,12 @@
 //!   write that is only staged is a data-loss bug.
 //! - **Every record is sealed and bound to its place.** A record is
 //!   ChaCha20-Poly1305 under a key derived from the store key for this
-//!   category, and its associated data is the category, the file's generation
-//!   and the record's sequence number. A record copied from the other
-//!   category, from an older generation, or to another position in the log
-//!   does not authenticate.
+//!   category and this file's generation, and its associated data is the
+//!   category, the generation and the record's sequence number. A record
+//!   copied from the other category, from another generation, or to another
+//!   position in the log does not authenticate. A key per generation also
+//!   bounds how many random nonces one key ever seals under: a compaction
+//!   starts the count again.
 //! - **A wrong key is refused, never repaired.** The header carries a key
 //!   check. A log whose header does not authenticate is refused at open,
 //!   before a record is read, and nothing is truncated: the common cause is
@@ -29,12 +31,20 @@
 //!   first record that is short or does not authenticate ends the log, and
 //!   the file is truncated there. A crash during a write leaves exactly that
 //!   (a partial record after the last whole one), and the record it was
-//!   writing was never acknowledged.
+//!   writing was never acknowledged. A damaged record with an intact one
+//!   after it is not a tear: cutting there would roll back acknowledged
+//!   state (ratchet generations an AEAD nonce depends on), so the log is
+//!   refused and left untouched, as for a wrong key.
 //! - **Compaction commits by its header.** It truncates the spare file, writes
 //!   every live record into it, flushes, and only then writes and flushes the
 //!   header that makes it valid, under the next generation. A crash at any
 //!   point leaves either the old file as the only valid one, or both valid
 //!   and the new one ahead, and open takes the highest valid generation.
+//!   An I/O error once the header write has begun is different: the header
+//!   may be on the disk, and if it is, the next open takes the new file and
+//!   every later append to the old one is lost. So the spare is emptied
+//!   again, and if even that fails, the log refuses every later write
+//!   rather than acknowledge one that a restart would drop.
 //!
 //! What this does not protect against is in the threat model's browser entry:
 //! the store key is reachable from the origin, so sealing keeps the records
@@ -127,6 +137,8 @@ pub trait LogFile: Send {
 pub enum OpenError {
     /// A file holds a log, and no log authenticates under this key.
     WrongKey,
+    /// A record inside the log is damaged and records after it are intact.
+    Damaged,
     /// A file could not be read or written.
     Io(String),
 }
@@ -136,6 +148,10 @@ impl std::fmt::Display for OpenError {
         match self {
             Self::WrongKey => f.write_str(
                 "the stored log does not open under this store key; it was left untouched",
+            ),
+            Self::Damaged => f.write_str(
+                "the stored log has a damaged record before intact ones; it was left \
+                 untouched rather than cut back",
             ),
             Self::Io(detail) => write!(f, "the log could not be opened: {detail}"),
         }
@@ -170,8 +186,13 @@ struct Log<F> {
     records: Records,
     live: u64,
     stats: LogStats,
+    /// The active generation's cipher.
     cipher: ChaCha20Poly1305,
+    store_key: Zeroizing<[u8; STORE_KEY_BYTES]>,
     category: Category,
+    /// Set when a failed compaction could not be undone: every later write
+    /// is refused, because the spare may win the next open.
+    poisoned: Option<String>,
 }
 
 /// One category's records, durable in two files. Implements both storage
@@ -190,8 +211,9 @@ impl<F: LogFile> std::fmt::Debug for LogStore<F> {
 enum HeaderState {
     /// No bytes at all.
     Empty,
-    /// Bytes, and zeros where the header goes: a compaction that never
-    /// committed. Not a log, and not live.
+    /// Zeros where the header goes (a compaction that never committed), or
+    /// fewer bytes than a header (a crash during the first header write).
+    /// Not a log, and not live.
     Uncommitted,
     Valid(u64),
     Invalid,
@@ -207,11 +229,8 @@ impl<F: LogFile> LogStore<F> {
         first: F,
         second: F,
     ) -> Result<Self, OpenError> {
-        let mut derived = Zeroizing::new([0u8; 32]);
-        Hkdf::<Sha256>::new(Some(HKDF_SALT), store_key)
-            .expand(category.domain(), derived.as_mut())
-            .map_err(|_| OpenError::Io("key derivation failed".to_string()))?;
-        let cipher = ChaCha20Poly1305::new(Key::from_slice(derived.as_ref()));
+        let store_key = Zeroizing::new(*store_key);
+        let cipher = derive(&store_key, category, 1).map_err(OpenError::Io)?;
         let mut log = Log {
             files: [first, second],
             active: 0,
@@ -222,7 +241,9 @@ impl<F: LogFile> LogStore<F> {
             live: 0,
             stats: LogStats::default(),
             cipher,
+            store_key,
             category,
+            poisoned: None,
         };
 
         let states = [log.header_state(0)?, log.header_state(1)?];
@@ -236,6 +257,7 @@ impl<F: LogFile> LogStore<F> {
             Some((generation, index)) => {
                 log.active = index;
                 log.generation = generation;
+                log.cipher = log.cipher_for(generation).map_err(OpenError::Io)?;
                 log.replay()?;
                 // The other file is an older generation, a compaction that
                 // never committed, or empty. None of it is live.
@@ -255,7 +277,7 @@ impl<F: LogFile> LogStore<F> {
                 log.generation = 1;
                 let spare = &mut log.files[1];
                 spare.truncate(0).map_err(OpenError::Io)?;
-                let header = log.header(1).map_err(OpenError::Io)?;
+                let header = log.header(&log.cipher, 1).map_err(OpenError::Io)?;
                 let file = &mut log.files[0];
                 file.truncate(0).map_err(OpenError::Io)?;
                 file.write_all_at(0, &header).map_err(OpenError::Io)?;
@@ -317,17 +339,23 @@ impl<F: LogFile> LogStore<F> {
     }
 
     fn keys(&self, key_type: &str) -> Result<Vec<String>, String> {
-        Ok(self
-            .lock()?
+        let log = self.lock()?;
+        let from = (key_type.to_string(), String::new());
+        Ok(log
             .records
-            .keys()
-            .filter(|(kind, _)| kind == key_type)
+            .range(from..)
+            .map(|((kind, id), _)| (kind, id))
+            .take_while(|(kind, _)| kind.as_str() == key_type)
             .map(|(_, id)| id.clone())
             .collect())
     }
 }
 
 impl<F: LogFile> Log<F> {
+    fn cipher_for(&self, generation: u64) -> Result<ChaCha20Poly1305, String> {
+        derive(&self.store_key, self.category, generation)
+    }
+
     fn header_aad(&self, generation: u64) -> Vec<u8> {
         let mut aad = self.category.domain().to_vec();
         aad.extend_from_slice(b"/header/");
@@ -343,12 +371,11 @@ impl<F: LogFile> Log<F> {
         aad
     }
 
-    fn header(&self, generation: u64) -> Result<Vec<u8>, String> {
+    fn header(&self, cipher: &ChaCha20Poly1305, generation: u64) -> Result<Vec<u8>, String> {
         let mut nonce = [0u8; NONCE_BYTES];
         OsRng.fill_bytes(&mut nonce);
         let aad = self.header_aad(generation);
-        let tag = self
-            .cipher
+        let tag = cipher
             .encrypt(
                 Nonce::from_slice(&nonce),
                 Payload {
@@ -373,7 +400,14 @@ impl<F: LogFile> Log<F> {
         if len == 0 {
             return Ok(HeaderState::Empty);
         }
-        let mut raw = vec![0u8; len.min(HEADER_BYTES) as usize];
+        // Every header is written whole, in one write, before any record
+        // after it can matter, so a file shorter than one never held a
+        // record: a crash during the first header write. Calling it a wrong
+        // key would refuse a fresh account for ever.
+        if len < HEADER_BYTES {
+            return Ok(HeaderState::Uncommitted);
+        }
+        let mut raw = vec![0u8; HEADER_BYTES as usize];
         file.read_exact_at(0, &mut raw).map_err(OpenError::Io)?;
         // A compaction truncates the spare file to nothing before it writes,
         // and writes the header last, so zeros where the header goes are a
@@ -381,12 +415,13 @@ impl<F: LogFile> Log<F> {
         if raw.iter().all(|&b| b == 0) {
             return Ok(HeaderState::Uncommitted);
         }
-        if len < HEADER_BYTES || &raw[..4] != MAGIC || raw[4] != VERSION {
+        if &raw[..4] != MAGIC || raw[4] != VERSION {
             return Ok(HeaderState::Invalid);
         }
         let generation = u64::from_be_bytes(raw[8..16].try_into().unwrap_or_default());
         let aad = self.header_aad(generation);
-        let opened = self.cipher.decrypt(
+        let cipher = self.cipher_for(generation).map_err(OpenError::Io)?;
+        let opened = cipher.decrypt(
             Nonce::from_slice(&raw[16..28]),
             Payload {
                 msg: &raw[28..44],
@@ -421,14 +456,13 @@ impl<F: LogFile> Log<F> {
             self.files[self.active]
                 .read_exact_at(at + 4, &mut sealed)
                 .map_err(OpenError::Io)?;
-            let aad = self.record_aad(self.generation, seq);
-            let Ok(plain) = self.cipher.decrypt(
-                Nonce::from_slice(&sealed[..NONCE_BYTES]),
-                Payload {
-                    msg: &sealed[NONCE_BYTES..],
-                    aad: &aad,
-                },
-            ) else {
+            let Some(plain) = self.open_record(seq, &sealed) else {
+                // A tear leaves nothing whole after it. An intact record
+                // next is damage inside the log, and cutting there would
+                // drop acknowledged writes.
+                if self.authenticates_at(at + 4 + size as u64, seq + 1, len)? {
+                    return Err(OpenError::Damaged);
+                }
                 break;
             };
             let Some((op, key_type, key_id, value)) = decode(&plain) else {
@@ -453,6 +487,41 @@ impl<F: LogFile> Log<F> {
         Ok(())
     }
 
+    fn open_record(&self, seq: u64, sealed: &[u8]) -> Option<Vec<u8>> {
+        let aad = self.record_aad(self.generation, seq);
+        self.cipher
+            .decrypt(
+                Nonce::from_slice(&sealed[..NONCE_BYTES]),
+                Payload {
+                    msg: &sealed[NONCE_BYTES..],
+                    aad: &aad,
+                },
+            )
+            .ok()
+    }
+
+    /// Whether a whole record sealed under `seq` starts at `at`.
+    fn authenticates_at(&mut self, at: u64, seq: u64, len: u64) -> Result<bool, OpenError> {
+        if at + 4 > len {
+            return Ok(false);
+        }
+        let mut prefix = [0u8; 4];
+        self.files[self.active]
+            .read_exact_at(at, &mut prefix)
+            .map_err(OpenError::Io)?;
+        let size = u32::from_be_bytes(prefix) as usize;
+        if !(NONCE_BYTES + TAG_BYTES..=MAX_SEALED_BYTES).contains(&size)
+            || at + 4 + size as u64 > len
+        {
+            return Ok(false);
+        }
+        let mut sealed = vec![0u8; size];
+        self.files[self.active]
+            .read_exact_at(at + 4, &mut sealed)
+            .map_err(OpenError::Io)?;
+        Ok(self.open_record(seq, &sealed).is_some())
+    }
+
     fn apply(&mut self, op: u8, key_type: String, key_id: String, value: Vec<u8>) {
         let cost = record_bytes(&key_type, &key_id, value.len());
         let key = (key_type, key_id);
@@ -465,12 +534,17 @@ impl<F: LogFile> Log<F> {
         }
     }
 
-    fn seal(&self, generation: u64, seq: u64, plain: &[u8]) -> Result<Vec<u8>, String> {
+    fn seal(
+        &self,
+        cipher: &ChaCha20Poly1305,
+        generation: u64,
+        seq: u64,
+        plain: &[u8],
+    ) -> Result<Vec<u8>, String> {
         let mut nonce = [0u8; NONCE_BYTES];
         OsRng.fill_bytes(&mut nonce);
         let aad = self.record_aad(generation, seq);
-        let sealed = self
-            .cipher
+        let sealed = cipher
             .encrypt(
                 Nonce::from_slice(&nonce),
                 Payload {
@@ -488,8 +562,11 @@ impl<F: LogFile> Log<F> {
     }
 
     fn append(&mut self, op: u8, key_type: &str, key_id: &str, value: &[u8]) -> Result<(), String> {
+        if let Some(reason) = &self.poisoned {
+            return Err(format!("the log refuses writes: {reason}"));
+        }
         let plain = Zeroizing::new(encode(op, key_type, key_id, value));
-        let record = self.seal(self.generation, self.seq, &plain)?;
+        let record = self.seal(&self.cipher, self.generation, self.seq, &plain)?;
         let file = &mut self.files[self.active];
         // On a failure the end does not move, so the next append overwrites
         // whatever part of this record reached the file.
@@ -512,20 +589,34 @@ impl<F: LogFile> Log<F> {
     fn compact(&mut self) -> Result<(), String> {
         let spare = 1 - self.active;
         let generation = self.generation + 1;
+        let cipher = self.cipher_for(generation)?;
         let mut body = Vec::with_capacity(self.live as usize);
         for (seq, ((key_type, key_id), value)) in self.records.iter().enumerate() {
             let plain = Zeroizing::new(encode(PUT, key_type, key_id, value));
-            body.extend_from_slice(&self.seal(generation, seq as u64, &plain)?);
+            body.extend_from_slice(&self.seal(&cipher, generation, seq as u64, &plain)?);
         }
-        let header = self.header(generation)?;
+        let header = self.header(&cipher, generation)?;
         let file = &mut self.files[spare];
+        // Until the header write begins, the spare holds zeros where the
+        // header goes, which open ignores, so a failure here costs nothing.
         file.truncate(0)?;
         file.flush()?;
         file.write_all_at(HEADER_BYTES, &body)?;
         file.flush()?;
-        file.write_all_at(0, &header)?;
-        file.flush()?;
-        self.stats.flushes += 3;
+        self.stats.flushes += 2;
+        if let Err(error) = file.write_all_at(0, &header).and_then(|()| file.flush()) {
+            // The header may be on the disk. If it is, the next open takes
+            // the spare, and every append to the live file from here on
+            // would be lost after a restart. Empty the spare again; if that
+            // fails too, refuse every later write instead.
+            if let Err(undo) = file.truncate(0).and_then(|()| file.flush()) {
+                self.poisoned = Some(format!(
+                    "a compaction failed ({error}) and could not be undone ({undo})"
+                ));
+            }
+            return Err(error);
+        }
+        self.stats.flushes += 1;
         // Committed. A failure from here on leaves two valid files, and the
         // next open takes this one, the higher generation.
         let old = &mut self.files[self.active];
@@ -534,11 +625,28 @@ impl<F: LogFile> Log<F> {
         }
         self.active = spare;
         self.generation = generation;
+        self.cipher = cipher;
         self.seq = self.records.len() as u64;
         self.end = HEADER_BYTES + body.len() as u64;
         self.stats.compactions += 1;
         Ok(())
     }
+}
+
+/// The cipher for one category's records in one generation of its log.
+fn derive(
+    store_key: &[u8; STORE_KEY_BYTES],
+    category: Category,
+    generation: u64,
+) -> Result<ChaCha20Poly1305, String> {
+    let mut info = category.domain().to_vec();
+    info.extend_from_slice(b"/generation/");
+    info.extend_from_slice(&generation.to_be_bytes());
+    let mut derived = Zeroizing::new([0u8; 32]);
+    Hkdf::<Sha256>::new(Some(HKDF_SALT), store_key)
+        .expand(&info, derived.as_mut())
+        .map_err(|_| "key derivation failed".to_string())?;
+    Ok(ChaCha20Poly1305::new(Key::from_slice(derived.as_ref())))
 }
 
 fn check_key(key_type: &str, key_id: &str) -> Result<(), String> {
@@ -850,5 +958,155 @@ mod tests {
         let long = "x".repeat(MAX_COMPONENT_BYTES + 1);
         assert!(MlsStorage::store(&store, &long, "id", b"v").is_err());
         assert!(MlsStorage::store(&store, "kind", "id", &vec![0; MAX_VALUE_BYTES + 1]).is_err());
+    }
+    #[test]
+    fn a_header_torn_on_the_first_run_starts_a_fresh_log() {
+        let files = (MemoryFile::default(), MemoryFile::default());
+        // A crash during the very first header write: the magic, no more.
+        files.0 .0.lock().expect("file").extend_from_slice(b"OP");
+        let store = open(&KEY, &files).expect("a torn first header is not a wrong key");
+        put(&store, "a", b"fresh");
+        drop(store);
+        let store = open(&KEY, &files).expect("reopen");
+        assert_eq!(get(&store, "a").as_deref(), Some(&b"fresh"[..]));
+    }
+
+    #[test]
+    fn a_damaged_record_before_intact_ones_is_refused_untouched() {
+        let files = (MemoryFile::default(), MemoryFile::default());
+        let store = open(&KEY, &files).expect("open");
+        put(&store, "a", b"first");
+        put(&store, "b", b"second");
+        drop(store);
+        // Flip a byte inside the first record's ciphertext.
+        let before = {
+            let mut data = files.0 .0.lock().expect("file");
+            data[HEADER_BYTES as usize + 4 + NONCE_BYTES] ^= 1;
+            data.clone()
+        };
+        assert_eq!(open(&KEY, &files).err(), Some(OpenError::Damaged));
+        assert_eq!(*files.0 .0.lock().expect("file"), before);
+    }
+
+    /// A file that fails on command: `flush` number `fail_flush_at`, and
+    /// every `truncate` once `fail_truncate_after` flushes have happened.
+    #[derive(Clone)]
+    struct FaultFile {
+        inner: MemoryFile,
+        flushes: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        fail_flush_at: u64,
+        fail_truncate_after: u64,
+    }
+
+    impl FaultFile {
+        fn new(inner: &MemoryFile, fail_flush_at: u64, fail_truncate_after: u64) -> Self {
+            Self {
+                inner: inner.clone(),
+                flushes: Default::default(),
+                fail_flush_at,
+                fail_truncate_after,
+            }
+        }
+    }
+
+    impl LogFile for FaultFile {
+        fn size(&mut self) -> Result<u64, String> {
+            self.inner.size()
+        }
+        fn read_exact_at(&mut self, at: u64, buffer: &mut [u8]) -> Result<(), String> {
+            self.inner.read_exact_at(at, buffer)
+        }
+        fn write_all_at(&mut self, at: u64, data: &[u8]) -> Result<(), String> {
+            self.inner.write_all_at(at, data)
+        }
+        fn truncate(&mut self, len: u64) -> Result<(), String> {
+            if self.flushes.load(std::sync::atomic::Ordering::SeqCst) >= self.fail_truncate_after {
+                return Err("truncate failed".to_string());
+            }
+            self.inner.truncate(len)
+        }
+        fn flush(&mut self) -> Result<(), String> {
+            let n = self
+                .flushes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            if n == self.fail_flush_at {
+                return Err("flush failed".to_string());
+            }
+            Ok(())
+        }
+    }
+
+    /// Writes until the log tries to compact into its (faulty) spare.
+    fn fill_until_compaction(store: &LogStore<FaultFile>) {
+        let value = vec![1u8; 4096];
+        for n in 0..600 {
+            let _ = MlsStorage::store(store, "kind", &format!("k{}", n % 3), &value);
+        }
+    }
+
+    #[test]
+    fn a_compaction_whose_header_flush_fails_is_undone_and_later_writes_survive() {
+        let (first, second) = (MemoryFile::default(), MemoryFile::default());
+        // The spare's third flush follows the header write; it fails once.
+        let store = LogStore::open(
+            &KEY,
+            Category::Mls,
+            FaultFile::new(&first, u64::MAX, u64::MAX),
+            FaultFile::new(&second, 3, u64::MAX),
+        )
+        .expect("open");
+        fill_until_compaction(&store);
+        MlsStorage::store(&store, "kind", "after", b"acknowledged").expect("store");
+        drop(store);
+        let store = LogStore::open(&KEY, Category::Mls, first, second).expect("reopen");
+        assert_eq!(
+            MlsStorage::load(&store, "kind", "after")
+                .expect("load")
+                .as_deref(),
+            Some(&b"acknowledged"[..]),
+        );
+    }
+
+    #[test]
+    fn a_compaction_that_cannot_be_undone_refuses_later_writes() {
+        let (first, second) = (MemoryFile::default(), MemoryFile::default());
+        // The header flush fails and so does every truncate after it.
+        let store = LogStore::open(
+            &KEY,
+            Category::Mls,
+            FaultFile::new(&first, u64::MAX, u64::MAX),
+            FaultFile::new(&second, 3, 3),
+        )
+        .expect("open");
+        let value = vec![1u8; 4096];
+        let mut acknowledged = Vec::new();
+        for n in 0..600 {
+            let id = format!("k{}", n % 3);
+            if MlsStorage::store(&store, "kind", &id, &value).is_ok() {
+                acknowledged.push(id);
+            }
+        }
+        assert!(
+            MlsStorage::store(&store, "kind", "after", b"never acknowledged").is_err(),
+            "a write after an unrecoverable compaction was acknowledged"
+        );
+        drop(store);
+        let store = LogStore::open(&KEY, Category::Mls, first, second).expect("reopen");
+        for id in acknowledged {
+            assert_eq!(
+                MlsStorage::load(&store, "kind", &id).expect("load"),
+                Some(value.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn each_generation_seals_under_its_own_key() {
+        let a = derive(&KEY, Category::Mls, 1).expect("derive");
+        let b = derive(&KEY, Category::Mls, 2).expect("derive");
+        let nonce = Nonce::from_slice(&[0u8; NONCE_BYTES]);
+        let sealed = a.encrypt(nonce, &b"x"[..]).expect("seal");
+        assert!(b.decrypt(nonce, sealed.as_slice()).is_err());
     }
 }

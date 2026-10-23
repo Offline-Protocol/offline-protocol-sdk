@@ -139,20 +139,29 @@ so a store cannot make a file per record as the POSIX file stores do: the
 worker opens all four files before the engine starts, and the engine never
 asks for another. The current value of every key is held in memory; a log
 past 1 MiB and over twice its live size is compacted into the spare file,
-which commits by writing its header last.
+which commits by writing its header last. An I/O error once that header
+write has begun empties the spare again, because a header that did reach
+the disk would make the next open take the spare and drop every later
+append; if the spare cannot be emptied, the log refuses every later write
+rather than acknowledge one a restart would lose.
 
 **Every record is sealed and bound to its place.** ChaCha20-Poly1305 under a
-key derived per category from a 32-byte store key, with the category, the
-file's generation and the record's sequence number as associated data. A
-record moved to the other category, an older generation or another position
-does not authenticate.
+key derived per category and per generation from a 32-byte store key, with
+the category, the file's generation and the record's sequence number as
+associated data. A record moved to the other category, another generation
+or another position does not authenticate, and each compaction starts a
+fresh key, which bounds the random nonces any one key seals under.
 
 **Only a torn tail is dropped; a wrong key is refused.** The header carries a
 key check, and a log whose header does not authenticate is refused at open
 with nothing truncated, because the common cause is the wrong key and
-truncating on that would destroy the identity. Once the header
-authenticates, the first record that is short or does not authenticate ends
-the log, which is what a crash during a write leaves.
+truncating on that would destroy the identity. A file shorter than a header
+is a crash during the first header write, not a wrong key, and starts a
+fresh log. Once the header authenticates, the first record that is short or
+does not authenticate ends the log, which is what a crash during a write
+leaves. A damaged record with an intact one after it is not a tear, and the
+log is refused untouched: cutting there would roll back acknowledged ratchet
+state, and a reused ratchet generation is a reused AEAD nonce.
 
 **The store key is sealed too.** The worker seals it under a non-extractable
 AES-GCM key kept in IndexedDB and stores the sealed copy beside the logs. A
