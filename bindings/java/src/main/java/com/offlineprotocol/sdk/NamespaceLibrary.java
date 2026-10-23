@@ -163,10 +163,16 @@ final class NamespaceLibrary {
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count() != ((short) 11879)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_node_hash() != ((short) 1579)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered() != ((short) 26789)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost() != ((short) 22804)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_rssi() != ((short) 9983)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count() != ((short) 42065)) {
@@ -611,6 +617,9 @@ final class NamespaceLibrary {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback() != ((short) 36253)) {
+            throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
+        }
+        if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_peer_rssi_events() != ((short) 39361)) {
             throw new RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project");
         }
         if (UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority() != ((short) 26597)) {

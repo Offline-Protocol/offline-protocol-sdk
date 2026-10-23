@@ -953,9 +953,13 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count(
     ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_node_hash(
+    ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost(
+    ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_rssi(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count(
     ): Int
@@ -1253,6 +1257,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback(
     ): Int
+    external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_peer_rssi_events(
+    ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority(
     ): Int
     external fun uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback(
@@ -1464,9 +1470,13 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_get_peer_count(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Int
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_node_hash(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): RustBuffer.ByValue
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_discovered(`ptr`: Long,`peerId`: RustBuffer.ByValue,`rssi`: Short,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_lost(`ptr`: Long,`peerId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_rssi(`ptr`: Long,`peerId`: RustBuffer.ByValue,`nodeHash`: RustBuffer.ByValue,`rssi`: Short,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_recipient_not_among_peers_count(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus, 
     ): Long
@@ -1763,6 +1773,8 @@ internal object UniffiLib {
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_member_role(`ptr`: Long,`groupId`: RustBuffer.ByValue,`userId`: RustBuffer.ByValue,`role`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_nostr_transport_callback(`ptr`: Long,`callback`: Long,uniffi_out_err: UniffiRustCallStatus, 
+    ): Unit
+    external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_peer_rssi_events(`ptr`: Long,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
     external fun uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_priority(`ptr`: Long,`priority`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
     ): Unit
@@ -2087,10 +2099,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count() and 0xFFFF) != 11879) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_node_hash() and 0xFFFF) != 1579) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered() and 0xFFFF) != 26789) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost() and 0xFFFF) != 22804) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_rssi() and 0xFFFF) != 9983) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count() and 0xFFFF) != 42065) {
@@ -2535,6 +2553,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback() and 0xFFFF) != 36253) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_peer_rssi_events() and 0xFFFF) != 39361) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority() and 0xFFFF) != 26597) {
@@ -4375,9 +4396,13 @@ public interface OfflineProtocolInterface {
     
     fun `bleGetPeerCount`(): kotlin.UInt
     
+    fun `bleNodeHash`(): List<kotlin.UByte>?
+    
     fun `blePeerDiscovered`(`peerId`: kotlin.String, `rssi`: kotlin.Short)
     
     fun `blePeerLost`(`peerId`: kotlin.String)
+    
+    fun `blePeerRssi`(`peerId`: kotlin.String?, `nodeHash`: List<kotlin.UByte>?, `rssi`: kotlin.Short)
     
     fun `bleRecipientNotAmongPeersCount`(): kotlin.ULong
     
@@ -4675,6 +4700,8 @@ public interface OfflineProtocolInterface {
     
     fun `setNostrTransportCallback`(`callback`: NostrTransportCallback)
     
+    fun `setPeerRssiEvents`(`enabled`: kotlin.Boolean)
+    
     fun `setRelayPriority`(`priority`: RelayPriority)
     
     fun `setReticulumTransportCallback`(`callback`: ReticulumTransportCallback)
@@ -4923,6 +4950,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
     }
     
 
+    override fun `bleNodeHash`(): List<kotlin.UByte>? {
+            return FfiConverterOptionalSequenceUByte.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_node_hash(
+        it,
+        _status)
+}
+    }
+    )
+    }
+    
+
     
     @Throws(ProtocolException::class)override fun `blePeerDiscovered`(`peerId`: kotlin.String, `rssi`: kotlin.Short)
         = 
@@ -4947,6 +4987,21 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
         it,
         
         FfiConverterString.lower(`peerId`),_status)
+}
+    }
+    
+    
+
+    override fun `blePeerRssi`(`peerId`: kotlin.String?, `nodeHash`: List<kotlin.UByte>?, `rssi`: kotlin.Short)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_rssi(
+        it,
+        
+        FfiConverterOptionalString.lower(`peerId`),
+        FfiConverterOptionalSequenceUByte.lower(`nodeHash`),
+        FfiConverterShort.lower(`rssi`),_status)
 }
     }
     
@@ -7050,6 +7105,19 @@ open class OfflineProtocol: Disposable, AutoCloseable, OfflineProtocolInterface
         it,
         
         FfiConverterTypeNostrTransportCallback.lower(`callback`),_status)
+}
+    }
+    
+    
+
+    override fun `setPeerRssiEvents`(`enabled`: kotlin.Boolean)
+        = 
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_peer_rssi_events(
+        it,
+        
+        FfiConverterBoolean.lower(`enabled`),_status)
 }
     }
     

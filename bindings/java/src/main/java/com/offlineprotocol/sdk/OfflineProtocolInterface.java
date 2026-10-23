@@ -7,8 +7,10 @@ public interface OfflineProtocolInterface {
     public void bleFragmentReceived(java.lang.String senderId, java.util.List<java.lang.Byte> fragment) throws ProtocolException;
     public BleFragment bleGetNextFragment();
     public int bleGetPeerCount();
+    public java.util.List<java.lang.Byte> bleNodeHash();
     public void blePeerDiscovered(java.lang.String peerId, short rssi) throws ProtocolException;
     public void blePeerLost(java.lang.String peerId) throws ProtocolException;
+    public void blePeerRssi(java.lang.String peerId, java.util.List<java.lang.Byte> nodeHash, short rssi);
     public long bleRecipientNotAmongPeersCount();
     public void bleReturnFragment();
     public void bleSetPeerMtu(java.lang.String peerId, int maxPayload) throws ProtocolException;
@@ -157,6 +159,7 @@ public interface OfflineProtocolInterface {
     public void setEventCallback(EventCallback callback);
     public void setMemberRole(java.lang.String groupId, java.lang.String userId, java.lang.String role) throws ProtocolException;
     public void setNostrTransportCallback(NostrTransportCallback callback);
+    public void setPeerRssiEvents(boolean enabled);
     public void setRelayPriority(RelayPriority priority) throws ProtocolException;
     public void setReticulumTransportCallback(ReticulumTransportCallback callback);
     public void setTelemetryEnabled(boolean enabled);

@@ -48,6 +48,25 @@ pub struct FragmentEvictionInfo {
 /// Callback invoked when a fragment assembly is evicted from the reassembly cache.
 pub type FragmentEvictionCallback = Arc<dyn Fn(FragmentEvictionInfo) + Send + Sync>;
 
+/// Length of [`node_hash`].
+pub const NODE_HASH_LEN: usize = 8;
+
+/// The digest of an address that a device advertises over Bluetooth LE: the
+/// first eight bytes of SHA-256 over the address string.
+///
+/// It exists so a scanner can name the advertiser of a reading. Without it
+/// iOS cannot: a peer linked to it as central advertises from a different
+/// CoreBluetooth identifier than the link has. It is matched only against
+/// peers that already proved their address on a link
+/// ([`BleTransport::on_peer_rssi`]), so it never names anyone new.
+pub fn node_hash(address: &str) -> [u8; NODE_HASH_LEN] {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(address.as_bytes());
+    let mut out = [0u8; NODE_HASH_LEN];
+    out.copy_from_slice(&digest[..NODE_HASH_LEN]);
+    out
+}
+
 /// Peer device information
 #[derive(Debug, Clone)]
 pub struct PeerDevice {
@@ -386,6 +405,36 @@ impl BleTransport {
     pub fn on_peer_lost(&self, device_id: &str) {
         self.peers.lock_or_recover().remove(device_id);
         self.peer_mtus.lock_or_recover().remove(device_id);
+    }
+
+    /// Records a signal reading taken from an advertisement, and returns the
+    /// peer it was attributed to.
+    ///
+    /// `peer_id` is the peer the platform's link to that advertiser names;
+    /// `node_hash` is the [`node_hash`] the advertisement carried. Either
+    /// may be absent, and the link wins when both are present. A reading is
+    /// attributed only to a peer already registered by
+    /// [`Self::on_peer_discovered`], so neither value can introduce one.
+    pub fn on_peer_rssi(
+        &self,
+        peer_id: Option<&str>,
+        node_hash: Option<&[u8]>,
+        rssi: i16,
+    ) -> Option<String> {
+        let mut peers = self.peers.lock_or_recover();
+        let id = match peer_id.filter(|id| peers.contains_key(*id)) {
+            Some(id) => id.to_string(),
+            // ponytail: one SHA-256 per linked peer per reading; links are
+            // capped in single digits, cache the digests if that changes.
+            None => {
+                let hash = node_hash.filter(|h| h.len() == NODE_HASH_LEN)?;
+                peers.keys().find(|id| self::node_hash(id) == hash)?.clone()
+            }
+        };
+        let peer = peers.get_mut(&id)?;
+        peer.rssi = rssi;
+        peer.last_seen = SystemTime::now();
+        Some(id)
     }
 
     /// Called when a message is received from a peer.
@@ -1434,6 +1483,56 @@ mod tests {
             AppId::new("app").unwrap(),
             "hi",
         )
+    }
+
+    #[test]
+    fn a_reading_reaches_only_a_linked_peer_by_link_or_by_hash() {
+        // SHA-256("abc") begins ba7816bf 8f01cfea: the digest is the standard
+        // one, so any platform can compute it without this crate.
+        assert_eq!(
+            node_hash("abc"),
+            [0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea]
+        );
+
+        let transport = BleTransport::new("me");
+        transport.start().unwrap();
+        transport.on_peer_discovered(peer_device("carol"));
+        transport.on_peer_discovered(peer_device("dave"));
+
+        let rssi_of = |id: &str| transport.get_peer(id).unwrap().rssi;
+        assert_eq!(
+            transport.on_peer_rssi(Some("carol"), None, -41),
+            Some("carol".into())
+        );
+        assert_eq!(rssi_of("carol"), -41);
+        // The link wins over a hash naming someone else.
+        let dave = node_hash("dave");
+        assert_eq!(
+            transport.on_peer_rssi(Some("carol"), Some(&dave), -42),
+            Some("carol".into())
+        );
+        // An unknown link falls through to the hash.
+        assert_eq!(
+            transport.on_peer_rssi(Some("eve"), Some(&dave), -70),
+            Some("dave".into())
+        );
+        assert_eq!(rssi_of("dave"), -70);
+        assert_eq!(
+            transport
+                .connected_peers()
+                .iter()
+                .find(|l| l.peer_id == "dave")
+                .unwrap()
+                .rssi,
+            Some(-70)
+        );
+        // Neither an unlinked address, its hash, nor a malformed hash is named.
+        assert_eq!(
+            transport.on_peer_rssi(Some("eve"), Some(&node_hash("eve")), -30),
+            None
+        );
+        assert_eq!(transport.on_peer_rssi(None, Some(&dave[..4]), -30), None);
+        assert_eq!(transport.get_peer("eve").map(|p| p.rssi), None);
     }
 
     #[test]

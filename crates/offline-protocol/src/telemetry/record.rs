@@ -305,6 +305,7 @@ pub(crate) mod tests {
             | Event::RelayDemoted { .. }
             | Event::NeighborDiscovered { .. }
             | Event::NeighborLost { .. }
+            | Event::PeerRssi { .. }
             | Event::IdentityReady { .. }
             | Event::NetworkMetrics { .. }
             | Event::FileProgress { .. }

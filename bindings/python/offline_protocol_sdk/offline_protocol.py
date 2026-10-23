@@ -649,9 +649,13 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count() != 11879:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_node_hash() != 1579:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered() != 26789:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost() != 22804:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_rssi() != 9983:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count() != 42065:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -949,6 +953,8 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback() != 36253:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_peer_rssi_events() != 39361:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority() != 26597:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_reticulum_transport_callback() != 53618:
@@ -1171,12 +1177,18 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_ge
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_get_peer_count.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_node_hash.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_node_hash.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_rssi.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_rssi.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_recipient_not_among_peers_count.restype = ctypes.c_uint16
@@ -1621,6 +1633,9 @@ _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_me
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback.restype = ctypes.c_uint16
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_peer_rssi_events.argtypes = (
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_peer_rssi_events.restype = ctypes.c_uint16
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority.argtypes = (
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_relay_priority.restype = ctypes.c_uint16
@@ -2031,6 +2046,11 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_get_peer
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_get_peer_count.restype = ctypes.c_uint32
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_node_hash.argtypes = (
+    ctypes.c_uint64,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_node_hash.restype = _UniffiRustBuffer
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_discovered.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -2044,6 +2064,14 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_los
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_lost.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_rssi.argtypes = (
+    ctypes.c_uint64,
+    _UniffiRustBuffer,
+    _UniffiRustBuffer,
+    ctypes.c_int16,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_rssi.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_recipient_not_among_peers_count.argtypes = (
     ctypes.c_uint64,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -2946,6 +2974,12 @@ _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_nostr_tr
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_nostr_transport_callback.restype = None
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_peer_rssi_events.argtypes = (
+    ctypes.c_uint64,
+    ctypes.c_int8,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_peer_rssi_events.restype = None
 _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_priority.argtypes = (
     ctypes.c_uint64,
     _UniffiRustBuffer,
@@ -10110,9 +10144,13 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def ble_get_peer_count(self, ) -> int:
         raise NotImplementedError
+    def ble_node_hash(self, ) -> typing.Optional[typing.List[int]]:
+        raise NotImplementedError
     def ble_peer_discovered(self, peer_id: str,rssi: int) -> None:
         raise NotImplementedError
     def ble_peer_lost(self, peer_id: str) -> None:
+        raise NotImplementedError
+    def ble_peer_rssi(self, peer_id: typing.Optional[str],node_hash: typing.Optional[typing.List[int]],rssi: int) -> None:
         raise NotImplementedError
     def ble_recipient_not_among_peers_count(self, ) -> int:
         raise NotImplementedError
@@ -10410,6 +10448,8 @@ class OfflineProtocolProtocol(typing.Protocol):
         raise NotImplementedError
     def set_nostr_transport_callback(self, callback: NostrTransportCallback) -> None:
         raise NotImplementedError
+    def set_peer_rssi_events(self, enabled: bool) -> None:
+        raise NotImplementedError
     def set_relay_priority(self, priority: RelayPriority) -> None:
         raise NotImplementedError
     def set_reticulum_transport_callback(self, callback: ReticulumTransportCallback) -> None:
@@ -10586,6 +10626,18 @@ class OfflineProtocol(OfflineProtocolProtocol):
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
+    def ble_node_hash(self, ) -> typing.Optional[typing.List[int]]:
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+        )
+        _uniffi_lift_return = _UniffiFfiConverterOptionalSequenceUInt8.lift
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_node_hash,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
     def ble_peer_discovered(self, peer_id: str,rssi: int) -> None:
         
         _UniffiFfiConverterString.check_lower(peer_id)
@@ -10616,6 +10668,27 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_lost,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def ble_peer_rssi(self, peer_id: typing.Optional[str],node_hash: typing.Optional[typing.List[int]],rssi: int) -> None:
+        
+        _UniffiFfiConverterOptionalString.check_lower(peer_id)
+
+        _UniffiFfiConverterOptionalSequenceUInt8.check_lower(node_hash)
+
+        _UniffiFfiConverterInt16.check_lower(rssi)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterOptionalString.lower(peer_id),
+            _UniffiFfiConverterOptionalSequenceUInt8.lower(node_hash),
+            _UniffiFfiConverterInt16.lower(rssi),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_rssi,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)
@@ -12878,6 +12951,21 @@ class OfflineProtocol(OfflineProtocolProtocol):
         _uniffi_ffi_result = _uniffi_rust_call_with_error(
             _uniffi_error_converter,
             _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_nostr_transport_callback,
+            *_uniffi_lowered_args,
+        )
+        return _uniffi_lift_return(_uniffi_ffi_result)
+    def set_peer_rssi_events(self, enabled: bool) -> None:
+        
+        _UniffiFfiConverterBoolean.check_lower(enabled)
+        _uniffi_lowered_args = (
+            self._uniffi_clone_handle(),
+            _UniffiFfiConverterBoolean.lower(enabled),
+        )
+        _uniffi_lift_return = lambda val: None
+        _uniffi_error_converter = None
+        _uniffi_ffi_result = _uniffi_rust_call_with_error(
+            _uniffi_error_converter,
+            _UniffiLib.uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_peer_rssi_events,
             *_uniffi_lowered_args,
         )
         return _uniffi_lift_return(_uniffi_ffi_result)

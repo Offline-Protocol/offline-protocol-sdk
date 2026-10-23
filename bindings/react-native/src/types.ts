@@ -1452,6 +1452,26 @@ export interface NeighborLostEvent extends BaseEvent {
 }
 
 /**
+ * A live signal-strength reading for a linked Bluetooth LE neighbor.
+ *
+ * Delivered only while at least one `on('peer_rssi', ...)` listener is
+ * registered (an `'all'` listener does not turn it on), at most four a second
+ * per peer. Only a peer that has proved its address on a link is named.
+ *
+ * `rssi` is raw dBm and swings several dB between samples; smooth it for a
+ * proximity display, for example `next = 0.7 * prev + 0.3 * rssi`.
+ */
+export interface PeerRssiEvent extends BaseEvent {
+  type: 'peer_rssi';
+  /** The peer's canonical address (`off1…`), as in `neighbor_discovered`. */
+  peer_id: string;
+  /** Transport the reading came from: `'BLE'`. */
+  transport: string;
+  /** Received signal strength in dBm. */
+  rssi: number;
+}
+
+/**
  * This device's own address is known.
  *
  * Fires once per successful startup, before any message can be sent. The
@@ -2941,6 +2961,7 @@ export type ProtocolEvent =
   | RelayDemotedBatteryEvent
   | NeighborDiscoveredEvent
   | NeighborLostEvent
+  | PeerRssiEvent
   | IdentityReadyEvent
   | NetworkMetricsEvent
   | FileProgressEvent

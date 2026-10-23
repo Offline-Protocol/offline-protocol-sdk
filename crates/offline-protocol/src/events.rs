@@ -799,6 +799,22 @@ pub enum Event {
         peer_id: String,
     },
 
+    /// A live signal-strength reading for a linked neighbor.
+    ///
+    /// Opt-in (`set_peer_rssi_events`) and at most four a second per peer,
+    /// because it fires from every advertisement the scanner hears. Only a
+    /// peer that has proved its address on a link is ever named. The value
+    /// is raw: Bluetooth LE readings swing several dB between samples, so a
+    /// proximity display smooths them.
+    PeerRssi {
+        /// The peer's canonical address, as in `NeighborDiscovered`.
+        peer_id: String,
+        /// Transport the reading came from (`"BLE"`).
+        transport: String,
+        /// Received signal strength in dBm.
+        rssi: i16,
+    },
+
     /// This device's own address is known: MLS storage was opened and the
     /// identity key in it derived to `address`.
     ///
@@ -2954,6 +2970,7 @@ impl Event {
             Self::RelayDemoted { .. } => "protocol.relay.demoted",
             Self::NeighborDiscovered { .. } => "protocol.neighbor.discovered",
             Self::NeighborLost { .. } => "protocol.neighbor.lost",
+            Self::PeerRssi { .. } => "protocol.neighbor.rssi",
             Self::IdentityReady { .. } => "protocol.identity.ready",
             Self::NetworkMetrics { .. } => "protocol.network.metrics",
             Self::FileProgress { .. } => "protocol.file.progress",
@@ -3208,6 +3225,16 @@ impl fmt::Debug for Event {
             Self::NeighborLost { peer_id: _ } => f
                 .debug_struct("NeighborLost")
                 .field("peer_id", &"[REDACTED]")
+                .finish(),
+            Self::PeerRssi {
+                peer_id: _,
+                transport,
+                rssi,
+            } => f
+                .debug_struct("PeerRssi")
+                .field("peer_id", &"[REDACTED]")
+                .field("transport", transport)
+                .field("rssi", rssi)
                 .finish(),
             // Redacted like any other identifier: this one names *this* device,
             // which is the strongest correlator a log can carry.
@@ -4383,6 +4410,11 @@ mod tests {
             },
             Event::NeighborLost {
                 peer_id: SENTINEL.to_string(),
+            },
+            Event::PeerRssi {
+                peer_id: SENTINEL.to_string(),
+                transport: "BLE".to_string(),
+                rssi: -50,
             },
             Event::SecureSessionEstablished {
                 peer_id: SENTINEL.to_string(),

@@ -470,6 +470,15 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_node_hash
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_node_hash = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_node_hash", java.lang.foreign.FunctionDescriptor.of(RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static java.lang.foreign.MemorySegment uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_node_hash(java.lang.foreign.SegmentAllocator _allocator, long ptr, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            return (java.lang.foreign.MemorySegment) MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_node_hash.invokeExact(_allocator, ptr, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_discovered
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_discovered = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_discovered", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_SHORT, java.lang.foreign.ValueLayout.ADDRESS));
 
@@ -485,6 +494,15 @@ final class UniffiLib {
     static void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_lost(long ptr, java.lang.foreign.MemorySegment peerId, java.lang.foreign.MemorySegment _uniffiOutErr) {
         try {
             MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_lost.invokeExact(ptr, peerId, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_rssi
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_rssi = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_rssi", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.JAVA_SHORT, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_rssi(long ptr, java.lang.foreign.MemorySegment peerId, java.lang.foreign.MemorySegment nodeHash, short rssi, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_ble_peer_rssi.invokeExact(ptr, peerId, nodeHash, rssi, _uniffiOutErr);
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
@@ -1820,6 +1838,15 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_peer_rssi_events
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_peer_rssi_events = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_peer_rssi_events", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, java.lang.foreign.ValueLayout.JAVA_BYTE, java.lang.foreign.ValueLayout.ADDRESS));
+
+    static void uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_peer_rssi_events(long ptr, byte enabled, java.lang.foreign.MemorySegment _uniffiOutErr) {
+        try {
+            MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_peer_rssi_events.invokeExact(ptr, enabled, _uniffiOutErr);
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_priority
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_priority = findDowncallHandle("uniffi_offline_protocol_uniffi_fn_method_offlineprotocol_set_relay_priority", java.lang.foreign.FunctionDescriptor.ofVoid(java.lang.foreign.ValueLayout.JAVA_LONG, RustBuffer.LAYOUT, java.lang.foreign.ValueLayout.ADDRESS));
 
@@ -3008,6 +3035,15 @@ final class UniffiLib {
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_node_hash
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_node_hash = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_node_hash", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_node_hash() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_node_hash.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
     // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered
     private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_discovered", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
 
@@ -3023,6 +3059,15 @@ final class UniffiLib {
     static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost() {
         try {
             return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_lost.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_rssi
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_rssi = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_rssi", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_rssi() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_ble_peer_rssi.invokeExact();
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 
@@ -4355,6 +4400,15 @@ final class UniffiLib {
     static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback() {
         try {
             return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_nostr_transport_callback.invokeExact();
+        } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
+    }
+
+    // uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_peer_rssi_events
+    private static final java.lang.invoke.MethodHandle MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_peer_rssi_events = findDowncallHandle("uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_peer_rssi_events", java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_SHORT));
+
+    static short uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_peer_rssi_events() {
+        try {
+            return (short) MH_uniffi_offline_protocol_uniffi_checksum_method_offlineprotocol_set_peer_rssi_events.invokeExact();
         } catch (Throwable _ex) { throw new AssertionError("invokeExact failed", _ex); }
     }
 

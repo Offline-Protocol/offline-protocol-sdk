@@ -2604,7 +2604,14 @@ struct BleState {
     fragments: VecDeque<(String, Vec<u8>)>,
     peer_count: u32,
     peers: HashMap<String, PeerDevice>,
+    /// Whether `PeerRssi` is emitted at all (`set_peer_rssi_events`).
+    rssi_events: bool,
+    /// When each peer's last `PeerRssi` went out, for the per-peer rate cap.
+    rssi_emitted: HashMap<String, offline_protocol_core::time::Instant>,
 }
+
+/// The closest two `PeerRssi` events for one peer may be: four a second.
+const PEER_RSSI_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Internal state for Internet transport operations
 struct InternetState {
@@ -2844,6 +2851,8 @@ impl OfflineProtocol {
                 fragments: VecDeque::new(),
                 peer_count: 0,
                 peers: HashMap::new(),
+                rssi_events: false,
+                rssi_emitted: HashMap::new(),
             }),
             internet_state: Mutex::new(InternetState {
                 is_connected: false,
@@ -4218,11 +4227,79 @@ impl OfflineProtocol {
         self.notify_neighbor_reachable(&peer_id, "BLE", Some(rssi))
     }
 
+    /// BLE: a signal reading from an advertisement.
+    ///
+    /// Cheap and safe to call for every scan result, unlike
+    /// [`Self::ble_peer_discovered`], which starts key exchange and flushes
+    /// the outbox. The platform passes what it has: the peer its link to the
+    /// advertiser names, and the node hash the advertisement carried. The
+    /// reading updates that peer's link quality, and reaches the app as
+    /// `PeerRssi` when [`Self::set_peer_rssi_events`] is on, at most four
+    /// a second per peer. Neither value can name a peer that
+    /// has not proved its address on a link; such a reading is dropped.
+    pub fn ble_peer_rssi(&self, peer_id: Option<String>, node_hash: Option<Vec<u8>>, rssi: i16) {
+        // CoreBluetooth's "no reading", not a signal of +127 dBm.
+        if rssi == 127 {
+            return;
+        }
+        let Some(peer_id) = self
+            .with_ble_transport(|ble| {
+                ble.on_peer_rssi(peer_id.as_deref(), node_hash.as_deref(), rssi)
+            })
+            .flatten()
+        else {
+            return;
+        };
+        {
+            let mut ble = recover_mutex(&self.ble_state, "ble_state");
+            if !ble.rssi_events {
+                return;
+            }
+            let now = offline_protocol_core::time::Instant::now();
+            if ble
+                .rssi_emitted
+                .get(&peer_id)
+                .is_some_and(|at| now.duration_since(*at) < PEER_RSSI_INTERVAL)
+            {
+                return;
+            }
+            ble.rssi_emitted.insert(peer_id.clone(), now);
+        }
+        // Suppressed like `NeighborDiscovered`: the app blocked this peer.
+        if self.lock_inner_recovering().is_user_blocked(&peer_id) {
+            return;
+        }
+        self.emit_event(CoreEvent::PeerRssi {
+            peer_id,
+            transport: "BLE".to_string(),
+            rssi,
+        });
+    }
+
+    /// Turns `PeerRssi` events on or off. Off by default, because they fire
+    /// from every advertisement and an app that is not listening should not
+    /// pay for them. Readings update link quality either way.
+    pub fn set_peer_rssi_events(&self, enabled: bool) {
+        let mut ble = recover_mutex(&self.ble_state, "ble_state");
+        ble.rssi_events = enabled;
+        ble.rssi_emitted.clear();
+    }
+
+    /// The node hash this device advertises over Bluetooth LE: the digest
+    /// of its own address that lets a scanner attribute a reading to it
+    /// (see `offline_protocol_transport::node_hash`). `None` until the
+    /// identity is open.
+    pub fn ble_node_hash(&self) -> Option<Vec<u8>> {
+        self.local_address()
+            .map(|address| offline_protocol_transport::node_hash(&address).to_vec())
+    }
+
     /// BLE: Peer lost
     pub fn ble_peer_lost(&self, peer_id: String) -> Result<(), ProtocolError> {
         let mut ble_state = self.lock_ble()?;
         let was_known = ble_state.peers.remove(&peer_id).is_some();
         ble_state.peer_count = ble_state.peers.len() as u32;
+        ble_state.rssi_emitted.remove(&peer_id);
         drop(ble_state);
 
         // Unregister peer from the BLE transport
@@ -10562,6 +10639,62 @@ mod tests {
             .filter(|e| e.contains("neighbor_lost") && e.contains("ble-peer"))
             .count();
         assert_eq!(lost, 1, "one departure is one neighbor_lost");
+    }
+
+    /// Live readings are opt-in, capped per peer, never name an unlinked
+    /// peer, and stay silent for a blocked one, while the link quality the
+    /// relay ranks by follows them regardless.
+    #[test]
+    fn test_ble_peer_rssi_is_opt_in_capped_and_linked_only() {
+        let protocol = OfflineProtocol::new(create_test_config()).unwrap();
+        protocol.start().unwrap();
+        protocol
+            .ble_peer_discovered("near".to_string(), -60)
+            .unwrap();
+        protocol
+            .ble_peer_discovered("shy".to_string(), -60)
+            .unwrap();
+        protocol.block_user("shy".to_string()).unwrap();
+        drained_events(&protocol);
+        let readings = |p: &OfflineProtocol| {
+            drained_events(p)
+                .iter()
+                .filter(|e| e.contains("\"peer_rssi\""))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let link_rssi = |p: &OfflineProtocol| {
+            p.with_ble_transport(|ble| ble.get_peer("near").unwrap().rssi)
+                .unwrap()
+        };
+
+        protocol.ble_peer_rssi(Some("near".to_string()), None, -45);
+        assert!(readings(&protocol).is_empty(), "off by default");
+        protocol.ble_peer_rssi(Some("near".to_string()), None, 127);
+        assert_eq!(link_rssi(&protocol), -45, "link quality follows anyway");
+
+        protocol.set_peer_rssi_events(true);
+        let hash = offline_protocol_transport::node_hash("near").to_vec();
+        protocol.ble_peer_rssi(None, Some(hash.clone()), -44);
+        protocol.ble_peer_rssi(None, Some(hash), -43);
+        protocol.ble_peer_rssi(Some("shy".to_string()), None, -40);
+        protocol.ble_peer_rssi(Some("stranger".to_string()), None, -40);
+        let got = readings(&protocol);
+        assert_eq!(
+            got.len(),
+            1,
+            "one per peer per interval, none for shy or a stranger: {got:?}"
+        );
+        assert!(got[0].contains("\"peer_id\":\"near\"") && got[0].contains("\"rssi\":-44"));
+        assert_eq!(
+            link_rssi(&protocol),
+            -43,
+            "the cap is on events, not on readings"
+        );
+
+        protocol.set_peer_rssi_events(false);
+        protocol.ble_peer_rssi(Some("near".to_string()), None, -42);
+        assert!(readings(&protocol).is_empty());
     }
 
     /// A peer that leaves the Wi-Fi Direct group but is still linked over
