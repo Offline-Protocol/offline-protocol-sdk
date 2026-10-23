@@ -91,6 +91,7 @@ addEventListener("pagehide", () => rtc.close());
 
 let groupId = null;
 let hosting = false;
+let resumed = false; // hosting a game saved before a reload
 let host = null; // the host's address, for a player
 let opponent = null; // the member who plays the right paddle
 const members = new Set();
@@ -141,8 +142,9 @@ function restore() {
 
 // --- Lobby ----------------------------------------------------------------
 
-function startHosting(resumed) {
+function startHosting(fromSave) {
   hosting = true;
+  resumed = fromSave;
   $("role").textContent = resumed
     ? "Hosting the same game as before the reload. Connect the other device again with two new codes."
     : "Hosting. You play the left paddle; the first device to join plays the right.";
@@ -175,30 +177,59 @@ const previous = restore();
 if (previous?.groupId) {
   groupId = previous.groupId;
   opponent = previous.opponent ?? null;
-  for (const peer of previous.members ?? []) members.add(peer);
+  for (const peer of Array.isArray(previous.members) ? previous.members : []) members.add(peer);
   startHosting(true);
 }
 
+// What the host says when a game cannot go on, after the engine's reason.
+// A resumed game can be gone from the node while this page still remembers
+// it (the browser's site data cleared in part), and only End this game
+// recovers from that.
+const advice = () => (resumed ? " If this game no longer exists, press End this game." : "");
+
 // The host invites every device it has a session with: those that formed
 // before it pressed Host, and every later one. The invite needs the device's
-// key package, which follows the session, so it is retried.
+// key package, which follows the session, so it is retried for as long as
+// the device holds a link. A fixed number of tries was a race. The tries
+// began at the link, so a key package that took longer than all of them
+// left the device uninvited with nothing on screen, and the device's
+// secure_session_established had already been spent on the loop that gave
+// up, so nothing tried again.
+//
+// A device joins `members` only once its invite succeeded: save() writes
+// `members`, and a device saved before it was invited would come back after
+// a reload as a member nobody ever invited.
 const sessions = new Set();
+const inviting = new Set();
+const SLOW_INVITE_MS = 10000;
 async function admit(peer) {
-  if (!hosting || members.has(peer)) return;
-  members.add(peer);
-  for (let attempt = 0; attempt < 50; attempt++) {
-    try {
-      await node.inviteToGroup(groupId, peer);
-      opponent ??= peer;
-      save();
-      renderPlayers();
-      status(`${peer} joined`);
-      return;
-    } catch {
-      await new Promise((r) => setTimeout(r, 200));
-    }
+  if (!hosting || members.has(peer) || inviting.has(peer)) return;
+  inviting.add(peer);
+  const started = performance.now();
+  let warned = false;
+  try {
+    // At least once: a device in session whose link is not announced yet is
+    // invited again from neighbor_discovered.
+    do {
+      try {
+        await node.inviteToGroup(groupId, peer);
+        members.add(peer);
+        opponent ??= peer;
+        save();
+        renderPlayers();
+        status(`${peer} joined`);
+        return;
+      } catch (error) {
+        if (!warned && performance.now() - started > SLOW_INVITE_MS) {
+          warned = true;
+          status(`still trying to add ${peer}: ${error?.message ?? error}.${advice()}`);
+        }
+        await new Promise((r) => setTimeout(r, warned ? 1000 : 200));
+      }
+    } while (hosting && linked.has(peer));
+  } finally {
+    inviting.delete(peer);
   }
-  members.delete(peer);
 }
 node.addEventListener("secure_session_established", ({ detail }) => {
   sessions.add(detail.peer_id);
@@ -309,10 +340,34 @@ $("copy-answer").onclick = () => navigator.clipboard.writeText($("answer-code").
 // so one that misses its moment is never retried, never queued for a link
 // that is down, and never arrives late. The host sends only while a member
 // has a link, so a long absence does not pile up group traffic either.
+//
+// An ephemeral send may fail now and then (a member just relinked), so one
+// failure says nothing. A run of them with a member linked does: the game
+// is not reaching anyone, and a resumed game whose group is gone fails like
+// this for ever. So SLOW_SEND_MS of nothing but failures is shown.
+const SLOW_SEND_MS = 3000;
+let failingSince = null;
+let sendWarned = false;
 function broadcast() {
-  if (!opponent || ![...members].some((peer) => linked.has(peer))) return;
+  if (!opponent || ![...members].some((peer) => linked.has(peer))) {
+    failingSince = null;
+    return;
+  }
   counters.statesOut++;
-  node.sendGroupMessage(groupId, JSON.stringify({ s: state }), { ephemeral: true }).catch(() => {});
+  node.sendGroupMessage(groupId, JSON.stringify({ s: state }), { ephemeral: true }).then(
+    () => {
+      failingSince = null;
+      if (sendWarned) status("game updates are reaching the other device again");
+      sendWarned = false;
+    },
+    (error) => {
+      failingSince ??= performance.now();
+      if (!sendWarned && performance.now() - failingSince > SLOW_SEND_MS) {
+        sendWarned = true;
+        status(`game updates are not reaching the other device: ${error?.message ?? error}.${advice()}`);
+      }
+    },
+  );
 }
 
 node.addEventListener("group_message_received", ({ detail }) => {
