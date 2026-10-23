@@ -166,8 +166,9 @@ class BleTransportFacade(
     private val deviceId: String,
     appId: String,
     // Whether the scan response carries this device's node hash. Off unless
-    // the app sets `transports.ble.advertiseNodeHash`: the hash lets anyone
-    // who knows the address recognise the phone passively (R29).
+    // the app sets `transports.ble.advertiseNodeHash`: the hash never
+    // changes, so any scanner in range can follow the phone across address
+    // rotation, and anyone who knows its address can identify it (R29).
     private val advertiseNodeHash: Boolean = false,
     private val diagnosticEmitter: ((String, String, Map<String, Any?>) -> Unit)? = null
 ) : TransportManager {

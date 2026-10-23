@@ -395,9 +395,13 @@ export interface BleTransportConfig {
    * advertises from a new Bluetooth address each time it restarts
    * advertising, which it does on every link change, so the advertisement
    * soon stops matching any link the iPhone holds, whichever side opened
-   * it. The digest never changes, so anyone in radio range who knows
-   * the address can recognise the phone without connecting, across
-   * Bluetooth address rotation (threat model R29). iOS cannot advertise it.
+   * it.
+   *
+   * The privacy cost is two exposures (threat model R29). The digest never
+   * changes, so any scanner in radio range can follow this phone across
+   * Bluetooth address rotation, knowing nothing about it; and anyone who
+   * knows its address (contacts, group members, relay operators) can
+   * identify it without connecting. iOS cannot advertise it.
    */
   advertiseNodeHash?: boolean;
 }

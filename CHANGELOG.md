@@ -24,9 +24,10 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   default), Android advertises an 8-byte digest of its address as service
   data under the mesh UUID in its scan response, in place of the bare UUID,
   so an iPhone can name an Android peer (Android re-advertises from a new
-  address on every link change, so without it an iPhone rarely can); the
-  digest lets anyone who knows the address recognise the phone passively
-  ([R29](docs/security/threat-model.md#r29-the-bluetooth-le-scan-response-names-the-device-and-rssi-is-unauthenticated)).
+  address on every link change, so without it an iPhone rarely can). The
+  digest never changes, so any scanner in range can follow the phone across
+  Bluetooth address rotation, and anyone who knows its address can identify
+  it ([R29](docs/security/threat-model.md#r29-the-bluetooth-le-scan-response-names-the-device-and-rssi-is-unauthenticated)).
   While the app listens, readings also keep each link's quality current,
   smoothed so that one reading's noise does not reorder neighbours; the mesh
   relay ranks neighbours by it. An app that does not listen keeps the
