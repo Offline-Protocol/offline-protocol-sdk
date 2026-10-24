@@ -223,12 +223,18 @@ bound. Closing loses nothing the engine promised: an acknowledged message
 waits in its outbox for the next link, and an unacknowledged one (W10) was
 never promised.
 
-A connection closes on `failed` or `closed`, never on `disconnected`, which
-the WebRTC specification lets recover on its own: closing there would turn a
-Wi-Fi blip into two new codes typed by hand. Chrome reaches `disconnected`
-5 seconds after the last answered connectivity check and `failed` 15 seconds
-after it (Firefox later), and only `failed` reaches the engine as a lost
-peer. So the carrier dispatches a `connection` event for every change,
+A connection closes on `failed` or `closed`, or once it has stayed
+`disconnected` for 15 seconds (`disconnectedMs`). `disconnected` may recover
+on its own, which the WebRTC specification allows, and closing on it at once
+would turn a Wi-Fi blip into two new codes typed by hand. But nothing obliges
+a browser to move on to `failed`, and Android's WebView was seen to sit in
+`disconnected` for good after the other device restarted. The engine takes
+one link per address (W3), so that dead link refused every new link from the
+same device, and the two never met again until a page reloaded. The deadline
+is longer than Chrome's own, so in Chrome it changes nothing: Chrome reaches
+`disconnected` 5 seconds after the last answered connectivity check and
+`failed` 15 seconds after it (Firefox later). Either way, a close is what
+reaches the engine as a lost peer. So the carrier dispatches a `connection` event for every change,
 `connected`, `disconnected` and `closed`, naming the object `offer()` or
 `answer()` resolved to. A page that waits for `neighbor_lost` alone looks
 connected for those seconds, and a page that watches for it on one side only
@@ -384,7 +390,10 @@ start there, because Firefox answers it by asking the user.
   message that crosses in chunks, a group at 10 Hz sent acknowledged and
   then ephemeral, each with its delivery latency and the sender's store
   flushes (the ephemeral phase must cost fewer), and a loss when the
-  connection closes (W9, W10). Chromium runs with `WebRtcHideLocalIpsWithMdns`
+  connection closes (W9, W10). Then a connection the page makes read
+  `disconnected`: a blip shorter than `disconnectedMs` leaves it up, one that
+  stays is closed and reported lost at both ends, and the same two devices
+  link again. Chromium runs with `WebRtcHideLocalIpsWithMdns`
   off and Firefox with `media.peerconnection.ice.obfuscate_host_addresses`
   off, so the candidates are addresses a runner can reach. WebKit has no such
   switch and gathers `.local` names.

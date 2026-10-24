@@ -149,6 +149,16 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Fixed
 
+- **A browser device can link again after the other one restarts.** The
+  WebRTC carrier closed a connection only on `failed` or `closed`, and a
+  browser need never get there: Android's WebView was seen to sit in
+  `disconnected` for good once the other device went away. The engine takes
+  one link per address, so that dead link refused every new link from the
+  same device until a page reloaded. A connection that stays `disconnected`
+  for 15 seconds is now closed and reported lost; `new WebRtcCarrier(node,
+  { disconnectedMs })` sets the deadline, which is longer than Chrome's own
+  so Chrome behaves as before
+  ([web bridge, W9](docs/bridges/web.md#w9-webrtc-lives-on-the-page-and-is-set-up-offline)).
 - **A pair no longer splits into two sessions that never decrypt each
   other.** When both sides created a session at once and the lesser
   address's Welcome was lost, the greater side kept a group the other never

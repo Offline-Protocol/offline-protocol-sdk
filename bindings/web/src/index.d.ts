@@ -125,7 +125,12 @@ export class OfflineNode extends EventTarget {
  * devices cannot reach each other directly.
  */
 export class WebRtcCarrier extends EventTarget {
-  constructor(node: OfflineNode, options?: { iceServers?: RTCIceServer[] });
+  /**
+   * `disconnectedMs` (default 15000) is how long a connection may stay
+   * "disconnected" before the carrier closes it and the engine reports the
+   * peer lost. `Infinity` leaves it to the browser, which may never decide.
+   */
+  constructor(node: OfflineNode, options?: { iceServers?: RTCIceServer[]; disconnectedMs?: number });
   offer(): Promise<OfferedConnection>;
   answer(offerCode: string): Promise<AnsweredConnection>;
   close(): void;
@@ -147,9 +152,11 @@ export interface AnsweredConnection {
 /**
  * The detail of a WebRtcCarrier `connection` event, one per change of state.
  * "disconnected" means the last connectivity checks went unanswered and may
- * recover; the connection closes, and the engine reports the peer lost, only
- * when the browser gives up ("failed": in Chrome 10 s after "disconnected",
- * 15 s after the last answered check). "closed" comes once, at the end.
+ * recover; the connection closes, and the engine reports the peer lost, when
+ * the browser gives up ("failed": in Chrome 10 s after "disconnected", 15 s
+ * after the last answered check) or when it has stayed "disconnected" for
+ * the carrier's `disconnectedMs`, whichever comes first. "closed" comes
+ * once, at the end.
  * Events start once `offer()` or `answer()` has resolved; a call that
  * rejects, including one whose connection closed while it gathered, reports
  * nothing.

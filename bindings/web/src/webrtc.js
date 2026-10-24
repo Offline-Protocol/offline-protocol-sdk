@@ -19,12 +19,18 @@
 //   code.
 // - A carrier address proves nothing. The connection only carries bytes; the
 //   engine's preamble proves who is on the other end.
-// - A connection closes on "failed" or "closed" only. "disconnected" may
-//   recover on its own, and closing there would turn a Wi-Fi blip into two
-//   new codes typed by hand. The page hears every state as a `connection`
-//   event instead, so it can warn at "disconnected" (5 s after the last
-//   answered check in Chrome) rather than look connected until "failed"
-//   (15 s, when the engine reports the peer lost).
+// - A connection closes on "failed" or "closed", or once it has stayed
+//   "disconnected" for DISCONNECTED_MS. "disconnected" may recover on its
+//   own, and closing at once would turn a Wi-Fi blip into two new codes
+//   typed by hand. But nothing obliges a browser to move on to "failed":
+//   Android's WebView was seen to sit in "disconnected" for good after the
+//   other device restarted. The engine takes one link per address, so that
+//   dead link refused every new link from the same device, and the two
+//   never met again. The deadline is longer than Chrome's own (it fails 10 s
+//   after "disconnected"), so it only ever ends a connection the browser
+//   would have left hanging. The page hears every state as a `connection`
+//   event too, so it can warn at "disconnected" (5 s after the last
+//   answered check in Chrome) rather than look connected until the close.
 // - A connection reports nothing until offer() or answer() has handed the
 //   page its object. A call that fails, or whose connection closed while it
 //   gathered, rejects and reports nothing: an event naming an object the
@@ -34,6 +40,8 @@ const CODE_PREFIX = "op1.";
 const CHANNEL_ID = 0;
 const CHUNK_BYTES = 16 * 1024;
 const GATHER_MS = 5000;
+// How long a connection may stay "disconnected" before it is closed.
+const DISCONNECTED_MS = 15000;
 // Above this many bytes buffered on the channel, sends wait for it to drain.
 const HIGH_WATER_BYTES = 1024 * 1024;
 // Above this many bytes waiting behind the channel, the peer is not keeping
@@ -109,9 +117,13 @@ class Connection {
   #onClose;
   #onState = null;
   #reported = null;
+  #disconnectedMs;
+  // Closes the connection once it has been "disconnected" too long.
+  #stale = null;
 
-  constructor(node, iceServers, onClose) {
+  constructor(node, iceServers, disconnectedMs, onClose) {
     this.#node = node;
+    this.#disconnectedMs = disconnectedMs;
     this.#onClose = onClose;
     this.#pc = new RTCPeerConnection({ iceServers });
     this.#channel = this.#pc.createDataChannel("offline-protocol", {
@@ -126,9 +138,21 @@ class Connection {
     this.#channel.onclose = () => this.close();
     this.#pc.onconnectionstatechange = () => {
       const state = this.#pc.connectionState;
-      if (state === "failed" || state === "closed") this.close();
-      else if (state === "connected" || state === "disconnected") this.#report(state);
+      if (state === "failed" || state === "closed") return this.close();
+      if (state === "disconnected") this.#expire();
+      else this.#recovered();
+      if (state === "connected" || state === "disconnected") this.#report(state);
     };
+  }
+
+  #expire() {
+    if (this.#stale !== null || !Number.isFinite(this.#disconnectedMs)) return;
+    this.#stale = setTimeout(() => this.close(), this.#disconnectedMs);
+  }
+
+  #recovered() {
+    clearTimeout(this.#stale);
+    this.#stale = null;
   }
 
   /// Starts reporting to `onState`, beginning with the state the connection
@@ -237,6 +261,7 @@ class Connection {
   close({ engine = false } = {}) {
     if (this.#closed) return;
     this.#closed = true;
+    this.#recovered();
     for (const done of [...this.#draining]) done();
     if (this.#link !== null && !engine) this.#node.closeLink(this.#link);
     this.#channel.close();
@@ -252,23 +277,31 @@ class Connection {
 ///
 /// Every change of a connection's state is a `connection` event with
 /// `{ state, connection }` as its detail: `state` is "connected",
-/// "disconnected" (no answer to the last checks; it may recover) or "closed"
-/// (once, at the end), and `connection` is the object `offer()` or `answer()`
+/// "disconnected" (no answer to the last checks; it may recover, and is
+/// closed if it has not within `disconnectedMs`) or "closed" (once, at the
+/// end), and `connection` is the object `offer()` or `answer()`
 /// resolved to, so a page with several devices can tell them apart. A call
 /// that rejects reports nothing.
 export class WebRtcCarrier extends EventTarget {
   #node;
   #iceServers;
+  #disconnectedMs;
   #connections = new Set();
 
   /// `iceServers` is RTCPeerConnection's list, for networks where devices
   /// cannot reach each other directly: a STUN server for addresses behind a
   /// NAT, a TURN server to relay. The default is none, so links stay on the
   /// local network and no server learns of them (W9).
-  constructor(node, { iceServers = [] } = {}) {
+  ///
+  /// `disconnectedMs` is how long a connection may stay "disconnected"
+  /// before it is closed and the engine reports the peer lost; `Infinity`
+  /// leaves it to the browser, which may never decide.
+  constructor(node, { iceServers = [], disconnectedMs = DISCONNECTED_MS } = {}) {
     super();
+    if (!(disconnectedMs > 0)) throw new Error("disconnectedMs must be a positive number of milliseconds");
     this.#node = node;
     this.#iceServers = iceServers;
+    this.#disconnectedMs = disconnectedMs;
   }
 
   /// Starts a connection. Resolves to `{ code, accept(answerCode), close() }`:
@@ -297,7 +330,7 @@ export class WebRtcCarrier extends EventTarget {
   }
 
   #connection() {
-    return new Connection(this.#node, this.#iceServers, (c) => this.#connections.delete(c));
+    return new Connection(this.#node, this.#iceServers, this.#disconnectedMs, (c) => this.#connections.delete(c));
   }
 
   // The connection's code, or a rejection that closes it. A connection that
