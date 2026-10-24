@@ -1292,6 +1292,10 @@ jobs:
           echo "Checking Android Kotlin bindings..."
           test -d bindings/react-native/android/src/main/java/uniffi
 
+          echo "Staging Flutter plugin native artifacts for pub.dev consumers..."
+          bash bindings/flutter/scripts/stage-plugin-native-artifacts.sh
+          bash bindings/flutter/scripts/stage-plugin-native-artifacts.sh --check
+
           # Checked here rather than at packaging time so a missing desktop slice
           # fails before anything is published, not between the GitHub release and
           # the npm publish.

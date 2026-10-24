@@ -24,57 +24,49 @@ fn flutter_dart_method_channel_methods(dart: &str) -> Vec<String> {
         .collect()
 }
 
-/// Method names handled in `OfflineProtocolPlugin.kt` `when (call.method)`.
+fn flutter_method_channel_manifest() -> Vec<String> {
+    let path = flutter_plugin_dir().join("method_channel_methods.txt");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    raw.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Method names dispatched in `FlutterEngineChannel.kt` (`"method" ->`).
 fn flutter_kotlin_method_channel_methods(kt: &str) -> std::collections::BTreeSet<String> {
-    const ANCHOR: &str = "when (call.method) {";
-    let block = kt
-        .split(ANCHOR)
-        .nth(1)
-        .unwrap_or_else(|| panic!("{ANCHOR} not found in OfflineProtocolPlugin.kt"));
-    let block = block
-        .split("else ->")
-        .next()
-        .unwrap_or_else(|| panic!("when (call.method) missing else arm"));
     let mut names = std::collections::BTreeSet::new();
-    for line in block.lines() {
+    for line in kt.lines() {
         let line = line.trim();
         let Some(rest) = line.strip_prefix('"') else {
             continue;
         };
-        let Some((method, _)) = rest.split_once('"') else {
+        let Some((method, tail)) = rest.split_once('"') else {
             continue;
         };
-        if !method.is_empty() {
+        if tail.trim_start().starts_with("->") && !method.is_empty() {
             names.insert(method.to_string());
         }
     }
     names
 }
 
-/// Method names handled in `OfflineProtocolPlugin.swift` `switch call.method`.
+/// Method names dispatched in `FlutterEngineChannel.swift` (`case "method":`).
 fn flutter_swift_method_channel_methods(swift: &str) -> std::collections::BTreeSet<String> {
-    const ANCHOR: &str = "switch call.method {";
-    let block = swift
-        .split(ANCHOR)
-        .nth(1)
-        .unwrap_or_else(|| panic!("{ANCHOR} not found in OfflineProtocolPlugin.swift"));
-    let block = block
-        .split("default:")
-        .next()
-        .unwrap_or_else(|| panic!("switch call.method missing default arm"));
     let mut names = std::collections::BTreeSet::new();
-    for line in block.lines() {
-        let line = line.trim();
-        let Some(rest) = line.strip_prefix("case \"") else {
-            continue;
+    let mut rest = swift;
+    while let Some(idx) = rest.find("case \"") {
+        rest = &rest[idx + 6..];
+        let Some(end) = rest.find('"') else {
+            break;
         };
-        let Some((method, _)) = rest.split_once('"') else {
-            continue;
-        };
-        if method.contains(',') {
-            continue;
+        let method = &rest[..end];
+        if !method.is_empty() && !method.contains(',') {
+            names.insert(method.to_string());
         }
-        names.insert(method.to_string());
+        rest = &rest[end + 1..];
     }
     names
 }
@@ -99,10 +91,18 @@ const FLUTTER_SHARED_SOURCES: &[&str] = &[
     "InternetManager",
     "PresenceWatchPolicy",
     "EventReplayRing",
+    "InboundEventBuffer",
     "ForegroundReconnectPolicy",
     "WifiDirectManager",
     "ProtocolConfigParser",
     "InitialRuntimeConfigApplier",
+    "ProtocolBackgroundProcessor",
+    "ProtocolEngineHost",
+    "ProtocolEngineHostBridge",
+    "TransportBridge",
+    "ReticulumManager",
+    "NostrManager",
+    "NostrQueryTracker",
 ];
 
 /// Every `exclude('com/offlineprotocol/X.kt')` in the plugin's Gradle build.
@@ -376,6 +376,16 @@ fn flutter_binding_ci_job_is_wired_in_workflow() {
             ".github/workflows/ci.yml Flutter Binding job must reference `{needle}`"
         );
     }
+    for needle in [
+        "flutter-binding-ios:",
+        "ci-typecheck-flutter-ios-bridge.sh",
+        "flutter_ios:",
+    ] {
+        assert!(
+            ci.contains(needle),
+            ".github/workflows/ci.yml must wire Flutter iOS bridge CI (`{needle}`)"
+        );
+    }
 }
 
 #[test]
@@ -407,40 +417,200 @@ fn flutter_aar_baseline_json_is_well_formed() {
 }
 
 #[test]
-fn flutter_method_channel_methods_match_native_plugins() {
-    let flutter = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../bindings/flutter/offline_protocol");
-    let dart = std::fs::read_to_string(flutter.join("lib/src/offline_protocol.dart"))
-        .unwrap_or_else(|e| panic!("cannot read offline_protocol.dart: {e}"));
-    let kt = std::fs::read_to_string(
+fn flutter_docs_describe_ios_bridge_ci() {
+    let changelog = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../CHANGELOG.md"),
+    )
+    .unwrap_or_else(|e| panic!("cannot read CHANGELOG.md: {e}"));
+    assert!(
+        !changelog.contains("nothing in CI compiles the iOS plugin yet"),
+        "CHANGELOG must describe the Flutter iOS bridge CI job, not claim iOS is unchecked"
+    );
+    assert!(
+        changelog.contains("ci-typecheck-flutter-ios-bridge.sh"),
+        "CHANGELOG must name the iOS bridge typecheck script"
+    );
+    let bridge_doc = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/bridges/flutter.md"),
+    )
+    .unwrap_or_else(|e| panic!("cannot read docs/bridges/flutter.md: {e}"));
+    assert!(
+        !bridge_doc.contains("nothing in CI compiles the iOS plugin yet")
+            && !bridge_doc.contains("No CI job compiles the iOS plugin yet"),
+        "docs/bridges/flutter.md must describe Flutter Binding (iOS bridge)"
+    );
+    assert!(
+        bridge_doc.contains("Flutter Binding (iOS bridge)"),
+        "docs/bridges/flutter.md must name the iOS CI job"
+    );
+}
+
+#[test]
+fn flutter_android_hosts_mesh_foreground_keep_alive() {
+    let flutter = flutter_plugin_dir();
+    let gradle = std::fs::read_to_string(flutter.join("android/build.gradle"))
+        .unwrap_or_else(|e| panic!("cannot read android/build.gradle: {e}"));
+    assert!(
+        !gradle.contains("MeshForegroundService.kt"),
+        "Flutter must compile MeshForegroundService, not exclude it"
+    );
+    let plugin_kt = std::fs::read_to_string(
         flutter
             .join("android/src/main/kotlin/com/offlineprotocol/flutter/OfflineProtocolPlugin.kt"),
     )
     .unwrap_or_else(|e| panic!("cannot read OfflineProtocolPlugin.kt: {e}"));
-    let swift = std::fs::read_to_string(flutter.join("ios/Classes/OfflineProtocolPlugin.swift"))
-        .unwrap_or_else(|e| panic!("cannot read OfflineProtocolPlugin.swift: {e}"));
-
-    let dart_methods = flutter_dart_method_channel_methods(&dart);
     assert!(
-        !dart_methods.is_empty(),
-        "nativeMethodChannelMethods must list at least one method"
+        plugin_kt.contains("FlutterMeshForegroundKeepAlive.start")
+            && plugin_kt.contains("FlutterMeshForegroundKeepAlive.stop"),
+        "Flutter start/stop must drive the shared mesh foreground service"
     );
+    assert!(
+        plugin_kt.contains("StickyEventDispatcher")
+            && plugin_kt.contains("sendStickyOneShotEvent")
+            && plugin_kt.contains("mesh_stopped_by_user")
+            && plugin_kt.contains("SupersededLatchPolicy.EVENT_TYPE"),
+        "Flutter must sticky-deliver one-shot events like React Native"
+    );
+    assert!(
+        plugin_kt.contains("holdInboundEventIfBuffered")
+            && plugin_kt.contains("INBOUND_EVENT_BUFFER_CAPACITY = 256")
+            && plugin_kt.contains("message_received")
+            && plugin_kt.contains("inboundEvents.flush()"),
+        "Flutter Android must buffer inbound core events like React Native"
+    );
+    assert!(
+        std::fs::read_to_string(
+            flutter.join(
+                "android/src/main/kotlin/com/offlineprotocol/flutter/FlutterEngineChannel.kt"
+            ),
+        )
+        .unwrap_or_else(|e| panic!("cannot read FlutterEngineChannel.kt: {e}"))
+        .contains("discardOneShotEvent"),
+        "Flutter enableTransport must discard held internet_session_superseded"
+    );
+    assert!(
+        !gradle.contains("StickyEventDispatcher.kt"),
+        "Flutter must compile StickyEventDispatcher for one-shot redelivery"
+    );
+    let manifest = std::fs::read_to_string(flutter.join("android/src/main/AndroidManifest.xml"))
+        .unwrap_or_else(|e| panic!("cannot read plugin AndroidManifest.xml: {e}"));
+    assert!(
+        manifest.contains("MeshForegroundService"),
+        "Flutter plugin manifest must declare MeshForegroundService"
+    );
+    let flutter_ios_plugin =
+        std::fs::read_to_string(flutter.join("ios/Classes/OfflineProtocolPlugin.swift"))
+            .unwrap_or_else(|e| panic!("cannot read OfflineProtocolPlugin.swift: {e}"));
+    assert!(
+        flutter_ios_plugin.contains("restateInternetSupersededIfNeeded()")
+            && flutter_ios_plugin.contains("supersedeRestatementJson()"),
+        "Flutter iOS must restate internet_session_superseded on foreground like React Native"
+    );
+    assert!(
+        flutter_ios_plugin.contains("holdInboundEventIfBuffered")
+            && flutter_ios_plugin.contains("flushInboundEvents()")
+            && flutter_ios_plugin.contains("InboundEventBuffer()"),
+        "Flutter iOS must buffer inbound core events like React Native"
+    );
+    assert!(
+        !std::fs::read_to_string(flutter.join("ios/offline_protocol.podspec"))
+            .unwrap_or_default()
+            .contains("InboundEventBuffer.swift"),
+        "Flutter must compile InboundEventBuffer.swift, not exclude it"
+    );
+    let ci_script = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh"),
+    )
+    .unwrap_or_else(|e| panic!("cannot read ci-typecheck-flutter-ios-bridge.sh: {e}"));
+    assert!(
+        !ci_script.contains("ReticulumManager.swift") && !ci_script.contains("NostrManager.swift"),
+        "Flutter iOS typecheck must compile Reticulum/Nostr managers with ProtocolEngineHost"
+    );
+}
+
+#[test]
+fn flutter_method_channel_methods_match_native_plugins() {
+    let flutter = flutter_plugin_dir();
+    let manifest: std::collections::BTreeSet<String> =
+        flutter_method_channel_manifest().into_iter().collect();
+    assert!(
+        manifest.len() >= 170,
+        "method_channel_methods.txt must list the full channel surface"
+    );
+
+    let dart = std::fs::read_to_string(flutter.join("lib/src/offline_protocol.dart"))
+        .unwrap_or_else(|e| panic!("cannot read offline_protocol.dart: {e}"));
+    let dart_methods = flutter_dart_method_channel_methods(&dart);
     let dart_set: std::collections::BTreeSet<_> = dart_methods.iter().cloned().collect();
     assert_eq!(
-        dart_methods.len(),
-        dart_set.len(),
-        "nativeMethodChannelMethods must not contain duplicates: {dart_methods:?}"
+        dart_set, manifest,
+        "Dart nativeMethodChannelMethods must match method_channel_methods.txt"
     );
+
+    let kt = std::fs::read_to_string(
+        flutter.join("android/src/main/kotlin/com/offlineprotocol/flutter/FlutterEngineChannel.kt"),
+    )
+    .unwrap_or_else(|e| panic!("cannot read FlutterEngineChannel.kt: {e}"));
+    let swift = std::fs::read_to_string(flutter.join("ios/Classes/FlutterEngineChannel.swift"))
+        .unwrap_or_else(|e| panic!("cannot read FlutterEngineChannel.swift: {e}"));
 
     let kotlin = flutter_kotlin_method_channel_methods(&kt);
     let swift_methods = flutter_swift_method_channel_methods(&swift);
 
     assert_eq!(
-        kotlin, dart_set,
-        "OfflineProtocolPlugin.kt when (call.method) must match Dart nativeMethodChannelMethods"
+        kotlin, manifest,
+        "FlutterEngineChannel.kt dispatch must match method_channel_methods.txt"
     );
     assert_eq!(
-        swift_methods, dart_set,
-        "OfflineProtocolPlugin.swift switch call.method must match Dart nativeMethodChannelMethods"
+        swift_methods, manifest,
+        "FlutterEngineChannel.swift dispatch must match method_channel_methods.txt"
     );
+}
+
+/// The plugin prefers native libraries the release stages into it, and falls
+/// back to the React Native build otherwise. The choice must test for the
+/// library, never for its directory: the library itself is ignored
+/// repository-wide, so a committed `Info.plist` (as the first version of this
+/// change had) is a framework with no binary on every fresh clone, and a
+/// directory test then never falls back. The iOS app fails at the first UniFFI
+/// symbol; the Android AAR ships with no native code.
+#[test]
+fn flutter_staged_native_artifacts_are_chosen_by_the_library_not_the_directory() {
+    let flutter = flutter_plugin_dir();
+    let podspec = std::fs::read_to_string(flutter.join("ios/offline_protocol.podspec"))
+        .unwrap_or_else(|e| panic!("cannot read offline_protocol.podspec: {e}"));
+    assert!(
+        podspec.contains("ios-arm64/liboffline_protocol_uniffi.a")
+            && podspec.contains("File.file?(staged_lib) ? staged_xcf : rn_xcf"),
+        "offline_protocol.podspec must vendor the staged XCFramework only when its device \
+         library is present"
+    );
+    assert!(
+        !podspec.contains("File.directory?(staged_xcf)"),
+        "offline_protocol.podspec must not choose the staged XCFramework by its directory"
+    );
+    let gradle = std::fs::read_to_string(flutter.join("android/build.gradle"))
+        .unwrap_or_else(|e| panic!("cannot read android/build.gradle: {e}"));
+    assert!(
+        gradle.contains("it.name == 'libuniffi_offline_protocol.so'")
+            && gradle.contains("jniLibs.srcDirs(stagedHasLibrary ? stagedJni : rnJni)"),
+        "android/build.gradle must use the staged jniLibs only when a library is present"
+    );
+    let ignore = std::fs::read_to_string(flutter.join("ios/.gitignore"))
+        .unwrap_or_else(|e| panic!("cannot read ios/.gitignore: {e}"));
+    assert!(
+        ignore.lines().any(|l| l.trim() == "Frameworks/"),
+        "ios/.gitignore must keep the staged XCFramework out of the repository"
+    );
+    let staged = flutter.join("ios/Frameworks/offline_protocol_uniffi.xcframework");
+    if staged.join("Info.plist").exists() {
+        assert!(
+            staged
+                .join("ios-arm64/liboffline_protocol_uniffi.a")
+                .exists(),
+            "{} holds an Info.plist with no library: a framework that links nothing",
+            staged.display()
+        );
+    }
 }

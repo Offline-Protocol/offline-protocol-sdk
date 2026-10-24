@@ -2225,9 +2225,12 @@ mod tests {
         let defaults = ProtocolConfig::new("test-app", "user123").reliability.dedup;
         let rn_root =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bindings/react-native");
+        // Fallbacks live in the shared bridge (ADR 0025), not the RN module shells.
         let kotlin =
-            rn_root.join("android/src/main/java/com/offlineprotocol/OfflineProtocolModule.kt");
-        let swift = rn_root.join("ios/OfflineProtocolModule.swift");
+            rn_root.join("android/src/main/java/com/offlineprotocol/ProtocolEngineHostBridge.kt");
+        let swift = rn_root.join("ios/ProtocolEngineHostBridge.swift");
+        let swift_max = format_underscored(defaults.max_tracked_messages as u64);
+        let swift_retention = format_underscored(defaults.retention_time_secs);
         let expected = [
             (
                 kotlin.clone(),
@@ -2245,17 +2248,11 @@ mod tests {
             ),
             (
                 swift.clone(),
-                format!(
-                    "(config[\"maxTrackedMessages\"] as? NSNumber)?.uint64Value ?? {}",
-                    defaults.max_tracked_messages
-                ),
+                format!(r#"unsigned64(j, "maxTrackedMessages", {swift_max})"#),
             ),
             (
                 swift,
-                format!(
-                    "(config[\"retentionTimeSecs\"] as? NSNumber)?.uint64Value ?? {}",
-                    defaults.retention_time_secs
-                ),
+                format!(r#"unsigned64(j, "retentionTimeSecs", {swift_retention})"#),
             ),
         ];
 

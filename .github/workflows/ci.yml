@@ -1510,6 +1510,10 @@ jobs:
               - 'docs/bridges/flutter.md'
               - '.github/workflows/ci.yml'
               - 'crates/offline-protocol-uniffi/src/tests/flutter_bridge_guards.rs'
+              - 'scripts/check-binding-generators.sh'
+              - 'tools/gen_*'
+              - 'tools/rn_engine_bridge_error_manifest.json'
+              - 'tools/extract_rn_bridge_error_manifest.py'
             flutter_native:
               # The plugin's own Kotlin and Gradle build: `flutter analyze`
               # excludes android/**, so without these a pull request that
@@ -1530,6 +1534,10 @@ jobs:
             flutter_lock:
               - 'Cargo.lock'
               - 'Cargo.toml'
+            flutter_ios:
+              - 'bindings/flutter/offline_protocol/ios/**'
+              - 'bindings/react-native/ios/**'
+              - 'bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh'
 
       - name: Decide Flutter native (NDK + AAR) gate
         id: flutter_native_gate
@@ -1575,6 +1583,15 @@ jobs:
           flutter test
           flutter analyze
 
+      - name: Check bridge generator outputs
+        if: >-
+          github.event_name == 'push'
+          || steps.flutter_paths.outputs.flutter_dart == 'true'
+          || steps.flutter_paths.outputs.flutter_native == 'true'
+          || steps.flutter_paths.outputs.flutter_ios == 'true'
+          || steps.flutter_paths.outputs.flutter_lock == 'true'
+        run: bash scripts/check-binding-generators.sh --check
+
       - uses: actions/setup-java@v6
         if: steps.flutter_native_gate.outputs.run == 'true'
         with:
@@ -1615,3 +1632,89 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: bindings/flutter/scripts/measure-plugin-aar-size.sh --check
+
+  flutter-binding-ios:
+    name: Flutter Binding (iOS bridge)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        id: flutter_ios_paths
+        with:
+          filters: |
+            flutter_ios:
+              - 'bindings/flutter/offline_protocol/ios/**'
+              - 'bindings/react-native/ios/**'
+              - 'bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh'
+              - 'crates/offline-protocol-uniffi/**'
+              - 'scripts/ios-deployment-target.sh'
+            flutter_lock:
+              - 'Cargo.lock'
+              - 'Cargo.toml'
+
+      - name: Skip (no Flutter iOS-related changes on this PR)
+        if: >-
+          github.event_name == 'pull_request'
+          && steps.flutter_ios_paths.outputs.flutter_ios != 'true'
+          && steps.flutter_ios_paths.outputs.flutter_lock != 'true'
+        run: echo "No matching paths; Flutter iOS bridge check skipped for this PR."
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        if: >-
+          github.event_name == 'push'
+          || steps.flutter_ios_paths.outputs.flutter_ios == 'true'
+          || steps.flutter_ios_paths.outputs.flutter_lock == 'true'
+        with:
+          channel: stable
+          flutter-version: "3.27.4"
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: >-
+          github.event_name == 'push'
+          || steps.flutter_ios_paths.outputs.flutter_ios == 'true'
+          || steps.flutter_ios_paths.outputs.flutter_lock == 'true'
+        with:
+          targets: aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        if: >-
+          github.event_name == 'push'
+          || steps.flutter_ios_paths.outputs.flutter_ios == 'true'
+          || steps.flutter_ios_paths.outputs.flutter_lock == 'true'
+        with:
+          shared-key: ci-flutter-binding-ios
+
+      - name: Precache Flutter iOS engine
+        if: >-
+          github.event_name == 'push'
+          || steps.flutter_ios_paths.outputs.flutter_ios == 'true'
+          || steps.flutter_ios_paths.outputs.flutter_lock == 'true'
+        run: flutter precache --ios
+
+      - name: Build Rust library for the iOS simulator
+        if: >-
+          github.event_name == 'push'
+          || steps.flutter_ios_paths.outputs.flutter_ios == 'true'
+          || steps.flutter_ios_paths.outputs.flutter_lock == 'true'
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            arm64) TARGET=aarch64-apple-ios-sim ;;
+            x86_64) TARGET=x86_64-apple-ios ;;
+            *) echo "::error::no iOS simulator target for $(uname -m)"; exit 1 ;;
+          esac
+          IPHONEOS_DEPLOYMENT_TARGET="$(bash scripts/ios-deployment-target.sh)"
+          export IPHONEOS_DEPLOYMENT_TARGET
+          cargo build --profile mobile --locked --target "$TARGET" \
+            --package offline-protocol-uniffi
+
+      - name: Typecheck Flutter iOS plugin and BridgeRN copy
+        if: >-
+          github.event_name == 'push'
+          || steps.flutter_ios_paths.outputs.flutter_ios == 'true'
+          || steps.flutter_ios_paths.outputs.flutter_lock == 'true'
+        run: bash bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh

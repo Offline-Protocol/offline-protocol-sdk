@@ -75,7 +75,14 @@ android {
             java {
                 srcDirs bridgeJava, 'src/main/kotlin'
             }
-            jniLibs.srcDirs bridgeDir.path + '/src/main/jniLibs'
+            // The libraries the release stages into the plugin win, but only
+            // when one is there: an ABI directory with no library in it would
+            // ship an AAR with no native code and never fall back.
+            def stagedJni = file('src/main/jniLibs')
+            def rnJni = file(bridgeDir.path + '/src/main/jniLibs')
+            def stagedHasLibrary = stagedJni.exists() &&
+                project.fileTree(stagedJni).files.any { it.name == 'libuniffi_offline_protocol.so' }
+            jniLibs.srcDirs(stagedHasLibrary ? stagedJni : rnJni)
         }
     }
 }
@@ -88,13 +95,9 @@ tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
     exclude('com/offlineprotocol/OfflineProtocolModule.kt')
     exclude('com/offlineprotocol/OfflineProtocolPackage.kt')
     exclude('com/offlineprotocol/MeshHeadlessWakeService.kt')
-    exclude('com/offlineprotocol/MeshForegroundService.kt')
-    exclude('com/offlineprotocol/ReticulumManager.kt')
-    exclude('com/offlineprotocol/NostrManager.kt')
-    exclude('com/offlineprotocol/NostrQueryTracker.kt')
-    exclude('com/offlineprotocol/StickyEventBuffer.kt')
-    exclude('com/offlineprotocol/StickyEventDispatcher.kt')
-    exclude('com/offlineprotocol/MeshWakePolicy.kt')
+    exclude('com/offlineprotocol/BridgeArgumentMaps.kt')
+    exclude('com/offlineprotocol/BridgeResults.kt')
+    exclude('com/offlineprotocol/ProtocolEngineHostBridgeReactNative.kt')
 }
 
 dependencies {

@@ -1,0 +1,450 @@
+{
+  "acceptConnectionRequest": {
+    "code": "ERROR_CONNECTION_REQUEST",
+    "mapProtocolErrors": true,
+    "message": "Failed to accept connection request"
+  },
+  "bleGetDiagnostics": {
+    "code": "ERROR_BLE",
+    "message": "Protocol not initialized"
+  },
+  "bleGetPeerCount": {
+    "code": "ERROR_BLE",
+    "message": "Protocol not initialized"
+  },
+  "blockUser": {
+    "code": "ERROR_BLOCK_USER",
+    "message": "Failed to block user"
+  },
+  "cancelConnectionRequest": {
+    "code": "ERROR_CONNECTION_REQUEST",
+    "mapProtocolErrors": true,
+    "message": "Failed to cancel connection request"
+  },
+  "cancelFileTransfer": {
+    "code": "ERROR_FILE_CANCEL",
+    "message": "Protocol not initialized"
+  },
+  "checkInternetPresence": {
+    "code": "ERROR_INTERNET",
+    "mapProtocolErrors": true,
+    "message": "Failed to query presence: Internet transport not initialized"
+  },
+  "createInvite": {
+    "code": "ERROR_NOT_INITIALIZED",
+    "message": "Protocol not initialized"
+  },
+  "deriveAddress": {
+    "code": "ERROR_CRYPTO",
+    "message": "Failed to derive address"
+  },
+  "deriveUserIdFromPublicKey": {
+    "code": "ERROR_NOT_INITIALIZED",
+    "message": "Protocol not initialized"
+  },
+  "disableTransport": {
+    "code": "ERROR_TRANSPORT_DISABLE",
+    "message": "Protocol not initialized"
+  },
+  "discoverServices": {
+    "code": "ERROR_DISCOVER_SERVICES",
+    "message": "Failed to discover services"
+  },
+  "eraseCustody": {
+    "code": "ERROR_ERASECUSTODY",
+    "mapProtocolErrors": true,
+    "message": "eraseCustody failed"
+  },
+  "establishSecureSession": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "finalizeFile": {
+    "code": "ERROR_FILE",
+    "message": "Protocol not initialized"
+  },
+  "forceTransport": {
+    "code": "ERROR_TRANSPORT",
+    "message": "Protocol not initialized"
+  },
+  "forwardMessage": {
+    "code": "ERROR_FORWARD",
+    "mapProtocolErrors": true,
+    "message": "Failed to forward message"
+  },
+  "getActiveTransports": {
+    "code": "ERROR_TRANSPORT",
+    "message": "Protocol not initialized"
+  },
+  "getBatteryLevel": {
+    "code": "ERROR_BATTERY",
+    "message": "Protocol not initialized"
+  },
+  "getBlockedUsers": {
+    "code": "ERROR_GET_BLOCKED",
+    "message": "Failed to get blocked users"
+  },
+  "getCustodyStats": {
+    "code": "ERROR_STATS",
+    "message": "Protocol not initialized"
+  },
+  "getDedupStats": {
+    "code": "ERROR_STATS",
+    "message": "Protocol not initialized"
+  },
+  "getDeliverySuccessRate": {
+    "code": "ERROR_DELIVERY_RATE",
+    "message": "Protocol not initialized"
+  },
+  "getDorsConfig": {
+    "code": "ERROR_CONFIG",
+    "message": "Protocol not initialized",
+    "parseJsonResult": true
+  },
+  "getEstablishmentState": {
+    "code": "ERROR_MLS",
+    "message": "Failed to get establishment state"
+  },
+  "getFileProgress": {
+    "code": "ERROR_FILE_PROGRESS",
+    "message": "Protocol not initialized"
+  },
+  "getIdentityPublicKey": {
+    "code": "ERROR_NOT_INITIALIZED",
+    "message": "Protocol not initialized"
+  },
+  "getIsCharging": {
+    "code": "ERROR_BATTERY",
+    "message": "Protocol not initialized"
+  },
+  "getMedianHops": {
+    "code": "ERROR_MEDIAN_HOPS",
+    "message": "Protocol not initialized"
+  },
+  "getMedianLatency": {
+    "code": "ERROR_MEDIAN_LATENCY",
+    "message": "Protocol not initialized"
+  },
+  "getMeshRelayStats": {
+    "code": "ERROR_STATS",
+    "message": "Protocol not initialized"
+  },
+  "getMeshRelayTunables": {
+    "code": "ERROR_STATS",
+    "message": "Protocol not initialized"
+  },
+  "getMessageStats": {
+    "code": "ERROR_MESSAGE_STATS",
+    "message": "Protocol not initialized"
+  },
+  "getPendingAckCount": {
+    "code": "ERROR_STATS",
+    "message": "Protocol not initialized"
+  },
+  "getRelayConfig": {
+    "code": "ERROR_RELAY",
+    "message": "Protocol not initialized"
+  },
+  "getRelayPriority": {
+    "code": "ERROR_RELAY",
+    "message": "Protocol not initialized"
+  },
+  "getRetryQueueSize": {
+    "code": "ERROR_STATS",
+    "message": "Protocol not initialized"
+  },
+  "getState": {
+    "code": "ERROR_NOT_INITIALIZED",
+    "message": "Failed to get protocol state"
+  },
+  "getTopology": {
+    "code": "ERROR_TOPOLOGY",
+    "message": "Protocol not initialized"
+  },
+  "getTransportMetrics": {
+    "code": "ERROR_METRICS",
+    "message": "Protocol not initialized"
+  },
+  "hasPendingKeyPackage": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "internetConfirmSent": {
+    "code": "ERROR_INTERNET",
+    "message": "Protocol not initialized"
+  },
+  "internetForceReconnect": {
+    "code": "ERROR_INTERNET",
+    "message": "Internet transport not initialized"
+  },
+  "internetGetNextMessage": {
+    "code": "ERROR_INTERNET",
+    "message": "Protocol not initialized"
+  },
+  "internetIsReady": {
+    "code": "ERROR_INTERNET",
+    "message": "Internet transport not initialized"
+  },
+  "internetIsSuperseded": {
+    "code": "ERROR_INTERNET",
+    "message": "Internet transport not initialized"
+  },
+  "internetMessageReceived": {
+    "code": "ERROR_INTERNET",
+    "message": "Protocol not initialized"
+  },
+  "internetSendFailed": {
+    "code": "ERROR_INTERNET",
+    "message": "Protocol not initialized"
+  },
+  "internetSendRawCommand": {
+    "code": "ERROR_INTERNET",
+    "mapProtocolErrors": true,
+    "message": "Failed to send raw server command: Internet transport not initialized"
+  },
+  "internetStatusChanged": {
+    "code": "ERROR_INTERNET",
+    "message": "Protocol not initialized"
+  },
+  "isBluetoothEnabled": {
+    "code": "ERROR_BLE",
+    "message": "Protocol not initialized"
+  },
+  "isMlsInitialized": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "isRelay": {
+    "code": "ERROR_RELAY",
+    "message": "Protocol not initialized"
+  },
+  "isUserBlocked": {
+    "code": "ERROR_IS_BLOCKED",
+    "message": "Failed to check blocked status"
+  },
+  "mlsCreateSession": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "mlsDecrypt": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "mlsDecryptFromUser": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "mlsDeleteSession": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "mlsEncryptForUser": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "mlsGenerateKeyPackage": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "mlsGetOrCreateKeyPackage": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "mlsGetPendingKeyPackages": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "mlsHasSession": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "mlsImportKeyPackage": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "mlsJoinSession": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "mlsListSessions": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "mlsMarkKeyPackageSynced": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "mlsProcessWelcome": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "parseInvite": {
+    "code": "ERROR_INVALID_INVITE",
+    "message": "Invite did not verify"
+  },
+  "processFileChunk": {
+    "code": "ERROR_FILE",
+    "mapProtocolErrors": true,
+    "message": "Failed to process file chunk"
+  },
+  "registerService": {
+    "code": "ERROR_REGISTER_SERVICE",
+    "message": "Failed to register service"
+  },
+  "rejectConnectionRequest": {
+    "code": "ERROR_CONNECTION_REQUEST",
+    "mapProtocolErrors": true,
+    "message": "Failed to reject connection request"
+  },
+  "rekeySession": {
+    "code": "ERROR_MLS",
+    "message": "Protocol not initialized"
+  },
+  "releaseTransportLock": {
+    "code": "ERROR_TRANSPORT",
+    "message": "Protocol not initialized"
+  },
+  "requestEnableBluetooth": {
+    "code": "ERROR_BLUETOOTH",
+    "message": "Bluetooth not available on this device"
+  },
+  "resolveUsername": {
+    "code": "ERROR_INVALID_ARGUMENT",
+    "mapProtocolErrors": true,
+    "message": "Failed to resolve username"
+  },
+  "respondToServiceRequest": {
+    "code": "ERROR_SERVICE_RESPONSE",
+    "mapProtocolErrors": true,
+    "message": "Failed to respond to service request"
+  },
+  "sendConnectionRequest": {
+    "code": "ERROR_CONNECTION_REQUEST",
+    "mapProtocolErrors": true,
+    "message": "Failed to send connection request"
+  },
+  "sendFileFromPath": {
+    "code": "ERROR_SEND_FILE",
+    "mapProtocolErrors": true,
+    "message": "Failed to send file from path"
+  },
+  "sendMedia": {
+    "code": "ERROR_SEND_MEDIA",
+    "mapProtocolErrors": true,
+    "message": "Failed to send media"
+  },
+  "sendMediaRich": {
+    "code": "ERROR_SEND_MEDIA",
+    "mapProtocolErrors": true,
+    "message": "Failed to send media"
+  },
+  "sendMessageRich": {
+    "code": "ERROR_SEND",
+    "mapProtocolErrors": true,
+    "message": "Failed to send rich message"
+  },
+  "sendPresenceUpdate": {
+    "code": "ERROR_PRESENCE_UPDATE",
+    "mapProtocolErrors": true,
+    "message": "Failed to send presence update"
+  },
+  "sendReadReceipt": {
+    "code": "ERROR_READ_RECEIPT",
+    "mapProtocolErrors": true,
+    "message": "Failed to send read receipt"
+  },
+  "sendServiceRequest": {
+    "code": "ERROR_SERVICE_REQUEST",
+    "mapProtocolErrors": true,
+    "message": "Failed to send service request"
+  },
+  "sendTypingIndicator": {
+    "code": "ERROR_TYPING_INDICATOR",
+    "mapProtocolErrors": true,
+    "message": "Failed to send typing indicator"
+  },
+  "setBatteryLevel": {
+    "code": "ERROR_BATTERY",
+    "message": "Protocol not initialized"
+  },
+  "setBatteryState": {
+    "code": "ERROR_BATTERY",
+    "message": "Protocol not initialized"
+  },
+  "setRelayPriority": {
+    "code": "ERROR_RELAY",
+    "message": "Protocol not initialized"
+  },
+  "shouldEscalateToWifi": {
+    "code": "ERROR_DORS",
+    "message": "Protocol not initialized"
+  },
+  "signData": {
+    "code": "ERROR_NOT_INITIALIZED",
+    "message": "Protocol not initialized"
+  },
+  "signDataBase64": {
+    "code": "ERROR_NOT_INITIALIZED",
+    "message": "Protocol not initialized"
+  },
+  "unblockUser": {
+    "code": "ERROR_UNBLOCK_USER",
+    "message": "Failed to unblock user"
+  },
+  "unregisterService": {
+    "code": "ERROR_UNREGISTER_SERVICE",
+    "message": "Failed to unregister service"
+  },
+  "updateAckConfig": {
+    "code": "ERROR_CONFIG",
+    "message": "Protocol not initialized"
+  },
+  "updateDedupConfig": {
+    "code": "ERROR_CONFIG",
+    "message": "Protocol not initialized"
+  },
+  "updateDorsConfig": {
+    "code": "ERROR_CONFIG",
+    "message": "Protocol not initialized"
+  },
+  "updateRelayConfig": {
+    "code": "ERROR_RELAY",
+    "message": "Protocol not initialized"
+  },
+  "updateRetryConfig": {
+    "code": "ERROR_CONFIG",
+    "message": "Protocol not initialized"
+  },
+  "verifySignature": {
+    "code": "ERROR_NOT_INITIALIZED",
+    "message": "Protocol not initialized"
+  },
+  "verifySignatureBase64": {
+    "code": "ERROR_NOT_INITIALIZED",
+    "message": "Protocol not initialized"
+  },
+  "wifiDirectGetNextMessage": {
+    "code": "ERROR_WIFI_DIRECT",
+    "message": "Protocol not initialized"
+  },
+  "wifiDirectMessageReceived": {
+    "code": "ERROR_WIFI_DIRECT",
+    "message": "Protocol not initialized"
+  },
+  "wifiDirectPeerConnected": {
+    "code": "ERROR_WIFI_DIRECT",
+    "message": "Protocol not initialized"
+  },
+  "wifiDirectPeerDisconnected": {
+    "code": "ERROR_WIFI_DIRECT",
+    "message": "Protocol not initialized"
+  },
+  "wifiDirectStatusChanged": {
+    "code": "ERROR_WIFI_DIRECT",
+    "message": "Protocol not initialized"
+  },
+  "wipePersistedState": {
+    "code": "ERROR_WIPE_STATE",
+    "message": "Refusing to wipe storage for the account this instance is running."
+  }
+}

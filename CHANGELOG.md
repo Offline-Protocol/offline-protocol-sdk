@@ -204,6 +204,11 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 > of those keys on the network path could read the telemetry API key and
 > the batches. It now trusts only the sixteen roots the ingest's issuers use.
 >
+> **Flutter iOS shares Swift with React Native.** After editing shared bridge
+> sources under `bindings/react-native/ios/`, run
+> `bindings/flutter/offline_protocol/ios/sync_bridge_rn.sh` or `pod install`
+> so the plugin's `BridgeRN/` copy matches (CI refreshes it automatically).
+>
 > **Three new ways in: C, Java and Flutter.** A C header over the native
 > library every release already ships, a Java binding generated from the
 > interface definition (JDK 22+, on Maven Central), and a preview Flutter
@@ -259,17 +264,56 @@ archived by series under [docs/changelog/](docs/changelog/); see the
 
 ### Added
 
+- **Pinned React Native bridge promise codes.** The 107 shared engine methods
+  read fallback `ERROR_*` codes and message prefixes from
+  `tools/rn_engine_bridge_error_manifest.json` (workflow in
+  [C9b](docs/bridges/README.md#c9b-shared-engine-bridge-generators-and-rn-promise-codes)).
+  The same file records which methods reject with typed protocol codes (the 19
+  that always did, on both platforms) and the one method whose JSON is resolved
+  as an object (`getDorsConfig`); every other string reaches JavaScript
+  unchanged. CI and Rust guards hold the Swift and Kotlin adapters to that file;
+  resolve-only queries use domain codes when the shared bridge throws.
+- **Flutter `MeshSdk` typed read helpers.** `getStateTyped`, `internetIsReadyTyped`,
+  `internetIsSupersededTyped`, `isBluetoothEnabledTyped`, `isMlsInitializedTyped`,
+  `isRelayTyped`, `hasPendingKeyPackageTyped`, `getBatteryLevelTyped`,
+  `localAddressTyped`, `getPendingAckCountTyped`, `getRetryQueueSizeTyped`,
+  `bleGetPeerCountTyped`, and `getActiveTransportsTyped` avoid hand-built maps on
+  common polling paths; `flushTelemetryAndWait` names the blocking telemetry flush
+  explicitly (F8).
+- **Flutter iOS supersede restatement.** Foreground re-emits
+  `internet_session_superseded` from the transport latch (React Native iOS parity).
+- **Flutter Android one-shot redelivery.** Sticky `mesh_stopped_by_user` and
+  `internet_session_superseded` with discard on internet re-enable.
+- **Flutter Android inbound event buffer.** Holds the five core message tags
+  when Dart is not listening (256-capacity sticky buffer, React Native parity).
+- **MeshSdk generator CI.** `gen_mesh_sdk_dart.py --check` in
+  `check-binding-generators.sh`.
+- **Flutter iOS inbound event buffer.** Compiles shared `InboundEventBuffer` and
+  redelivers on subscribe/foreground (React Native iOS parity).
+- **EngineMethodHandlers generator CI.** `gen_engine_method_handlers.py --check`
+  in `check-binding-generators.sh`.
+- **Flutter `OfflineProtocol.minimalFootprintConfig`.** Transport flags-only create
+  payload for the smallest runtime surface (F9).
+- **Flutter Android mesh foreground keep-alive.** `MeshForegroundService` ships with
+  the plugin; `start`/`stop`/`destroy` drive it like React Native.
+- **Flutter pub.dev publish path.** Release staging plus
+  `bindings/flutter/scripts/publish-to-pub.sh` and [flutter-integration.md](docs/flutter-integration.md).
+- **Engine-bridge poll smoke tests.** `js-ci-harness/engine-bridge-smoke.test.js`
+  (MLS and Internet readiness through the RN SDK) and
+  `ProtocolEngineHostBridgeSmokeTest` on Android complement Rust delegation guards.
+
 - **A Flutter plugin (preview).** `bindings/flutter/offline_protocol` hosts
   the engine on iOS and Android from Dart: create, MLS with the platform
   secure stores, start, stop, destroy, the local address, `sendMessage`, the
   Internet, BLE and Wi-Fi Direct transports, and core events with the same
   sequence numbers and gap replay as React Native. Its Android and iOS hosts
   compile the React Native bridge sources where they are, less a named list
-  of the ones that need React, so a transport fix reaches both. Nostr and
-  Reticulum are not hosted yet, and a config that enables either is refused
-  at create. Until it is on pub.dev it is a path dependency. CI runs the Dart
-  tests and assembles the Android plugin against a size baseline; nothing in
-  CI compiles the iOS plugin yet. The contract is `docs/bridges/flutter.md`.
+  of the ones that need React, so a transport fix reaches both. Nostr, Reticulum,
+  and Android mesh foreground keep-alive use the same shared managers as RN.
+  Until it is on pub.dev it is a path dependency. CI runs Dart tests
+  and analysis, gates the Android release AAR against a size baseline, and
+  typechecks the iOS plugin plus shared Swift via
+  `ci-typecheck-flutter-ios-bridge.sh` (see `docs/bridges/flutter.md`).
 - **A Java binding.** `bindings/java` is a typed Java API generated from the
   interface definition by `uniffi-bindgen-java`, the fourth member of the
   artifact set that `scripts/generate-bindings.sh` writes with Swift, Kotlin

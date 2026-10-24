@@ -27,6 +27,9 @@ REACT_ONLY_SOURCES = (
     "OfflineProtocolModule.kt",
     "OfflineProtocolPackage.kt",
     "MeshHeadlessWakeService.kt",
+    "ProtocolEngineHostBridgeReactNative.kt",
+    "BridgeArgumentMaps.kt",
+    "BridgeResults.kt",
 )
 BRIDGE_PACKAGE = "com/offlineprotocol/"
 REACT_PACKAGE = "com/facebook/"

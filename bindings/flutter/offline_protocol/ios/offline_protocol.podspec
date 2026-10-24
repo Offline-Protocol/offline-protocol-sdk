@@ -30,10 +30,7 @@ ios_deployment_target = rn_targets.first
 rn_only_swift = [
   'BridgeRN/OfflineProtocolModule.swift',
   'BridgeRN/OfflineProtocolModule.m',
-  'BridgeRN/NostrManager.swift',
-  'BridgeRN/NostrQueryTracker.swift',
-  'BridgeRN/ReticulumManager.swift',
-  'BridgeRN/InboundEventBuffer.swift',
+  'BridgeRN/ProtocolEngineHostBridgeReactNative.swift',
 ]
 
 Pod::Spec.new do |s|
@@ -66,7 +63,16 @@ Pod::Spec.new do |s|
     File.join(rn_ios, 'Generated/offline_protocolFFI.modulemap'),
   ]
 
-  s.vendored_frameworks = File.join(rn_ios, 'libs/offline_protocol_uniffi.xcframework')
+  # The framework the release stages into the plugin wins, but only when it
+  # holds the device library. A directory is not enough: an Info.plist with no
+  # binary beside it is a framework that links nothing, and a checkout that
+  # carried one would never fall back to the React Native build.
+  # File patterns are relative to the pod root, like `rn_xcf`; the absolute
+  # path is only for the existence test.
+  staged_xcf = 'Frameworks/offline_protocol_uniffi.xcframework'
+  staged_lib = File.join(plugin_ios, staged_xcf, 'ios-arm64/liboffline_protocol_uniffi.a')
+  rn_xcf = File.join(rn_ios, 'libs/offline_protocol_uniffi.xcframework')
+  s.vendored_frameworks = File.file?(staged_lib) ? staged_xcf : rn_xcf
 
   s.public_header_files = [
     File.join(rn_ios, 'Generated/offline_protocolFFI.h'),

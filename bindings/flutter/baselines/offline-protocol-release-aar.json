@@ -2,7 +2,7 @@
   "artifact": "offline_protocol-release.aar",
   "gradle_module": ":offline_protocol:assembleRelease",
   "working_directory": "bindings/flutter/offline_protocol/example/android",
-  "bytes": 5447562,
+  "bytes": 6853741,
   "tolerance_bytes": 1048576,
   "description": "Flutter plugin release AAR: the shared Kotlin bridge and the arm64-v8a UniFFI library built with the mobile profile, as CI builds it. measure-plugin-aar-size.sh subtracts any other ABI under react-native jniLibs. Re-baseline with bindings/flutter/scripts/measure-plugin-aar-size.sh --write-baseline after intentional native surface changes."
 }
