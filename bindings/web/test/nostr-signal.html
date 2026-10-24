@@ -8,7 +8,8 @@
 // direct message across, with a dead relay listed ahead of the live one. A
 // join to a room nobody hosts gives up, a room that never opens closes its
 // sockets, the host remembers a session for as long as its newest offer is
-// fresh, and a stopped node refuses calls instead of hanging. The title ends
+// fresh, a hosted room redials a relay that dropped it and drops one that
+// stopped answering, and a stopped node refuses calls instead of hanging. The title ends
 // as PASS or FAIL: <step>.
 import { OfflineNode, WebRtcCarrier, NostrSignaller } from "../src/index.js";
 import { log, waitFor, run } from "./common.js";
@@ -128,9 +129,65 @@ await run(async (step) => {
   holder.close();
   log("the host held a session until its newest offer went stale");
 
+  step.name = "relay dropped";
+  // A hosted room outlives its relay sockets. The page closes every socket
+  // the host opened, as a phone's sleep or a network change would, and a
+  // device that joins afterwards must still be answered.
+  // Counts the sockets made until restore().
+  const capture = () => {
+    const sockets = [];
+    const Native = globalThis.WebSocket;
+    globalThis.WebSocket = class extends Native {
+      constructor(...args) {
+        super(...args);
+        sockets.push(this);
+      }
+    };
+    return { sockets, restore: () => (globalThis.WebSocket = Native) };
+  };
+  const d = await OfflineNode.start({ appId, profile: "sleeper", storage: "memory", tabs: false });
+  const e = await OfflineNode.start({ appId, profile: "late", storage: "memory", tabs: false });
+  const sleepRoom = await d.newRoom();
+  const dropped = capture();
+  let sleeping;
+  try {
+    sleeping = await new NostrSignaller(d, { relays: [relay] }).host(sleepRoom, new WebRtcCarrier(d));
+  } finally {
+    dropped.restore();
+  }
+  for (const socket of dropped.sockets) socket.close();
+  await pause(200);
+  const relinked = waitFor(d, "secure_session_established", (x) => x.peer_id === e.address);
+  await new NostrSignaller(e, { relays: [relay] }).join(sleepRoom, new WebRtcCarrier(e), { timeoutMs: 15000 });
+  await relinked;
+  sleeping.close();
+  log("a hosted room whose relay socket closed redialled and answered a join");
+
+  step.name = "relay gone quiet";
+  // A socket the network lost without closing it still reads as open. The
+  // relay on /once confirms a socket's first subscription and then answers
+  // nothing; the room must drop that socket at its next probe and dial a
+  // new one.
+  const quiet = capture();
+  let muted;
+  try {
+    muted = await new NostrSignaller(d, { relays: [`${relay}/once`], keepAliveMs: 500 })
+      .host(await d.newRoom(), new WebRtcCarrier(d));
+    await pause(3000);
+  } finally {
+    quiet.restore();
+  }
+  muted.close();
+  const [first] = quiet.sockets;
+  if (first.readyState !== WebSocket.CLOSING && first.readyState !== WebSocket.CLOSED) {
+    throw new Error("a relay that stopped answering kept its socket");
+  }
+  if (quiet.sockets.length < 2) throw new Error("the room never dialled the relay again");
+  log(`a relay that stopped answering was dropped and dialled again (${quiet.sockets.length} sockets)`);
+
   step.name = "stop";
   hosting.close();
-  await Promise.all([a.stop(), b.stop(), c.stop()]);
+  await Promise.all([a.stop(), b.stop(), c.stop(), d.stop(), e.stop()]);
   const after = await Promise.race([
     a.sendMessage(b.address, "after stop").then(() => "resolved", () => "rejected"),
     new Promise((r) => setTimeout(() => r("hung"), 2000)),

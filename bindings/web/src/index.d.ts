@@ -177,9 +177,18 @@ export interface SignalledConnection {
  * session proves.
  */
 export class NostrSignaller {
-  constructor(node: OfflineNode, options: { relays: string[] });
+  /**
+   * `keepAliveMs` (default 60000) is how often a hosted room asks each relay
+   * to confirm its subscription, dropping and redialling one that does not.
+   */
+  constructor(node: OfflineNode, options: { relays: string[]; keepAliveMs?: number });
   newRoom(): Promise<string>;
-  /** Answers every device that joins `room`; resolves once listening. */
+  /**
+   * Answers every device that joins `room`; resolves once listening. Until
+   * it is closed the room redials a relay that drops, with backoff, and
+   * probes the live ones, at once when the page comes back online or into
+   * view, so it outlasts a device that slept or changed networks.
+   */
   host(
     room: string,
     carrier: WebRtcCarrier,

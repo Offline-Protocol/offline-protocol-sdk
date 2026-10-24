@@ -159,6 +159,15 @@ archived by series under [docs/changelog/](docs/changelog/); see the
   { disconnectedMs })` sets the deadline, which is longer than Chrome's own
   so Chrome behaves as before
   ([web bridge, W9](docs/bridges/web.md#w9-webrtc-lives-on-the-page-and-is-set-up-offline)).
+- **A room hosted through Nostr keeps answering after the device sleeps or
+  changes networks.** `NostrSignaller.host` opened its relay sockets once
+  and never again, so once a phone slept or lost Wi-Fi the room answered
+  nobody, while `host()` had long since resolved. A hosted room now redials
+  a relay that drops, with backoff from one second to thirty, asks each live
+  relay to confirm its subscription every `keepAliveMs` (default sixty
+  seconds) and redials one that does not, and does both at once when the
+  page comes back online or into view
+  ([web bridge, W11](docs/bridges/web.md#w11-signalling-can-ride-a-nostr-room)).
 - **A pair no longer splits into two sessions that never decrypt each
   other.** When both sides created a session at once and the lesser
   address's Welcome was lost, the greater side kept a group the other never

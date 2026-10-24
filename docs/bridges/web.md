@@ -320,6 +320,22 @@ new event every two seconds until an answer for its session arrives or its
 deadline passes, because a host that subscribed after an ephemeral event was
 sent never sees it.
 
+**A hosted room stays reachable until it is closed.** `host()` resolves once
+a relay confirms the subscription, and a room is meant to be held for as long
+as the device wants to be found, which on a phone spans sleeps and network
+changes. A relay socket that closes is dialled again, after one second,
+doubling to thirty. A live one is asked to confirm its subscription every
+`keepAliveMs` (default sixty seconds): NIP-01 lets a REQ under an open
+subscription's id replace it, and the relay answers with EOSE again. A socket
+that has not answered within ten seconds is dropped and dialled again,
+because a socket the network lost without a word still reads as open until
+TCP gives up, minutes later. The page coming back online or into view probes
+at once and cuts every backoff short. Before this, a room whose sockets had
+dropped answered nobody, while `host()` had long since resolved and the page
+had no way to tell: a phone that had slept was unreachable until the app
+restarted. A join keeps none of this; it lasts seconds, and fails on its
+deadline.
+
 ## Which shared rules apply
 
 | Rule | How it reaches the web binding |
@@ -400,10 +416,13 @@ start there, because Firefox answers it by asking the user.
 - `nostr-signal.html`: two nodes that share only a room code meet through
   a Nostr relay, link over WebRTC and send an ephemeral direct message. A
   join to a room nobody hosts gives up at its deadline, and a call to a
-  stopped node rejects instead of hanging (W10, W11). The relay is
-  `test/nostr-relay.mjs`, a NIP-01 relay in Node's standard library that
-  stores and verifies nothing, so the page's own checks are what refuse a
-  forged event.
+  stopped node rejects instead of hanging (W10, W11). A hosted room whose
+  relay sockets the page closes must still answer a later join, and one on a
+  relay that confirms its first subscription and then goes quiet (the relay's
+  `/once` path) must drop that socket at its next probe and dial another.
+  The relay is `test/nostr-relay.mjs`, a NIP-01 relay in Node's standard
+  library that stores and verifies nothing, so the page's own checks are what
+  refuse a forged event.
 
 `scripts/test-conformance.sh` runs
 `crates/offline-protocol-web/tests/browser_conformance.rs` in a dedicated
