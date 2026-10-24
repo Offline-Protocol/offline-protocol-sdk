@@ -7,7 +7,8 @@ compile ([ADR 0025](../adr/0025-native-packages-are-assembled-in-place.md)).
 Read [the shared contract](README.md) first. This document covers what is
 specific to Flutter.
 
-Integration steps live in [bindings/flutter/README.md](../../bindings/flutter/README.md).
+App integration: [bindings/flutter/README.md](../../bindings/flutter/README.md) and
+[flutter-integration.md](../flutter-integration.md).
 
 ## The generated layer
 
@@ -27,9 +28,13 @@ decision 3 asks: a list of what to leave out, never a list of what to take.
 On Android that is the `KotlinCompile` excludes in `android/build.gradle`. On
 iOS it is `rn_only_swift` in `ios/offline_protocol.podspec`, which must agree
 with the `--exclude` list in `ios/sync_bridge_rn.sh`. What is left out needs
-React (the module, its package, the mesh foreground and wake services, the
-sticky event dispatcher) or is a transport the plugin does not host yet
-(Nostr, Reticulum).
+React (the module and package entrypoints, RN-only bridge adapters, and
+`MeshHeadlessWakeService`). Reticulum, Nostr, `MeshForegroundService`, and on
+Android `StickyEventDispatcher` / `StickyEventBuffer` compile with the plugin;
+headless mesh wake stays React-only.
+Release AAR
+size is gated in CI ([F9](#f9-binary-footprint)); use
+`OfflineProtocol.minimalFootprintConfig` when you ship a subset of transports.
 
 A new shared source reaches the plugin without being registered. A list of
 what to take would not: the Kotlin plugin ignores `java { include }`, so such
@@ -98,10 +103,12 @@ thread it kills the process and the call is never answered. It is reported as
 
 ## F3. Method-channel API is pinned across three languages
 
-Dart calls `MethodChannel('com.offlineprotocol/offline_protocol')`. The method
-names are listed in `OfflineProtocol.nativeMethodChannelMethods` and must match
-`OfflineProtocolPlugin.kt` and `OfflineProtocolPlugin.swift` exactly. CI enforces
-this via `flutter_method_channel_methods_match_native_plugins`.
+Dart calls `MethodChannel('com.offlineprotocol/offline_protocol')`. The canonical
+list is `method_channel_methods.txt` (171 React Native–parity methods plus
+`replayEvents`). Dart mirrors it in `OfflineProtocol.nativeMethodChannelMethods`;
+Android dispatches in `FlutterEngineChannel.kt`; iOS declares the same surface in
+`FlutterEngineChannel.swift`. CI enforces parity via
+`flutter_method_channel_methods_match_native_plugins`.
 
 New surface area: add the Dart wrapper, both native handlers, and extend the
 const list (tests fail if the list drifts).
@@ -114,8 +121,16 @@ implements the same gap-detection and `replayEvents` contract as React Native
 `admitNativeEvent`.
 
 Native code assigns `seq` and records to `EventReplayRing` only while an event
-sink is attached. Apps must subscribe to `OfflineProtocol.events` **before**
-`createFromConfig` if they need every event or replay recovery.
+sink is attached. Subscribe to `OfflineProtocol.events` **before**
+`createFromConfig` when you need contiguous `seq` values and gap replay.
+
+**Android and iOS** hold the five inbound message tags (`message_received`,
+`file_received`, `message_decryption_failed`, `message_delivered`,
+`message_failed`) when Dart is not listening: Android uses
+`StickyEventDispatcher` (256-cap); iOS uses shared `InboundEventBuffer` (256-cap).
+Both flush on subscribe and app foreground (React Native parity). A large flush
+posts up to 256 events to the platform thread in one burst; subscribe early when
+possible. Other event types still require an attached listener at emit time.
 
 ## F5. Config parsing
 
@@ -124,10 +139,6 @@ sink is attached. Apps must subscribe to `OfflineProtocol.events` **before**
 Native ([C6](README.md#c6-config-parsers-must-not-default-to-literals)). Dart
 may auto-enable transports after `start()` mirroring the React Native JS layer
 (Internet, Wi‑Fi Direct).
-
-`create` refuses a config with `reticulumEnabled` or `nostrEnabled` set. The
-plugin hosts no manager for either, and accepting the flag would have the core
-route messages to a transport nothing serves, with no error anywhere.
 
 ## F5b. iOS BLE and `Info.plist`
 
@@ -155,12 +166,54 @@ Foreground Internet reconnect uses shared `ForegroundReconnectPolicy` (Android
 `ActivityLifecycleCallbacks` on the plugin activity, iOS `UIApplication`
 notifications).
 
+## F7b. One-shot events (`internet_session_superseded`, `mesh_stopped_by_user`)
+
+These tags report state nothing else restates. Delivery is at-least-once; apps
+treat them as state, not one-time edges.
+
+**Android** holds both one-shots in `StickyEventDispatcher` when the event channel
+has no listener, flushes on subscribe and activity start, and discards held
+`internet_session_superseded` when `enableTransport('internet', …)` re-enables
+the relay (same as React Native). **`mesh_stopped_by_user`** is Android-only
+(notification Stop); there is no iOS counterpart. Inbound message tags (F4) use
+a separate buffer on both mobile platforms.
+
+**iOS** re-derives `internet_session_superseded` from the live transport latch
+on each app foreground (`supersedeRestatementJson()`), matching React Native iOS.
+Use `MeshSdk.internetIsSupersededTyped()` after process restart when no event
+was buffered.
+
 ## F8. Telemetry
 
-The Flutter plugin does not yet call `enableTelemetry`. When it does, it must
-follow [C12](README.md#c12-telemetry-is-callback-free-and-the-binding-fills-the-platform):
-fill platform fields in the binding, own the session boundary off UI pause
-granularity, and never run blocking flush on the main thread.
+Telemetry methods are exposed on the method channel (`enableTelemetry`,
+`disableTelemetry`, `flushTelemetry`, `telemetryStats`, `telemetryInstallId`,
+`endTelemetrySession`, `setTelemetryEnabled`) and in Dart via `MeshSdk`. Android
+fills platform fields in `ProtocolEngineHost.parseTelemetryConfig` ([C12](README.md#c12-telemetry-is-callback-free-and-the-binding-fills-the-platform)).
+The binding owns the session boundary off UI pause granularity and never runs
+blocking flush on the main thread. `disableTelemetry`, `endTelemetrySession`, and
+`flushTelemetry` may block the dedicated engine thread for up to a few seconds
+(same as React Native); other method-channel calls queue behind that work. iOS
+and Android Flutter hosts seed and update `AppState` from process lifecycle
+observers so telemetry sessions follow foreground/background edges.
+
+On shutdown or before tearing down the engine, prefer `MeshSdk.disableTelemetryAndWait`,
+`endTelemetrySessionAndWait`, or `flushTelemetryAndWait` so your Dart `await`
+matches the engine-thread flush. Calling other channel methods while a flush is
+in flight is safe but queues behind it; avoid overlapping polls you rely on for
+UI gating until the wait completes.
+
+During in-app navigation you may call `MeshSdk.disableTelemetry()` without
+`await` so Dart keeps rendering, as long as you defer engine polls you gate UI on
+(for example `internetIsReadyTyped`) until that future completes or you call the
+matching `*AndWait` helper before `destroy`.
+
+## F8b. Staged native artifacts (pub.dev)
+
+Release workflow runs `bindings/flutter/scripts/stage-plugin-native-artifacts.sh`
+after mobile UniFFI artifacts are assembled. The plugin Gradle build prefers
+`android/src/main/jniLibs` when staged; the podspec prefers
+`ios/Frameworks/offline_protocol_uniffi.xcframework` when present. See
+[flutter-integration.md](../flutter-integration.md).
 
 ## F9. Binary footprint
 
@@ -173,41 +226,25 @@ The script subtracts any other ABI present under the React Native `jniLibs`,
 so the local check measures what CI measures. Re-baseline intentionally after
 compile-surface or UniFFI artifact changes.
 
+Reticulum and Nostr managers compile with the Flutter Android library (F1), so
+the release AAR is larger than a BLE-and-Internet-only build. That growth is
+expected and gated by the baseline, not a silent regression. Runtime footprint
+still follows `ProtocolConfig`: disable transports and mesh features you do not
+ship so the engine does not start managers you never use (same guidance as React
+Native). [OfflineProtocol.minimalFootprintConfig](../flutter/offline_protocol/lib/src/offline_protocol.dart)
+builds a create payload with only the transport flags you enable; pair it with
+narrow nested sections for mesh and data features you actually ship.
+
 ## What CI runs
 
-The `Flutter Binding` job in `.github/workflows/ci.yml` (path-filtered on pull
-requests; full run on pushes to `main`):
+GitHub Actions (see `.github/workflows/ci.yml`):
 
-- **Dart (fast path):** `flutter test` and `flutter analyze` when the plugin,
-  `docs/bridges/flutter.md`, workflow, or `flutter_bridge_guards.rs` change.
-- **UniFFI production (`lib.rs`):** any edit runs the native path (jniLibs +
-  AAR gate), not the guard-only fast path.
-- **Android native (slow path):** arm64 UniFFI build, a check of the
-  example's committed Gradle wrapper, then `:offline_protocol:assembleRelease`
-  via `measure-plugin-aar-size.sh --check` when the plugin's own Android tree
-  or the example's, baselines, Flutter scripts, shared RN Android tree
-  (Kotlin, jniLibs, ProGuard consumer rules, Gradle), bindgen, UniFFI ABI
-  inputs, or root `Cargo.lock` / workspace `Cargo.toml` change. Changes
-  confined to Dart or guard-only tests can skip the NDK/Gradle path; pushes to
-  `main` always run the full native gate. `flutter analyze` excludes
-  `android/**`, so the plugin's own Kotlin is compiled only by this path.
+- **`Flutter Binding`:** `flutter test`, `flutter analyze`, Android arm64 UniFFI,
+  release AAR assembly, and `measure-plugin-aar-size.sh --check` (path-filtered
+  on pull requests; full run on pushes to `main`).
+- **`Flutter Binding (iOS bridge)`:** `bindings/flutter/scripts/ci-typecheck-flutter-ios-bridge.sh`
+  (syncs `BridgeRN/`, typechecks plugin and shared Swift against the Flutter
+  engine and simulator UniFFI archive).
 
-iOS pod compilation is not gated in CI yet (requires XCFramework assembly like
-the Swift Package job). Until it is, typecheck the plugin by hand against the
-Flutter engine framework and the shared sources, from
-`bindings/react-native/ios`:
-
-```bash
-FLUTTER_FRAMEWORK="$(dirname "$(dirname "$(readlink -f "$(command -v flutter)")")")/bin/cache/artifacts/engine/ios/Flutter.xcframework/ios-arm64_x86_64-simulator"
-FILES=()
-for f in *.swift; do
-  case "$f" in Package.swift|OfflineProtocolModule.swift|NostrManager.swift|NostrQueryTracker.swift|ReticulumManager.swift|InboundEventBuffer.swift) ;;
-  *) FILES+=("$f") ;;
-  esac
-done
-xcrun --sdk iphonesimulator swiftc -typecheck -target arm64-apple-ios13.0-simulator \
-  -sdk "$(xcrun --sdk iphonesimulator --show-sdk-path)" -F "$FLUTTER_FRAMEWORK" \
-  -Xcc -fmodule-map-file=Generated/offline_protocolFFI.modulemap -Xcc -IGenerated \
-  "${FILES[@]}" ble/*.swift mesh/*.swift Generated/offline_protocol.swift \
-  ../../flutter/offline_protocol/ios/Classes/*.swift
-```
+Run the iOS script locally after editing shared Swift or before trusting a stale
+`BridgeRN/` copy (F1).
