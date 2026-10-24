@@ -26,9 +26,17 @@
 //   that closes is dialled again, with backoff, and a live one is asked to
 //   confirm the subscription every KEEP_ALIVE_MS and dropped if it does not,
 //   because a socket the network lost without a word still reads as open.
-//   Coming back online or into view probes at once. A room that dropped its
-//   sockets and never redialled answered nobody, while host() had long
-//   since resolved and the page had no way to tell.
+//   A redialled socket that never confirms is dropped the same way: a relay
+//   that accepts a socket and says nothing would otherwise hold its slot
+//   for good. Coming back online or into view probes at once. A room that
+//   dropped its sockets and never redialled answered nobody, while host()
+//   had long since resolved and the page had no way to tell. A room whose
+//   node stopped closes itself, as nothing it heard could be answered.
+// - A relay waits on one confirmation at a time. A probe never starts while
+//   another is unanswered: a later probe that reset the earlier one's state
+//   would make an answer read as silence, and browsers run an interval's
+//   next tick ahead of a deadline of the same length set inside it, so a
+//   short keep-alive dropped relays that had answered.
 // - A channel that fails to open closes every socket it opened. A relay that
 //   connects but never confirms the subscription would otherwise stay open,
 //   and keep delivering to a room nobody is answering.
@@ -43,12 +51,14 @@ const JOIN_TIMEOUT_MS = 30000;
 const MAX_SESSIONS = 16;
 // A hosted room redials a relay that dropped after RETRY_MIN_MS, doubling to
 // RETRY_MAX_MS, and asks each live relay to confirm its subscription every
-// KEEP_ALIVE_MS, dropping one that has not within PROBE_MS (or the keep-alive
-// period, if that is shorter, so probes never overlap).
+// KEEP_ALIVE_MS. A socket that has not confirmed within PROBE_MS (or the
+// keep-alive period, if that is shorter) of being dialled or asked is dropped.
 const RETRY_MIN_MS = 1000;
 const RETRY_MAX_MS = 30000;
 const KEEP_ALIVE_MS = 60000;
 const PROBE_MS = 10000;
+// The longest delay a browser timer honours; a longer one fires at once.
+const MAX_TIMER_MS = 0x7fffffff;
 
 function randomHex(bytes) {
   return Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) =>
@@ -66,11 +76,12 @@ class RoomChannel {
   #room;
   #onSignal;
   #keepAliveMs;
-  // One per relay: { url, socket, request, live, answered, retry, backoff, refused }.
+  // One per relay: { url, socket, request, live, confirm, retry, backoff, refused }.
+  // `confirm` is the deadline for the confirmation the socket waits on.
   #slots = [];
   #subscriptionId = randomHex(8);
   #closed = false;
-  // While open() waits: { live(), refused() }.
+  // While open() waits: { live(), refused(), failed(error) }.
   #waiting = null;
   #keepAlive = null;
   #wake = () => this.#probe({ now: true });
@@ -82,7 +93,7 @@ class RoomChannel {
     this.#relays = relays;
     this.#room = room;
     this.#onSignal = onSignal;
-    this.#keepAliveMs = keepAliveMs;
+    this.#keepAliveMs = keepAliveMs === null ? null : Math.min(keepAliveMs, MAX_TIMER_MS);
   }
 
   get #stays() {
@@ -96,19 +107,22 @@ class RoomChannel {
       await new Promise((resolve, reject) => {
         let refused = 0;
         const timer = setTimeout(() => reject(new Error("no Nostr relay answered")), OPEN_TIMEOUT_MS);
+        const settle = (error) => {
+          clearTimeout(timer);
+          if (error) reject(error);
+          else resolve();
+        };
         this.#waiting = {
-          live: () => {
-            clearTimeout(timer);
-            resolve();
-          },
+          live: () => settle(),
           refused: () => {
-            if (++refused < this.#relays.length) return;
-            clearTimeout(timer);
-            reject(new Error("every Nostr relay refused the connection"));
+            if (++refused === this.#relays.length) {
+              settle(new Error("every Nostr relay refused the connection"));
+            }
           },
+          failed: (error) => settle(error),
         };
         for (const url of this.#relays) {
-          const slot = { url, socket: null, request: null, live: false, answered: false, retry: null, backoff: RETRY_MIN_MS, refused: false };
+          const slot = { url, socket: null, request: null, live: false, confirm: null, retry: null, backoff: RETRY_MIN_MS, refused: false };
           this.#slots.push(slot);
           this.#connect(slot);
         }
@@ -127,17 +141,25 @@ class RoomChannel {
   }
 
   async #connect(slot) {
-    let socket;
     try {
       // Built again for every socket, so a resubscription asks from now on.
       slot.request = await this.#node.signalSubscription(this.#room, this.#subscriptionId);
-      if (this.#closed) return;
+    } catch (error) {
+      // The node stopped: nothing this room hears could be answered.
+      return this.#failed(error);
+    }
+    if (this.#closed) return;
+    let socket;
+    try {
       socket = new WebSocket(slot.url);
     } catch {
-      return this.#lost(slot, null);
+      // A URL the browser refuses (malformed, a blocked port) stays refused.
+      return this.#lost(slot, null, { again: false });
     }
     slot.socket = socket;
     slot.live = false;
+    // A socket that hangs while it connects counts as one that never confirms.
+    this.#await(slot, socket);
     // A socket that fails fires both error and close; #lost acts on the first.
     socket.onerror = () => this.#lost(slot, socket);
     socket.onclose = () => this.#lost(slot, socket);
@@ -145,7 +167,9 @@ class RoomChannel {
     socket.onmessage = ({ data }) => {
       if (typeof data !== "string") return;
       if (this.#isEose(data)) {
-        slot.answered = true;
+        if (slot.socket !== socket) return;
+        clearTimeout(slot.confirm);
+        slot.confirm = null;
         if (!slot.live) {
           slot.live = true;
           slot.backoff = RETRY_MIN_MS;
@@ -160,20 +184,44 @@ class RoomChannel {
     };
   }
 
+  // In a channel that stays, drops `socket` unless its relay confirms the
+  // subscription in time. Only EOSE clears the deadline, and nothing resets
+  // it, so an answer is never read as silence.
+  #await(slot, socket) {
+    if (!this.#stays) return;
+    clearTimeout(slot.confirm);
+    slot.confirm = setTimeout(() => {
+      slot.confirm = null;
+      if (slot.socket !== socket) return;
+      this.#drop(socket);
+      this.#lost(slot, socket);
+    }, Math.min(PROBE_MS, this.#keepAliveMs));
+  }
+
+  // The node refused to build a subscription, which it does only once it
+  // has stopped: open() rejects with its error, and a room already open
+  // closes rather than redial forever.
+  #failed(error) {
+    if (this.#waiting) this.#waiting.failed(error);
+    else this.close();
+  }
+
   // The relay behind `slot` is gone: counted once against open(), and dialled
-  // again after a backoff if the channel stays. A socket that closes after
-  // the subscription went live used to be left closed, and a hosted room
-  // whose sockets the network had dropped (a phone that slept, Wi-Fi that
-  // came back) went on looking open while nobody could reach it.
-  #lost(slot, socket) {
+  // again after a backoff if the channel stays and `again`. A socket that
+  // closes after the subscription went live used to be left closed, and a
+  // hosted room whose sockets the network had dropped (a phone that slept,
+  // Wi-Fi that came back) went on looking open while nobody could reach it.
+  #lost(slot, socket, { again = true } = {}) {
     if (slot.socket !== socket) return;
     slot.socket = null;
     slot.live = false;
+    clearTimeout(slot.confirm);
+    slot.confirm = null;
     if (this.#waiting && !slot.refused) {
       slot.refused = true;
       this.#waiting.refused();
     }
-    if (this.#closed || !this.#stays || slot.retry !== null) return;
+    if (!again || this.#closed || !this.#stays || slot.retry !== null) return;
     slot.retry = setTimeout(() => {
       slot.retry = null;
       this.#connect(slot);
@@ -184,9 +232,10 @@ class RoomChannel {
   // Asks every live relay to confirm the subscription again, and drops one
   // that does not answer within PROBE_MS. A socket the network dropped
   // without a word (a phone's radio asleep) still reads as open, and would
-  // only fire close when TCP gives up, minutes later. `now` also redials at
-  // once every relay waiting out a backoff: the page has just come back
-  // online or into view, and the relays most likely answer again.
+  // only fire close when TCP gives up, minutes later. A relay still owing a
+  // confirmation is left to its deadline. `now` also redials at once every
+  // relay waiting out a backoff: the page has just come back online or into
+  // view, and the relays most likely answer again.
   #probe({ now = false } = {}) {
     if (this.#closed) return;
     for (const slot of this.#slots) {
@@ -199,16 +248,11 @@ class RoomChannel {
         continue;
       }
       const socket = slot.socket;
-      if (!slot.live || socket?.readyState !== WebSocket.OPEN) continue;
-      slot.answered = false;
+      if (!slot.live || slot.confirm !== null || socket?.readyState !== WebSocket.OPEN) continue;
       // NIP-01: a REQ under an open subscription's id replaces it, and the
       // relay answers with EOSE again.
       socket.send(slot.request);
-      setTimeout(() => {
-        if (slot.socket !== socket || slot.answered) return;
-        this.#drop(socket);
-        this.#lost(slot, socket);
-      }, Math.min(PROBE_MS, this.#keepAliveMs));
+      this.#await(slot, socket);
     }
   }
 
@@ -246,7 +290,8 @@ class RoomChannel {
     const done = JSON.stringify(["CLOSE", this.#subscriptionId]);
     for (const slot of this.#slots) {
       clearTimeout(slot.retry);
-      slot.retry = null;
+      clearTimeout(slot.confirm);
+      slot.retry = slot.confirm = null;
       const socket = slot.socket;
       slot.socket = null;
       if (!socket) continue;
@@ -276,7 +321,9 @@ export class NostrSignaller {
     if (!Array.isArray(relays) || relays.length === 0) {
       throw new Error("NostrSignaller needs at least one relay URL");
     }
-    if (!(keepAliveMs > 0)) throw new Error("keepAliveMs must be a positive number of milliseconds");
+    if (typeof keepAliveMs !== "number" || !(keepAliveMs > 0)) {
+      throw new Error("keepAliveMs must be a positive number of milliseconds");
+    }
     this.#node = node;
     this.#relays = relays;
     this.#keepAliveMs = keepAliveMs;
@@ -291,8 +338,8 @@ export class NostrSignaller {
   /// the room is listening to `{ close() }`; `onConnection` gets each answered
   /// connection's `{ close() }`. Until it is closed the room redials a relay
   /// that drops and probes the live ones, so it outlasts a phone that slept
-  /// or a network that went away. Closing stops answering; links already
-  /// made stay up.
+  /// or a network that went away. A room whose node stops closes itself.
+  /// Closing stops answering; links already made stay up.
   async host(room, carrier, { onConnection } = {}) {
     // session -> { answer, connection, freshUntilMs, timer }
     const sessions = new Map();

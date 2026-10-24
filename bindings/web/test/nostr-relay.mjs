@@ -6,8 +6,10 @@
 // the path `/silent` is never answered: the relay that accepts a socket and
 // never confirms a subscription. One on `/once` confirms its first
 // subscription and then goes quiet, answering and forwarding nothing more:
-// a socket the network lost without closing it. Node's standard library only, so the test
-// runner installs nothing.
+// a socket the network lost without closing it. On `/first/<token>` the
+// first socket for a token is served and every later one is silent: a relay
+// that answered before a network change and now accepts and ignores a
+// redial. Node's standard library only, so the test runner installs nothing.
 //
 // Usage: node test/nostr-relay.mjs <port>
 
@@ -17,6 +19,8 @@ import { createHash } from "node:crypto";
 const port = Number(process.argv[2] ?? 8766);
 const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const clients = new Set();
+// The `/first/<token>` paths a socket has already connected on.
+const served = new Set();
 
 function frame(text) {
   const payload = Buffer.from(text);
@@ -152,7 +156,11 @@ server.on("upgrade", (request, socket) => {
     "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
       `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
   );
-  const mode = { "/silent": "silent", "/once": "once" }[request.url] ?? "open";
+  let mode = { "/silent": "silent", "/once": "once" }[request.url] ?? "open";
+  if (request.url.startsWith("/first/")) {
+    mode = served.has(request.url) ? "silent" : "open";
+    served.add(request.url);
+  }
   clients.add(new Client(socket, mode));
 });
 server.listen(port, "127.0.0.1", () => console.log(`nostr test relay on ${port}`));

@@ -332,10 +332,17 @@ changes. A relay socket that closes is dialled again, after one second,
 doubling to thirty. A live one is asked to confirm its subscription every
 `keepAliveMs` (default sixty seconds): NIP-01 lets a REQ under an open
 subscription's id replace it, and the relay answers with EOSE again. A socket
-that has not answered within ten seconds is dropped and dialled again,
-because a socket the network lost without a word still reads as open until
-TCP gives up, minutes later. The page coming back online or into view probes
-at once and cuts every backoff short. Before this, a room whose sockets had
+that has not answered within ten seconds (or `keepAliveMs`, if shorter) of
+being dialled or asked is dropped and dialled again, because a socket the
+network lost without a word still reads as open until TCP gives up, minutes
+later, and a relay that accepts a redial and says nothing would otherwise
+hold its place for good. A relay waits on one confirmation at a time: a probe
+is never sent while another is unanswered. Browsers run an interval's next
+tick ahead of a deadline of the same length set inside it, so a probe that
+reset the last one's state made an answer read as silence and dropped a
+relay that had answered. The page coming back online or into view probes at
+once and cuts every backoff short, and a room whose node stops closes
+itself. Before this, a room whose sockets had
 dropped answered nobody, while `host()` had long since resolved and the page
 had no way to tell: a phone that had slept was unreachable until the app
 restarted. A join keeps none of this; it lasts seconds, and fails on its
@@ -425,6 +432,10 @@ start there, because Firefox answers it by asking the user.
   relay sockets the page closes must still answer a later join, and one on a
   relay that confirms its first subscription and then goes quiet (the relay's
   `/once` path) must drop that socket at its next probe and dial another.
+  A relay that answers every probe of a half-second keep-alive keeps its one
+  socket, coming back `online` redials ahead of the backoff, and a redial
+  the relay accepts and never confirms (its `/first/<token>` path) is
+  dropped and dialled again.
   The relay is `test/nostr-relay.mjs`, a NIP-01 relay in Node's standard
   library that stores and verifies nothing, so the page's own checks are what
   refuse a forged event.

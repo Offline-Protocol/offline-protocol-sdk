@@ -180,6 +180,7 @@ export class NostrSignaller {
   /**
    * `keepAliveMs` (default 60000) is how often a hosted room asks each relay
    * to confirm its subscription, dropping and redialling one that does not.
+   * A relay has the lesser of ten seconds and `keepAliveMs` to confirm.
    */
   constructor(node: OfflineNode, options: { relays: string[]; keepAliveMs?: number });
   newRoom(): Promise<string>;
@@ -187,7 +188,8 @@ export class NostrSignaller {
    * Answers every device that joins `room`; resolves once listening. Until
    * it is closed the room redials a relay that drops, with backoff, and
    * probes the live ones, at once when the page comes back online or into
-   * view, so it outlasts a device that slept or changed networks.
+   * view, so it outlasts a device that slept or changed networks. A room
+   * whose node stops closes itself.
    */
   host(
     room: string,
